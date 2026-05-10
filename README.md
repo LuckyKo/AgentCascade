@@ -70,14 +70,14 @@ limitations under the License.
 
 - Install from PyPI:
 ```bash
-pip install -U "agent-cascade[gui,rag,code_interpreter,mcp]"
+pip install -U "agent-cascade[rag,code_interpreter,mcp]"
 ```
 
 - Install from source for development:
 ```bash
 git clone https://github.com/QwenLM/AgentCascade.git
 cd AgentCascade
-pip install -e ./"[gui,rag,code_interpreter,mcp]"
+pip install -e ./"[rag,code_interpreter,mcp]"
 ```
 
 ### Preparation: Model Service

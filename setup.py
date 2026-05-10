@@ -50,8 +50,7 @@ setup(
     packages=find_packages(exclude=['examples', 'examples.*', 'agent_server', 'agent_server.*']),
     package_data={
         'agent_cascade': [
-            'utils/qwen.tiktoken', 'tools/resource/*.ttf', 'tools/resource/*.py', 'gui/assets/*.css',
-            'gui/assets/*.jpeg'
+            'utils/qwen.tiktoken', 'tools/resource/*.ttf', 'tools/resource/*.py'
         ],
     },
 
@@ -107,15 +106,6 @@ setup(
             'uvicorn>=0.23.2',
         ],
 
-        # Extra dependencies for Gradio-based GUI:
-        'gui': [
-            # Gradio has bad version compatibility. Therefore, we use `==` instead of `>=`.
-            'pydantic==2.9.2',
-            'pydantic-core==2.23.4',
-            'gradio==5.23.1',
-            'gradio-client==1.8.0',
-            'modelscope_studio==1.1.7',
-        ],
     },
     url='https://github.com/QwenLM/AgentCascade',
 )
