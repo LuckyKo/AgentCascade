@@ -75,7 +75,7 @@ pip install -U "agent-cascade[rag,code_interpreter,mcp]"
 
 - 从源码安装开发版本：
 ```bash
-git clone https://github.com/QwenLM/AgentCascade.git
+git clone https://github.com/LuckyKo/AgentCascade.git
 cd AgentCascade
 pip install -e ./"[rag,code_interpreter,mcp]"
 ```
