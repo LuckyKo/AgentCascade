@@ -7,8 +7,8 @@ __pycache__
 .DS_Store
 *.ipynb_checkpoints
 
-qwen_agent/llm/gpt.py
-qwen_agent/llm/tools.py
+agent_cascade/llm/gpt.py
+agent_cascade/llm/tools.py
 workspace/*
 
 benchmark/log/*
@@ -16,7 +16,7 @@ benchmark/output_data/*
 benchmark/upload_file/*
 benchmark/upload_file_clean/*
 benchmark/eval_data/
-Qwen-Agent
+AgentCascade
 
 docqa/*
 log/*
@@ -29,7 +29,7 @@ ai_agent/local_prompts/*
 **/debug.log*
 debug.json
 ai_agent/log.jsonl
-qwen_agent.egg-info/*
+agent_cascade.egg-info/*
 build/*
 dist/*
 
@@ -55,13 +55,13 @@ benchmark/deepplanning/travelplanning/MODEL_CONFIG.md
 
 
 # Website (Next.js/Node.js)
-qwen-agent-docs/website/node_modules/
-#qwen-agent-docs/website/package-lock.json
-qwen-agent-docs/website/.next/
-qwen-agent-docs/website/out/
-qwen-agent-docs/website/.env*
-qwen-agent-docs/website/.temp-source-repo/
-qwen-agent-docs/website/.source-docs/
-qwen-agent-docs/website/last-sync.json
-qwen-agent-docs/website/_pagefind/
-qwen-agent-docs/website/*.tsbuildinfo
+agent-cascade-docs/website/node_modules/
+#agent-cascade-docs/website/package-lock.json
+agent-cascade-docs/website/.next/
+agent-cascade-docs/website/out/
+agent-cascade-docs/website/.env*
+agent-cascade-docs/website/.temp-source-repo/
+agent-cascade-docs/website/.source-docs/
+agent-cascade-docs/website/last-sync.json
+agent-cascade-docs/website/_pagefind/
+agent-cascade-docs/website/*.tsbuildinfo
