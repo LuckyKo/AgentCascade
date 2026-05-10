@@ -1,5 +1,5 @@
 /**
- * Qwen-Agent Console — Frontend Application
+ * AgentCascade Console — Frontend Application
  * 
  * Connects to the API server via WebSocket for real-time streaming.
  * Renders messages with markdown, handles editing, deletion, and approvals.
@@ -32,7 +32,7 @@ const state = {
   generating: false,
   agents: [],
   agentIndex: 0,
-  sessionName: localStorage.getItem('qwen-session-name') || 'Maine',
+  sessionName: localStorage.getItem('agent-cascade-session-name') || localStorage.getItem('qwen-session-name') || 'Maine',
   connected: false,
   editingIndex: null,  // Which message index is being edited
   activeSubTab: null,
@@ -339,7 +339,7 @@ function saveSettings() {
   if (settingAfkMessage) s['afk-message'] = settingAfkMessage.value;
   if (autoSecurityToggle) s['auto-security'] = autoSecurityToggle.checked;
 
-  localStorage.setItem('qwen-settings', JSON.stringify(s));
+  localStorage.setItem('agent-cascade-settings', JSON.stringify(s));
   
   // Re-render to apply setting changes immediately (like context bar max value)
   renderMessages();
@@ -348,7 +348,7 @@ function saveSettings() {
 
 function loadSettings() {
   try {
-    const raw = localStorage.getItem('qwen-settings');
+    const raw = localStorage.getItem('agent-cascade-settings') || localStorage.getItem('qwen-settings');
     if (!raw) return;
     const s = JSON.parse(raw);
 
@@ -1835,12 +1835,12 @@ if (mainTabChat) {
 const settingAgentSelect = $('#setting-agent-select');
 const settingToolsList = $('#setting-tools-list');
 
-if (!localStorage.getItem('qwen-tools-migrated-v2')) {
-  localStorage.removeItem('qwen-disabled-tools');
-  localStorage.setItem('qwen-tools-migrated-v2', '1');
+if (!localStorage.getItem('agent-cascade-tools-migrated-v2')) {
+  localStorage.removeItem('agent-cascade-disabled-tools');
+  localStorage.setItem('agent-cascade-tools-migrated-v2', '1');
 }
 
-let agentDisabledTools = JSON.parse(localStorage.getItem('qwen-disabled-tools') || '{}');
+let agentDisabledTools = JSON.parse(localStorage.getItem('agent-cascade-disabled-tools') || localStorage.getItem('qwen-disabled-tools') || '{}');
 
 function renderAgentSelect() {
   if (agentSelect) agentSelect.innerHTML = '';
@@ -1872,7 +1872,7 @@ function renderAgentSelect() {
   }
 
   if (updatedDisabledTools) {
-    localStorage.setItem('qwen-disabled-tools', JSON.stringify(agentDisabledTools));
+    localStorage.setItem('agent-cascade-disabled-tools', JSON.stringify(agentDisabledTools));
   }
 
   renderToolsForSelectedAgent();
@@ -1908,7 +1908,7 @@ function renderToolsForSelectedAgent() {
       } else {
         agentDisabledTools[aName] = agentDisabledTools[aName].filter(t => t !== tName);
       }
-      localStorage.setItem('qwen-disabled-tools', JSON.stringify(agentDisabledTools));
+      localStorage.setItem('agent-cascade-disabled-tools', JSON.stringify(agentDisabledTools));
       saveSettings();
     });
   });
@@ -2347,7 +2347,7 @@ agentSelect.addEventListener('change', () => {
 
 sessionNameInput.addEventListener('change', () => {
   state.sessionName = sessionNameInput.value.trim() || 'Maine';
-  localStorage.setItem('qwen-session-name', state.sessionName);
+  localStorage.setItem('agent-cascade-session-name', state.sessionName);
   send({ type: 'set_session_name', name: state.sessionName });
 });
 
