@@ -49,7 +49,7 @@ class TextChatAtOAI(BaseFnCallModel):
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
-        self.model = self.model or 'gpt-4o-mini'
+        self.model = self.model or 'local-model'
         cfg = cfg or {}
 
         api_base = cfg.get('api_base')
@@ -211,6 +211,10 @@ class TextChatAtOAI(BaseFnCallModel):
             response = self._chat_complete_create(model=local_model, messages=messages, stream=True, **generate_cfg)
             if delta_stream:
                 for chunk in response:
+                    # Update local model info if returned by the server (e.g. LM Studio)
+                    if hasattr(chunk, 'model') and chunk.model:
+                        self.model = chunk.model
+                        
                     if chunk.choices:
                         reasoning = chunk.choices[0].delta.reasoning_content if hasattr(chunk.choices[0].delta, 'reasoning_content') else ''
                         content = chunk.choices[0].delta.content if hasattr(chunk.choices[0].delta, 'content') else ''
@@ -221,6 +225,10 @@ class TextChatAtOAI(BaseFnCallModel):
                 full_reasoning_content = ''
                 full_tool_calls = []
                 for chunk in response:
+                    # Update local model info if returned by the server
+                    if hasattr(chunk, 'model') and chunk.model:
+                        self.model = chunk.model
+                        
                     if chunk.choices:
                         if hasattr(chunk.choices[0].delta,
                                    'reasoning_content') and chunk.choices[0].delta.reasoning_content:
@@ -292,6 +300,11 @@ class TextChatAtOAI(BaseFnCallModel):
 
         try:
             response = self._chat_complete_create(model=local_model, messages=messages, stream=False, **generate_cfg)
+            
+            # Update local model info if returned by the server
+            if hasattr(response, 'model') and response.model:
+                self.model = response.model
+                
             finish_reason = getattr(response.choices[0], 'finish_reason', None)
             extra = {'finish_reason': finish_reason} if finish_reason else {}
             if hasattr(response.choices[0].message, 'reasoning_content'):

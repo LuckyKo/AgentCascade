@@ -76,8 +76,24 @@
           <div class="sidebar-divider"></div>
 
           <div class="sidebar-section">
-            <label class="sidebar-label">Work Access Folders</label>
-            <textarea id="workAccessFolders" class="sidebar-input" rows="2" placeholder="C:\path\one&#10;/path/two"
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <label class="sidebar-label">Default Workspace (RW)</label>
+              <button id="editDefaultWS" class="icon-btn" title="Edit Default Workspace" style="opacity: 0.5; cursor: pointer; background: transparent; border: none; font-size: 10px;">✏️</button>
+            </div>
+            <div id="defaultWorkspace" class="sidebar-info" style="font-size: 11px; word-break: break-all; opacity: 0.7; padding: 4px 0;">Loading...</div>
+          </div>
+
+          <div class="sidebar-divider"></div>
+
+          <div class="sidebar-section">
+            <label class="sidebar-label">Additional Work Folders (Read-Write)</label>
+            <textarea id="workAccessFoldersRW" class="sidebar-input" rows="2" placeholder="C:\path\one&#10;/path/two"
+              style="resize: vertical;"></textarea>
+          </div>
+
+          <div class="sidebar-section" style="margin-top: 12px;">
+            <label class="sidebar-label">Additional Work Folders (Read-Only)</label>
+            <textarea id="workAccessFoldersRO" class="sidebar-input" rows="2" placeholder="C:\read\only&#10;/read/other"
               style="resize: vertical;"></textarea>
           </div>
 
@@ -175,7 +191,7 @@
         </div>
       </main>
 
-      <!-- Right Panel: Settings -->
+      <div id="side-panel-resizer" class="resizer-v"></div>
       <aside id="side-panel" class="side-panel collapsed">
         <div class="panel-header" style="flex-direction: column; align-items: stretch; gap: 12px; padding-bottom: 0;">
           <h2>Settings</h2>

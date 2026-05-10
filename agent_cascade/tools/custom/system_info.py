@@ -98,6 +98,22 @@ class SystemInfo(BaseTool):
                 cfg = agent_obj.llm.cfg
                 api_base = cfg.get('api_base') or cfg.get('base_url') or cfg.get('model_server') or "Unknown"
 
+        # Workspace and Folders information
+        default_ws = DEFAULT_WORKSPACE
+        ro_folders = []
+        rw_folders = []
+        if hasattr(self, 'agent_pool') and self.agent_pool and self.agent_pool.operation_manager:
+            om = self.agent_pool.operation_manager
+            default_ws = str(om.base_dir)
+            ro_folders = [str(p) for p in om.extra_work_folders_ro]
+            rw_folders = [str(p) for p in om.extra_work_folders_rw]
+
+        folders_info = f"Default Workspace (RW): {default_ws}\n"
+        if rw_folders:
+            folders_info += f"Additional RW Folders: {', '.join(rw_folders)}\n"
+        if ro_folders:
+            folders_info += f"Additional RO Folders: {', '.join(ro_folders)}\n"
+
         info = (
             f"--- System Information ---\n"
             f"OS: {os_info}\n"
@@ -105,9 +121,8 @@ class SystemInfo(BaseTool):
             f"Python Version: {py_version}\n"
             f"API Endpoint: {api_base}\n"
             f"Model Used: {model}\n"
-            f"Default Agent Workspace: {DEFAULT_WORKSPACE}\n"
-            f"Additional Working Directories: {cwd}\n"
-            # f"Directory Contents: [{cwd_str}]\n"
+            f"--- Workspace & Permissions ---\n"
+            f"{folders_info}"
             f"--- Session Stats ---\n"
             f"{stats_str}\n"
             f"--- Tool Policy ---\n"

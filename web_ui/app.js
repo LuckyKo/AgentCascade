@@ -99,6 +99,10 @@ const settingAssistantColor = $('#setting-assistant-color');
 const settingRawEditColor = $('#setting-raw-edit-color');
 const settingTruncateTools = $('#setting-truncate-tools');
 
+const workAccessFoldersRW = $('#workAccessFoldersRW');
+const workAccessFoldersRO = $('#workAccessFoldersRO');
+const defaultWorkspace = $('#defaultWorkspace');
+
 const settingVisionEnabled = $('#setting-vision-enabled');
 const settingImageDetail = $('#setting-image-detail');
 const settingMaxImageSize = $('#setting-max-image-size');
@@ -137,6 +141,44 @@ if (btnToggleSettings && sidePanel) {
   btnToggleSettings.addEventListener('click', () => {
     sidePanel.classList.toggle('collapsed');
   });
+}
+
+// Resizer for Right Panel
+const sidePanelResizer = $('#side-panel-resizer');
+if (sidePanelResizer && sidePanel) {
+  let isResizing = false;
+  const appContainer = $('.app');
+
+  sidePanelResizer.addEventListener('mousedown', (e) => {
+    isResizing = true;
+    if (appContainer) appContainer.classList.add('resizing');
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', stopResizing);
+    e.preventDefault(); // Prevent text selection
+  });
+
+  function handleMouseMove(e) {
+    if (!isResizing) return;
+    const width = window.innerWidth - e.clientX;
+    // Enforce limits (also defined in CSS but JS helps smooth it)
+    if (width > 150 && width < window.innerWidth * 0.8) {
+      sidePanel.style.width = `${width}px`;
+    }
+  }
+
+  function stopResizing() {
+    isResizing = false;
+    if (appContainer) appContainer.classList.remove('resizing');
+    document.removeEventListener('mousemove', handleMouseMove);
+    document.removeEventListener('mouseup', stopResizing);
+    localStorage.setItem('side-panel-width', sidePanel.style.width);
+  }
+
+  // Restore width
+  const savedWidth = localStorage.getItem('side-panel-width');
+  if (savedWidth) {
+    sidePanel.style.width = savedWidth;
+  }
 }
 
 // Sidebar toggle (Left)
@@ -325,7 +367,8 @@ function saveSettings() {
   if (settingMaxImageSize) s['setting-max-image-size'] = settingMaxImageSize.value;
   if (settingMcpServers) s['setting-mcp-servers'] = settingMcpServers.value;
 
-  if ($('#workAccessFolders')) s['work-access-folders'] = $('#workAccessFolders').value;
+  if (workAccessFoldersRW) s['work-access-folders-rw'] = workAccessFoldersRW.value;
+  if (workAccessFoldersRO) s['work-access-folders-ro'] = workAccessFoldersRO.value;
 
   ranges.forEach(r => {
     if (r.input) s[r.input.id] = r.input.value;
@@ -340,6 +383,10 @@ function saveSettings() {
   if (autoSecurityToggle) s['auto-security'] = autoSecurityToggle.checked;
 
   localStorage.setItem('agent-cascade-settings', JSON.stringify(s));
+  
+  if (state.connected) {
+    send({ type: 'update_config', generate_cfg: getGenerateCfg() });
+  }
   
   // Re-render to apply setting changes immediately (like context bar max value)
   renderMessages();
@@ -423,8 +470,43 @@ function loadSettings() {
       settingMcpServers.value = s['setting-mcp-servers'];
     }
 
-    if ($('#workAccessFolders') && s['work-access-folders'] !== undefined) {
-      $('#workAccessFolders').value = s['work-access-folders'];
+    if (workAccessFoldersRW) {
+      if (s['work-access-folders-rw'] !== undefined) {
+        workAccessFoldersRW.value = s['work-access-folders-rw'];
+      } else if (s['work-access-folders'] !== undefined) {
+        // Migration from legacy
+        workAccessFoldersRW.value = s['work-access-folders'];
+      }
+    }
+    if (workAccessFoldersRO && s['work-access-folders-ro'] !== undefined) {
+      workAccessFoldersRO.value = s['work-access-folders-ro'];
+    }
+
+    if (defaultWorkspace && s['default-workspace'] !== undefined) {
+      defaultWorkspace.textContent = s['default-workspace'];
+      defaultWorkspace.title = s['default-workspace'];
+    }
+
+    const editDefaultWSBtn = $('#editDefaultWS');
+    if (editDefaultWSBtn && !editDefaultWSBtn.dataset.bound) {
+      editDefaultWSBtn.dataset.bound = "true";
+      editDefaultWSBtn.addEventListener('click', () => {
+        const current = defaultWorkspace.textContent;
+        const newVal = prompt('Enter new Default Workspace path (requires server restart to take full effect):', current);
+        if (newVal !== null && newVal.trim() !== '' && newVal.trim() !== current) {
+          const trimmed = newVal.trim();
+          defaultWorkspace.textContent = trimmed;
+          defaultWorkspace.title = trimmed + ' (Pending restart)';
+          defaultWorkspace.style.color = 'var(--accent)';
+          
+          // Save to local settings
+          const settings = JSON.parse(localStorage.getItem('agent-cascade-settings') || '{}');
+          settings['default-workspace'] = trimmed;
+          localStorage.setItem('agent-cascade-settings', JSON.stringify(settings));
+          
+          alert('Default workspace path saved to settings. A full server restart is recommended to properly re-initialize the Code Interpreter (Docker) and other core services in the new location.');
+        }
+      });
     }
 
     if (afkToggle && s['afk-enabled'] !== undefined) {
@@ -453,6 +535,9 @@ if (sidePanel) {
   sidePanel.addEventListener('change', saveSettings);
   sidePanel.addEventListener('input', debouncedSaveSettings);
 }
+
+if (workAccessFoldersRW) workAccessFoldersRW.addEventListener('input', debouncedSaveSettings);
+if (workAccessFoldersRO) workAccessFoldersRO.addEventListener('input', debouncedSaveSettings);
 
 if (afkToggle) {
   afkToggle.addEventListener('change', () => {
@@ -499,6 +584,8 @@ function connect() {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     // Sync session name with server on connect
     send({ type: 'set_session_name', name: state.sessionName });
+    // Sync local settings (including default_workspace)
+    send({ type: 'update_config', generate_cfg: getGenerateCfg() });
   };
 
   ws.onclose = () => {
@@ -620,6 +707,22 @@ function handleServerMessage(data) {
 
       if (data.current_model && statusModel) {
         statusModel.textContent = data.current_model;
+      }
+
+      if (data.default_workspace && defaultWorkspace) {
+        const s = JSON.parse(localStorage.getItem('agent-cascade-settings') || '{}');
+        const localWS = s['default-workspace'];
+        // Only let the server override if we don't have a local preference or it already matches
+        if (!localWS || localWS === data.default_workspace) {
+          defaultWorkspace.textContent = data.default_workspace;
+          defaultWorkspace.title = data.default_workspace;
+          defaultWorkspace.style.color = '';
+        } else {
+          // Keep the local one; the update_config sent on connect will sync the server eventually
+          defaultWorkspace.textContent = localWS;
+          defaultWorkspace.title = localWS + ' (Syncing with server...)';
+          defaultWorkspace.style.color = 'var(--accent)';
+        }
       }
 
       // Full state: force complete re-render (session load, reset, edit, delete, etc.)
@@ -2385,13 +2488,21 @@ function getGenerateCfg() {
     }
   }
 
-  if ($('#workAccessFolders')) {
-    cfg.work_access_folders = $('#workAccessFolders').value.trim() ? $('#workAccessFolders').value.trim().split('\n').map(s => s.trim()).filter(s => s) : [];
+  if (workAccessFoldersRO) {
+    cfg.work_access_folders_ro = workAccessFoldersRO.value.trim() ? workAccessFoldersRO.value.trim().split('\n').map(s => s.trim()).filter(s => s) : [];
+  }
+  if (workAccessFoldersRW) {
+    cfg.work_access_folders_rw = workAccessFoldersRW.value.trim() ? workAccessFoldersRW.value.trim().split('\n').map(s => s.trim()).filter(s => s) : [];
   }
 
   if (typeof agentDisabledTools !== 'undefined') {
     cfg.disabled_tools = agentDisabledTools;
   }
+
+  if (defaultWorkspace && defaultWorkspace.textContent && defaultWorkspace.textContent !== 'Loading...') {
+    cfg.default_workspace = defaultWorkspace.textContent.replace(' (Pending restart)', '').trim();
+  }
+
   return cfg;
 }
 

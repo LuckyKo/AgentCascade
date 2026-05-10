@@ -83,15 +83,16 @@ class ReadFile(BaseTool):
             if limit is None:
                 limit = 1000000  # Effectively "full" read
 
-        if hasattr(self, 'agent_pool') and self.agent_pool:
-            base_dir = self.agent_pool.operation_manager.base_dir
-        else:
-            # Fallback if no agent_pool, but try to use the new default
-            base_dir = Path(DEFAULT_WORKSPACE)
-            base_dir.mkdir(parents=True, exist_ok=True)
-
         try:
-            resolved = (base_dir / path).resolve()
+            if hasattr(self, 'agent_pool') and self.agent_pool:
+                resolved = self.agent_pool.operation_manager._resolve_path(path, mode="ro")
+            else:
+                # Fallback if no agent_pool
+                base_dir = Path(DEFAULT_WORKSPACE)
+                resolved = (base_dir / path).resolve()
+                if not str(resolved).startswith(str(base_dir.resolve())):
+                     return f"Path '{path}' is outside the allowed directory"
+
             if not resolved.exists():
                 return f"File not found: {path}"
 
@@ -189,15 +190,16 @@ class ViewImage(BaseTool):
         params = self._verify_json_format_args(params)
         path = params['path']
 
-        if hasattr(self, 'agent_pool') and self.agent_pool:
-            base_dir = self.agent_pool.operation_manager.base_dir
-        else:
-            # Fallback if no agent_pool, but try to use the new default
-            base_dir = Path(DEFAULT_WORKSPACE)
-            base_dir.mkdir(parents=True, exist_ok=True)
-
         try:
-            resolved = (base_dir / path).resolve()
+            if hasattr(self, 'agent_pool') and self.agent_pool:
+                resolved = self.agent_pool.operation_manager._resolve_path(path, mode="ro")
+            else:
+                # Fallback if no agent_pool
+                base_dir = Path(DEFAULT_WORKSPACE)
+                resolved = (base_dir / path).resolve()
+                if not str(resolved).startswith(str(base_dir.resolve())):
+                     return f"Path '{path}' is outside the allowed directory"
+
             if not resolved.exists():
                 return f"Image not found: {path}"
 

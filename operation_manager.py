@@ -67,7 +67,8 @@ class OperationManager:
         self.base_dir = Path(base_dir).resolve()
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.agent_pool = agent_pool
-        self.extra_work_folders: List[Path] = []
+        self.extra_work_folders_ro: List[Path] = []
+        self.extra_work_folders_rw: List[Path] = []
 
         # Currently pending approvals (request_id -> PendingApproval)
         self.pending: Dict[str, PendingApproval] = {}
@@ -83,6 +84,15 @@ class OperationManager:
 
         import atexit
         atexit.register(self.cleanup_backups)
+
+    def set_base_dir(self, path: str):
+        """Update the base workspace directory."""
+        new_path = Path(path).resolve()
+        if new_path != self.base_dir:
+            self.base_dir = new_path
+            self.base_dir.mkdir(parents=True, exist_ok=True)
+            return True
+        return False
 
     def cleanup_backups(self, agent_name: Optional[str] = None):
         """Clean up backup files for a specific agent, or all agents if None."""
@@ -100,18 +110,29 @@ class OperationManager:
         except Exception as e:
             print(f"Failed to clean up backups: {e}")
 
-    def set_extra_work_folders(self, folders: List[str]):
+    def set_extra_work_folders(self, folders_ro: List[str], folders_rw: List[str]):
         """Set extra directories that the agents can access."""
-        self.extra_work_folders = []
-        for folder in folders:
+        self.extra_work_folders_ro = []
+        for folder in folders_ro:
             if not folder.strip():
                 continue
             try:
                 p = Path(folder.strip()).resolve()
-                if p.exists():
-                    self.extra_work_folders.append(p)
+                self.extra_work_folders_ro.append(p)
             except Exception as e:
-                print(f"Failed to resolve extra work folder {folder}: {e}")
+                print(f"Failed to resolve extra RO work folder {folder}: {e}")
+
+        self.extra_work_folders_rw = []
+        for folder in folders_rw:
+            if not folder.strip():
+                continue
+            try:
+                p = Path(folder.strip()).resolve()
+                self.extra_work_folders_rw.append(p)
+            except Exception as e:
+                print(f"Failed to resolve extra RW work folder {folder}: {e}")
+        
+        print(f"[Workspace] Tiered folders updated: RO={len(self.extra_work_folders_ro)}, RW={len(self.extra_work_folders_rw)}")
 
     # ─── Auto-Approval for Agent-Owned Files ──────────────────────────────
 
@@ -123,11 +144,11 @@ class OperationManager:
           - The agent is creating a brand new file (doesn't exist yet).
         """
         if creating_new:
-            resolved = self._resolve_path(path)
+            resolved = self._resolve_path(path, mode="rw")
             if not resolved.exists():
                 return True  # New file — no existing work affected
 
-        resolved = self._resolve_path(path)
+        resolved = self._resolve_path(path, mode="rw")
         owner = self.file_ownership.get(str(resolved))
         return owner == agent_name
 
@@ -229,9 +250,9 @@ class OperationManager:
 
     # ─── Path Resolution ──────────────────────────────────────────────────
 
-    def _resolve_path(self, path: str) -> Path:
-        """Resolve a path to be within the base directory or extra folders (security)."""
-        # Handle virtual /workspace/ prefix used by agents (common in system prompts)
+    def _resolve_path(self, path: str, mode: str = "ro") -> Path:
+        """Resolve a path to be within the allowed directories (security)."""
+        # Handle virtual /workspace/ prefix
         clean_path = path
         if clean_path.startswith('/workspace/'):
             clean_path = clean_path[len('/workspace/'):]
@@ -242,20 +263,28 @@ class OperationManager:
             
         resolved = (self.base_dir / clean_path).resolve()
         
-        # Check if it starts with base_dir
+        # 1. Base directory is always RW (and thus RO)
         if str(resolved).startswith(str(self.base_dir)):
             return resolved
         if os.name == 'nt' and str(resolved).lower().startswith(str(self.base_dir).lower()):
             return resolved
 
-        # Check extra work folders
-        for extra in self.extra_work_folders:
+        # 2. Check extra RW folders (allowed for both RO and RW)
+        for extra in self.extra_work_folders_rw:
             if str(resolved).startswith(str(extra)):
                 return resolved
             if os.name == 'nt' and str(resolved).lower().startswith(str(extra).lower()):
                 return resolved
 
-        raise ValueError(f"Path '{path}' is outside the allowed directories")
+        # 3. Check extra RO folders (allowed only if mode is "ro")
+        if mode == "ro":
+            for extra in self.extra_work_folders_ro:
+                if str(resolved).startswith(str(extra)):
+                    return resolved
+                if os.name == 'nt' and str(resolved).lower().startswith(str(extra).lower()):
+                    return resolved
+
+        raise ValueError(f"Path '{path}' is outside the allowed {mode.upper()} directories")
 
 
     # ─── Read Operations (Free Access) ────────────────────────────────────
@@ -269,7 +298,7 @@ class OperationManager:
             if not resolved.is_dir():
                 return f"Not a directory: {path}"
 
-            result = f"Contents of {path}/:\n\n"
+            result = f"Contents of {path}/ (Absolute path: {resolved}):\n\n"
             dirs = []
             files = []
             for item in resolved.iterdir():
@@ -299,6 +328,31 @@ class OperationManager:
             return result
         except Exception as e:
             return f"Error listing directory: {str(e)}"
+
+    def read_file(self, path: str, start_line: int = 1, limit: int = 1000) -> str:
+        """Read a file."""
+        try:
+            resolved = self._resolve_path(path, mode="ro")
+            if not resolved.exists():
+                return f"File not found: {path}"
+            if not resolved.is_file():
+                return f"Not a file: {path}"
+
+            with open(resolved, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+
+            total_lines = len(lines)
+            start_idx = max(0, start_line - 1)
+            end_idx = min(total_lines, start_idx + limit)
+
+            content = "".join([f"{i+1}: {lines[i]}" for i in range(start_idx, end_idx)])
+            header = f"File content ({path}), lines {start_idx+1} to {end_idx} of {total_lines}:"
+            if end_idx < total_lines:
+                header += " [TRUNCATED]"
+
+            return f"{header}\n```\n{content}\n```"
+        except Exception as e:
+            return f"Error reading file: {str(e)}"
 
     def grep(self, pattern: str, path: str = ".", include: str = "*", char_limit: int = 2000, agent_name: str = "unknown") -> str:
         """Search for text pattern in files."""
@@ -366,7 +420,7 @@ class OperationManager:
     def write_file(self, path: str, content: str, agent_name: str) -> str:
         """Write a file — auto-approved for new files and owned files."""
         try:
-            resolved = self._resolve_path(path)
+            resolved = self._resolve_path(path, mode="rw")
         except Exception as e:
             return f"ERROR: {str(e)}"
         is_new = not resolved.exists()
@@ -383,7 +437,7 @@ class OperationManager:
                 return f"REJECTED BY USER: {reason}"
 
         try:
-            resolved = self._resolve_path(path)
+            resolved = self._resolve_path(path, mode="rw")
             
             # Backup if overwriting
             backup_path_str = ""
@@ -413,7 +467,7 @@ class OperationManager:
                   new_content: str) -> str:
         """Edit a file surgically — auto-approved for agent-owned files."""
         try:
-            resolved = self._resolve_path(path)
+            resolved = self._resolve_path(path, mode="rw")
         except Exception as e:
             return f"ERROR: {str(e)}"
 
@@ -443,6 +497,7 @@ class OperationManager:
 
         try:
             import time, shutil
+            resolved = self._resolve_path(path, mode="rw")
             backup_dir = self.base_dir / "logs" / "backups" / agent_name
             backup_dir.mkdir(parents=True, exist_ok=True)
             backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
@@ -468,7 +523,7 @@ class OperationManager:
     def delete_file(self, path: str, agent_name: str) -> str:
         """Delete a file — auto-approved for agent-owned files."""
         try:
-            resolved = self._resolve_path(path)
+            resolved = self._resolve_path(path, mode="rw")
         except Exception as e:
             return f"ERROR: {str(e)}"
         if not resolved.exists():
@@ -486,6 +541,7 @@ class OperationManager:
                 return f"REJECTED BY USER: {reason}"
 
         try:
+            resolved = self._resolve_path(path, mode="rw")
             if resolved.is_dir():
                 import shutil
                 shutil.rmtree(resolved)
@@ -500,8 +556,8 @@ class OperationManager:
     def copy_file(self, source: str, destination: str, agent_name: str) -> str:
         """Copy a file — auto-approved if destination is new or agent-owned."""
         try:
-            src_path = self._resolve_path(source)
-            dest_path_check = self._resolve_path(destination)
+            src_path = self._resolve_path(source, mode="ro")
+            dest_path_check = self._resolve_path(destination, mode="rw")
         except Exception as e:
             return f"ERROR: {str(e)}"
         if not src_path.exists():
@@ -519,7 +575,7 @@ class OperationManager:
                 return f"REJECTED BY USER: {reason}"
 
         try:
-            dest_path = self._resolve_path(destination)
+            dest_path = self._resolve_path(destination, mode="rw")
             import shutil
             if src_path.is_dir():
                 shutil.copytree(src_path, dest_path, dirs_exist_ok=True)
@@ -534,8 +590,8 @@ class OperationManager:
     def move_file(self, source: str, destination: str, agent_name: str) -> str:
         """Move a file — auto-approved if source is agent-owned."""
         try:
-            src_path = self._resolve_path(source)
-            dest_path_check = self._resolve_path(destination)
+            src_path = self._resolve_path(source, mode="rw")
+            dest_path_check = self._resolve_path(destination, mode="rw")
         except Exception as e:
             return f"ERROR: {str(e)}"
         if not src_path.exists():
@@ -553,7 +609,7 @@ class OperationManager:
                 return f"REJECTED BY USER: {reason}"
 
         try:
-            dest_path = self._resolve_path(destination)
+            dest_path = self._resolve_path(destination, mode="rw")
             import shutil
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(src_path, dest_path)
@@ -567,7 +623,7 @@ class OperationManager:
     def execute_shell_command(self, command: str, justification: str, agent_name: str, cwd: str = ".", char_limit: int = 2000) -> str:
         """Execute a shell command — NEVER auto-approved, always requires user approval."""
         try:
-            resolved_cwd = self._resolve_path(cwd)
+            resolved_cwd = self._resolve_path(cwd, mode="rw") # shell commands usually need RW for artifacts
         except Exception as e:
             return f"ERROR: Invalid working directory: {str(e)}"
 

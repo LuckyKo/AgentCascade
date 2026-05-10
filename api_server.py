@@ -505,6 +505,7 @@ def create_app(agents, agent_pool, config=None):
                 for i, a in enumerate(agents)
             ],
             'current_model': getattr(get_agent().llm, 'model', 'Unknown') if hasattr(get_agent(), 'llm') and get_agent().llm else 'Unknown',
+            'default_workspace': str(agent_pool.operation_manager.base_dir) if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager else str(DEFAULT_WORKSPACE),
         }
 
     def build_stream_update(responses, cached_h_stats=None, sub_agents=None, telemetry=None):
@@ -1317,9 +1318,19 @@ def create_app(agents, agent_pool, config=None):
                                 print(f"[MCP] Eagerly loaded {len(mcp_tools)} tools.")
                             except Exception as e:
                                 print(f"[MCP] Eager initialization failed: {e}")
-                        if 'work_access_folders' in ui_cfg:
+                        if 'work_access_folders_ro' in ui_cfg or 'work_access_folders_rw' in ui_cfg or 'work_access_folders' in ui_cfg:
                             if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-                                agent_pool.operation_manager.set_extra_work_folders(ui_cfg['work_access_folders'])
+                                ro = ui_cfg.get('work_access_folders_ro', [])
+                                rw = ui_cfg.get('work_access_folders_rw', [])
+                                # Support legacy 'work_access_folders' as RW for backward compatibility
+                                legacy = ui_cfg.get('work_access_folders', [])
+                                rw = list(set(rw + legacy))
+                                agent_pool.operation_manager.set_extra_work_folders(ro, rw)
+                        if 'default_workspace' in ui_cfg:
+                            if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
+                                new_ws = ui_cfg['default_workspace']
+                                if new_ws:
+                                    agent_pool.operation_manager.set_base_dir(new_ws)
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'approve':
