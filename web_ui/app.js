@@ -2059,10 +2059,10 @@ function updateControls() {
   stopBtn.style.display = state.generating ? 'inline-flex' : 'none';
   sendBtn.disabled = !state.connected;
   continueBtn.disabled = state.generating || state.messages.length === 0;
-  const sidebarRB = document.getElementById('sidebarRetryBtn');
+  const refreshBtn = document.getElementById('refreshBtn');
   const mainRB = document.getElementById('mainRetryBtn');
   const retryDisabled = state.generating || state.messages.length === 0;
-  if (sidebarRB) sidebarRB.disabled = retryDisabled;
+  if (refreshBtn) refreshBtn.disabled = state.generating;
   if (mainRB) mainRB.disabled = retryDisabled;
 
   statusText.textContent = state.generating ? 'Generating...' : '';
@@ -2432,12 +2432,24 @@ const onRetryClick = () => {
   lastRenderedCount = Infinity;
   retryGeneration();
 };
-const sidebarRetryBtn = document.getElementById('sidebarRetryBtn');
+const refreshBtn = document.getElementById('refreshBtn');
 const mainRetryBtn = document.getElementById('mainRetryBtn');
-if (sidebarRetryBtn) sidebarRetryBtn.addEventListener('click', onRetryClick);
+if (refreshBtn) {
+  refreshBtn.addEventListener('click', () => {
+    send({ type: 'refresh_souls' });
+    const span = refreshBtn.querySelector('span');
+    const originalText = span ? span.textContent : 'Refresh Soul';
+    if (span) span.textContent = 'Refreshing...';
+    refreshBtn.disabled = true;
+    setTimeout(() => {
+      if (span) span.textContent = originalText;
+      refreshBtn.disabled = false;
+    }, 1500);
+  });
+}
 if (mainRetryBtn) mainRetryBtn.addEventListener('click', onRetryClick);
 resetBtn.addEventListener('click', () => {
-  if (confirm('Reset the entire conversation?')) {
+  if (confirm('Reset the entire conversation and start a new session?')) {
     lastRenderedCount = Infinity;
     send({ type: 'reset' });
   }

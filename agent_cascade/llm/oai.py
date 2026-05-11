@@ -237,19 +237,43 @@ class TextChatAtOAI(BaseFnCallModel):
                             full_response += chunk.choices[0].delta.content
                         if hasattr(chunk.choices[0].delta, 'tool_calls') and chunk.choices[0].delta.tool_calls:
                             for tc in chunk.choices[0].delta.tool_calls:
-                                if full_tool_calls and (not tc.id or
-                                                        tc.id == full_tool_calls[-1]['extra']['function_id']):
-                                    if tc.function.name:
-                                        full_tool_calls[-1].function_call['name'] += tc.function.name
-                                    if tc.function.arguments:
-                                        full_tool_calls[-1].function_call['arguments'] += tc.function.arguments
+                                tc_index = getattr(tc, 'index', None)
+                                tc_id = getattr(tc, 'id', None)
+                                tc_func = getattr(tc, 'function', None)
+                                tc_name = getattr(tc_func, 'name', None) or '' if tc_func else ''
+                                tc_args = getattr(tc_func, 'arguments', None) or '' if tc_func else ''
+                                
+                                # Find existing tool call to append to (by ID or index)
+                                matched = None
+                                if tc_id:
+                                    # New tool call with an ID
+                                    for existing in full_tool_calls:
+                                        if existing.extra.get('function_id') == tc_id:
+                                            matched = existing
+                                            break
+                                elif tc_index is not None:
+                                    # Continuation chunk — match by index
+                                    for existing in full_tool_calls:
+                                        if existing.extra.get('tool_index') == tc_index:
+                                            matched = existing
+                                            break
+                                elif full_tool_calls:
+                                    # No ID or index — append to last
+                                    matched = full_tool_calls[-1]
+                                
+                                if matched:
+                                    if tc_name:
+                                        matched.function_call.name = (matched.function_call.name or '') + tc_name
+                                    if tc_args:
+                                        matched.function_call.arguments = (matched.function_call.arguments or '') + tc_args
                                 else:
                                     full_tool_calls.append(
                                         Message(role=ASSISTANT,
                                                 content='',
-                                                function_call=FunctionCall(name=tc.function.name,
-                                                                           arguments=tc.function.arguments),
-                                                extra={'function_id': tc.id}))
+                                                function_call=FunctionCall(name=tc_name,
+                                                                           arguments=tc_args),
+                                                extra={'function_id': tc_id or f'call_{len(full_tool_calls)}',
+                                                       'tool_index': tc_index if tc_index is not None else len(full_tool_calls)}))
 
                         res = []
                         finish_reason = getattr(chunk.choices[0], 'finish_reason', None)
@@ -300,22 +324,47 @@ class TextChatAtOAI(BaseFnCallModel):
 
         try:
             response = self._chat_complete_create(model=local_model, messages=messages, stream=False, **generate_cfg)
-            
+
             # Update local model info if returned by the server
             if hasattr(response, 'model') and response.model:
                 self.model = response.model
-                
+
             finish_reason = getattr(response.choices[0], 'finish_reason', None)
             extra = {'finish_reason': finish_reason} if finish_reason else {}
-            if hasattr(response.choices[0].message, 'reasoning_content'):
-                return [
-                    Message(role=ASSISTANT,
-                            content=response.choices[0].message.content,
-                            reasoning_content=response.choices[0].message.reasoning_content,
-                            extra=extra)
-                ]
+
+            msg = response.choices[0].message
+            result = []
+
+            # Handle tool_calls (native function calling mode)
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tc_id = getattr(tc, 'id', None) or f'call_{len(result)}'
+                    tc_func = getattr(tc, 'function', None)
+                    tc_name = getattr(tc_func, 'name', '') if tc_func else ''
+                    tc_args = getattr(tc_func, 'arguments', '') if tc_func else ''
+                    result.append(
+                        Message(role=ASSISTANT,
+                                content='',
+                                function_call=FunctionCall(name=tc_name,
+                                                           arguments=tc_args),
+                                extra={'function_id': tc_id})
+                    )
+                # Also include content/reasoning if present alongside tool_calls
+                reasoning = getattr(msg, 'reasoning_content', None) or ''
+                content = msg.content or ''
+                if content or reasoning:
+                    result.insert(0, Message(role=ASSISTANT,
+                                            content=content,
+                                            reasoning_content=reasoning,
+                                            extra=extra))
             else:
-                return [Message(role=ASSISTANT, content=response.choices[0].message.content, extra=extra)]
+                # No tool_calls — standard text response
+                reasoning = getattr(msg, 'reasoning_content', None) or ''
+                result.append(Message(role=ASSISTANT,
+                                      content=msg.content or '',
+                                      reasoning_content=reasoning,
+                                      extra=extra))
+            return result
         except OpenAIError as ex:
             raise ModelServiceError(exception=ex)
 

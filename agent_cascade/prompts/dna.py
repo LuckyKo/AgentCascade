@@ -115,12 +115,11 @@ TOOL_METADATA = {
             'If the file already exists, a backup is automatically created. '
             'This is auto-approved for new files. Overwriting an existing file '
             'requires user approval if you do not own it.\n'
-            'Place the file content in <content></content> XML tags after the JSON arguments.\n'
             'NOTE: All paths are relative to the workspace root.'
         ),
         'parameters': {
             'file_path': "Path to the file, relative to the workspace root (e.g., 'src/main.py').",
-            'content': 'The full content to write to the file. Place in <content></content> XML tags.',
+            'content': 'The full content to write to the file.',
             'justification': 'Why you need to create or overwrite this file'
         }
     },
@@ -130,16 +129,14 @@ TOOL_METADATA = {
             'Always use this instead of write_file for modifying parts of a file, '
             'as it is safer and preserves the rest of the content. '
             'Requires user approval if you do not own the file. '
-            'Always read the file content before attempting an edit.\n\n'
-            'Place `old_content` and `new_content` in their respective XML tags '
-            '(<old_content></old_content> and <new_content></new_content>) after the JSON arguments. '
+            'Always read the file content before attempting an edit.\n'
             'Include at least 3 lines of context matching whitespace and indentation precisely.\n'
             'NOTE: All paths are relative to the workspace root.'
         ),
         'parameters': {
             'file_path': "Path to the file, relative to the workspace root.",
-            'old_content': 'The EXACT literal text to replace. Place in <old_content></old_content> XML tags. Include context.',
-            'new_content': 'The exact literal text to replace old_content with. Place in <new_content></new_content> XML tags.',
+            'old_content': 'The EXACT literal text to replace. Include at least 3 lines of context with matching whitespace and indentation.',
+            'new_content': 'The exact literal text to replace old_content with.',
             'justification': 'Why you need to edit this file'
         }
     },
@@ -203,11 +200,10 @@ TOOL_METADATA = {
             'The container working directory is /workspace, so you can also just use '
             'relative paths like "foo/bar.py" in your code. '
             'You can use write_file to create .py files and then import them here. '
-            'To access services on the host machine (like local APIs), use "host.docker.internal" instead of "localhost". '
-            'Place the code in <code></code> XML tags after the JSON arguments.'
+            'To access services on the host machine (like local APIs), use "host.docker.internal" instead of "localhost".'
         ),
         'parameters': {
-            'code': 'The python code to execute. Place in <code></code> XML tags.'
+            'code': 'The python code to execute.'
         }
     },
     'python_compiler': {
@@ -344,80 +340,17 @@ TOOL_METADATA = {
 # --- Function Calling Templates ---
 FN_CALL_TEMPLATE = """# Tools
 
-You may call one or more functions to assist with the user query.
+You have access to a set of provided tools. You can call these tools natively to assist with the user's query.
 
-You are provided with function signatures within <tools></tools> XML tags:
-<tools>
-{tool_descs}
-</tools>
+When you need to call a tool, use your native function calling schema to emit the tool call. The system will parse the native tool call and execute the function.
 
-For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+**Rules for Tool Calling:**
+1. **Native JSON Parameters**: All parameters MUST be passed within the tool call's JSON arguments. Do not use external XML tags for arguments.
+2. **Proper Escaping**: When passing code, large text, or multiline content (e.g., to `write_file`, `edit_file`, or `code_interpreter`), ensure the text is properly escaped within the JSON string.
+3. **Reasoning**: You may explain your thoughts and reasoning in the normal message content before making the tool call.
+4. **Tool Results**: The results of the tool call will be provided back to you in the next message.
 
-<tool_call>
-{{"name": <function-name>, "arguments": <args-json-object>}}
-</tool_call>
-
-**Hybrid Transport Rules:**
-1. **Flexibility**: You can pass the tool name AND any argument either inside the JSON object OR as an XML tag after the JSON. 
-   - Use JSON for short, simple values (name, paths, flags).
-   - Use XML tags for large text, code, or multi-line content to avoid JSON escaping issues.
-2. **Precedence**: If a value is provided in both JSON and XML (e.g., both a "name" key in JSON and a <name> tag), the XML version will take priority.
-3. **Pure XML**: For maximum reliability with complex content, you may omit the JSON object entirely and use XML tags for everything.
-
-This flexible "Mix & Match" approach ensures reliability across all tools.
-
-Example for write_file (Mixed JSON + XML):
-<tool_call>
-{{"name": "write_file", "arguments": {{"file_path": "/path/to/file.py", "justification": "creating a test script"}}}}
-<content>
-def hello():
-    print("Hello, world!")
-</content>
-</tool_call>
-
-Example for edit_file (Pure XML):
-<tool_call>
-<name>edit_file</name>
-<file_path>src/main.py</file_path>
-<justification>Refactoring for clarity</justification>
-<old_content>
-def old():
-    pass
-</old_content>
-<new_content>
-def new():
-    print("updated")
-</new_content>
-</tool_call>
-
-Example for edit_file (Mixed JSON + XML):
-<tool_call>
-{{"name": "edit_file", "arguments": {{"file_path": "/path/to/file.py", "justification": "fixing a typo"}}}}
-<old_content>
-    print("old")
-</old_content>
-<new_content>
-    print("new")
-</new_content>
-</tool_call>
-
-For code_interpreter, put the code in <code></code> tags:
-<tool_call>
-{{"name": "code_interpreter", "arguments": {{}}}}
-<code>
-import os
-print(os.listdir("."))
-</code>
-</tool_call>
-
-### Alternative Dialects & Simple Calls
-For simple tools (web_search, weather, etc.), you can omit the extra XML tags and use pure JSON inside <tool_call>:
-<tool_call>
-{{"name": "web_search", "arguments": {{"query": "current weather in London"}}}}
-</tool_call>
-
-If your model has been fine-tuned on special tokens (Gemma/Qwen style), the following format is also acceptable:
-<|tool_call|>json{{"name": "amap_weather", "arguments": {{"city": "Beijing"}}}}<|tool_call|>
+Do not try to output <tool_call> or <tools> XML tags manually; the system handles the tool schemas and execution natively via the API.
 """
 
 FN_CALL_TEMPLATE_WITH_CI = FN_CALL_TEMPLATE # Now included in main template

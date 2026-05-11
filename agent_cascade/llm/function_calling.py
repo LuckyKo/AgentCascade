@@ -18,14 +18,25 @@ from typing import Dict, Iterator, List, Literal, Optional, Union
 
 from agent_cascade.llm.base import BaseChatModel
 from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER, ContentItem, Message
+from agent_cascade.log import logger
 
 
 class BaseFnCallModel(BaseChatModel, ABC):
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
-        fncall_prompt_type = self.generate_cfg.get('fncall_prompt_type', 'nous')
-        if fncall_prompt_type == 'qwen':
+        fncall_prompt_type = self.generate_cfg.get('fncall_prompt_type', 'native')
+        self.native_fncall = False
+        self.fncall_prompt = None
+
+        if fncall_prompt_type == 'native':
+            # Native mode: tools are passed via the OpenAI API's `tools` parameter.
+            # The model returns structured `tool_calls` in the response, parsed by the SDK.
+            # No prompt injection, no XML parsing — same mechanism qwen-code uses.
+            self.native_fncall = True
+            from agent_cascade.log import logger as _logger
+            _logger.info('Using native function calling mode (tools passed via API parameter)')
+        elif fncall_prompt_type == 'qwen':
             from agent_cascade.llm.fncall_prompts.qwen_fncall_prompt import FN_STOP_WORDS, QwenFnCallPrompt
             self.fncall_prompt = QwenFnCallPrompt()
             stop = self.generate_cfg.get('stop', [])
@@ -34,7 +45,7 @@ class BaseFnCallModel(BaseChatModel, ABC):
             from agent_cascade.llm.fncall_prompts.nous_fncall_prompt import NousFnCallPrompt
             self.fncall_prompt = NousFnCallPrompt()
         else:
-            raise NotImplementedError
+            raise NotImplementedError(f'Unknown fncall_prompt_type: {fncall_prompt_type}')
         if 'fncall_prompt_type' in self.generate_cfg:
             del self.generate_cfg['fncall_prompt_type']
 
@@ -49,13 +60,20 @@ class BaseFnCallModel(BaseChatModel, ABC):
         messages = super()._preprocess_messages(messages, lang=lang, generate_cfg=generate_cfg, functions=functions)
         if use_raw_api:
             return messages
+
+        if self.native_fncall:
+            # Native mode: DO NOT inject tool descriptions into the prompt.
+            # Messages with function_call / FUNCTION role stay as structural messages.
+            # They will be converted to OpenAI tool_calls/tool format by
+            # _conv_agent_cascade_messages_to_oai() in the transport layer (oai.py).
+            if (not functions) or (generate_cfg.get('function_choice', 'auto') == 'none'):
+                messages = self._remove_fncall_messages(messages, lang=lang)
+            return messages
+
+        # Legacy prompt-injection mode (nous/qwen):
         if (not functions) or (generate_cfg.get('function_choice', 'auto') == 'none'):
             messages = self._remove_fncall_messages(messages, lang=lang)
         else:
-            # validate_num_fncall_results(
-            #     messages=messages,
-            #     support_multimodal_input=self.support_multimodal_input,
-            # )
             messages = self.fncall_prompt.preprocess_fncall_messages(
                 messages=messages,
                 functions=functions,
@@ -72,7 +90,14 @@ class BaseFnCallModel(BaseChatModel, ABC):
         generate_cfg: dict,
     ) -> List[Message]:
         messages = super()._postprocess_messages(messages, fncall_mode=fncall_mode, generate_cfg=generate_cfg)
-        if fncall_mode:
+
+        if self.native_fncall:
+            # Native mode: tool_calls are already parsed by the OpenAI SDK into
+            # Message objects with function_call set. No XML/text parsing needed.
+            return messages
+
+        # Legacy mode: parse <tool_call> XML from response text
+        if fncall_mode and self.fncall_prompt:
             messages = self.fncall_prompt.postprocess_fncall_messages(
                 messages=messages,
                 parallel_function_calls=generate_cfg.get('parallel_function_calls', False),
@@ -130,6 +155,38 @@ class BaseFnCallModel(BaseChatModel, ABC):
             raise NotImplementedError('Please use stream=True with delta_stream=False, because delta_stream=True'
                                       ' is not implemented for function calling due to some technical reasons.')
         generate_cfg = copy.deepcopy(generate_cfg)
+
+        if self.native_fncall:
+            # Native mode: map AgentCascade-specific keys to OpenAI API equivalents
+            pf_calls = generate_cfg.pop('parallel_function_calls', True)
+            generate_cfg['parallel_tool_calls'] = pf_calls
+
+            fn_choice = generate_cfg.pop('function_choice', 'auto')
+            if fn_choice == 'none':
+                # No function calling — don't pass tools at all
+                pass
+            else:
+                if fn_choice == 'auto':
+                    generate_cfg['tool_choice'] = 'auto'
+                else:
+                    # Force a specific tool
+                    matching = [f for f in functions if f.get('name', f.get('name_for_model')) == fn_choice]
+                    if matching:
+                        generate_cfg['tool_choice'] = {'type': 'function', 'function': {'name': fn_choice}}
+                    else:
+                        logger.warning(f'function_choice="{fn_choice}" does not match any available tool; defaulting to auto')
+                        generate_cfg['tool_choice'] = 'auto'
+
+                # Pass tools as structured API parameter.
+                tools = [{'type': 'function', 'function': f} for f in functions]
+                generate_cfg['tools'] = tools
+
+            # Remove keys that OpenAI API doesn't understand
+            generate_cfg.pop('thought_in_content', None)
+
+            return self._chat(messages, stream=stream, delta_stream=False, generate_cfg=generate_cfg)
+
+        # Legacy mode: tool descriptions already injected into prompt by preprocess
         for k in ['parallel_function_calls', 'function_choice', 'thought_in_content']:
             if k in generate_cfg:
                 del generate_cfg[k]

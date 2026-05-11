@@ -766,6 +766,11 @@ def create_app(agents, agent_pool, config=None):
                                     else:
                                         # Loop is entirely within current response
                                         del responses[-refined_pop:]
+                                    
+                                    # 1b. Record the soft rollback in the persistent log for the main session
+                                    if agent_pool:
+                                        orch_logger = agent_pool.get_logger(session['session_name'], 'Orchestrator')
+                                        orch_logger.rollback(refined_pop, soft=True, reason=loop_reason)
 
                                     # 2. Inject a hint to avoid the loop in the next attempt
                                     loop_hint = f"[SYSTEM]: A repetitive loop was detected ({loop_reason}). Please try a different approach."
@@ -787,7 +792,7 @@ def create_app(agents, agent_pool, config=None):
                                     
                                     # Rollback even on final stop to keep history clean for user intervention
                                     if agent_pool:
-                                        agent_pool.rollback_to_snapshots(pool_snapshots)
+                                        agent_pool.rollback_to_snapshots(pool_snapshots, soft=True, reason=loop_reason)
                                     if current_history:
                                         current_history.pop()
                                     
@@ -837,9 +842,13 @@ def create_app(agents, agent_pool, config=None):
                                     if len(current_history) >= refined_pop:
                                         del current_history[-refined_pop:]
                                         logger.info(f"Surgically rolled back main history by {refined_pop} messages.")
+                                        
+                                        # Record soft rollback in orchestrator log
+                                        orch_logger = agent_pool.get_logger(session['session_name'], 'Orchestrator')
+                                        orch_logger.rollback(refined_pop, soft=True, reason=loop_reason)
                             elif agent_pool:
                                 # Fallback to snapshots if pop_count is missing
-                                agent_pool.rollback_to_snapshots(pool_snapshots)
+                                agent_pool.rollback_to_snapshots(pool_snapshots, soft=True, reason=loop_reason)
                                 
                             # 1b. Inject a hint directly into the sub-agent's history so it knows it looped
                             if is_sub_agent:
@@ -863,7 +872,7 @@ def create_app(agents, agent_pool, config=None):
                         else:
                             logger.warning(f"Loop detected for {agent_name}: {loop_reason}. Stopping generation.")
                             if agent_pool:
-                                agent_pool.rollback_to_snapshots(pool_snapshots)
+                                agent_pool.rollback_to_snapshots(pool_snapshots, soft=True, reason=loop_reason)
                             if current_history:
                                 current_history.pop()
                             responses = []
@@ -1177,8 +1186,14 @@ def create_app(agents, agent_pool, config=None):
                             if session['history']:
                                 session['history'].pop()
                         
-                        _save_session_history()
+                        # Record soft rollback in orchestrator log to keep internal state in sync
                         if agent_pool:
+                            try:
+                                agent_runner_for_log = get_agent()
+                                main_logger = agent_pool.get_logger(session['session_name'], agent_runner_for_log.__class__.__name__)
+                                main_logger.truncate_to(len(session['history']), soft=True, reason="Manual /rollback command")
+                            except Exception:
+                                pass
                             agent_pool.reset()
                         await broadcast({'type': 'state', **build_state()})
                         continue
@@ -1248,14 +1263,14 @@ def create_app(agents, agent_pool, config=None):
 
                         # 1. Rollback sub-agents to the start of the last turn
                         if session.get('last_turn_snapshots'):
-                            agent_pool.rollback_to_snapshots(session['last_turn_snapshots'])
+                            agent_pool.rollback_to_snapshots(session['last_turn_snapshots'], soft=True, reason="User retry")
                         
                         # 2. Rollback the main orchestrator log to match the shortened history
                         # This now points to the state before the user message we just popped.
                         try:
                             agent_runner_for_log = get_agent()
                             main_logger = agent_pool.get_logger(session['session_name'], agent_runner_for_log.__class__.__name__)
-                            main_logger.truncate_to(len(session['history']))
+                            main_logger.truncate_to(len(session['history']), soft=True, reason="User retry")
                         except Exception:
                             pass
                     
@@ -1301,6 +1316,18 @@ def create_app(agents, agent_pool, config=None):
                         agent_pool.stopped = True
                         agent_pool.reset()
                     await broadcast({'type': 'done', **build_state()})
+
+                elif msg_type == 'refresh_souls':
+                    if agent_pool:
+                        agent_pool.refresh_agents()
+                        # Update the global agents list used by build_state
+                        nonlocal agents
+                        agents = [agent_pool.get_agent(name) for name in agent_pool.list_agents()]
+                        # Ensure orchestrator is at index 0 if possible
+                        if 'orchestrator' in agent_pool.agents:
+                            orch = agent_pool.agents['orchestrator']
+                            agents = [orch] + [a for a in agents if a != orch]
+                    await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'update_config':
                     if 'generate_cfg' in data:
@@ -1365,9 +1392,12 @@ def create_app(agents, agent_pool, config=None):
                                     sec_agent = agent_pool.get_agent('security_advisor')
 
                                     workspace_info = f"Main workspace: {agent_pool.operation_manager.base_dir}\n"
-                                    if agent_pool.operation_manager.extra_work_folders:
-                                        extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders]
-                                        workspace_info += f"Additional allowed folders: {', '.join(extra)}\n"
+                                    if agent_pool.operation_manager.extra_work_folders_ro:
+                                        extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_ro]
+                                        workspace_info += f"Additional RO folders: {', '.join(extra)}\n"
+                                    if agent_pool.operation_manager.extra_work_folders_rw:
+                                        extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_rw]
+                                        workspace_info += f"Additional RW folders: {', '.join(extra)}\n"
                                         
                                     prompt = SECURITY_ADVISOR_PROMPT.format(
                                         tool_name=ap.get('tool_name', 'unknown'),

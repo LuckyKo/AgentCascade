@@ -1377,7 +1377,7 @@ class OrchestratorAgent(Assistant):
                     # Use e.turn_pop_count to find how many messages are in the current uncommitted turn.
                     if e.pop_count > e.turn_pop_count:
                         pool_pop = e.pop_count - e.turn_pop_count
-                        self.agent_pool.surgical_rollback(instance_name, pool_pop)
+                        self.agent_pool.surgical_rollback(instance_name, pool_pop, soft=True, reason=e.reason)
                     else:
                         # Loop is entirely within the current turn, no need to rollback pool history
                         pass

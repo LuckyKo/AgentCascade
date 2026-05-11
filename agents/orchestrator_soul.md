@@ -82,6 +82,13 @@ delegation_guidelines:
     - Edge case identification
     - Consistency auditing across files
 
+  to_generalist:
+    - Quick tasks that don't require deep specialization
+    - General problem solving
+    - Rapid implementation of simple features
+    - When speed and efficiency are prioritized over deep analysis
+    - Tasks that span multiple domains (code, text, research) simultaneously
+
 operation_workflow:
   1. User makes request
   2. You identify which specialist(s) should handle it

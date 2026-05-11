@@ -172,40 +172,55 @@ class AgentInstanceLogger:
         # all the remaining messages as "new".
         self.data["history"] = [self._format_message(msg) for msg in new_history]
 
-    def rollback(self, count: int):
+    def rollback(self, count: int, soft: bool = False, reason: Optional[str] = None):
         """
-        Rollback the history by popping N messages and re-writing the log file.
-        This is used when an orchestrator turn is undone (e.g. on loop detection).
+        Rollback the history by popping N messages.
+        If soft=False, re-writes the log file (truncates).
+        If soft=True, appends a ROLLBACK marker to the log and keeps the file intact.
         """
         if count <= 0:
             return
         
-        # Pop from internal history
+        # 1. Update physical log file
+        if soft:
+            # Append a marker to the log file instead of truncating
+            marker = {
+                "event": "ROLLBACK",
+                "timestamp": datetime.datetime.now().isoformat(),
+                "message": f"Surgical rollback of {count} messages.{f' Reason: {reason}' if reason else ''}",
+                "rolled_back_count": count
+            }
+            self._append_line(marker)
+        else:
+            # Remove lines from the end of the physical log file
+            try:
+                with open(self.log_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                
+                # Make sure we don't pop the metadata line
+                if len(lines) > count + 1:
+                    lines = lines[:-count]
+                else:
+                    lines = [lines[0]] if lines else []
+                    
+                with open(self.log_path, 'w', encoding='utf-8') as f:
+                    f.writelines(lines)
+            except Exception as e:
+                logger.error(f"Failed to rollback agent log {self.log_path}: {e}")
+
+        # 2. Pop from internal history tracking
         for _ in range(count):
             if self.data["history"]:
                 self.data["history"].pop()
             else:
                 break
         
-        # Remove lines from the end of the physical log file
-        try:
-            with open(self.log_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
-            # Make sure we don't pop the metadata line
-            if len(lines) > count + 1:
-                lines = lines[:-count]
-            else:
-                lines = [lines[0]] if lines else []
-                
-            with open(self.log_path, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
-        except Exception as e:
-            logger.error(f"Failed to rollback agent log {self.log_path}: {e}")
+        if soft:
+            logger.info(f"Soft rollback of {count} messages for {self.instance_name} recorded in log.")
 
-    def truncate_to(self, target_len: int):
-        """Truncate the history to a specific target length and re-write the file."""
+    def truncate_to(self, target_len: int, soft: bool = False, reason: Optional[str] = None):
+        """Truncate the history to a specific target length."""
         current_len = len(self.data["history"])
         if target_len >= current_len:
             return
-        self.rollback(current_len - target_len)
+        self.rollback(current_len - target_len, soft=soft, reason=reason)

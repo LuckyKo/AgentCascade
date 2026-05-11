@@ -74,6 +74,13 @@ class AgentPool:
         
         # Auto-load all agents from the agents directory
         self._discover_agents()
+
+    def refresh_agents(self):
+        """Reload all agent souls and templates from disk."""
+        self.agents.clear()
+        self.agent_configs.clear()
+        self._discover_agents()
+        logger.info("AgentPool souls refreshed from disk.")
     
     def terminate_instance(self, instance_name: str):
         """Mark an instance for immediate termination. Only triggers global stop if the instance is currently active."""
@@ -96,7 +103,7 @@ class AgentPool:
             snapshots[name] = len(conv)
         return snapshots
 
-    def rollback_to_snapshots(self, snapshots: Dict[str, int]):
+    def rollback_to_snapshots(self, snapshots: Dict[str, int], soft: bool = False, reason: Optional[str] = None):
         """Rollback all sub-agent instances to the lengths recorded in the snapshots."""
         for name, target_len in snapshots.items():
             # Rollback history list
@@ -107,9 +114,9 @@ class AgentPool:
             
             # Rollback persistent log file
             if name in self.instance_loggers:
-                self.instance_loggers[name].truncate_to(target_len)
+                self.instance_loggers[name].truncate_to(target_len, soft=soft, reason=reason)
         
-    def surgical_rollback(self, agent_name: str, pop_count: int):
+    def surgical_rollback(self, agent_name: str, pop_count: int, soft: bool = False, reason: Optional[str] = None):
         """Rollback a specific agent by pop_count messages."""
         if not agent_name or pop_count is None or pop_count <= 0:
             return
@@ -155,7 +162,7 @@ class AgentPool:
         # Sync the log file to the new history length
         if agent_name in self.instance_loggers:
             new_len = len(self.instance_conversations.get(agent_name, []))
-            self.instance_loggers[agent_name].truncate_to(new_len)
+            self.instance_loggers[agent_name].truncate_to(new_len, soft=soft, reason=reason)
         
         # Clear any sub-agents that were created AFTER the snapshot?
         # (This is harder since they might be in self.agents, but they are mostly harmless)

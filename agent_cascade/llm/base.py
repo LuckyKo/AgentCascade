@@ -442,7 +442,7 @@ class BaseChatModel(ABC):
         new_messages = []
         for msg in messages:
             if msg['role'] == ASSISTANT:
-                if new_messages[-1]['role'] != ASSISTANT:
+                if not new_messages or new_messages[-1]['role'] != ASSISTANT:
                     new_messages.append({'role': ASSISTANT})
                 if msg.get('content'):
                     new_messages[-1]['content'] = msg['content']
@@ -451,19 +451,37 @@ class BaseChatModel(ABC):
                 if msg.get('function_call'):
                     if not new_messages[-1].get('tool_calls'):
                         new_messages[-1]['tool_calls'] = []
+                    # Ensure arguments is a JSON string (OpenAI spec requirement)
+                    fn_args = msg['function_call']['arguments']
+                    if isinstance(fn_args, dict):
+                        import json as _json
+                        fn_args = _json.dumps(fn_args, ensure_ascii=False)
                     new_messages[-1]['tool_calls'].append({
                         'id': msg.get('extra', {}).get('function_id', '1'),
                         'type': 'function',
                         'function': {
                             'name': msg['function_call']['name'],
-                            'arguments': msg['function_call']['arguments']
+                            'arguments': fn_args
                         }
                     })
             elif msg['role'] == FUNCTION:
-                new_msg = copy.deepcopy(msg)
-                new_msg['role'] = 'tool'
-                new_msg['id'] = msg.get('extra', {}).get('function_id', '1')
-                new_messages.append(new_msg)
+                # OpenAI spec: tool messages need 'tool_call_id', not 'id'
+                tool_call_id = msg.get('extra', {}).get('function_id', '1')
+                content = msg.get('content', '')
+                # Content might be a list of ContentItems — flatten to string
+                if isinstance(content, list):
+                    parts = []
+                    for item in content:
+                        if hasattr(item, 'text') and item.text:
+                            parts.append(item.text)
+                        elif isinstance(item, dict) and item.get('text'):
+                            parts.append(item['text'])
+                    content = ''.join(parts)
+                new_messages.append({
+                    'role': 'tool',
+                    'tool_call_id': tool_call_id,
+                    'content': content or '',
+                })
             else:
                 new_messages.append(msg)
         return new_messages
