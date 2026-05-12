@@ -61,6 +61,9 @@ class TextChatAtOAI(BaseFnCallModel):
         api_key = api_key or os.getenv('OPENAI_API_KEY')
         api_key = (api_key or 'EMPTY').strip()
 
+        self.api_base = api_base
+        self.api_key = api_key
+
         if openai.__version__.startswith('0.'):
             if api_base:
                 openai.api_base = api_base
@@ -119,65 +122,71 @@ class TextChatAtOAI(BaseFnCallModel):
             self._chat_complete_create = _chat_complete_create
 
         # Attempt to dynamically detect context window size from local model servers (LM Studio, Ollama, etc.)
+        self.dynamic_model = not cfg.get('model') or cfg.get('model') == 'whatever_is_on'
+        self.original_model = self.model
+        
         if api_base and self.model and 'max_input_tokens' not in self.generate_cfg:
-            try:
-                models_url = f"{api_base.rstrip('/')}/models"
-                headers = {"Authorization": f"Bearer {api_key}"} if api_key != 'EMPTY' else {}
-                response = requests.get(models_url, headers=headers, timeout=5)
-                if response.status_code == 200:
-                    models_data = response.json()
-                    data = models_data.get('data', [])
-                    target_model = None
-                    
-                    # 1. Try exact match
-                    for m in data:
-                        if m.get('id') == self.model:
-                            target_model = m
-                            break
-                    
-                    # 2. If no exact match and only one model, assume it's the one
-                    if not target_model and len(data) == 1:
+            self._detect_context_window(api_base, api_key)
+
+    def _detect_context_window(self, api_base: str, api_key: str):
+        try:
+            models_url = f"{api_base.rstrip('/')}/models"
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key != 'EMPTY' else {}
+            response = requests.get(models_url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                models_data = response.json()
+                data = models_data.get('data', [])
+                target_model = None
+                
+                # 1. Try exact match
+                for m in data:
+                    if m.get('id') == self.model:
+                        target_model = m
+                        break
+                
+                # 2. If no exact match and only one model, assume it's the one
+                if not target_model and len(data) == 1:
+                    target_model = data[0]
+                    logger.info(f"Using single available model '{target_model.get('id')}' for context detection.")
+                
+                # 3. Special case for LM Studio / whatever_is_on
+                if not target_model and (self.model == 'whatever_is_on' or not data):
+                    # Use the first model if it exists and looks plausible
+                    if data:
                         target_model = data[0]
-                        logger.info(f"Using single available model '{target_model.get('id')}' for context detection.")
+                        logger.info(f"Picking first available model '{target_model.get('id')}' for potential context detection.")
+                
+                if target_model:
+                    # 4. Extract context length from model object (check direct and nested config)
+                    ctx_len = (target_model.get('context_length') or 
+                               target_model.get('max_context_length') or
+                               target_model.get('config', {}).get('context_length') or
+                               target_model.get('config', {}).get('max_context_length'))
                     
-                    # 3. Special case for LM Studio / whatever_is_on
-                    if not target_model and (self.model == 'whatever_is_on' or not data):
-                        # Use the first model if it exists and looks plausible
-                        if data:
-                            target_model = data[0]
-                            logger.info(f"Picking first available model '{target_model.get('id')}' for potential context detection.")
+                    # 5. If still missing, try querying the specific model endpoint
+                    if not ctx_len:
+                        try:
+                            specific_url = f"{models_url}/{target_model.get('id')}"
+                            logger.debug(f"Missing context metadata in list. Trying specific endpoint: {specific_url}")
+                            spec_resp = requests.get(specific_url, headers=headers, timeout=3)
+                            if spec_resp.status_code == 200:
+                                spec_data = spec_resp.json()
+                                ctx_len = (spec_data.get('context_length') or 
+                                           spec_data.get('max_context_length') or
+                                           spec_data.get('config', {}).get('context_length') or
+                                           spec_data.get('config', {}).get('max_context_length'))
+                        except Exception as inner_e:
+                            logger.debug(f"Individual model metadata query failed: {inner_e}")
                     
-                    if target_model:
-                        # 4. Extract context length from model object (check direct and nested config)
-                        ctx_len = (target_model.get('context_length') or 
-                                   target_model.get('max_context_length') or
-                                   target_model.get('config', {}).get('context_length') or
-                                   target_model.get('config', {}).get('max_context_length'))
-                        
-                        # 5. If still missing, try querying the specific model endpoint
-                        if not ctx_len:
-                            try:
-                                specific_url = f"{models_url}/{target_model.get('id')}"
-                                logger.debug(f"Missing context metadata in list. Trying specific endpoint: {specific_url}")
-                                spec_resp = requests.get(specific_url, headers=headers, timeout=3)
-                                if spec_resp.status_code == 200:
-                                    spec_data = spec_resp.json()
-                                    ctx_len = (spec_data.get('context_length') or 
-                                               spec_data.get('max_context_length') or
-                                               spec_data.get('config', {}).get('context_length') or
-                                               spec_data.get('config', {}).get('max_context_length'))
-                            except Exception as inner_e:
-                                logger.debug(f"Individual model metadata query failed: {inner_e}")
-                        
-                        if ctx_len:
-                            logger.info(f"Dynamically detected context window for {target_model.get('id')}: {ctx_len}")
-                            self.generate_cfg['max_input_tokens'] = int(ctx_len)
-                        else:
-                            logger.info(f"Model {target_model.get('id')} found, but could not detect context length via API.")
+                    if ctx_len:
+                        logger.info(f"Dynamically detected context window for {target_model.get('id')}: {ctx_len}")
+                        self.generate_cfg['max_input_tokens'] = int(ctx_len)
                     else:
-                        logger.debug(f"Could not identify a target model in {models_url} for context length detection.")
-            except Exception as e:
-                logger.debug(f"Optional context length detection failed: {e}")
+                        logger.info(f"Model {target_model.get('id')} found, but could not detect context length via API.")
+                else:
+                    logger.debug(f"Could not identify a target model in {models_url} for context length detection.")
+        except Exception as e:
+            logger.debug(f"Optional context length detection failed: {e}")
 
     def _chat_stream(
         self,
@@ -188,6 +197,12 @@ class TextChatAtOAI(BaseFnCallModel):
         messages = self.convert_messages_to_dicts(messages)
         logger.debug(f'LLM Input generate_cfg: \n{generate_cfg}')
         local_model = generate_cfg.pop('model', self.model)
+        request_model = local_model
+        if self.dynamic_model and local_model == self.model:
+            # If the user didn't specify a model, and we are using our internal state,
+            # send the generic 'original_model' name to allow the server to use whatever is loaded.
+            request_model = self.original_model
+            
         log_api_post = generate_cfg.pop('log_api_post', False)
         
         # Strict Allowlist: Only pass parameters that the LLM API actually understands
@@ -201,19 +216,22 @@ class TextChatAtOAI(BaseFnCallModel):
                 debug_dir = Path(DEFAULT_WORKSPACE) / 'logs' / 'debug'
                 debug_dir.mkdir(parents=True, exist_ok=True)
                 dump_file = debug_dir / f"api_post_{int(time.time()*1000)}.json"
-                dump_data = {"model": local_model, "messages": messages, **generate_cfg}
+                dump_data = {"model": request_model, "messages": messages, **generate_cfg}
                 with open(dump_file, 'w', encoding='utf-8') as f:
                     json.dump(dump_data, f, indent=2, ensure_ascii=False)
             except Exception as e:
                 logger.error(f"Failed to dump API POST: {e}")
             
         try:
-            response = self._chat_complete_create(model=local_model, messages=messages, stream=True, **generate_cfg)
+            response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
             if delta_stream:
                 for chunk in response:
                     # Update local model info if returned by the server (e.g. LM Studio)
                     if hasattr(chunk, 'model') and chunk.model:
-                        self.model = chunk.model
+                        if chunk.model != self.model:
+                            self.model = chunk.model
+                            if self.dynamic_model and self.api_base:
+                                self._detect_context_window(self.api_base, self.api_key)
                         
                     if chunk.choices:
                         reasoning = chunk.choices[0].delta.reasoning_content if hasattr(chunk.choices[0].delta, 'reasoning_content') else ''
@@ -227,7 +245,10 @@ class TextChatAtOAI(BaseFnCallModel):
                 for chunk in response:
                     # Update local model info if returned by the server
                     if hasattr(chunk, 'model') and chunk.model:
-                        self.model = chunk.model
+                        if chunk.model != self.model:
+                            self.model = chunk.model
+                            if self.dynamic_model and self.api_base:
+                                self._detect_context_window(self.api_base, self.api_key)
                         
                     if chunk.choices:
                         if hasattr(chunk.choices[0].delta,
@@ -303,6 +324,10 @@ class TextChatAtOAI(BaseFnCallModel):
     ) -> List[Message]:
         messages = self.convert_messages_to_dicts(messages)
         local_model = generate_cfg.pop('model', self.model)
+        request_model = local_model
+        if self.dynamic_model and local_model == self.model:
+            request_model = self.original_model
+
         log_api_post = generate_cfg.pop('log_api_post', False)
 
         # Strict Allowlist: Only pass parameters that the LLM API actually understands
@@ -316,18 +341,21 @@ class TextChatAtOAI(BaseFnCallModel):
                 debug_dir = Path(DEFAULT_WORKSPACE) / 'logs' / 'debug'
                 debug_dir.mkdir(parents=True, exist_ok=True)
                 dump_file = debug_dir / f"api_post_{int(time.time()*1000)}.json"
-                dump_data = {"model": local_model, "messages": messages, **generate_cfg}
+                dump_data = {"model": request_model, "messages": messages, **generate_cfg}
                 with open(dump_file, 'w', encoding='utf-8') as f:
                     json.dump(dump_data, f, indent=2, ensure_ascii=False)
             except Exception as e:
                 logger.error(f"Failed to dump API POST: {e}")
 
         try:
-            response = self._chat_complete_create(model=local_model, messages=messages, stream=False, **generate_cfg)
+            response = self._chat_complete_create(model=request_model, messages=messages, stream=False, **generate_cfg)
 
             # Update local model info if returned by the server
             if hasattr(response, 'model') and response.model:
-                self.model = response.model
+                if response.model != self.model:
+                    self.model = response.model
+                    if self.dynamic_model and self.api_base:
+                        self._detect_context_window(self.api_base, self.api_key)
 
             finish_reason = getattr(response.choices[0], 'finish_reason', None)
             extra = {'finish_reason': finish_reason} if finish_reason else {}

@@ -45,7 +45,7 @@ from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX
-from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT
+from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_BASELINE_TEMPLATE
 
 try:
     from agent_cascade.agents.user_agent import PENDING_USER_INPUT
@@ -105,18 +105,34 @@ def detect_loop(messages: List[dict]) -> Optional[Tuple[str, int]]:
     
     # Extract identifying features, ignoring SYSTEM messages
     def get_feature(m):
+        if hasattr(m, 'model_dump'):
+            m = m.model_dump()
+        elif not isinstance(m, dict):
+            # Fallback for other objects
+            m = {
+                ROLE: getattr(m, 'role', ''),
+                CONTENT: getattr(m, 'content', ''),
+                'reasoning_content': getattr(m, 'reasoning_content', getattr(m, 'thought', '')),
+                'function_call': getattr(m, 'function_call', None)
+            }
         role = m.get(ROLE)
         content = str(m.get(CONTENT, ''))
-        reasoning = str(m.get('reasoning_content', ''))
+        reasoning = str(m.get('reasoning_content', '') or m.get('thought', ''))
         
-        # If content is empty but reasoning is present (common in some agents), use reasoning as feature
-        if not content and reasoning:
-            content = reasoning
+        # Combine reasoning and content for better loop detection
+        if reasoning and not content.startswith('<think>'):
+            text_feature = f"{reasoning}\n{content}"
+        else:
+            text_feature = content or reasoning
             
         fc = m.get('function_call')
         if fc:
-            return f"{role}:{fc.get('name')}:{fc.get('arguments')}"
-        return f"{role}:{content[:200]}" # Truncate for comparison
+            # Handle both dict and object function calls
+            name = fc.get('name') if isinstance(fc, dict) else getattr(fc, 'name', '')
+            args = fc.get('arguments') if isinstance(fc, dict) else getattr(fc, 'arguments', '')
+            return f"{role}:{name}:{args}"
+        # For plain messages, use first 3000 chars of content to distinguish long reasoning
+        return f"{role}:{text_feature[:3000]}"
 
     # Only look at the last 40 messages to detect recent loops
     window = messages[-40:]
@@ -189,11 +205,15 @@ def _refine_pop_count(history, pop_count):
     while new_pop < removable:
         start_idx = len(history) - new_pop
         if start_idx >= keep_at_least and history[start_idx].get(ROLE) == FUNCTION:
+            # If we land on a function response, we must also remove the call that preceded it.
             new_pop += 1
         elif start_idx >= keep_at_least and history[start_idx].get(ROLE) == ASSISTANT and history[start_idx].get('function_call'):
-            new_pop += 1
+            # If we land on a tool call, it means we've already included it (or it's the start of our rollback).
+            # We stop here to keep the history clean without rolling back into the previous successful turn.
             break
         else:
+            # Landed on a regular message (USER or text ASSISTANT). 
+            # This is a safe boundary to stop.
             break
     return new_pop
 
@@ -407,14 +427,17 @@ def create_app(agents, agent_pool, config=None):
                 agent_template = agent_pool.get_agent(agent_class)
                 max_tokens = get_agent_max_tokens(agent_template) if agent_template else 58000
                 
-                stats = get_history_stats(msgs)
+                # Calculate tokens for the active 'working set' (after compression)
+                active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
+                stats = get_history_stats(active_msgs)
                 
                 # Dynamically extract summary from messages if missing from tracker (e.g. after restart)
                 summary = agent_pool.instance_summaries.get(name, "")
                 if not summary:
                     for msg in reversed(msgs):
+                        role = msg.get(ROLE)
                         content = msg.get(CONTENT, '')
-                        if isinstance(content, str) and "<context_summary>" in content:
+                        if role == USER and isinstance(content, str) and "<context_summary>" in content:
                             import re
                             match = re.search(r"<context_summary>\s*\n(.*?)\s*</context_summary>", content, re.DOTALL)
                             if match:
@@ -460,8 +483,9 @@ def create_app(agents, agent_pool, config=None):
         # Calculate tokens for the main session
         orch_agent = get_agent()
         
-        # Optimize: History stats are cached, partial responses are calculated on the fly
-        h_stats = get_history_stats(session['history'])
+        # Calculate tokens for the active 'working set' (after compression)
+        active_h = agent_pool.slice_history_for_llm(session['history']) if agent_pool else session['history']
+        h_stats = get_history_stats(active_h)
         r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
         
         total_tokens = h_stats['tokens'] + r_stats['tokens']
@@ -526,7 +550,8 @@ def create_app(agents, agent_pool, config=None):
         response_msgs = [serialize_message(m, history_count + i) for i, m in enumerate(responses)] if responses else []
 
         # Stats: use cached h_stats when available to skip O(n) history iteration each tick
-        h_stats = cached_h_stats if cached_h_stats is not None else get_history_stats(session['history'])
+        active_h = agent_pool.slice_history_for_llm(session['history']) if agent_pool else session['history']
+        h_stats = cached_h_stats if cached_h_stats is not None else get_history_stats(active_h)
         r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
 
         orch_agent = get_agent()
@@ -701,8 +726,9 @@ def create_app(agents, agent_pool, config=None):
                 if agent_pool:
                     pool_snapshots = agent_pool.capture_snapshots()
 
-                # Pre-compute history stats for streaming updates
-                cached_h_stats = get_history_stats(current_history)
+                # Pre-compute history stats for streaming updates (based on active slice)
+                active_h = agent_pool.slice_history_for_llm(current_history) if agent_pool else current_history
+                cached_h_stats = get_history_stats(active_h)
                 sub_agents_cache = None
 
                 try:
@@ -872,9 +898,17 @@ def create_app(agents, agent_pool, config=None):
                         else:
                             logger.warning(f"Loop detected for {agent_name}: {loop_reason}. Stopping generation.")
                             if agent_pool:
-                                agent_pool.rollback_to_snapshots(pool_snapshots, soft=True, reason=loop_reason)
-                            if current_history:
-                                current_history.pop()
+                                # For sub-agents, we should NOT blunt-rollback to start of turn
+                                # if we already have surgical information or if it's already rolled back.
+                                if is_sub_agent:
+                                    logger.info(f"Sub-agent {agent_name} loop stop: keeping surgical state.")
+                                    # We still pop the last orchestrator message if it was the call that failed
+                                    if current_history:
+                                        current_history.pop()
+                                else:
+                                    agent_pool.rollback_to_snapshots(pool_snapshots, soft=True, reason=loop_reason)
+                                    if current_history:
+                                        current_history.pop()
                             responses = []
                             session['stop_requested'] = True
                             if agent_pool:
@@ -1473,27 +1507,70 @@ def create_app(agents, agent_pool, config=None):
                                     
                                     parsing_response = parsing_text.strip()
                                     
-                                    # Check verdict on both stripped and unstripped to be robust
-                                    check_text = (parsing_response + " " + raw_parsing_text).upper()
-                                    is_yes = "[YES]" in check_text or parsing_response.upper().strip().startswith("YES")
-                                    is_no = "[NO]" in check_text or parsing_response.upper().strip().startswith("NO")
+                                    # 1. Clean the text: Remove reasoning blocks completely to avoid false positives in "thinking"
+                                    # This handles both <think> tags and [THINK] tags
+                                    clean_text = re.sub(r'<(think|thought)>.*?(</\1>|$)', '', raw_parsing_text, flags=re.IGNORECASE | re.DOTALL)
+                                    clean_text = re.sub(r'\[(THINK|THOUGHT)\].*?(\[/\1\]|$)', '', clean_text, flags=re.IGNORECASE | re.DOTALL).strip()
                                     
-                                    # Extract reason: find the first occurrence of [NO] and take everything after it
-                                    no_reason = ""
-                                    if is_no:
-                                        match = re.search(r'\[NO\]', raw_parsing_text, re.IGNORECASE)
-                                        if match:
-                                            no_reason = raw_parsing_text[match.end():].strip()
-                                            # Strip leading "Reason:" or similar if present
-                                            no_reason = re.sub(r'^[:\s-]*(Reason|Justification)[:\s-]*', '', no_reason, flags=re.IGNORECASE).strip()
+                                    check_text = clean_text.upper()
+                                    
+                                    # 2. Identify verdicts in the clean text only
+                                    is_yes = bool(re.search(r'\[YES\]|\bYES\b', check_text))
+                                    is_no = bool(re.search(r'\[NO\]|\bNO\b', check_text))
+                                    
+                                    # If both are present, pick the LAST one in the clean text
+                                    verdict_idx = -1
+                                    final_verdict = None
+                                    
+                                    if is_yes or is_no:
+                                        yes_match = list(re.finditer(r'\[YES\]|\bYES\b', check_text))
+                                        no_match = list(re.finditer(r'\[NO\]|\bNO\b', check_text))
+                                        
+                                        last_yes = yes_match[-1].start() if yes_match else -1
+                                        last_no = no_match[-1].start() if no_match else -1
+                                        
+                                        if last_yes > last_no:
+                                            is_yes, is_no = True, False
+                                            verdict_idx = last_yes
+                                            # Find the end of the matched YES token in original case clean_text
+                                            verdict_end_idx = yes_match[-1].end()
+                                            final_verdict = "YES"
                                         else:
-                                            no_reason = parsing_response
+                                            is_yes, is_no = False, True
+                                            verdict_idx = last_no
+                                            verdict_end_idx = no_match[-1].end()
+                                            final_verdict = "NO"
+                                            
+                                    # 3. Extract justification: everything AFTER the final verdict token
+                                    justification = ""
+                                    if verdict_idx != -1:
+                                        justification = clean_text[verdict_end_idx:].strip()
+                                        # Strip leading "Reason:" or similar
+                                        justification = re.sub(r'^[:\s-]*(Reason|Justification|Verdict|Tips)[:\s-]*', '', justification, flags=re.IGNORECASE).strip()
                                     
+                                    # Fallback: if no verdict found, look for safe/unsafe keywords in clean text
                                     if not is_yes and not is_no:
+                                        if "SAFE" in check_text and "UNSAFE" not in check_text:
+                                            is_yes = True
+                                            justification = clean_text
+                                        elif "UNSAFE" in check_text or "DANGEROUS" in check_text or "REJECT" in check_text:
+                                            is_no = True
+                                            justification = clean_text
+                                    
+                                    if is_yes:
+                                        logger.info(f"[SECURITY] Automatic Approval for {rid} with justification: {justification[:50]}...")
+                                        agent_pool.operation_manager.user_approve(rid, reason=justification)
+                                    elif is_no:
+                                        logger.info(f"[SECURITY] Automatic Rejection for {rid} with reason: {justification[:50]}...")
+                                        # Auto-rejection message
+                                        reject_msg = f"SECURITY REJECTED: {justification}" if justification else "SECURITY REJECTED: The security advisor flagged this operation as unsafe."
+                                        agent_pool.operation_manager.user_reject(rid, reject_msg)
+                                    else:
                                         # Strict enforcement: Invalid format = Automatic NO
                                         logger.info(f"[SECURITY] Automatic Rejection for {rid} (Ambiguous/Invalid Format)")
-                                        reject_msg = f"SECURITY VERIFICATION FAILED: The security advisor provided an ambiguous response without a clear [YES] or [NO] verdict. For safety, the operation has been automatically rejected. Please ensure your response ends with an explicit [YES] or [NO] verdict."
+                                        reject_msg = f"SECURITY VERIFICATION FAILED: The security advisor provided an ambiguous response without a clear [YES] or [NO] verdict. For safety, the operation has been automatically rejected. Please ensure your response ends with an explicit [YES] or [NO] verdict followed by your justification."
                                         agent_pool.operation_manager.user_reject(rid, reject_msg)
+
                                         
                                         # Also notify the UI
                                         asyncio.run_coroutine_threadsafe(
@@ -1594,7 +1671,10 @@ def create_app(agents, agent_pool, config=None):
                                 suffix_match = re.search(r"(\s*</context_summary>.*)", old_content, re.DOTALL)
                                 
                                 if prefix_match and suffix_match:
-                                    msg[CONTENT] = prefix_match.group(1) + new_summary_content + suffix_match.group(1)
+                                    msg[CONTENT] = COMPRESSION_BASELINE_TEMPLATE.format(
+                                        header="Manual edit",
+                                        summary=new_summary_content
+                                    )
                                     break
                     
                     # 2. Update AgentPool tracker

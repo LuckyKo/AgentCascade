@@ -149,7 +149,7 @@ class AgentPool:
                 if start_idx >= keep_at_least and conv[start_idx].get(ROLE) == FUNCTION:
                     pop_count += 1
                 elif start_idx >= keep_at_least and conv[start_idx].get(ROLE) == ASSISTANT and conv[start_idx].get('function_call'):
-                    pop_count += 1
+                    # We are at a tool call boundary. Stop here.
                     break
                 else:
                     break
@@ -335,8 +335,9 @@ rules:
         latest_summary_idx = -1
         for i in range(len(history) - 1, -1, -1):
             msg = history[i]
+            role = msg.get(ROLE) if isinstance(msg, dict) else getattr(msg, 'role', '')
             content = msg.get(CONTENT, '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-            if isinstance(content, str) and "<context_summary>" in content:
+            if role == USER and isinstance(content, str) and "<context_summary>" in content:
                 latest_summary_idx = i
                 break
                 
@@ -469,8 +470,7 @@ rules:
         latest_summary_idx = -1
         for i in range(len(cleaned_messages) - 1, -1, -1):
             msg = cleaned_messages[i]
-            content = msg.get(CONTENT, '')
-            if isinstance(content, str) and "<context_summary>" in content:
+            if msg.get(ROLE) == USER and isinstance(msg.get(CONTENT, ''), str) and "<context_summary>" in msg.get(CONTENT, ''):
                 latest_summary_idx = i
                 break
                 
@@ -609,7 +609,7 @@ rules:
             
         # Create the summary text
         summary_text = COMPRESSION_BASELINE_TEMPLATE.format(
-            fraction_percent=int(fraction * 100),
+            header=f"{int(fraction * 100)}% of history summarized",
             summary=summary
         )
         

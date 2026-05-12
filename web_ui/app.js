@@ -519,6 +519,10 @@ function loadSettings() {
       autoSecurityToggle.checked = s['auto-security'];
       state.autoSecurity = s['auto-security'];
     }
+
+    if (afkToggle && afkToggle.checked && !state.generating) {
+      checkAfkAutoReply();
+    }
   } catch (e) {
     console.error('Failed to load settings', e);
   }
@@ -1454,7 +1458,19 @@ function renderApprovals() {
     return;
   }
 
-  // Auto-reject if AFK is enabled
+  // Auto-security check (Auto-Ask) takes priority
+  if (state.autoSecurity) {
+    const pending = [...state.approvals];
+    state.approvals = [];
+    bar.style.display = 'none';
+    
+    pending.forEach(ap => {
+      send({ type: 'ask_security', request_id: ap.request_id, auto_apply: true });
+    });
+    return;
+  }
+
+  // Auto-reject if AFK is enabled (and auto-security is OFF)
   if (afkToggle && afkToggle.checked) {
     const reason = (settingAfkMessage && settingAfkMessage.value.trim()) 
       ? `Auto-rejected (AFK): ${settingAfkMessage.value.trim()}`
@@ -1466,18 +1482,6 @@ function renderApprovals() {
     
     pending.forEach(ap => {
       send({ type: 'reject', request_id: ap.request_id, reason: reason, automated: true });
-    });
-    return;
-  }
-
-  // Auto-security check
-  if (state.autoSecurity) {
-    const pending = [...state.approvals];
-    state.approvals = [];
-    bar.style.display = 'none';
-    
-    pending.forEach(ap => {
-      send({ type: 'ask_security', request_id: ap.request_id, auto_apply: true });
     });
     return;
   }

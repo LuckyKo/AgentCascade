@@ -57,9 +57,17 @@ def detect_loop(messages: List[Union[dict, Message]]) -> Optional[Tuple[str, int
     
     # Extract identifying features, ignoring SYSTEM messages
     def get_feature(m):
-        if isinstance(m, Message):
+        if hasattr(m, 'model_dump'):
             m = m.model_dump()
-        
+        elif not isinstance(m, dict):
+            # Fallback for other objects
+            m = {
+                ROLE: getattr(m, 'role', ''),
+                CONTENT: getattr(m, 'content', ''),
+                'reasoning_content': getattr(m, 'reasoning_content', getattr(m, 'thought', '')),
+                'function_call': getattr(m, 'function_call', None)
+            }
+            
         role = m.get(ROLE)
         content = m.get(CONTENT, '')
         if isinstance(content, list):
@@ -68,19 +76,23 @@ def detect_loop(messages: List[Union[dict, Message]]) -> Optional[Tuple[str, int
             content = " ".join(text_parts)
         content = str(content)
         
-        reasoning = str(m.get('reasoning_content', ''))
+        reasoning = str(m.get('reasoning_content', '') or m.get('thought', ''))
         
-        # If content is empty but reasoning is present, use reasoning as feature
-        if not content and reasoning:
-            content = reasoning
+        # Combine reasoning and content for better loop detection
+        if reasoning and not content.startswith('<think>'):
+            text_feature = f"{reasoning}\n{content}"
+        else:
+            text_feature = content or reasoning
             
         fc = m.get('function_call')
         if fc:
-            # For tool calls, name + args is the best fingerprint
-            return f"{role}:{fc.get('name')}:{fc.get('arguments')}"
+            # Handle both dict and object function calls
+            name = fc.get('name') if isinstance(fc, dict) else getattr(fc, 'name', '')
+            args = fc.get('arguments') if isinstance(fc, dict) else getattr(fc, 'arguments', '')
+            return f"{role}:{name}:{args}"
         
-        # For plain messages, use first 200 chars of content
-        return f"{role}:{content[:200]}"
+        # For plain messages, use first 2000 chars of content
+        return f"{role}:{text_feature[:2000]}"
 
     # Only look at the last 40 messages to detect recent loops
     window = messages[-40:]
@@ -1386,8 +1398,10 @@ class OrchestratorAgent(Assistant):
                     sub_hint = f"[SYSTEM]: Your last actions resulted in a repetitive loop ({e.reason}). Please try a different approach to solve the task."
                     conv.append({ROLE: USER, CONTENT: sub_hint})
                     
-                    # Sync log immediately so user sees the hint in history
+                    # Sync log and UI state immediately so user sees the hint and rollback in history
                     logger_inst.update_history(conv)
+                    state['messages'] = list(conv)
+                    self.agent_pool.sub_agent_state[instance_name] = state
                     
                     # Restart the turn for this sub-agent
                     continue

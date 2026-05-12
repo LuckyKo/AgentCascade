@@ -37,7 +37,7 @@ COMPRESSION_PROMPT = (
 )
 
 COMPRESSION_BASELINE_TEMPLATE = (
-    "--- CONTEXT COMPRESSED ({fraction_percent}% of history summarized) ---\n"
+    "--- CONTEXT COMPRESSED ({header}) ---\n"
     "The following is a summary of the conversation context that was removed to save space.\n"
     "Summary of previous context:\n"
     "<context_summary>\n"
@@ -56,7 +56,10 @@ SECURITY_ADVISOR_PROMPT = (
     "- Working directory and any file paths must be within the allowed workspaces.\n"
     "Allowed workspaces:\n{workspace_info}\n\n"
     "Evaluate this command against your security rules. You may use your tools to investigate further if needed.\n"
-    "Once you have made a decision, output your final verdict as [YES] or [NO] Reason: ..."
+    "CRITICAL: Once you have made a decision, you MUST output your final verdict as either [YES] or [NO] followed by your reasoning and any tips for the agent.\n"
+    "Example: [YES] Reason: The command is safe. Tip: Make sure to check the output for any errors.\n"
+    "Example: [NO] Reason: The command is dangerous because it deletes system files.\n"
+    "The system will automatically parse your response for the [YES] or [NO] token and pass your justification back to the asking agent."
 )
 
 # --- Knowledge Base Templates ---
@@ -143,7 +146,7 @@ TOOL_METADATA = {
     'list_dir': {
         'description': (
             'Lists the names of files and subdirectories directly within a specified directory path.\n'
-            'NOTE: All paths are relative to the workspace root. Use "." for the workspace root itself.'
+            'NOTE: All paths are relative to the workspace root. Use "." for the workspace root itself. Use absolute paths for directories in the aditional work folders.'
         ),
         'parameters': {
             'path': "Path to the directory, relative to the workspace root (e.g., '.', 'src', 'data/images')"
@@ -230,7 +233,7 @@ TOOL_METADATA = {
         'description': (
             'Retrieves the current system information. '
             'This includes the operating system, current time and date, '
-            'current working directory, Python version, and basic session stats.'
+            'current work directories, Python version, and basic session stats.'
         ),
         'parameters': {}
     },

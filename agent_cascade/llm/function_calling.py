@@ -35,7 +35,7 @@ class BaseFnCallModel(BaseChatModel, ABC):
             # No prompt injection, no XML parsing — same mechanism qwen-code uses.
             self.native_fncall = True
             from agent_cascade.log import logger as _logger
-            _logger.info('Using native function calling mode (tools passed via API parameter)')
+            # _logger.info('Using native function calling mode (tools passed via API parameter)')
         elif fncall_prompt_type == 'qwen':
             from agent_cascade.llm.fncall_prompts.qwen_fncall_prompt import FN_STOP_WORDS, QwenFnCallPrompt
             self.fncall_prompt = QwenFnCallPrompt()

@@ -47,7 +47,7 @@ class PendingApproval:
     # Threading primitives for blocking
     event: threading.Event = field(default_factory=threading.Event)
     approved: bool = False
-    reject_reason: str = ""
+    outcome_reason: str = ""
 
 
 # Timeout for user approval (seconds). Auto-rejects after this.
@@ -204,19 +204,20 @@ class OperationManager:
             return False, "User is AFK, try another method if possible"
 
         if approval.approved:
-            return True, ""
+            return True, approval.outcome_reason
         else:
-            return False, approval.reject_reason or "Rejected by user."
+            return False, approval.outcome_reason or "Rejected by user."
 
-    def user_approve(self, request_id: str) -> str:
+    def user_approve(self, request_id: str, reason: str = "") -> str:
         """Called by WebUI when user clicks Approve."""
         with self._lock:
             approval = self.pending.get(request_id)
-
+            
         if not approval:
             return f"ERROR: Request '{request_id}' not found or already resolved."
-
+            
         approval.approved = True
+        approval.outcome_reason = reason
         approval.event.set()
         return f"Approved: {request_id}"
 
@@ -229,7 +230,7 @@ class OperationManager:
             return f"ERROR: Request '{request_id}' not found or already resolved."
 
         approval.approved = False
-        approval.reject_reason = reason or "Rejected by user."
+        approval.outcome_reason = reason or "Rejected by user."
         approval.event.set()
         return f"Rejected: {request_id}"
 
@@ -435,6 +436,10 @@ class OperationManager:
             )
             if not approved:
                 return f"REJECTED BY USER: {reason}"
+            justification = reason
+        else:
+            justification = ""
+
 
         try:
             resolved = self._resolve_path(path, mode="rw")
@@ -456,6 +461,8 @@ class OperationManager:
             resolved.write_text(content, encoding='utf-8')
             self.file_ownership[str(resolved)] = agent_name
             msg = f"APPROVED: Created {path} ({len(content)} characters)"
+            if justification:
+                msg += f"\nSecurity Justification: {justification}"
             if backup_path_str:
                 msg += f". Backup created: {backup_path_str}"
             return msg
@@ -494,6 +501,10 @@ class OperationManager:
             )
             if not approved:
                 return f"REJECTED BY USER: {reason}"
+            justification = reason
+        else:
+            justification = ""
+
 
         try:
             import time, shutil
@@ -514,6 +525,8 @@ class OperationManager:
             self.file_ownership[str(resolved)] = agent_name
             
             res_msg = f"APPROVED: Edited {path}"
+            if justification:
+                res_msg += f"\nSecurity Justification: {justification}"
             if backup_path_str:
                 res_msg += f" (Backup saved to: {backup_path_str})"
             return res_msg
@@ -539,6 +552,10 @@ class OperationManager:
             )
             if not approved:
                 return f"REJECTED BY USER: {reason}"
+            justification = reason
+        else:
+            justification = ""
+
 
         try:
             resolved = self._resolve_path(path, mode="rw")
@@ -549,7 +566,10 @@ class OperationManager:
                 resolved.unlink()
             if str(resolved) in self.file_ownership:
                 del self.file_ownership[str(resolved)]
-            return f"APPROVED: Deleted {path}"
+            msg = f"APPROVED: Deleted {path}"
+            if justification:
+                msg += f"\nSecurity Justification: {justification}"
+            return msg
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
 
@@ -573,6 +593,10 @@ class OperationManager:
             )
             if not approved:
                 return f"REJECTED BY USER: {reason}"
+            justification = reason
+        else:
+            justification = ""
+
 
         try:
             dest_path = self._resolve_path(destination, mode="rw")
@@ -583,7 +607,10 @@ class OperationManager:
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src_path, dest_path)
             self.file_ownership[str(dest_path)] = agent_name
-            return f"APPROVED: Copied {source} to {destination}"
+            msg = f"APPROVED: Copied {source} to {destination}"
+            if justification:
+                msg += f"\nSecurity Justification: {justification}"
+            return msg
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
 
@@ -607,6 +634,10 @@ class OperationManager:
             )
             if not approved:
                 return f"REJECTED BY USER: {reason}"
+            justification = reason
+        else:
+            justification = ""
+
 
         try:
             dest_path = self._resolve_path(destination, mode="rw")
@@ -616,7 +647,10 @@ class OperationManager:
             if str(src_path) in self.file_ownership:
                 del self.file_ownership[str(src_path)]
             self.file_ownership[str(dest_path)] = agent_name
-            return f"APPROVED: Moved {source} to {destination}"
+            msg = f"APPROVED: Moved {source} to {destination}"
+            if justification:
+                msg += f"\nSecurity Justification: {justification}"
+            return msg
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
 
@@ -642,6 +676,7 @@ class OperationManager:
         
         if not approved:
             return f"REJECTED BY USER: {reason}"
+        justification_text = reason
             
         try:
             import subprocess
@@ -692,7 +727,10 @@ class OperationManager:
                 final_output = output[:char_limit] + f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. Full output saved to: {rel_spill}]"
                 status += " [TRUNCATED]"
 
-            return f"APPROVED: {status}\n\n{final_output}"
+            final_msg = f"APPROVED: {status}\n"
+            if justification_text:
+                final_msg += f"Security Justification: {justification_text}\n"
+            return final_msg + f"\n{final_output}"
             
         except subprocess.TimeoutExpired:
             return "ERROR: Command timed out after 120 seconds. If the process is expected to take a long time, consider using a background command (e.g. using '&' on linux or 'Start-Job' on windows) or optimizing the task."

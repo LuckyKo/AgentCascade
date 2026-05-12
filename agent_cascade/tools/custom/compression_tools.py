@@ -2,7 +2,7 @@ import json
 import logging
 from typing import List, Union
 from agent_cascade.tools.base import BaseTool, register_tool
-from agent_cascade.prompts.dna import TOOL_METADATA, COMPRESSION_PROMPT
+from agent_cascade.prompts.dna import TOOL_METADATA, COMPRESSION_PROMPT, COMPRESSION_BASELINE_TEMPLATE
 from agent_cascade.llm.schema import SYSTEM, USER, Message, FUNCTION
 
 logger = logging.getLogger(__name__)
@@ -282,13 +282,9 @@ class CompressContext(BaseTool):
                     num_to_remove_active = 0
 
                 if num_to_remove_active > 0:
-                    summary_content = (
-                        f"--- CONTEXT COMPRESSED ({int(fraction*100)}% of history summarized) ---\n"
-                        f"The following is a summary of the conversation context that was removed to save space.\n"
-                        f"Summary of previous context:\n"
-                        f"<context_summary>\n"
-                        f"{summary}\n"
-                        f"</context_summary>"
+                    summary_content = COMPRESSION_BASELINE_TEMPLATE.format(
+                        header=f"{int(fraction*100)}% of history summarized",
+                        summary=summary
                     )
                     
                     new_active = []
