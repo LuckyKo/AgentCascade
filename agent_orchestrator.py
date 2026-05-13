@@ -39,11 +39,12 @@ from agent_pool import AgentPool
 
 class LoopDetectedError(Exception):
     """Raised when a repetitive loop is detected in agent turns."""
-    def __init__(self, reason, agent_name=None, pop_count=None, turn_pop_count=0):
+    def __init__(self, reason, agent_name=None, pop_count=None, turn_pop_count=0, resp_snapshot=None):
         self.reason = reason
         self.agent_name = agent_name
         self.pop_count = pop_count
         self.turn_pop_count = turn_pop_count
+        self.resp_snapshot = resp_snapshot or []
         super().__init__(f"Loop detected for {agent_name or 'agent'}: {reason}")
 
 def detect_loop(messages: List[Union[dict, Message]]) -> Optional[Tuple[str, int]]:
@@ -728,7 +729,12 @@ class OrchestratorAgent(Assistant):
                 logger.warning(f"Loop detected for {self.name}: {loop_reason}")
                 try:
                     if hasattr(self.agent_pool, 'telemetry'):
-                        self.agent_pool.telemetry.record_loop_detected(self.session_name, loop_reason)
+                        self.agent_pool.telemetry.record_loop_detected(
+                            self.session_name, 
+                            loop_reason, 
+                            auto_rolled_back=True, 
+                            pop_count=pop_count
+                        )
                 except Exception:
                     pass
                 raise LoopDetectedError(loop_reason, agent_name=self.session_name, pop_count=pop_count)
@@ -1358,7 +1364,7 @@ class OrchestratorAgent(Assistant):
                         if loop_info:
                             loop_reason, pop_count = loop_info
                             logger.warning(f"Loop detected for sub-agent {instance_name}: {loop_reason}")
-                            raise LoopDetectedError(loop_reason, agent_name=instance_name, pop_count=pop_count, turn_pop_count=len(resp))
+                            raise LoopDetectedError(loop_reason, agent_name=instance_name, pop_count=pop_count, turn_pop_count=len(resp), resp_snapshot=list(resp))
                             
                         final_resp = resp
 
@@ -1383,16 +1389,37 @@ class OrchestratorAgent(Assistant):
                         logger.error(f"Sub-agent {instance_name} hit hard internal retry limit for loop: {e.reason}. Kicking back to main.")
                         raise e
                     
-                    logger.warning(f"Sub-agent {instance_name} loop detected internally ({internal_retries}/{max_internal_retries}). Surgically rolling back sub-agent...")
+                    logger.warning(f"Sub-agent {instance_name} loop detected internally ({internal_retries}/{max_internal_retries}). Surgically rolling back {e.pop_count} messages...")
                     
-                    # pop_count is relative to (conv + resp). We only want to rollback 'conv'.
-                    # Use e.turn_pop_count to find how many messages are in the current uncommitted turn.
-                    if e.pop_count > e.turn_pop_count:
-                        pool_pop = e.pop_count - e.turn_pop_count
-                        self.agent_pool.surgical_rollback(instance_name, pool_pop, soft=True, reason=e.reason)
-                    else:
-                        # Loop is entirely within the current turn, no need to rollback pool history
+                    # Telemetry: Record the internal loop and rollback
+                    try:
+                        if hasattr(self.agent_pool, 'telemetry'):
+                            self.agent_pool.telemetry.record_loop_detected(
+                                instance_name, 
+                                e.reason, 
+                                auto_rolled_back=True, 
+                                pop_count=e.pop_count
+                            )
+                    except Exception:
                         pass
+                    
+                    # New Logic: Commit any prefix of the turn that was NOT part of the loop
+                    if e.resp_snapshot:
+                        if e.pop_count < len(e.resp_snapshot):
+                            keep_count = len(e.resp_snapshot) - e.pop_count
+                            if keep_count > 0:
+                                good_messages = e.resp_snapshot[:keep_count]
+                                conv.extend(good_messages)
+                                logger.info(f"Partial loop recovery: Committed {keep_count} successful messages from turn to history.")
+                            # No pool rollback needed as loop was entirely in resp
+                        else:
+                            # Loop spans back into pool history
+                            pool_pop = e.pop_count - len(e.resp_snapshot)
+                            if pool_pop > 0:
+                                self.agent_pool.surgical_rollback(instance_name, pool_pop, soft=True, reason=e.reason)
+                    elif e.pop_count > 0:
+                        # Fallback for when resp_snapshot is missing (shouldn't happen with new code)
+                        self.agent_pool.surgical_rollback(instance_name, e.pop_count, soft=True, reason=e.reason)
                     
                     # Inject a corrective hint for the sub-agent
                     sub_hint = f"[SYSTEM]: Your last actions resulted in a repetitive loop ({e.reason}). Please try a different approach to solve the task."

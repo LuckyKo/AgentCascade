@@ -123,7 +123,7 @@ You are a specialized agent instance.
                             loop_reason, pop_count = loop_info
                             from agent_orchestrator import LoopDetectedError
                             logger.warning(f"Loop detected for sub-agent {instance_name}: {loop_reason}")
-                            raise LoopDetectedError(loop_reason, agent_name=instance_name, pop_count=pop_count, turn_pop_count=len(response))
+                            raise LoopDetectedError(loop_reason, agent_name=instance_name, pop_count=pop_count, turn_pop_count=len(response), resp_snapshot=list(response))
 
                 if response:
                     messages.extend(response)
@@ -148,24 +148,44 @@ You are a specialized agent instance.
                     
                     logger.warning(f"Sub-agent {instance_name} detected loop: {e.reason}. Performing internal retry ({internal_retries}/{max_internal_retries}).")
                     
-                    # Perform surgical rollback on the sub-agent's history
-                    # messages here is self.agent_pool.instance_conversations[instance_name]
-                    if e.pop_count > e.turn_pop_count:
-                        pool_pop = e.pop_count - e.turn_pop_count
-                        self.agent_pool.surgical_rollback(instance_name, pool_pop)
-                    else:
-                        # Loop is entirely within current response
+                    # Telemetry: Record the loop event
+                    try:
+                        if hasattr(self.agent_pool, 'telemetry'):
+                            self.agent_pool.telemetry.record_loop_detected(
+                                instance_name, 
+                                e.reason, 
+                                auto_rolled_back=True, 
+                                pop_count=e.pop_count
+                            )
+                    except Exception:
                         pass
+                    
+                    # Partial Turn Commitment: Save progress before the loop started
+                    if hasattr(e, 'resp_snapshot') and e.resp_snapshot:
+                        if e.pop_count < len(e.resp_snapshot):
+                            keep_count = len(e.resp_snapshot) - e.pop_count
+                            if keep_count > 0:
+                                good_msgs = e.resp_snapshot[:keep_count]
+                                messages.extend(good_msgs)
+                                logger.info(f"Sub-agent {instance_name} partial recovery: Committed {keep_count} messages to history.")
+                        else:
+                            pool_pop = e.pop_count - len(e.resp_snapshot)
+                            if pool_pop > 0:
+                                self.agent_pool.surgical_rollback(instance_name, pool_pop)
+                    elif e.pop_count > 0:
+                        # Fallback for old errors or missing snapshots
+                        if e.pop_count > e.turn_pop_count:
+                            pool_pop = e.pop_count - e.turn_pop_count
+                            self.agent_pool.surgical_rollback(instance_name, pool_pop)
                     
                     # 2. Inject hint to sub-agent
                     sub_hint = f"[SYSTEM]: Your last actions resulted in a repetitive loop ({e.reason}). Please try a different approach to solve the task."
-                    self.agent_pool.instance_conversations[instance_name].append({ROLE: USER, CONTENT: sub_hint})
+                    messages.append({ROLE: USER, 'content': sub_hint})
                     
                     # 3. Sync log
-                    logger_inst.update_history(self.agent_pool.instance_conversations[instance_name])
+                    logger_inst.update_history(messages)
                     
-                    # 4. Refresh local messages pointer for the next attempt
-                    messages = self.agent_pool.instance_conversations[instance_name]
+                    # 4. Refresh pointer for next attempt
                     continue
                     
                 return f"Error calling agent {instance_name} ({agent_class}): {str(e)}"

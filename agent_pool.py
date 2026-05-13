@@ -493,7 +493,9 @@ rules:
             if system_msg and sliced_messages[0].get(ROLE) != SYSTEM:
                 sliced_messages.insert(0, system_msg)
                 
-            cleaned_messages = cleaned_messages
+            # Note: We keep the full history in memory for now. 
+            # slice_history_for_llm will handle the working set during execution.
+            pass
 
         # Restore to pool
         self.instance_conversations[instance_name] = cleaned_messages

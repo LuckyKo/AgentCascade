@@ -351,13 +351,14 @@ class TelemetryCollector:
         self.events.append(event)
         self._session_stats["sub_agent_calls"] += 1
 
-    def record_loop_detected(self, instance_name: str, reason: str, auto_rolled_back: bool = False):
+    def record_loop_detected(self, instance_name: str, reason: str, auto_rolled_back: bool = False, pop_count: int = 0):
         """Record a loop detection event."""
         event = {
             "type": "loop_detected",
             "instance": instance_name,
             "reason": reason,
             "auto_rolled_back": auto_rolled_back,
+            "pop_count": pop_count,
             "timestamp": _now_iso(),
         }
         self._write_event(event)

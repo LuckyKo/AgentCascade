@@ -1557,43 +1557,37 @@ def create_app(agents, agent_pool, config=None):
                                             is_no = True
                                             justification = clean_text
                                     
-                                    if is_yes:
-                                        logger.info(f"[SECURITY] Automatic Approval for {rid} with justification: {justification[:50]}...")
-                                        agent_pool.operation_manager.user_approve(rid, reason=justification)
-                                    elif is_no:
-                                        logger.info(f"[SECURITY] Automatic Rejection for {rid} with reason: {justification[:50]}...")
-                                        # Auto-rejection message
-                                        reject_msg = f"SECURITY REJECTED: {justification}" if justification else "SECURITY REJECTED: The security advisor flagged this operation as unsafe."
-                                        agent_pool.operation_manager.user_reject(rid, reject_msg)
+                                    if is_yes or is_no:
+                                        if auto_apply:
+                                            if is_yes:
+                                                logger.info(f"[SECURITY] Automatic Approval for {rid} with justification: {justification[:50]}...")
+                                                agent_pool.operation_manager.user_approve(rid, reason=justification)
+                                            else:
+                                                logger.info(f"[SECURITY] Automatic Rejection for {rid} with reason: {justification[:50]}...")
+                                                # Auto-rejection message
+                                                reject_msg = f"SECURITY REJECTED: {justification}" if justification else "SECURITY REJECTED: The security advisor flagged this operation as unsafe."
+                                                agent_pool.operation_manager.user_reject(rid, reject_msg)
+                                        else:
+                                            # Valid format but auto_apply is off: Send to UI for manual confirmation
+                                            asyncio.run_coroutine_threadsafe(
+                                                send_queue.put({
+                                                    'type': 'security_response', 
+                                                    'request_id': rid, 
+                                                    'response': display_response,
+                                                    'verdict': 'YES' if is_yes else 'NO',
+                                                    'reason': justification if is_no else ""
+                                                }),
+                                                loop
+                                            )
                                     else:
-                                        # Strict enforcement: Invalid format = Automatic NO
+                                        # Strict enforcement: Invalid format = Automatic NO (Safety)
                                         logger.info(f"[SECURITY] Automatic Rejection for {rid} (Ambiguous/Invalid Format)")
                                         reject_msg = f"SECURITY VERIFICATION FAILED: The security advisor provided an ambiguous response without a clear [YES] or [NO] verdict. For safety, the operation has been automatically rejected. Please ensure your response ends with an explicit [YES] or [NO] verdict followed by your justification."
                                         agent_pool.operation_manager.user_reject(rid, reject_msg)
-
                                         
                                         # Also notify the UI
                                         asyncio.run_coroutine_threadsafe(
                                             send_queue.put({'type': 'security_response', 'request_id': rid, 'response': display_response + f"\n\n**[AUTO-REJECTED: Ambiguous Format]**", 'verdict': 'AMBIGUOUS'}),
-                                            loop
-                                        )
-                                    elif auto_apply:
-                                        if is_yes:
-                                            logger.info(f"[SECURITY] Automated Approval for {rid}")
-                                            agent_pool.operation_manager.user_approve(rid)
-                                        else: # is_no
-                                            logger.info(f"[SECURITY] Automated Rejection for {rid}. Reason: {no_reason}")
-                                            agent_pool.operation_manager.user_reject(rid, no_reason)
-                                    else:
-                                        # Valid format but auto_apply is off: Send to UI for manual confirmation
-                                        asyncio.run_coroutine_threadsafe(
-                                            send_queue.put({
-                                                'type': 'security_response', 
-                                                'request_id': rid, 
-                                                'response': display_response,
-                                                'verdict': 'YES' if is_yes else 'NO',
-                                                'reason': no_reason if is_no else ""
-                                            }),
                                             loop
                                         )
                                 except Exception as e:
