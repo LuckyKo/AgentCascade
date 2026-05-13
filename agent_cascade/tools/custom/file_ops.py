@@ -1,6 +1,6 @@
 from pathlib import Path
 from agent_cascade.tools.base import BaseTool
-from agent_cascade.settings import DEFAULT_WORKSPACE
+from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_READ_FILE_MAX_LINES, DEFAULT_TOOL_RESULT_MAX_CHARS
 from agent_cascade.prompts.dna import TOOL_METADATA
 
 
@@ -69,19 +69,25 @@ class ReadFile(BaseTool):
         limit = params.get('limit')
         full_read = params.get('full_read', False)
 
-        # Get the truncation limit from agent/tool options
-        cfg_limit = 1000
+        # Get the character limit from agent/tool options or settings
+        # Default "soft" limit for wild reads (if no limit/full_read provided)
+        wild_limit = DEFAULT_TOOL_RESULT_MAX_CHARS
         if hasattr(self, 'agent_pool') and self.agent_pool:
-            cfg_limit = getattr(self.agent_pool, 'llm_cfg', {}).get('read_file_limit', cfg_limit)
-        elif self.cfg.get('read_file_limit'):
-            cfg_limit = self.cfg.get('read_file_limit')
+            wild_limit = getattr(self.agent_pool, 'llm_cfg', {}).get('tool_result_max_chars', wild_limit)
 
+        # Line-based limit is now secondary to character-based volume
         if not full_read:
-            if limit is None or limit > cfg_limit:
-                limit = cfg_limit
-        else:
             if limit is None:
-                limit = 1000000  # Effectively "full" read
+                # If no limit provided, we read until we hit the character threshold
+                limit = 1000000 
+                is_wild_read_candidate = True
+            else:
+                is_wild_read_candidate = False
+                if limit > 100000:
+                    limit = 100000
+        else:
+            limit = 1000000  # Effectively "full" read
+            is_wild_read_candidate = False
 
         try:
             if hasattr(self, 'agent_pool') and self.agent_pool:
@@ -117,9 +123,14 @@ class ReadFile(BaseTool):
                 if agent_max and agent_max != 58000:
                     max_input_tokens = int(agent_max)
             
-            # 25% of context * ~2.5 chars/token
+            # 25% of context * ~2.5 chars/token (Hard Context Safety Limit)
             char_limit = int(max_input_tokens * 0.25 * 2.5)
             char_limit = max(500, char_limit)  # floor at 500 chars
+
+            # If it's a candidate for wild read (no limit provided), 
+            # we cap it at wild_limit to avoid being flagged by the orchestrator
+            if is_wild_read_candidate:
+                char_limit = min(char_limit, wild_limit)
 
             end_idx = min(total_lines, start_idx + limit)
             

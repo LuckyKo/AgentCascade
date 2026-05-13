@@ -128,7 +128,6 @@ const ranges = [
   { input: $('#setting-repeat-penalty'), output: $('#val-repeat-penalty') },
   { input: $('#setting-presence-penalty'), output: $('#val-presence-penalty') },
   { input: $('#setting-frequency-penalty'), output: $('#val-frequency-penalty') },
-  { input: $('#setting-read-file-limit'), output: $('#val-read-file-limit') },
   { input: $('#setting-grep-char-limit'), output: $('#val-grep-char-limit') },
   { input: $('#setting-shell-char-limit'), output: $('#val-shell-char-limit') },
   { input: $('#setting-code-char-limit'), output: $('#val-code-char-limit') },
@@ -376,7 +375,7 @@ function saveSettings() {
 
   if ($('#setting-max-turns')) s['max-turns'] = $('#setting-max-turns').value;
   if ($('#setting-auto-continue')) s['auto-continue'] = $('#setting-auto-continue').checked;
-  if ($('#setting-read-file-limit')) s['read-file-limit'] = $('#setting-read-file-limit').value;
+  if ($('#setting-tool-result-max-chars')) s['tool-result-max-chars'] = $('#setting-tool-result-max-chars').value;
   if (settingVisionEnabled) s['vision-enabled'] = settingVisionEnabled.checked;
   if (afkToggle) s['afk-enabled'] = afkToggle.checked;
   if (settingAfkMessage) s['afk-message'] = settingAfkMessage.value;
@@ -454,9 +453,9 @@ function loadSettings() {
     if (s['vision-enabled'] !== undefined) $('#setting-vision-enabled').checked = s['vision-enabled'];
     if (s['max-turns'] !== undefined) $('#setting-max-turns').value = s['max-turns'];
     if (s['auto-continue'] !== undefined) $('#setting-auto-continue').checked = s['auto-continue'];
-    if (s['read-file-limit'] !== undefined) {
-      $('#setting-read-file-limit').value = s['read-file-limit'];
-      $('#setting-read-file-limit').dispatchEvent(new Event('input'));
+    if (s['tool-result-max-chars'] !== undefined) {
+      $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
+      $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
     }
 
     if (settingImageDetail && s['setting-image-detail'] !== undefined) {
@@ -2491,7 +2490,7 @@ function getGenerateCfg() {
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
   if ($('#setting-max-rollbacks')) cfg.max_auto_rollbacks = parseInt($('#setting-max-rollbacks').value);
-  if ($('#setting-read-file-limit')) cfg.read_file_limit = parseInt($('#setting-read-file-limit').value) || 1000;
+  if ($('#setting-tool-result-max-chars')) cfg.tool_result_max_chars = parseInt($('#setting-tool-result-max-chars').value) || 10000;
   if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value);
   if ($('#setting-shell-char-limit')) cfg.shell_char_limit = parseInt($('#setting-shell-char-limit').value);
   if ($('#setting-code-char-limit')) cfg.code_char_limit = parseInt($('#setting-code-char-limit').value);

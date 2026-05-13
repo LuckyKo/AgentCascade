@@ -52,7 +52,14 @@ class CallAgent(BaseTool):
             return f"Error: Agent class '{agent_class}' not found. Available: {self.agent_pool.list_agents()}"
 
         # Prepare sub-agent logger
-        logger_inst = self.agent_pool.get_logger(instance_name, agent_class)
+        caller = kwargs.get('agent_obj')
+        caller_name = getattr(caller, 'name', 'Supervisor') if caller else 'Tool'
+        
+        logger_inst = self.agent_pool.get_logger(
+            instance_name, 
+            agent_class,
+            base_metadata={'supervisor': caller_name}
+        )
         
         # Isolation Safeguard: If this instance exists but was a DIFFERENT class, 
         # clear its history to avoid confusing stacking/context merging.
@@ -78,7 +85,15 @@ You are a specialized agent instance.
 - Instance Name: {instance_name}
 - Agent Class: {agent_class}
 - Supervisor: {caller_name} ({caller_class})
+- Working Dir: {logger_inst.data['metadata'].get('working_dir', 'Unknown')}
 """
+        # Add extra paths if they exist
+        extra_ro = logger_inst.data['metadata'].get('extra_paths_ro', [])
+        extra_rw = logger_inst.data['metadata'].get('extra_paths_rw', [])
+        if extra_ro:
+            metadata_prompt += f"- Extra Paths (Read-Only): {', '.join(extra_ro)}\n"
+        if extra_rw:
+            metadata_prompt += f"- Extra Paths (Read-Write): {', '.join(extra_rw)}\n"
         # Ensure metadata is in sub-agent's prompt
         orig_sys = getattr(agent, 'system_message', "")
         if metadata_prompt not in orig_sys:

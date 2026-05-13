@@ -175,11 +175,21 @@ class AgentPool:
             log_dir = self.operation_manager.base_dir / 'logs'
             log_dir.mkdir(parents=True, exist_ok=True)
             
+            meta = base_metadata or {}
+            if 'working_dir' not in meta:
+                meta['working_dir'] = str(self.operation_manager.base_dir)
+            
+            # Add extra paths to metadata
+            if 'extra_paths_ro' not in meta:
+                meta['extra_paths_ro'] = [str(p) for p in self.operation_manager.extra_work_folders_ro]
+            if 'extra_paths_rw' not in meta:
+                meta['extra_paths_rw'] = [str(p) for p in self.operation_manager.extra_work_folders_rw]
+            
             self.instance_loggers[instance_name] = AgentInstanceLogger(
                 agent_class=agent_class,
                 instance_name=instance_name,
                 log_dir=str(log_dir),
-                base_metadata=base_metadata
+                base_metadata=meta
             )
         return self.instance_loggers[instance_name]
     
@@ -273,7 +283,7 @@ rules:
         EXCLUDE_KEYS = {
             'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
             'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-            'read_file_limit', 'grep_char_limit', 'shell_char_limit', 'code_char_limit'
+            'tool_result_max_chars', 'grep_char_limit', 'shell_char_limit', 'code_char_limit'
         }
         
         for agent_name, agent in self.agents.items():

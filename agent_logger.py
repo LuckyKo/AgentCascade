@@ -32,6 +32,8 @@ class AgentInstanceLogger:
                 "instance_name": instance_name,
                 "start_timestamp": self.start_time.isoformat(),
                 "current_log_path": self.log_path,
+                "working_dir": os.getcwd(),  # Default to current CWD
+                "supervisor": "System",      # Default supervisor
             },
             "history": []
         }

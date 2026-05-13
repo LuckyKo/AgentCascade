@@ -604,7 +604,7 @@ def create_app(agents, agent_pool, config=None):
             
             def sanitize_cfg(cfg: dict):
                 floats = ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'repetition_penalty', 'repeat_penalty', 'repeatPenalty', 'min_p']
-                ints = ['max_tokens', 'max_completion_tokens', 'top_k', 'seed', 'max_input_tokens', 'max_turns', 'read_file_limit']
+                ints = ['max_tokens', 'max_completion_tokens', 'top_k', 'seed', 'max_input_tokens', 'max_turns', 'read_file_limit', 'tool_result_max_chars', 'grep_char_limit', 'shell_char_limit', 'code_char_limit']
                 new_cfg = {}
                 for k, v in cfg.items():
                     try:
@@ -633,7 +633,7 @@ def create_app(agents, agent_pool, config=None):
             NON_LLM_KEYS = (
                 'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
                 'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-                'read_file_limit', 'grep_char_limit', 'shell_char_limit', 'code_char_limit',
+                'tool_result_max_chars', 'grep_char_limit', 'shell_char_limit', 'code_char_limit',
                 'disabled_tools'
             )
 
@@ -648,7 +648,6 @@ def create_app(agents, agent_pool, config=None):
                 pure_llm_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
                 agent_max_turns = ui_cfg.get('max_turns')
                 agent_auto_continue = ui_cfg.get('auto_continue')
-                read_file_limit = ui_cfg.get('read_file_limit')
 
                 # Remove any existing keys that should not be passed to LLM
                 for key in NON_LLM_KEYS:
@@ -657,8 +656,14 @@ def create_app(agents, agent_pool, config=None):
                 agent_runner.llm.generate_cfg.update(pure_llm_cfg)
                 if disabled_tools is not None:
                     agent_runner.llm.generate_cfg['disabled_tools'] = disabled_tools
+                
+                # Propagate tool limits to the agent runner for the orchestrator to use
+                tool_result_max_chars = ui_cfg.get('tool_result_max_chars')
+                if tool_result_max_chars is not None:
+                    agent_runner.tool_result_max_chars = tool_result_max_chars
+                
                 if agent_pool:
-                    agent_pool.update_llm_cfg(agent_runner.llm.generate_cfg)
+                    agent_pool.update_llm_cfg(ui_cfg)
                 if agent_max_turns is not None:
                     agent_runner.max_turns = agent_max_turns
                 if agent_auto_continue is not None:

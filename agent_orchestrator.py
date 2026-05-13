@@ -241,6 +241,11 @@ class OrchestratorAgent(Assistant):
         self.session_name: str = "Maine"
         from agent_cascade.utils.tokenization_qwen import count_tokens
         self._count_tokens = count_tokens
+        
+        # Tool result character limits
+        self.tool_result_max_chars = getattr(agent_cascade.settings, 'DEFAULT_TOOL_RESULT_MAX_CHARS', 10000)
+        if 'tool_result_max_chars' in kwargs:
+            self.tool_result_max_chars = kwargs['tool_result_max_chars']
 
     def _count_message_tokens(self, msg: Union[Message, dict]) -> int:
         from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
@@ -310,6 +315,7 @@ class OrchestratorAgent(Assistant):
         tool_name: str,
         messages: List[Message],
         instance_name: str,
+        tool_args: Optional[dict] = None,
     ) -> str:
         """Truncate a tool result if it would push context past 95% capacity.
         
@@ -350,23 +356,52 @@ class OrchestratorAgent(Assistant):
         if '![image/' in tool_result:
             return tool_result
 
+        # --- Wild Read Detection ---
+        # 1. Check instance-level override
+        # 2. Check shared agent_pool config (updated by UI)
+        # 3. Fallback to global setting
+        wild_read_limit = getattr(self, 'tool_result_max_chars', 10000)
+        if hasattr(self, 'agent_pool') and self.agent_pool:
+            wild_read_limit = self.agent_pool.llm_cfg.get('tool_result_max_chars', wild_read_limit)
+        
+        if not wild_read_limit or wild_read_limit == 10000:
+             wild_read_limit = getattr(agent_cascade.settings, 'DEFAULT_TOOL_RESULT_MAX_CHARS', 10000)
+        is_wild_read = len(tool_result) > wild_read_limit
+        
+        # Bypass "wild read" for controlled read_file calls
+        if is_wild_read and tool_name == 'read_file' and isinstance(tool_args, dict):
+            # If the model specified limit, offset, full_read, or line ranges, we assume it's a controlled read
+            if any(tool_args.get(k) for k in ['limit', 'offset', 'full_read', 'start_line', 'end_line']):
+                is_wild_read = False
+        
         result_tokens = max(1, len(tool_result) // 3)
         
         # Check if truncation is needed for ANY reason:
         # 1. Individual tool output exceeds 25% of total context
         # 2. Total context would exceed 95% capacity
-        if (result_tokens <= per_tool_threshold) and (non_system_tokens + result_tokens <= total_threshold):
+        # 3. Wild read (over limit and not a controlled read)
+        if (result_tokens <= per_tool_threshold) and (non_system_tokens + result_tokens <= total_threshold) and not is_wild_read:
             return tool_result  # Fits fine, no truncation needed
         
         # --- Truncation required ---
         # Determine target token count for the result
         target_tokens = result_tokens
+        reason = ""
+        
+        if is_wild_read:
+            target_tokens = 500
+            reason = f"A possible wild read without defined limits (over {wild_read_limit} chars)"
+            
         if target_tokens > per_tool_threshold:
             target_tokens = per_tool_threshold
+            if not reason:
+                reason = f"Individual tool limit (used {result_tokens/available_tokens*100:.0f}% of context)"
         
         # Final safety check against total context budget
         if non_system_tokens + target_tokens > total_threshold:
             target_tokens = max(200, total_threshold - non_system_tokens)
+            if not reason:
+                reason = f"Total context safety (capacity at {(non_system_tokens+result_tokens)/available_tokens*100:.0f}%)"
             
         # Convert tokens back to chars (use 2.5 multiplier to be safe)
         char_budget = int(target_tokens * 2.5)
@@ -392,10 +427,12 @@ class OrchestratorAgent(Assistant):
         
         truncated = tool_result[:char_budget]
         
-        if result_tokens > per_tool_threshold:
-            reason = f"Individual tool limit (used {result_tokens/available_tokens*100:.0f}% of context)"
-        else:
-            reason = f"Total context safety (capacity at {(non_system_tokens+result_tokens)/available_tokens*100:.0f}%)"
+        # If no specific reason was set yet, use a fallback
+        if not reason:
+            if result_tokens > per_tool_threshold:
+                reason = f"Individual tool limit (used {result_tokens/available_tokens*100:.0f}% of context)"
+            else:
+                reason = f"Total context safety (capacity at {(non_system_tokens+result_tokens)/available_tokens*100:.0f}%)"
 
         notice = (
             f"\n\n[TOOL RESPONSE TRUNCATED — {reason}. "
@@ -981,7 +1018,7 @@ class OrchestratorAgent(Assistant):
                 if isinstance(tool_result, str):
                     _pre_trunc_len = len(tool_result)
                     tool_result = self._truncate_tool_result(
-                        tool_result, tool_name, llm_messages, self.session_name
+                        tool_result, tool_name, llm_messages, self.session_name, tool_args=tool_args
                     )
                     _was_truncated = len(tool_result) < _pre_trunc_len
                 
@@ -1146,7 +1183,11 @@ class OrchestratorAgent(Assistant):
             return f"Operation cancelled by user."
             
         # Prepare sub-agent logger
-        logger_inst = self.agent_pool.get_logger(instance_name, agent_class)
+        logger_inst = self.agent_pool.get_logger(
+            instance_name, 
+            agent_class, 
+            base_metadata={'supervisor': self.session_name}
+        )
 
         # Build the final system message FIRST (before conversation init)
         # so there's only ever ONE system prompt in the conversation and logs.
@@ -1162,9 +1203,19 @@ class OrchestratorAgent(Assistant):
             metadata_block = [
                 "## Session Metadata",
                 f"- Supervisor: {self.session_name}",
+                f"- Working Dir: {logger_inst.data['metadata'].get('working_dir', 'Unknown')}",
                 f"- Log Path: {logger_inst.log_path}",
-                "Use your logs to recall details from turns that were compressed.\n"
             ]
+            
+            # Add extra paths to prompt if they exist
+            extra_ro = logger_inst.data['metadata'].get('extra_paths_ro', [])
+            extra_rw = logger_inst.data['metadata'].get('extra_paths_rw', [])
+            if extra_ro:
+                metadata_block.append(f"- Extra Paths (Read-Only): {', '.join(extra_ro)}")
+            if extra_rw:
+                metadata_block.append(f"- Extra Paths (Read-Write): {', '.join(extra_rw)}")
+                
+            metadata_block.append("Use your logs to recall details from turns that were compressed.\n")
             
             # Insert after the tagline if line 2 exists and isn't a header, otherwise after line 1
             insert_pos = 2 if len(lines) > 1 and not lines[1].startswith("#") else 1
