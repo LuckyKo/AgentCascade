@@ -1011,6 +1011,12 @@ function updateMainActivityBar() {
   if (chatTab) {
     chatTab.innerHTML = `<span class="main-tab-icon">💬</span> Chat`;
   }
+
+  // Persistent Queue Notification
+  const queuedEl = document.getElementById('mainQueuedMsg');
+  if (queuedEl) {
+    queuedEl.style.display = state.has_queued_messages ? 'block' : 'none';
+  }
 }
 
 function fullRender(msgs, container) {
@@ -1733,6 +1739,7 @@ function renderSubAgentPanel(panel, agentData, name) {
         <span>Activity</span>
       </div>
       <div class="activity-text">Idle</div>
+      <div class="activity-queued" style="display:none;">⚡ Queued</div>
       <button class="btn btn-danger btn-sm terminate-btn" style="margin-left: auto; display: none; padding: 2px 8px; font-size: 11px;">Terminate</button>
     `;
     panel.appendChild(activityBar);
@@ -1807,6 +1814,12 @@ function renderSubAgentPanel(panel, agentData, name) {
     activityBar.classList.remove('active');
     activityText.textContent = 'Agent Idle';
     terminateBtn.style.display = 'none';
+  }
+
+  // Persistent Queue Notification
+  const queuedEl = activityBar.querySelector('.activity-queued');
+  if (queuedEl) {
+    queuedEl.style.display = agentData.has_queued_messages ? 'block' : 'none';
   }
 
   const wasAtBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 50;
@@ -2531,19 +2544,12 @@ function sendMessage(inputEl) {
   autoResize(targetInput);
 
   if (state.generating) {
-    // Async injection: message will be injected into the running agent
-    send({ type: 'message', text });
-    // Visual feedback
-    const feedbackText = document.getElementById('statusText');
-    if (feedbackText) {
-      const prev = feedbackText.textContent;
-      feedbackText.textContent = '⚡ Message injected';
-      feedbackText.style.color = 'var(--accent)';
-      setTimeout(() => {
-        feedbackText.textContent = prev;
-        feedbackText.style.color = '';
-      }, 1500);
+    // Async injection: route to the agent whose tab is active
+    let targetAgent = state.sessionName || 'Maine';
+    if (state.activeSubTab && state.activeSubTab !== 'chat') {
+      targetAgent = state.activeSubTab.substring(4); // strip 'sub-'
     }
+    send({ type: 'message', text, target_agent: targetAgent });
     return;
   }
 

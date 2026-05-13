@@ -40,6 +40,10 @@ from agent_cascade.llm.schema import (
     ASSISTANT, CONTENT, FUNCTION, NAME, REASONING_CONTENT,
     ROLE, SYSTEM, USER, Message,
 )
+import base64
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import x25519
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
@@ -405,6 +409,18 @@ def create_app(agents, agent_pool, config=None):
         agent_pool.instance_summaries[default_session_name] = session['summary']
 
 
+    # ── E2E Encryption State ─────────────────────────────────────────────
+    server_private_key = x25519.X25519PrivateKey.generate()
+    server_public_key = server_private_key.public_key()
+    server_public_bytes = server_public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw
+    )
+    
+    # Session storage for external API clients
+    # key: session_token (string), value: shared_secret (bytes)
+    api_sessions: Dict[str, bytes] = {}
+
     ws_connections: Set[WebSocket] = set()
     send_queue: asyncio.Queue = asyncio.Queue()
 
@@ -451,7 +467,8 @@ def create_app(agents, agent_pool, config=None):
                     'total_tokens': stats['tokens'],
                     'total_words': stats['words'],
                     'max_tokens': max_tokens,
-                    'summary': summary
+                    'summary': summary,
+                    'has_queued_messages': agent_pool.has_messages(name)
                 }
         return result
 
@@ -530,6 +547,7 @@ def create_app(agents, agent_pool, config=None):
             ],
             'current_model': getattr(get_agent().llm, 'model', 'Unknown') if hasattr(get_agent(), 'llm') and get_agent().llm else 'Unknown',
             'default_workspace': str(agent_pool.operation_manager.base_dir) if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager else str(DEFAULT_WORKSPACE),
+            'has_queued_messages': agent_pool.has_messages(session['session_name']) if agent_pool else False
         }
 
     def build_stream_update(responses, cached_h_stats=None, sub_agents=None, telemetry=None):
@@ -1042,6 +1060,97 @@ def create_app(agents, agent_pool, config=None):
             except Exception:
                 pass
 
+    # ── E2E Encrypted REST API ────────────────────────────────────────────
+
+    @app.get("/api/keys")
+    async def api_get_keys():
+        """Returns the server's X25519 public key (Base64)."""
+        return {
+            "public_key": base64.b64encode(server_public_bytes).decode('utf-8'),
+            "algorithm": "X25519"
+        }
+
+    @app.post("/api/handshake")
+    async def api_handshake(data: dict):
+        """
+        Performs X25519 handshake.
+        Client sends its public_key, server returns a session_token.
+        """
+        client_pub_b64 = data.get("public_key")
+        if not client_pub_b64:
+            return JSONResponse(status_code=400, content={"message": "Missing public_key"})
+            
+        try:
+            client_pub_bytes = base64.b64decode(client_pub_b64)
+            client_public_key = x25519.X25519PublicKey.from_public_bytes(client_pub_bytes)
+            
+            # Derive shared secret
+            shared_secret = server_private_key.exchange(client_public_key)
+            
+            # Generate a session token
+            import secrets
+            token = secrets.token_hex(16)
+            api_sessions[token] = shared_secret
+            
+            return {"session_token": token}
+        except Exception as e:
+            return JSONResponse(status_code=400, content={"message": f"Handshake failed: {str(e)}"})
+
+    @app.post("/api/message")
+    async def api_inject_message(data: dict):
+        """
+        Inject an E2E encrypted message into an agent's queue.
+        Payload must be AES-GCM encrypted using the shared secret.
+        """
+        token = data.get("session_token")
+        encrypted_b64 = data.get("payload")
+        nonce_b64 = data.get("nonce")
+        
+        if not all([token, encrypted_b64, nonce_b64]):
+            return JSONResponse(status_code=400, content={"message": "Missing token, payload, or nonce"})
+            
+        shared_secret = api_sessions.get(token)
+        if not shared_secret:
+            return JSONResponse(status_code=401, content={"message": "Invalid or expired session token"})
+            
+        try:
+            # Decrypt payload
+            nonce = base64.b64decode(nonce_b64)
+            ciphertext = base64.b64decode(encrypted_b64)
+            
+            aesgcm = AESGCM(shared_secret)
+            decrypted_bytes = aesgcm.decrypt(nonce, ciphertext, None)
+            payload = json.loads(decrypted_bytes.decode('utf-8'))
+            
+            target = payload.get("target") or session.get('session_name', 'Maine')
+            text = payload.get("text", "").strip()
+            
+            if not text:
+                return JSONResponse(status_code=400, content={"message": "Empty message text"})
+                
+            if agent_pool:
+                agent_pool.enqueue_message(target, text)
+                logger.info(f"REST API: Injected message into {target}: {text[:50]}...")
+                return {"status": "success", "queued": True, "target": target}
+            else:
+                return JSONResponse(status_code=503, content={"message": "Agent pool not initialized"})
+                
+        except Exception as e:
+            return JSONResponse(status_code=400, content={"message": f"Decryption failed: {str(e)}"})
+
+    @app.get("/api/status")
+    async def api_get_status(token: str = None):
+        """Returns the current state of the agents."""
+        if not token or token not in api_sessions:
+             return JSONResponse(status_code=401, content={"message": "Invalid session token"})
+             
+        return {
+            "generating": session['generating'],
+            "active_agent": session['session_name'],
+            "agents": agent_pool.list_agents() if agent_pool else [],
+            "active_stack": get_active_stack()
+        }
+
     # ── REST endpoints ────────────────────────────────────────────────────
 
     @app.get("/api/agents")
@@ -1197,9 +1306,10 @@ def create_app(agents, agent_pool, config=None):
                         continue
 
                     if session['generating']:
-                        # Async injection while agent is running
+                        # Async injection while agent is running — route to target agent
                         if agent_pool:
-                            agent_pool.async_message_queue.append(text)
+                            target = data.get('target_agent') or session.get('session_name', 'Maine')
+                            agent_pool.enqueue_message(target, text)
                         continue
 
                     # Update session config if provided
@@ -1715,8 +1825,9 @@ def create_app(agents, agent_pool, config=None):
 
                 elif msg_type == 'inject':
                     text = data.get('text', '').strip()
+                    target = data.get('target_agent') or session.get('session_name', 'Maine')
                     if text and agent_pool:
-                        agent_pool.async_message_queue.append(text)
+                        agent_pool.enqueue_message(target, text)
 
         except WebSocketDisconnect:
             pass

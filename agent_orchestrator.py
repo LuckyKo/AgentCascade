@@ -745,15 +745,15 @@ class OrchestratorAgent(Assistant):
     
             extra_generate_cfg = {'lang': lang}
     
-            # --- ASYNC MESSAGE INJECTION ---
-            if hasattr(self.agent_pool, 'async_message_queue') and self.agent_pool.async_message_queue:
-                while self.agent_pool.async_message_queue:
-                    async_msg_text = self.agent_pool.async_message_queue.pop(0)
-                    async_msg = Message(role=USER, content=f"[ASYNC INTERRUPTION]: {async_msg_text}")
+            # --- ASYNC MESSAGE INJECTION (per-agent routed) ---
+            pending = self.agent_pool.drain_queue(self.session_name)
+            if pending:
+                for async_msg_text in pending:
+                    async_msg = Message(role=USER, content=async_msg_text)
                     messages.append(async_msg)
                     llm_messages.append(async_msg)
                     response.append(async_msg)
-                    logger.info(f"Injected async user message into {self.name}: {async_msg_text}")
+                    logger.info(f"Injected async user message into {self.session_name}: {async_msg_text}")
                 yield response  # Update UI with the injected message
                 
             # Inject warning if needed (only for the LLM call, doesn't affect saved history)
@@ -1064,15 +1064,15 @@ class OrchestratorAgent(Assistant):
                 # Log just the function result (LLM output already logged above)
                 logger_inst.log_message(fn_msg)
                 
-                # --- ASYNC MESSAGE INJECTION (URGENT) ---
-                if hasattr(self.agent_pool, 'async_message_queue') and self.agent_pool.async_message_queue:
-                    while self.agent_pool.async_message_queue:
-                        async_msg_text = self.agent_pool.async_message_queue.pop(0)
-                        async_msg = Message(role=USER, content=f"[ASYNC INTERRUPTION]: {async_msg_text}")
+                # --- ASYNC MESSAGE INJECTION (URGENT, per-agent routed) ---
+                urgent_msgs = self.agent_pool.drain_queue(instance)
+                if urgent_msgs:
+                    for async_msg_text in urgent_msgs:
+                        async_msg = Message(role=USER, content=async_msg_text)
                         messages.append(async_msg)
                         llm_messages.append(async_msg)
                         response.append(async_msg)
-                        logger.info(f"Injected urgent async user message mid-tool-loop into {self.name}: {async_msg_text}")
+                        logger.info(f"Injected urgent async user message mid-tool-loop into {instance}: {async_msg_text}")
                     yield response
                     break  # CRITICAL: Stop executing the rest of the batched tools!
                     
@@ -1356,13 +1356,12 @@ class OrchestratorAgent(Assistant):
                         agent._original_call_llm = agent._call_llm
 
                         def hooked_call_llm(self_agent, messages: List[Message], **kwargs_llm):
-                            # --- ASYNC MESSAGE INJECTION ---
-                            if hasattr(self.agent_pool, 'async_message_queue') and self.agent_pool.async_message_queue:
-                                while self.agent_pool.async_message_queue:
-                                    async_msg_text = self.agent_pool.async_message_queue.pop(0)
-                                    async_msg = Message(role=USER, content=f"[ASYNC INTERRUPTION]: {async_msg_text}")
-                                    messages.append(async_msg)
-                                    logger.info(f"Injected async user message into sub-agent {instance_name} via LLM hook: {async_msg_text}")
+                            # --- ASYNC MESSAGE INJECTION (per-agent routed) ---
+                            hook_pending = self.agent_pool.drain_queue(instance_name)
+                            for async_msg_text in hook_pending:
+                                async_msg = Message(role=USER, content=async_msg_text)
+                                messages.append(async_msg)
+                                logger.info(f"Injected async user message into sub-agent {instance_name} via LLM hook: {async_msg_text}")
 
                             self._inject_compression_warning_for_agent(self_agent, instance_name, messages)
                             

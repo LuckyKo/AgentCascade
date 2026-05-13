@@ -262,8 +262,10 @@ if __name__ == '__main__':
             try:
                 msg = sys.stdin.readline().strip()
                 if msg:
-                    agent_pool.async_message_queue.append(msg)
-                    print(f"\n[QUEUED] '{msg}' will be injected to the active agent on its next turn.")
+                    # Route to orchestrator session by default
+                    target = orchestrator.session_name if hasattr(orchestrator, 'session_name') else 'Maine'
+                    agent_pool.enqueue_message(target, msg)
+                    print(f"\n[QUEUED] '{msg}' → {target} (will be injected on its next turn)")
             except Exception:
                 break
     threading.Thread(target=async_input_listener, daemon=True).start()

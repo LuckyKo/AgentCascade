@@ -69,11 +69,44 @@ class AgentPool:
         self.stopped = False
         self.terminated_instances = set()
         
-        # Async message queue for injecting user messages mid-generation
+        # Per-agent message queues for routed async injection
+        # Key = instance_name (e.g. 'Maine', 'MACFixer2'), Value = list of message strings
+        self.message_queues: Dict[str, List[str]] = {}
+        
+        # Backward compat: kept as a drain-only alias checked by legacy code
         self.async_message_queue: List[str] = []
         
         # Auto-load all agents from the agents directory
         self._discover_agents()
+
+    # ── Per-Agent Message Queue Helpers ──────────────────────────────────────
+
+    def enqueue_message(self, target: str, text: str):
+        """Push a message into a specific agent's queue."""
+        if target not in self.message_queues:
+            self.message_queues[target] = []
+        self.message_queues[target].append(text)
+
+    def drain_queue(self, target: str) -> List[str]:
+        """Pop and return all pending messages for a specific agent."""
+        msgs = []
+        # Drain targeted queue
+        if target in self.message_queues and self.message_queues[target]:
+            msgs = self.message_queues[target][:]
+            self.message_queues[target].clear()
+        # Also drain any legacy global queue messages (backward compat)
+        if self.async_message_queue:
+            msgs.extend(self.async_message_queue)
+            self.async_message_queue.clear()
+        return msgs
+
+    def has_messages(self, target: str) -> bool:
+        """Check if there are pending messages for a specific agent without consuming them."""
+        if target in self.message_queues and self.message_queues[target]:
+            return True
+        if self.async_message_queue:
+            return True
+        return False
 
     def refresh_agents(self):
         """Reload all agent souls and templates from disk."""

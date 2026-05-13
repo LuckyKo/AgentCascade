@@ -630,6 +630,19 @@ body {
   font-style: italic;
 }
 
+.activity-queued {
+  font-size: 10px;
+  font-weight: 800;
+  color: #000;
+  background: var(--accent);
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  animation: pulse 1.5s ease-in-out infinite;
+  white-space: nowrap;
+}
+
 @keyframes activity-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.6; transform: scale(0.8); }
