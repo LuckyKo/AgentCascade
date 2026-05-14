@@ -22,7 +22,7 @@ from agent_cascade.settings import DEFAULT_WORKSPACE
 
 from agent_logger import AgentInstanceLogger
 from telemetry import TelemetryCollector
-from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE
+from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE, COMPRESSION_MARKER
 
 
 class AgentPool:
@@ -513,7 +513,7 @@ rules:
         latest_summary_idx = -1
         for i in range(len(cleaned_messages) - 1, -1, -1):
             msg = cleaned_messages[i]
-            if msg.get(ROLE) == USER and isinstance(msg.get(CONTENT, ''), str) and "<context_summary>" in msg.get(CONTENT, ''):
+            if msg.get(ROLE) == USER and isinstance(msg.get(CONTENT, ''), str) and COMPRESSION_MARKER in msg.get(CONTENT, ''):
                 latest_summary_idx = i
                 break
                 
@@ -553,10 +553,94 @@ rules:
             agent_class=agent_class,
             base_metadata=metadata
         )
+        
+        # 1. Clean up the loaded history before syncing to the new log
+        self._cleanup_history(instance_name)
+        cleaned_messages = self.instance_conversations[instance_name]
+        
         # Sync the loaded history to the NEW log file so it's persistent
         self.instance_loggers[instance_name].update_history(cleaned_messages)
 
         return f"Successfully loaded {len(cleaned_messages)} messages for instance '{instance_name}' ({agent_class}) from {log_source}."
+    
+    def _cleanup_history(self, instance_name: str):
+        """
+        Ultra-robust deduplicator to prune accidental duplications from history.
+        Handles adjacent repeats and repeating sequences (echoes).
+        """
+        messages = self.instance_conversations.get(instance_name, [])
+        if not messages: return
+        
+        # 1. Prune adjacent identical messages (same role and content)
+        new_msgs = []
+        for m in messages:
+            if not new_msgs:
+                new_msgs.append(m)
+                continue
+            prev = new_msgs[-1]
+            if str(prev.get(ROLE)) == str(m.get(ROLE)) and \
+               str(prev.get(CONTENT)).strip() == str(m.get(CONTENT)).strip() and \
+               str(prev.get('name')) == str(m.get('name')):
+                logger.info(f"Cleanup [{instance_name}]: Pruned adjacent identical message.")
+                continue
+            new_msgs.append(m)
+        messages = new_msgs
+
+        # 2. Search for context summary markers and handle duplication around them
+        # (Sliding window match for segments that were accidentally re-appended after compression)
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            if isinstance(msg, dict) and COMPRESSION_MARKER in str(msg.get(CONTENT, "")):
+                num_after = len(messages) - 1 - i
+                if num_after > 0:
+                    for length in range(num_after, 0, -1):
+                        after_segment = messages[i+1 : i+1+length]
+                        for start_idx in range(0, i - length + 1):
+                            before_segment = messages[start_idx : start_idx + length]
+                            matches = True
+                            for k in range(length):
+                                mb = before_segment[k]
+                                ma = after_segment[k]
+                                if str(mb.get(ROLE)) != str(ma.get(ROLE)) or \
+                                   str(mb.get(CONTENT)).strip() != str(ma.get(CONTENT)).strip():
+                                    matches = False
+                                    break
+                            if matches:
+                                logger.info(f"Cleanup [{instance_name}]: Pruned {length} echo messages found around summary.")
+                                del messages[i+1 : i+1+length]
+                                i = -1
+                                break
+                        if i == -1: break
+            i += 1
+            
+        # 3. General sequence-deduplication (catch accidental turn repeats anywhere)
+        # We look for any repeating sequence of length 2 or more.
+        i = 0
+        while i < len(messages):
+            # Try sequences of length 5 down to 2
+            for n in range(min(5, (len(messages)-i) // 2), 1, -1):
+                seq = messages[i : i+n]
+                # Look for this exact sequence immediately following it
+                following = messages[i+n : i+2*n]
+                
+                matches = True
+                for k in range(n):
+                    if str(seq[k].get(ROLE)) != str(following[k].get(ROLE)) or \
+                       str(seq[k].get(CONTENT)).strip() != str(following[k].get(CONTENT)).strip():
+                        matches = False
+                        break
+                if matches:
+                    logger.info(f"Cleanup [{instance_name}]: Pruned repeated sequence of {n} messages starting at index {i+n}.")
+                    del messages[i+n : i+2*n]
+                    i = -1 # Restart
+                    break
+            if i == -1: 
+                i = 0
+                continue
+            i += 1
+        
+        self.instance_conversations[instance_name] = messages
     
     def _apply_context_compression(self, agent_name: str, summary: str, fraction: float, agent_obj=None):
         """
@@ -660,24 +744,31 @@ rules:
         
         # New history baseline marker
         is_dict = isinstance(system_msg, dict) if system_msg else isinstance(messages_to_compress[0], dict)
-        # Insert the summary message at the boundary point in the FULL history.
-        # This keeps the history non-destructive for the UI, while slice_history_for_llm
-        # will find the marker and provide a clean working set to the LLM.
         summary_msg = {'role': USER, 'content': str(summary_text)} if is_dict else Message(role=USER, content=str(summary_text))
         
-        insert_idx = num_to_remove + (1 if system_msg else 0)
-        history.insert(insert_idx, summary_msg)
+        # 1. DESTRUCTIVE: Remove the messages that were summarized from memory
+        # This keeps the AgentPool lean and matches the user design (middle bar).
+        for _ in range(num_to_remove):
+            if len(history) > start_idx:
+                history.pop(start_idx)
+        
+        # 2. Insert summary marker at the boundary position
+        history.insert(start_idx, summary_msg)
         
         # Track the active summary
         self.instance_summaries[agent_name] = summary
         
-        # Notify the logger that a compression event happened.
-        # We pass the full history (which now includes the summary marker).
-        # The logger's reset_history will append the summary to the log file.
+        # 3. Notify the logger that a compression event happened.
         if agent_name in self.instance_loggers:
-            self.instance_loggers[agent_name].reset_history(history)
+            # Run cleanup to catch any lingering echoes
+            self._cleanup_history(agent_name)
             
-        logger.info(f"Inserted context summary baseline for agent '{agent_name}' at index {insert_idx}. Full history preserved.")
+            # For the logs, we want a CUMULATIVE log with a surgical summary insertion.
+            # We use update_history which handles the surgical merge automatically.
+            history = self.get_conversation(agent_name)
+            self.instance_loggers[agent_name].update_history(history)
+            
+        logger.info(f"Destructive compression: Removed {num_to_remove} messages for agent '{agent_name}'. Memory now starts with summary.")
     
     def get_agent_info(self, agent_name: str) -> Optional[dict]:
         """Get info about a specific agent."""

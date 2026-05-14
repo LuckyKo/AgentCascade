@@ -49,7 +49,7 @@ from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX
-from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_BASELINE_TEMPLATE
+from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_BASELINE_TEMPLATE, COMPRESSION_MARKER
 
 try:
     from agent_cascade.agents.user_agent import PENDING_USER_INPUT
@@ -453,12 +453,14 @@ def create_app(agents, agent_pool, config=None):
                     for msg in reversed(msgs):
                         role = msg.get(ROLE)
                         content = msg.get(CONTENT, '')
-                        if role == USER and isinstance(content, str) and "<context_summary>" in content:
+                        # Specifically target USER messages for context boundaries
+                        if role == USER and isinstance(content, str) and (COMPRESSION_MARKER in content or "<context_summary>" in content):
                             import re
-                            match = re.search(r"<context_summary>\s*\n(.*?)\s*</context_summary>", content, re.DOTALL)
+                            # Use the standardized XML-style tag match
+                            match = re.search(r"<context_summary>[\s\n]*(.*?)[\s\n]*</context_summary>", content, re.DOTALL)
                             if match:
                                 summary = match.group(1).strip()
-                            break
+                                break
                 
                 result[name] = {
                     'active': state.get('active', False),
@@ -514,10 +516,10 @@ def create_app(agents, agent_pool, config=None):
         current_summary = session.get('summary', '')
         for msg in reversed(session['history']):
             content = msg.get(CONTENT, '')
-            if isinstance(content, str) and "<context_summary>" in content:
+            if isinstance(content, str) and COMPRESSION_MARKER in content:
                 import re
-                # Only match content INSIDE the tags
-                match = re.search(r"<context_summary>\s*\n(.*?)\s*</context_summary>", content, re.DOTALL)
+                # Only match content INSIDE the tags, allowing optional newlines/whitespace
+                match = re.search(r"<context_summary>[\s\n]*(.*?)[\s\n]*</context_summary>", content, re.DOTALL)
                 if match:
                     current_summary = match.group(1).strip()
                 break
@@ -1478,6 +1480,13 @@ def create_app(agents, agent_pool, config=None):
                             agents = [orch] + [a for a in agents if a != orch]
                     await broadcast({'type': 'state', **build_state()})
 
+                elif msg_type == 'restart_server':
+                    logger.warning("Server restart requested via UI")
+                    await broadcast({'type': 'error', 'message': 'Server is restarting... Please wait.'})
+                    import sys
+                    import os
+                    os.execl(sys.executable, sys.executable, *sys.argv)
+
                 elif msg_type == 'update_config':
                     if 'generate_cfg' in data:
                         session['generate_cfg'] = data['generate_cfg']
@@ -1630,16 +1639,16 @@ def create_app(agents, agent_pool, config=None):
                                     check_text = clean_text.upper()
                                     
                                     # 2. Identify verdicts in the clean text only
-                                    is_yes = bool(re.search(r'\[YES\]|\bYES\b', check_text))
-                                    is_no = bool(re.search(r'\[NO\]|\bNO\b', check_text))
+                                    is_yes = bool(re.search(r'\[YES\]', check_text))
+                                    is_no = bool(re.search(r'\[NO\]', check_text))
                                     
                                     # If both are present, pick the LAST one in the clean text
                                     verdict_idx = -1
                                     final_verdict = None
                                     
                                     if is_yes or is_no:
-                                        yes_match = list(re.finditer(r'\[YES\]|\bYES\b', check_text))
-                                        no_match = list(re.finditer(r'\[NO\]|\bNO\b', check_text))
+                                        yes_match = list(re.finditer(r'\[YES\]', check_text))
+                                        no_match = list(re.finditer(r'\[NO\]', check_text))
                                         
                                         last_yes = yes_match[-1].start() if yes_match else -1
                                         last_no = no_match[-1].start() if no_match else -1
@@ -1726,7 +1735,11 @@ def create_app(agents, agent_pool, config=None):
                         msg = session['history'][idx]
                         if isinstance(msg, dict):
                             msg[CONTENT] = _parse_multimodal_content(content)
-                        _save_session_history()
+                            if '_ui_cache' in msg:
+                                del msg['_ui_cache']
+                        if agent_pool:
+                            logger_inst = agent_pool.get_logger(session['session_name'], 'Orchestrator')
+                            logger_inst.reset_history(session['history'], rewrite=True)
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'delete_messages':
@@ -1736,7 +1749,9 @@ def create_app(agents, agent_pool, config=None):
                     for idx in indices:
                         if 0 <= idx < len(session['history']):
                             session['history'].pop(idx)
-                    _save_session_history()
+                    if agent_pool:
+                        logger_inst = agent_pool.get_logger(session['session_name'], 'Orchestrator')
+                        logger_inst.reset_history(session['history'], rewrite=True)
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'select_agent':
@@ -1759,7 +1774,6 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'edit_summary':
                     target_name = data.get('instance_name')
                     new_summary_content = data.get('content', '')
-                    
                     if not target_name:
                         target_name = session['session_name']
                     
@@ -1769,41 +1783,76 @@ def create_app(agents, agent_pool, config=None):
                         history_to_update = session['history']
                     elif agent_pool and target_name in agent_pool.instance_conversations:
                         history_to_update = agent_pool.instance_conversations[target_name]
-                    
                     if history_to_update:
-                        for msg in history_to_update:
+                        summary_found = False
+                        # Iterate in REVERSE to find the LATEST summary (the active one)
+                        for msg in reversed(history_to_update):
+                            role = msg.get(ROLE)
                             old_content = msg.get(CONTENT, '')
-                            if isinstance(old_content, str) and "<context_summary>" in old_content:
-                                # Replace the inner summary while keeping markers
-                                import re
-                                prefix_match = re.search(r"(.*?<context_summary>\s*\n)", old_content, re.DOTALL)
-                                suffix_match = re.search(r"(\s*</context_summary>.*)", old_content, re.DOTALL)
-                                
-                                if prefix_match and suffix_match:
+                            # Specifically target the USER boundary marker
+                            if role == USER and isinstance(old_content, str) and (COMPRESSION_MARKER in old_content or "<context_summary>" in old_content):
+                                # Check if the user already included tags/markers in their edit
+                                if COMPRESSION_MARKER in new_summary_content or "<context_summary>" in new_summary_content:
+                                    msg[CONTENT] = new_summary_content
+                                else:
+                                    # Wrap it in the standard template
                                     msg[CONTENT] = COMPRESSION_BASELINE_TEMPLATE.format(
                                         header="Manual edit",
                                         summary=new_summary_content
                                     )
-                                    break
+                                    
+                                # Update the actual message object too if it's not a dict
+                                if hasattr(msg, 'content'):
+                                    msg.content = msg[CONTENT]
+                                
+                                # CRITICAL: Clear UI cache so the update reflects in the next state broadcast
+                                if isinstance(msg, dict):
+                                    if '_ui_cache' in msg: del msg['_ui_cache']
+                                else:
+                                    if hasattr(msg, '_ui_cache'): delattr(msg, '_ui_cache')
+                                    if hasattr(msg, 'extra') and msg.extra and '_ui_cache' in msg.extra:
+                                        del msg.extra['_ui_cache']
+                                
+                                summary_found = True
+                                # After finding and updating the LATEST summary, 
+                                # we stop so we don't accidentally update/mess with old archived ones
+                                break
+                        
+                        if not summary_found:
+                            # 1.5 Inject a new summary message if none existed
+                            new_msg = {
+                                ROLE: USER,
+                                CONTENT: COMPRESSION_BASELINE_TEMPLATE.format(
+                                    header="Manual edit",
+                                    summary=new_summary_content
+                                )
+                            }
+                            # Insert after SYSTEM message if present, otherwise at start
+                            insert_at = 0
+                            if len(history_to_update) > 0 and history_to_update[0].get(ROLE) == SYSTEM:
+                                insert_at = 1
+                            history_to_update.insert(insert_at, new_msg)
+                            summary_found = True
                     
                     # 2. Update AgentPool tracker
                     if agent_pool:
+                        # CRITICAL: Ensure both session and pool are using the EXACT SAME list object
+                        # to prevent state drift where one reverts while the other is updated.
+                        if target_name == session['session_name']:
+                             agent_pool.instance_conversations[target_name] = session['history']
+                             session['summary'] = new_summary_content
+                        
                         agent_pool.instance_summaries[target_name] = new_summary_content
                         
+                        if target_name in agent_pool.sub_agent_state:
+                            agent_pool.sub_agent_state[target_name]['messages'] = list(agent_pool.instance_conversations[target_name])
+                        
                         # 3. Sync to persistent log file
-                        if target_name in agent_pool.instance_loggers:
-                            agent_pool.instance_loggers[target_name].reset_history(history_to_update)
-                    
-                    if target_name == session['session_name']:
-                        _save_session_history()
+                        agent_class = agent_pool.instance_classes.get(target_name, 'Orchestrator') if target_name != session['session_name'] else 'Orchestrator'
+                        logger_inst = agent_pool.get_logger(target_name, agent_class)
+                        logger_inst.update_history(history_to_update)
                         
                     await broadcast({'type': 'state', **build_state()})
-                    new_name = data.get('name', 'Maine')
-                    if new_name != session['session_name']:
-                        session['session_name'] = new_name
-                        # Auto-load history for the new session name
-                        session['history'] = _load_session_history(new_name)
-                        await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'load_session':
                     path = data.get('path')

@@ -25,6 +25,8 @@ XML_MIN_LENGTH: int = 40
 DEFAULT_SYSTEM_MESSAGE: str = 'You are a helpful assistant.'
 
 # --- Memory Compression ---
+COMPRESSION_MARKER = "--- CONTEXT COMPRESSED"
+
 COMPRESSION_PROMPT = (
     "You are a memory compression assistant. Your task is to summarize the following conversation history.\n"
     "Focus strictly on key decisions, important facts, established context, and the current state of tasks.\n"
@@ -37,7 +39,7 @@ COMPRESSION_PROMPT = (
 )
 
 COMPRESSION_BASELINE_TEMPLATE = (
-    "--- CONTEXT COMPRESSED ({header}) ---\n"
+    COMPRESSION_MARKER + " ({header}) ---\n"
     "The following is a summary of the conversation context that was removed to save space.\n"
     "Summary of previous context:\n"
     "<context_summary>\n"
@@ -56,10 +58,9 @@ SECURITY_ADVISOR_PROMPT = (
     "- Working directory and any file paths must be within the allowed workspaces.\n"
     "Allowed workspaces:\n{workspace_info}\n\n"
     "Evaluate this command against your security rules. You may use your tools to investigate further if needed.\n"
-    "CRITICAL: Once you have made a decision, you MUST output your final verdict as either [YES] or [NO] followed by your reasoning and any tips for the agent.\n"
-    "Example: [YES] Reason: The command is safe. Tip: Make sure to check the output for any errors.\n"
-    "Example: [NO] Reason: The command is dangerous because it deletes system files.\n"
-    "The system will automatically parse your response for the [YES] or [NO] token and pass your justification back to the asking agent."
+    "CRITICAL: Once you have made a decision, the final line of your output MUST be formatted as follows:\n"
+    "[YES] Reason: ...\n"
+    "[NO] Reason: ..."
 )
 
 # --- Knowledge Base Templates ---

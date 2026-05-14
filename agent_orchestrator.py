@@ -1419,16 +1419,23 @@ class OrchestratorAgent(Assistant):
                         final_resp = resp
 
                         # Update streaming state for WebUI
+                        # Check if history was compressed or edited externally (which mutates state['messages'] in-place)
+                        pool_messages = state.get('messages', [])
+                        prefix_len = len(pool_messages) - len(resp) if resp else len(pool_messages)
+                        current_prefix = pool_messages[:prefix_len]
+                        
+                        if current_prefix != conv:
+                            # Context was modified! Update 'conv' base to match.
+                            conv = list(current_prefix)
+                            logger.info(f"Sub-agent {instance_name} history base was modified externally. Synchronized orchestrator.")
+
                         state['messages'] = list(conv) + list(resp)
                         yield current_response
                         
                         # Efficient logging: check if a tool call was just completed
                         if resp and (resp[-1].get(ROLE) == FUNCTION or resp[-1].get('function_call')):
-                            # Log full conversation snapshot on tool events
+                            # Log conversation snapshot on tool events
                             logger_inst.update_history(conv + resp)
-                            
-                            # Note: Context compression mutates the pool history object in-place,
-                            # and 'conv' is a reference to that object, so it stays in sync automatically.
                     
                     # Turn successfully completed
                     break

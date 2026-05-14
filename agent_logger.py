@@ -12,6 +12,7 @@ import datetime
 from typing import Any, Dict, List, Optional, Union
 
 from agent_cascade.log import logger
+from agent_cascade.prompts.dna import COMPRESSION_MARKER
 
 
 class AgentInstanceLogger:
@@ -98,41 +99,130 @@ class AgentInstanceLogger:
         """
         Additive sync for persistent logs (JSONL). 
         Only appends new messages found in `history` that aren't in the log yet.
+        Handles context compression by identifying the most advanced sync point.
         """
         old_history = self.data["history"]
-        last_match_idx = -1  # Index in old_history
+        last_match_in_log = -1
+        needs_rewrite = False
         
-        for msg in history:
+        # Surgical Merge: Identify gaps, insertions, and UPDATES
+        buffer = []
+        for i, msg in enumerate(history):
             formatted = self._format_message(msg)
             
-            # Look for this message in the log AFTER the last matched message
-            found = False
-            # Check a reasonable range to find a match (e.g. up to 10 messages ahead)
-            start_search = last_match_idx + 1
-            for j in range(start_search, len(old_history)):
-                potential_match = old_history[j]
-                if potential_match.get('role') == formatted.get('role') and \
-                   potential_match.get('content') == formatted.get('content'):
-                    # Found a match!
-                    last_match_idx = j
-                    found = True
-                    break
-            
-            if not found:
-                # This is a truly new message — append it!
-                old_history.append(formatted)
-                last_match_idx = len(old_history) - 1
-                self._append_line(formatted)
+            # Robust comparison
+            def normalize(v):
+                if v is None: return ""
+                if isinstance(v, dict):
+                    try: return json.dumps(v, sort_keys=True, ensure_ascii=False).strip()
+                    except: return str(v).strip()
+                return str(v).replace('\r\n', '\n').strip()
 
-    def reset_history(self, new_history: List[Any]):
-        """
-        Update internal tracking after a compression event.
+            # Search for this message in the log
+            found_idx = -1
+            start_search = last_match_in_log + 1
+            
+            # Check if it's an UPDATE to the very next message in log
+            # Use timestamp to ensure it's the same logical slot
+            if start_search < len(old_history):
+                potential_match = old_history[start_search]
+                
+                # Use timestamp as a reliable identifier for the same slot
+                same_slot = False
+                if potential_match.get('timestamp') == formatted.get('timestamp'):
+                    same_slot = True
+                elif potential_match.get('role') == formatted.get('role') and \
+                     potential_match.get('name') == formatted.get('name'):
+                    # Fallback for messages without timestamps:
+                    # 1. If it's a summary slot, the marker is a strong structural anchor
+                    old_c = str(potential_match.get('content', ''))
+                    new_c = str(formatted.get('content', ''))
+                    if COMPRESSION_MARKER in old_c and COMPRESSION_MARKER in new_c:
+                        same_slot = True
+                    # 2. If the content is ALREADY a match, it's definitely the same slot
+                    elif normalize(old_c) == normalize(new_c):
+                        same_slot = True
+
+                if same_slot:
+                    if normalize(potential_match.get('content')) != normalize(formatted.get('content')) or \
+                       normalize(potential_match.get('reasoning_content')) != normalize(formatted.get('reasoning_content')) or \
+                       normalize(potential_match.get('function_call')) != normalize(formatted.get('function_call')):
+                        # CONTENT CHANGED (Manual Edit)
+                        old_history[start_search] = formatted
+                        needs_rewrite = True
+                    
+                    # Either way, we move past it
+                    found_idx = start_search
+
+            # If not an immediate update, search forward for a match
+            if found_idx == -1:
+                for j in range(start_search, len(old_history)):
+                    potential_match = old_history[j]
+                    if potential_match.get('role') == formatted.get('role') and \
+                       normalize(potential_match.get('content')) == normalize(formatted.get('content')) and \
+                       normalize(potential_match.get('name')) == normalize(formatted.get('name')) and \
+                       normalize(potential_match.get('reasoning_content')) == normalize(formatted.get('reasoning_content')) and \
+                       normalize(potential_match.get('function_call')) == normalize(formatted.get('function_call')):
+                        found_idx = j
+                        break
+            
+            if found_idx != -1:
+                # We found a match (or an update slot)! 
+                # If we have a buffer of un-matched messages, they were inserted here!
+                if buffer:
+                    logger.info(f"Logger [{self.instance_name}]: Surgically inserting {len(buffer)} messages into log at index {last_match_in_log + 1}.")
+                    # Update our internal cumulative history
+                    self.data["history"] = old_history[:last_match_in_log + 1] + buffer + old_history[last_match_in_log + 1:]
+                    old_history = self.data["history"]
+                    last_match_in_log += len(buffer)
+                    buffer = []
+                    needs_rewrite = True # We inserted in the middle, must rewrite
+                
+                last_match_in_log = found_idx
+            else:
+                # No match found yet, add to buffer
+                buffer.append(formatted)
         
-        We insert the compressed summary back into the persistent log file
-        at the same point it appears in the cached message queue (new_history).
+        # Any remaining messages in buffer are truly new tail messages
+        if buffer:
+            for msg in buffer:
+                old_history.append(msg)
+                if not needs_rewrite:
+                    # If we haven't needed a rewrite so far, we can just append to file
+                    self._append_line(msg)
+        
+        if needs_rewrite:
+            # We had edits or insertions in the middle, rewrite the file with FULL cumulative history
+            self.reset_history(old_history, rewrite=True)
+
+    def reset_history(self, new_history: List[Any], rewrite: bool = False):
+        """
+        Update internal tracking after a compression event or manual edit.
+        
+        If rewrite=True, the log file is truncated and rewritten from scratch.
+        Otherwise, we append a compression baseline to the end of the log.
         """
         import datetime as _dt
         
+        if rewrite:
+            try:
+                # 1. Prepare all lines (metadata + history)
+                lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
+                for msg in new_history:
+                    lines.append(json.dumps(self._format_message(msg), ensure_ascii=False) + '\n')
+                
+                # 2. Write to file (overwrite)
+                with open(self.log_path, 'w', encoding='utf-8') as f:
+                    f.writelines(lines)
+                
+                logger.info(f"Rewrote agent log {self.log_path} with {len(new_history)} messages.")
+            except Exception as e:
+                logger.error(f"Failed to rewrite agent log {self.log_path}: {e}")
+            
+            # Update internal tracking
+            self.data["history"] = [self._format_message(msg) for msg in new_history]
+            return
+
         # Find the summary message in new_history
         summary_msg = None
         idx_in_new = -1

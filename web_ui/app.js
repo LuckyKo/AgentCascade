@@ -51,6 +51,7 @@ const state = {
   maxTokens: 32768,
   autoSecurity: false,
   summary: "", // Active compression summary
+  lastMemoryEditTime: 0, // Timestamp of last manual memory edit to prevent race condition reverts
 };
 
 let ws = null;
@@ -263,6 +264,11 @@ function renderSessions() {
   });
 }
 
+// Save settings when connection inputs change
+if ($('#setting-endpoint')) $('#setting-endpoint').addEventListener('change', saveSettings);
+if ($('#setting-api-key')) $('#setting-api-key').addEventListener('change', saveSettings);
+if ($('#setting-model')) $('#setting-model').addEventListener('change', saveSettings);
+
 function loadSession(path) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     if (confirm('Load this session? Current unsaved state will be lost.')) {
@@ -364,6 +370,7 @@ function saveSettings() {
 
   if (settingImageDetail) s['setting-image-detail'] = settingImageDetail.value;
   if (settingMaxImageSize) s['setting-max-image-size'] = settingMaxImageSize.value;
+  if ($('#setting-mcp-enabled')) s['setting-mcp-enabled'] = $('#setting-mcp-enabled').checked;
   if (settingMcpServers) s['setting-mcp-servers'] = settingMcpServers.value;
 
   if (workAccessFoldersRW) s['work-access-folders-rw'] = workAccessFoldersRW.value;
@@ -450,6 +457,10 @@ function loadSettings() {
       settingRawEditColor.dispatchEvent(new Event('input'));
     }
 
+    if (s['api_base'] !== undefined) $('#setting-endpoint').value = s['api_base'];
+    if (s['api_key'] !== undefined) $('#setting-api-key').value = s['api_key'];
+    if (s['model'] !== undefined) $('#setting-model').value = s['model'];
+
     if (s['vision-enabled'] !== undefined) $('#setting-vision-enabled').checked = s['vision-enabled'];
     if (s['max-turns'] !== undefined) $('#setting-max-turns').value = s['max-turns'];
     if (s['auto-continue'] !== undefined) $('#setting-auto-continue').checked = s['auto-continue'];
@@ -463,6 +474,10 @@ function loadSettings() {
     }
     if (settingMaxImageSize && s['setting-max-image-size'] !== undefined) {
       settingMaxImageSize.value = s['setting-max-image-size'];
+    }
+
+    if ($('#setting-mcp-enabled') && s['setting-mcp-enabled'] !== undefined) {
+      $('#setting-mcp-enabled').checked = s['setting-mcp-enabled'];
     }
 
     if (settingMcpServers && s['setting-mcp-servers'] !== undefined) {
@@ -2292,6 +2307,8 @@ function formatMultimodalContent(text) {
   return text.replace(imageRegex, "[Image: $1]");
 }
 
+let lastMemorySelectedId = null;
+
 function updateMemoryTab(forceRebuild = false) {
   if (!settingSummaryText || !settingSummaryAgentSelect) return;
   
@@ -2316,6 +2333,17 @@ function updateMemoryTab(forceRebuild = false) {
   }
 
   const selectedId = settingSummaryAgentSelect.value;
+  
+  // 2. SKIP update if user is currently typing to prevent overwrite/jump
+  // OR if we just performed an edit (2s grace period) to prevent race condition reverts
+  // from WebSocket state broadcasts arriving mid-click.
+  const isEditing = document.activeElement === settingSummaryText || document.activeElement === saveSummaryBtn;
+  const inGracePeriod = (Date.now() - state.lastMemoryEditTime) < 2000;
+  
+  if (!forceRebuild && selectedId === lastMemorySelectedId && (isEditing || inGracePeriod)) {
+    return;
+  }
+  lastMemorySelectedId = selectedId;
   
   if (selectedId === 'chat') {
     settingSummaryText.value = state.summary || "";
@@ -2508,7 +2536,9 @@ function getGenerateCfg() {
   if ($('#setting-shell-char-limit')) cfg.shell_char_limit = parseInt($('#setting-shell-char-limit').value);
   if ($('#setting-code-char-limit')) cfg.code_char_limit = parseInt($('#setting-code-char-limit').value);
 
-  if ($('#setting-mcp-servers') && $('#setting-mcp-servers').value.trim()) {
+  if ($('#setting-mcp-enabled') && !$('#setting-mcp-enabled').checked) {
+    // MCP is disabled
+  } else if ($('#setting-mcp-servers') && $('#setting-mcp-servers').value.trim()) {
     try {
       cfg.mcpServers = JSON.parse($('#setting-mcp-servers').value.trim());
     } catch (e) {
@@ -2604,11 +2634,28 @@ if ($('#apply-mcp-btn')) {
   });
 }
 
+if ($('#restart-server-btn')) {
+  $('#restart-server-btn').addEventListener('click', () => {
+    if (confirm('Are you sure you want to restart the server? This will interrupt any active generations.')) {
+      send({ type: 'restart_server' });
+      const btn = $('#restart-server-btn');
+      btn.textContent = 'Restarting...';
+      btn.disabled = true;
+      setTimeout(() => {
+        window.location.reload();
+      }, 3000);
+    }
+  });
+}
+
 if (saveSummaryBtn) {
   saveSummaryBtn.addEventListener('click', () => {
     const content = settingSummaryText.value;
     const selectedId = settingSummaryAgentSelect ? settingSummaryAgentSelect.value : (state.activeSubTab || 'chat');
     const instanceName = selectedId.startsWith('sub-') ? selectedId.substring(4) : state.sessionName;
+    
+    // Set timestamp to prevent state broadcast from reverting this box for the next 2 seconds
+    state.lastMemoryEditTime = Date.now();
     
     send({
       type: 'edit_summary',
@@ -2616,6 +2663,8 @@ if (saveSummaryBtn) {
       content: content
     });
     
+    // Immediate UI feedback
+    const originalHTML = saveSummaryBtn.innerHTML;
     saveSummaryBtn.innerHTML = `
       <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
         <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
@@ -2624,6 +2673,13 @@ if (saveSummaryBtn) {
     `;
     saveSummaryBtn.classList.remove('btn-primary');
     saveSummaryBtn.classList.add('btn-success');
+    
+    // Revert button style after a delay
+    setTimeout(() => {
+        saveSummaryBtn.innerHTML = originalHTML;
+        saveSummaryBtn.classList.add('btn-primary');
+        saveSummaryBtn.classList.remove('btn-success');
+    }, 2000);
     
     setTimeout(() => {
       saveSummaryBtn.innerHTML = `

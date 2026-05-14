@@ -40,7 +40,7 @@ ALLOWED_LLM_PARAMS = {
     'presence_penalty', 'frequency_penalty', 'logit_bias', 'user',
     'response_format', 'tools', 'tool_choice', 'parallel_tool_calls',
     'min_p', 'repeat_penalty', 'repetition_penalty', 'extra_body',
-    'timeout', 'request_timeout'
+    'timeout', 'request_timeout', 'api_base', 'api_key'
 }
 
 
@@ -147,7 +147,13 @@ class TextChatAtOAI(BaseFnCallModel):
                 # 2. If no exact match and only one model, assume it's the one
                 if not target_model and len(data) == 1:
                     target_model = data[0]
-                    logger.info(f"Using single available model '{target_model.get('id')}' for context detection.")
+                    if self.dynamic_model:
+                        new_model_id = target_model.get('id')
+                        logger.info(f"Auto-selected single available model '{new_model_id}' for calls and context detection.")
+                        self.model = new_model_id
+                        self.original_model = new_model_id
+                    else:
+                        logger.info(f"Using single available model '{target_model.get('id')}' for context detection.")
                 
                 # 3. Special case for LM Studio / whatever_is_on
                 if not target_model and (self.model == 'whatever_is_on' or not data):
@@ -204,6 +210,15 @@ class TextChatAtOAI(BaseFnCallModel):
             request_model = self.original_model
             
         log_api_post = generate_cfg.pop('log_api_post', False)
+
+        # Update local infrastructure state if changed in UI
+        new_base = generate_cfg.get('api_base')
+        new_key = generate_cfg.get('api_key')
+        if (new_base and new_base != self.api_base) or (new_key and new_key != self.api_key):
+            self.api_base = new_base or self.api_base
+            self.api_key = new_key or self.api_key
+            logger.info(f"LLM infrastructure changed. Re-detecting context for: {self.api_base}")
+            self._detect_context_window(self.api_base, self.api_key)
         
         # Strict Allowlist: Only pass parameters that the LLM API actually understands
         generate_cfg = {k: v for k, v in generate_cfg.items() if k in ALLOWED_LLM_PARAMS}
@@ -329,6 +344,15 @@ class TextChatAtOAI(BaseFnCallModel):
             request_model = self.original_model
 
         log_api_post = generate_cfg.pop('log_api_post', False)
+
+        # Update local infrastructure state if changed in UI
+        new_base = generate_cfg.get('api_base')
+        new_key = generate_cfg.get('api_key')
+        if (new_base and new_base != self.api_base) or (new_key and new_key != self.api_key):
+            self.api_base = new_base or self.api_base
+            self.api_key = new_key or self.api_key
+            logger.info(f"LLM infrastructure changed. Re-detecting context for: {self.api_base}")
+            self._detect_context_window(self.api_base, self.api_key)
 
         # Strict Allowlist: Only pass parameters that the LLM API actually understands
         generate_cfg = {k: v for k, v in generate_cfg.items() if k in ALLOWED_LLM_PARAMS}
