@@ -13,7 +13,7 @@ from agent_cascade.tools.code_interpreter import CodeInterpreter
 from agent_cascade.tools.custom import (
     ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep,
     DeleteFile, CopyFile, MoveFile, DismissAgent, ListAgents, ShellCmd, SystemInfo,
-    ReadLogs,
+    ReadLogs, Calculate,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
 from soul_loader import create_agent_from_soul
@@ -123,6 +123,9 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
 
     from agent_cascade.tools.extract_doc_vocabulary import ExtractDocVocabulary
     agent.function_map['extract_doc_vocabulary'] = ExtractDocVocabulary(cfg={'work_dir': DEFAULT_WORKSPACE})
+    
+    # ── Calculation Tool ──
+    agent.function_map['calculate'] = Calculate()
 
     # ── User approval system notice ──
     agent.system_message += """

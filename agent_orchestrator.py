@@ -85,6 +85,9 @@ def detect_loop(messages: List[Union[dict, Message]]) -> Optional[Tuple[str, int
         else:
             text_feature = content or reasoning
             
+        import re
+        text_feature = re.sub(r'\[TOOL RESPONSE TRUNCATED.*?\]', '[TOOL RESPONSE TRUNCATED]', text_feature, flags=re.DOTALL)
+            
         fc = m.get('function_call')
         if fc:
             # Handle both dict and object function calls
@@ -92,8 +95,8 @@ def detect_loop(messages: List[Union[dict, Message]]) -> Optional[Tuple[str, int
             args = fc.get('arguments') if isinstance(fc, dict) else getattr(fc, 'arguments', '')
             return f"{role}:{name}:{args}"
         
-        # For plain messages, use first 2000 chars of content
-        return f"{role}:{text_feature[:2000]}"
+        # For plain messages, use first 3000 chars of content to distinguish long reasoning
+        return f"{role}:{text_feature[:3000]}"
 
     # Only look at the last 40 messages to detect recent loops
     window = messages[-40:]

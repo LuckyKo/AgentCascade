@@ -7,6 +7,7 @@ from .manager_ops import (
 from .shell_cmd import ShellCmd
 from .system_info import SystemInfo
 from .read_logs import ReadLogs
+from .calculation import Calculate
 
 __all__ = [
     'ReadFile',
@@ -24,4 +25,5 @@ __all__ = [
     'ShellCmd',
     'SystemInfo',
     'ReadLogs',
+    'Calculate',
 ]

@@ -136,6 +136,9 @@ def detect_loop(messages: List[dict]) -> Optional[Tuple[str, int]]:
         else:
             text_feature = content or reasoning
             
+        import re
+        text_feature = re.sub(r'\[TOOL RESPONSE TRUNCATED.*?\]', '[TOOL RESPONSE TRUNCATED]', text_feature, flags=re.DOTALL)
+            
         fc = m.get('function_call')
         if fc:
             # Handle both dict and object function calls
@@ -325,7 +328,7 @@ def create_app(agents, agent_pool, config=None):
         agent_pool: The AgentPool instance
         config:     Optional chatbot config dict
     """
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, File, UploadFile, Request
     from fastapi.responses import FileResponse, JSONResponse
     from fastapi.middleware.cors import CORSMiddleware
 
@@ -1866,6 +1869,40 @@ def create_app(agents, agent_pool, config=None):
     # ── Serve frontend static files ───────────────────────────────────────
     web_ui_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web_ui')
 
+    @app.post("/api/find_file")
+    async def find_file(request: Request):
+        try:
+            data = await request.json()
+            filename = data.get('filename')
+            if not filename:
+                return JSONResponse(status_code=400, content={"message": "Filename required"})
+                
+            base_dir = Path(DEFAULT_WORKSPACE)
+            if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
+                base_dir = agent_pool.operation_manager.base_dir
+                
+            matches = []
+            
+            # Simple recursive search, ignoring common large/irrelevant directories
+            ignore_dirs = {'.git', 'node_modules', '__pycache__', '.pytest_cache', 'venv', 'env', '.env'}
+            
+            def search_dir(current_dir):
+                try:
+                    for item in current_dir.iterdir():
+                        if item.is_dir() and item.name not in ignore_dirs:
+                            search_dir(item)
+                        elif item.is_file() and item.name == filename:
+                            matches.append(str(item.absolute()))
+                except PermissionError:
+                    pass
+                    
+            search_dir(base_dir)
+            
+            return {"matches": matches}
+        except Exception as e:
+            logger.error(f"Failed to find file: {e}")
+            return JSONResponse(status_code=500, content={"message": str(e)})
+
     @app.get("/")
     async def serve_index():
         return FileResponse(os.path.join(web_ui_dir, 'index.html'))
@@ -1877,5 +1914,34 @@ def create_app(agents, agent_pool, config=None):
             return FileResponse(file_path)
         # SPA fallback
         return FileResponse(os.path.join(web_ui_dir, 'index.html'))
+
+    @app.post("/api/parse")
+    async def parse_document(file: UploadFile = File(...)):
+        try:
+            from agent_cascade.tools.simple_doc_parser import SimpleDocParser
+            import shutil
+            import tempfile
+
+            # Create a temporary directory inside the workspace
+            temp_dir = Path(DEFAULT_WORKSPACE) / 'temp_uploads'
+            temp_dir.mkdir(exist_ok=True)
+            
+            file_path = temp_dir / file.filename
+            with file_path.open("wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+
+            doc_extractor = SimpleDocParser({'structured_doc': False, 'work_dir': str(DEFAULT_WORKSPACE)})
+            text = doc_extractor.call({'url': str(file_path)})
+            
+            # Clean up the temp file
+            try:
+                file_path.unlink()
+            except Exception as cleanup_err:
+                logger.warning(f"Failed to clean up temp file {file_path}: {cleanup_err}")
+
+            return {"text": text, "filename": file.filename}
+        except Exception as e:
+            logger.error(f"Failed to parse document: {e}")
+            return JSONResponse(status_code=500, content={"message": str(e)})
 
     return app

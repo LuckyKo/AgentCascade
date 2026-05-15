@@ -32,6 +32,7 @@ const state = {
   generating: false,
   agents: [],
   agentIndex: 0,
+  viewingAgentIndex: 0,
   sessionName: localStorage.getItem('agent-cascade-session-name') || localStorage.getItem('qwen-session-name') || 'Maine',
   connected: false,
   editingIndex: null,  // Which message index is being edited
@@ -109,6 +110,8 @@ const settingImageDetail = $('#setting-image-detail');
 const settingMaxImageSize = $('#setting-max-image-size');
 const insertImageBtn = $('#insertImageBtn');
 const imageInput = $('#imageInput');
+const insertDocBtn = $('#insertDocBtn');
+const docInput = $('#docInput');
 
 const settingMcpServers = $('#setting-mcp-servers');
 
@@ -700,7 +703,9 @@ function handleServerMessage(data) {
       state.activeStack = data.active_stack || [];
       state.generating = data.generating ?? false;
       if (data.agents) {
+        const firstLoad = state.agents.length === 0;
         state.agents = data.agents;
+        if (firstLoad) state.viewingAgentIndex = state.agentIndex;
         renderAgentSelect();
       }
       if (data.session_name) state.sessionName = data.session_name;
@@ -2100,7 +2105,7 @@ function renderAgentSelect() {
       const opt2 = document.createElement('option');
       opt2.value = agent.index;
       opt2.textContent = agent.name;
-      if (agent.index === state.agentIndex) opt2.selected = true;
+      if (agent.index === state.viewingAgentIndex) opt2.selected = true;
       settingAgentSelect.appendChild(opt2);
     }
   }
@@ -2149,7 +2154,10 @@ function renderToolsForSelectedAgent() {
 }
 
 if (settingAgentSelect) {
-  settingAgentSelect.addEventListener('change', renderToolsForSelectedAgent);
+  settingAgentSelect.addEventListener('change', (e) => {
+    state.viewingAgentIndex = parseInt(e.target.value);
+    renderToolsForSelectedAgent();
+  });
 }
 
 // Settings Tabs
@@ -2451,11 +2459,61 @@ function processImageFile(file) {
   reader.readAsDataURL(file);
 }
 
+function processDocFile(file) {
+  if (!file) return;
+
+  const statusText = document.getElementById('statusText');
+  if (statusText) statusText.textContent = `Parsing ${file.name}...`;
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  fetch('/api/parse', {
+    method: 'POST',
+    body: formData
+  })
+  .then(resp => {
+    if (!resp.ok) throw new Error(`Parse failed: ${resp.statusText}`);
+    return resp.json();
+  })
+  .then(data => {
+    if (data.text) {
+      const header = `--- DOCUMENT: ${file.name} ---`;
+      const footer = `--- END DOCUMENT ---`;
+      const fullText = `\n${header}\n${data.text}\n${footer}\n`;
+      
+      const start = chatInput.selectionStart;
+      const end = chatInput.selectionEnd;
+      const oldVal = chatInput.value;
+      chatInput.value = oldVal.substring(0, start) + fullText + oldVal.substring(end);
+      chatInput.focus();
+      chatInput.selectionStart = chatInput.selectionEnd = start + fullText.length;
+      autoResize(chatInput);
+    }
+    if (statusText) statusText.textContent = '';
+  })
+  .catch(err => {
+    console.error(err);
+    if (statusText) statusText.textContent = `Error: ${err.message}`;
+    appendSystemBubble(`⚠️ Failed to parse document: ${err.message}`);
+  });
+}
+
 if (insertImageBtn && imageInput) {
   insertImageBtn.addEventListener('click', () => imageInput.click());
   imageInput.addEventListener('change', (e) => {
     if (e.target.files && e.target.files.length > 0) {
       processImageFile(e.target.files[0]);
+    }
+    e.target.value = ''; // Reset input
+  });
+}
+
+if (insertDocBtn && docInput) {
+  insertDocBtn.addEventListener('click', () => docInput.click());
+  docInput.addEventListener('change', (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      processDocFile(e.target.files[0]);
     }
     e.target.value = ''; // Reset input
   });
@@ -2474,9 +2532,46 @@ chatInput.addEventListener('drop', (e) => {
   e.preventDefault();
   chatInput.classList.remove('drag-over');
   if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-    Array.from(e.dataTransfer.files).forEach(processImageFile);
+    Array.from(e.dataTransfer.files).forEach(file => {
+      if (file.path) {
+        insertAtCursor(`"${file.path}" `);
+      } else {
+        // Fallback: search backend for the file by name to get absolute path
+        fetch('/api/find_file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: file.name })
+        })
+        .then(res => res.json())
+        .then(data => {
+          if (data.matches && data.matches.length === 1) {
+            insertAtCursor(`"${data.matches[0]}" `);
+          } else if (data.matches && data.matches.length > 1) {
+            insertAtCursor(`"${data.matches[0]}" /* Warning: multiple matches found for ${file.name} */ `);
+          } else {
+            insertAtCursor(`"${file.name}" `);
+          }
+        })
+        .catch(err => {
+          console.error(err);
+          insertAtCursor(`"${file.name}" `);
+        });
+      }
+    });
+  } else if (e.dataTransfer.getData('text')) {
+    insertAtCursor(e.dataTransfer.getData('text'));
   }
 });
+
+function insertAtCursor(text) {
+  const start = chatInput.selectionStart;
+  const end = chatInput.selectionEnd;
+  const oldVal = chatInput.value;
+  chatInput.value = oldVal.substring(0, start) + text + oldVal.substring(end);
+  chatInput.focus();
+  chatInput.selectionStart = chatInput.selectionEnd = start + text.length;
+  autoResize(chatInput);
+}
 
 chatInput.addEventListener('paste', (e) => {
   if (e.clipboardData && e.clipboardData.items) {
@@ -2540,6 +2635,8 @@ resetBtn.addEventListener('click', () => {
 
 agentSelect.addEventListener('change', () => {
   state.agentIndex = parseInt(agentSelect.value);
+  state.viewingAgentIndex = state.agentIndex;
+  renderAgentSelect(); // This will also call renderToolsForSelectedAgent
   send({ type: 'select_agent', index: state.agentIndex });
 });
 

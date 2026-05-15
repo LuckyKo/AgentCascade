@@ -338,6 +338,17 @@ TOOL_METADATA = {
             'justification': 'Why compression is needed now.',
             'summary_text': 'Your own summary of the conversation history. Required when mode=manual.'
         }
+    },
+    'calculate': {
+        'description': (
+            'Evaluates a mathematical expression and returns the result. '
+            'Supports basic arithmetic (+, -, *, /, ^), trigonometry (sin, cos, tan), '
+            'logarithms (log, ln), constants like pi and e, and basic random '
+            'number generation (random(), randint(a, b), uniform(a, b)).'
+        ),
+        'parameters': {
+            'expression': 'The mathematical expression to evaluate (e.g., "sin(pi/2) + randint(1, 10)").'
+        }
     }
 }
 
