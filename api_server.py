@@ -107,36 +107,6 @@ def get_agent_max_tokens(agent) -> int:
     return DEFAULT_MAX_INPUT_TOKENS
 
 
-def propagate_ui_config(ui_cfg: dict, agent_pool):
-    """Synchronize UI settings to all active agents and the orchestrator."""
-    if not agent_pool:
-        return
-    
-    # 1. Sanitize the incoming UI config
-    floats = ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'repetition_penalty', 'repeat_penalty', 'repeatPenalty', 'min_p']
-    ints = ['max_tokens', 'max_completion_tokens', 'top_k', 'seed', 'max_input_tokens', 'max_turns', 'read_file_limit', 'tool_result_max_chars', 'grep_char_limit', 'shell_char_limit', 'code_char_limit']
-    
-    pure_llm_cfg = {}
-    for k, v in ui_cfg.items():
-        try:
-            if k in floats and v is not None:
-                pure_llm_cfg[k] = float(v)
-            elif k in ints and v is not None:
-                pure_llm_cfg[k] = int(float(v))
-            else:
-                pure_llm_cfg[k] = v
-        except (ValueError, TypeError):
-            pure_llm_cfg[k] = v
-
-    # 2. Update the Orchestrator
-    orch_agent = getattr(agent_pool, 'orchestrator_agent', None)
-    if orch_agent and hasattr(orch_agent, 'llm'):
-        orch_agent.llm.generate_cfg.update(pure_llm_cfg)
-        orch_agent.llm.generate_cfg['agent_name'] = 'Orchestrator'
-    
-    # 3. Update all sub-agents in the pool
-    agent_pool.update_llm_cfg(ui_cfg)
-    logger.debug(f"Propagated UI config: {pure_llm_cfg}")
 
 
 def detect_loop(messages: List[dict]) -> Optional[Tuple[str, int]]:
@@ -344,7 +314,6 @@ def serialize_message(msg, index=None):
 
 
 # Global caches for UI performance
-_SUB_AGENT_STATS_CACHE = {}
 
 # ── Logging Setup ─────────────────────────────────────────────────────────────
 
@@ -488,24 +457,9 @@ def create_app(agents, agent_pool, config=None):
                 agent_template = agent_pool.get_agent(agent_class)
                 max_tokens = get_agent_max_tokens(agent_template) if agent_template else 58000
                 
-                # Optimization: Only recalculate stats if message history length has changed.
-                # This prevents expensive re-tokenization during streaming (every chunk).
-                cache_key = (name, len(msgs))
-                if cache_key in _SUB_AGENT_STATS_CACHE:
-                    stats = _SUB_AGENT_STATS_CACHE[cache_key]
-                else:
-                    # Calculate tokens for the active 'working set' (after compression and LLM truncation)
-                    active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
-                    if max_tokens > 0:
-                        # Convert to Message objects for the truncation utility
-                        msg_objs = [Message(**m) if isinstance(m, dict) else copy.deepcopy(m) for m in active_msgs]
-                        try:
-                            active_msgs = _truncate_input_messages_roughly(msg_objs, max_tokens, agent_name=agent_class)
-                        except Exception as e:
-                            logger.error(f"Failed to truncate sub-agent messages for stats: {e}")
-                    
-                    stats = get_history_stats(active_msgs)
-                    _SUB_AGENT_STATS_CACHE[cache_key] = stats
+                # Calculate tokens for the active 'working set' (after compression)
+                active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
+                stats = get_history_stats(active_msgs)
                 
                 # Dynamically extract summary from messages if missing from tracker (e.g. after restart)
                 summary = agent_pool.instance_summaries.get(name, "")
@@ -563,15 +517,8 @@ def create_app(agents, agent_pool, config=None):
         orch_agent = get_agent()
         max_tokens = get_agent_max_tokens(orch_agent)
         
-        # Calculate tokens for the active 'working set' (after compression and LLM truncation)
+        # Calculate tokens for the active 'working set' (after compression)
         active_h = agent_pool.slice_history_for_llm(session['history']) if agent_pool else session['history']
-        if max_tokens > 0:
-            msg_objs = [Message(**m) if isinstance(m, dict) else copy.deepcopy(m) for m in active_h]
-            try:
-                active_h = _truncate_input_messages_roughly(msg_objs, max_tokens, agent_name="Orchestrator")
-            except Exception as e:
-                logger.error(f"Failed to truncate orchestrator messages for stats: {e}")
-            
         h_stats = get_history_stats(active_h)
         r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
         
@@ -1406,7 +1353,6 @@ def create_app(agents, agent_pool, config=None):
                         session['session_name'] = data['session_name']
                     if 'generate_cfg' in data:
                         session['generate_cfg'] = data['generate_cfg']
-                        propagate_ui_config(session['generate_cfg'], agent_pool)
 
                     # Check for /rollback command
                     if text.startswith('/rollback'):
@@ -1576,7 +1522,6 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'update_config':
                     if 'generate_cfg' in data:
                         session['generate_cfg'] = data['generate_cfg']
-                        propagate_ui_config(session['generate_cfg'], agent_pool)
                         ui_cfg = data['generate_cfg']
                         if 'mcpServers' in ui_cfg:
                             mcp_servers = ui_cfg['mcpServers']
