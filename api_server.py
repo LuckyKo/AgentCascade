@@ -95,15 +95,12 @@ def get_agent_max_tokens(agent) -> int:
         if hasattr(agent.llm, 'generate_cfg'):
             agent_max = agent.llm.generate_cfg.get('max_input_tokens')
             if agent_max:
-                logger.info(f"[TOKEN_DEBUG] Found max_input_tokens {agent_max} in generate_cfg for {getattr(agent, 'name', '?')}")
                 return int(agent_max)
         if hasattr(agent.llm, 'cfg'):
             cfg = agent.llm.cfg
             agent_max = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens')
             if agent_max:
-                logger.info(f"[TOKEN_DEBUG] Found max_input_tokens {agent_max} in static cfg for {getattr(agent, 'name', '?')}")
                 return int(agent_max)
-    logger.warning(f"[TOKEN_DEBUG] Falling back to default {DEFAULT_MAX_INPUT_TOKENS} for {getattr(agent, 'name', '?')} - generate_cfg: {getattr(getattr(agent, 'llm', None), 'generate_cfg', 'NO LLM')}")
     return DEFAULT_MAX_INPUT_TOKENS
 
 
