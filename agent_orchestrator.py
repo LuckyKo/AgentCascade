@@ -462,22 +462,29 @@ class OrchestratorAgent(Assistant):
         
         # 1. Critical Threshold Check (> 95%)
         if usage_pct > 95.0:
+            # Skip if compress_context already ran this turn — prevents double-compression when
+            # LLM-initiated compression mutates the pool, but _inject_compression_warning checks
+            # a stale deep-copied llm_messages that still has all old messages.
+            if getattr(self, '_compress_context_ran_this_turn', False):
+                logger.debug(f"Skipping forceful compression for {instance_name} — already ran this turn.")
+                return
             logger.info(f"Context usage at {usage_pct:.1f}% for {instance_name} - Triggering FORCEFUL compression.")
             compress_tool = agent.function_map.get('compress_context')
             if compress_tool:
                 # Programmatically call the tool's internal compression logic
-                
+
                 # Call tool directly with 50% fraction
                 params = json.dumps({
-                    'fraction': 0.5, 
+                    'fraction': 0.5,
                     'justification': f'CRITICAL THRESHOLD REACHED ({usage_pct:.1f}%)'
                 })
-                
+
                 # Pass necessary kwargs for direct application
+                self._compress_context_ran_this_turn = True
                 result = compress_tool.call(
-                    params, 
-                    messages=messages, 
-                    agent_instance_name=instance_name, 
+                    params,
+                    messages=messages,
+                    agent_instance_name=instance_name,
                     agent_obj=agent
                 )
                 
@@ -669,7 +676,8 @@ class OrchestratorAgent(Assistant):
                 
                 compress_tool = self.function_map.get('compress_context')
                 if compress_tool:
-                    messages.pop() # Remove from history
+                    # We no longer pop the command. It should remain in history for traceability.
+                    # The cumulative log and tool logic will handle it correctly.
                     
                     yield [Message(role=ASSISTANT, content=f"Generating context summary for {int(fraction*100)}% of history...")]
                     
@@ -721,9 +729,10 @@ class OrchestratorAgent(Assistant):
         # --- Custom FnCallAgent-style loop with streaming sub-agent support ---
         # messages[0] now contains all stabilized instructions, so caches will hit across turns.
         llm_messages = copy.deepcopy(messages)
-            
+
         # Initialize/Reset turn state
         self.turn_final_messages = None
+        self._compress_context_ran_this_turn = False  # prevent double-compression this turn
         
         # Robustness: Read turn limit and auto-continue settings
         # These may be set on the instance by api_server.py or passed in kwargs
@@ -758,6 +767,15 @@ class OrchestratorAgent(Assistant):
                 
             # Inject warning if needed (only for the LLM call, doesn't affect saved history)
             self._inject_compression_warning(llm_messages)
+            
+            # BUG-7 fix: If forceful compression ran, llm_messages was compressed in-place
+            # but `messages` (the canonical history) still holds the old un-compressed state.
+            # Re-sync `messages` from the Pool to prevent divergence.
+            if getattr(self, '_compress_context_ran_this_turn', False):
+                compressed = self.agent_pool.get_conversation(self.session_name)
+                if compressed and len(compressed) < len(messages):
+                    messages.clear()
+                    messages.extend(compressed)
             
             # --- LOOP DETECTION ---
             loop_info = detect_loop(messages)
@@ -1021,6 +1039,10 @@ class OrchestratorAgent(Assistant):
                         tool_result, tool_name, llm_messages, self.session_name, tool_args=tool_args
                     )
                     _was_truncated = len(tool_result) < _pre_trunc_len
+
+                # Track that compress_context ran this turn to prevent _inject_compression_warning from triggering a second one
+                if tool_name == 'compress_context':
+                    self._compress_context_ran_this_turn = True
                 
                 # --- Post-execution success detection ---
                 # Many tools return an error message as a string instead of raising an exception.
@@ -1336,6 +1358,12 @@ class OrchestratorAgent(Assistant):
         # mid-session setting changes (e.g. from the UI) are respected.
         agent.max_turns = getattr(self, 'max_turns', 50)
         agent.auto_continue_enabled = getattr(self, 'auto_continue_enabled', True)
+        
+        # Propagate context window limit from supervisor to sub-agent
+        if hasattr(self.llm, 'generate_cfg'):
+            supervisor_max = self.llm.generate_cfg.get('max_input_tokens') or (self.llm.cfg and self.llm.cfg.get('max_input_tokens'))
+            if supervisor_max:
+                agent.llm.generate_cfg['max_input_tokens'] = supervisor_max
 
         orchestrator_disabled = getattr(self.llm, 'generate_cfg', {}).get('disabled_tools')
         if orchestrator_disabled and hasattr(agent, 'llm') and agent.llm:
@@ -1401,6 +1429,8 @@ class OrchestratorAgent(Assistant):
                     # Extract the optimized working set for the LLM
                     working_history = self.agent_pool.slice_history_for_llm(conv)
                     
+                    # Removed base_len logic as it interferes with legitimate external edits.
+                    
                     # Pass instance name through kwargs so tools (like compress_context) know who they are contextually
                     for resp in agent.run(working_history, agent_instance_name=instance_name):
                         if self.agent_pool.stopped:
@@ -1418,24 +1448,16 @@ class OrchestratorAgent(Assistant):
                             
                         final_resp = resp
 
-                        # Update streaming state for WebUI
-                        # Check if history was compressed or edited externally (which mutates state['messages'] in-place)
-                        pool_messages = state.get('messages', [])
-                        prefix_len = len(pool_messages) - len(resp) if resp else len(pool_messages)
-                        current_prefix = pool_messages[:prefix_len]
-                        
-                        if current_prefix != conv:
-                            # Context was modified! Update 'conv' base to match.
-                            conv = list(current_prefix)
-                            logger.info(f"Sub-agent {instance_name} history base was modified externally. Synchronized orchestrator.")
-
+                        # Sync stream state using the definitive 'conv' reference
+                        # If 'conv' was edited externally (UI/compression), it is already updated since it's a reference to instance_conversations.
                         state['messages'] = list(conv) + list(resp)
                         yield current_response
                         
                         # Efficient logging: check if a tool call was just completed
                         if resp and (resp[-1].get(ROLE) == FUNCTION or resp[-1].get('function_call')):
-                            # Log conversation snapshot on tool events
-                            logger_inst.update_history(conv + resp)
+                            # Incremental logging via log_message (already called in agent loop) 
+                            # ensures history is persistent. update_history is redundant here.
+                            pass
                     
                     # Turn successfully completed
                     break
@@ -1478,6 +1500,11 @@ class OrchestratorAgent(Assistant):
                         # Fallback for when resp_snapshot is missing (shouldn't happen with new code)
                         self.agent_pool.surgical_rollback(instance_name, e.pop_count, soft=True, reason=e.reason)
                     
+                    # Ensure the persistent log is truncated to match the exact rolled-back state of conv
+                    # This guarantees that if the loop was entirely within resp_snapshot (no pool rollback),
+                    # the incrementally logged bad messages are removed.
+                    logger_inst.truncate_to(len(conv), soft=True, reason=e.reason)
+
                     # Inject a corrective hint for the sub-agent
                     sub_hint = f"[SYSTEM]: Your last actions resulted in a repetitive loop ({e.reason}). Please try a different approach to solve the task."
                     conv.append({ROLE: USER, CONTENT: sub_hint})
@@ -1499,8 +1526,9 @@ class OrchestratorAgent(Assistant):
                 # This ensures the next turn (or next 'call_agent') sees the tool results.
                 conv.extend(final_resp)
                 
-                # Final log sync for the session turn
-                logger_inst.update_history(conv)
+                # Messages were already logged incrementally via log_message in the turn loop.
+                # update_history(conv) is redundant here.
+                pass
                 
                 # Extraction logic: get only text blocks from the last successful turn 
                 # to avoid repeating the whole task/context history in the manager's prompt.

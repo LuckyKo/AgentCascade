@@ -47,9 +47,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
-from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX
 from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_BASELINE_TEMPLATE, COMPRESSION_MARKER
+from agent_cascade.llm.base import _truncate_input_messages_roughly
 
 try:
     from agent_cascade.agents.user_agent import PENDING_USER_INPUT
@@ -91,12 +91,52 @@ def _parse_multimodal_content(text):
 def get_agent_max_tokens(agent) -> int:
     """Resolve the effective max_input_tokens from agent LLM config."""
     from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
-    if hasattr(agent, 'llm') and hasattr(agent.llm, 'cfg'):
-        cfg = agent.llm.cfg
-        agent_max = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens')
-        if agent_max:
-            return int(agent_max)
+    if hasattr(agent, 'llm'):
+        if hasattr(agent.llm, 'generate_cfg'):
+            agent_max = agent.llm.generate_cfg.get('max_input_tokens')
+            if agent_max:
+                logger.info(f"[TOKEN_DEBUG] Found max_input_tokens {agent_max} in generate_cfg for {getattr(agent, 'name', '?')}")
+                return int(agent_max)
+        if hasattr(agent.llm, 'cfg'):
+            cfg = agent.llm.cfg
+            agent_max = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens')
+            if agent_max:
+                logger.info(f"[TOKEN_DEBUG] Found max_input_tokens {agent_max} in static cfg for {getattr(agent, 'name', '?')}")
+                return int(agent_max)
+    logger.warning(f"[TOKEN_DEBUG] Falling back to default {DEFAULT_MAX_INPUT_TOKENS} for {getattr(agent, 'name', '?')} - generate_cfg: {getattr(getattr(agent, 'llm', None), 'generate_cfg', 'NO LLM')}")
     return DEFAULT_MAX_INPUT_TOKENS
+
+
+def propagate_ui_config(ui_cfg: dict, agent_pool):
+    """Synchronize UI settings to all active agents and the orchestrator."""
+    if not agent_pool:
+        return
+    
+    # 1. Sanitize the incoming UI config
+    floats = ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'repetition_penalty', 'repeat_penalty', 'repeatPenalty', 'min_p']
+    ints = ['max_tokens', 'max_completion_tokens', 'top_k', 'seed', 'max_input_tokens', 'max_turns', 'read_file_limit', 'tool_result_max_chars', 'grep_char_limit', 'shell_char_limit', 'code_char_limit']
+    
+    pure_llm_cfg = {}
+    for k, v in ui_cfg.items():
+        try:
+            if k in floats and v is not None:
+                pure_llm_cfg[k] = float(v)
+            elif k in ints and v is not None:
+                pure_llm_cfg[k] = int(float(v))
+            else:
+                pure_llm_cfg[k] = v
+        except (ValueError, TypeError):
+            pure_llm_cfg[k] = v
+
+    # 2. Update the Orchestrator
+    orch_agent = getattr(agent_pool, 'orchestrator_agent', None)
+    if orch_agent and hasattr(orch_agent, 'llm'):
+        orch_agent.llm.generate_cfg.update(pure_llm_cfg)
+        orch_agent.llm.generate_cfg['agent_name'] = 'Orchestrator'
+    
+    # 3. Update all sub-agents in the pool
+    agent_pool.update_llm_cfg(ui_cfg)
+    logger.debug(f"Propagated UI config: {pure_llm_cfg}")
 
 
 def detect_loop(messages: List[dict]) -> Optional[Tuple[str, int]]:
@@ -303,6 +343,11 @@ def serialize_message(msg, index=None):
     return d
 
 
+# Global caches for UI performance
+_SUB_AGENT_STATS_CACHE = {}
+
+# ── Logging Setup ─────────────────────────────────────────────────────────────
+
 # ─── App factory ──────────────────────────────────────────────────────────────
 
 def create_app(agents, agent_pool, config=None):
@@ -347,7 +392,7 @@ def create_app(agents, agent_pool, config=None):
                 content = msg.get(CONTENT, '')
                 if isinstance(content, str) and "<context_summary>" in content:
                     import re
-                    match = re.search(r"<context_summary>\s*\n(.*?)\s*</context_summary>", content, re.DOTALL)
+                    match = re.search(r"<context_summary>[\s\n]*(.*?)[\s\n]*</context_summary>", content, re.DOTALL)
                     if match:
                         agent_pool.instance_summaries[name] = match.group(1).strip()
                     break
@@ -443,9 +488,24 @@ def create_app(agents, agent_pool, config=None):
                 agent_template = agent_pool.get_agent(agent_class)
                 max_tokens = get_agent_max_tokens(agent_template) if agent_template else 58000
                 
-                # Calculate tokens for the active 'working set' (after compression)
-                active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
-                stats = get_history_stats(active_msgs)
+                # Optimization: Only recalculate stats if message history length has changed.
+                # This prevents expensive re-tokenization during streaming (every chunk).
+                cache_key = (name, len(msgs))
+                if cache_key in _SUB_AGENT_STATS_CACHE:
+                    stats = _SUB_AGENT_STATS_CACHE[cache_key]
+                else:
+                    # Calculate tokens for the active 'working set' (after compression and LLM truncation)
+                    active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
+                    if max_tokens > 0:
+                        # Convert to Message objects for the truncation utility
+                        msg_objs = [Message(**m) if isinstance(m, dict) else copy.deepcopy(m) for m in active_msgs]
+                        try:
+                            active_msgs = _truncate_input_messages_roughly(msg_objs, max_tokens, agent_name=agent_class)
+                        except Exception as e:
+                            logger.error(f"Failed to truncate sub-agent messages for stats: {e}")
+                    
+                    stats = get_history_stats(active_msgs)
+                    _SUB_AGENT_STATS_CACHE[cache_key] = stats
                 
                 # Dynamically extract summary from messages if missing from tracker (e.g. after restart)
                 summary = agent_pool.instance_summaries.get(name, "")
@@ -501,16 +561,24 @@ def create_app(agents, agent_pool, config=None):
 
         # Calculate tokens for the main session
         orch_agent = get_agent()
+        max_tokens = get_agent_max_tokens(orch_agent)
         
-        # Calculate tokens for the active 'working set' (after compression)
+        # Calculate tokens for the active 'working set' (after compression and LLM truncation)
         active_h = agent_pool.slice_history_for_llm(session['history']) if agent_pool else session['history']
+        if max_tokens > 0:
+            msg_objs = [Message(**m) if isinstance(m, dict) else copy.deepcopy(m) for m in active_h]
+            try:
+                active_h = _truncate_input_messages_roughly(msg_objs, max_tokens, agent_name="Orchestrator")
+            except Exception as e:
+                logger.error(f"Failed to truncate orchestrator messages for stats: {e}")
+            
         h_stats = get_history_stats(active_h)
         r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
         
         total_tokens = h_stats['tokens'] + r_stats['tokens']
         total_words = h_stats['words'] + r_stats['words']
         
-        max_tokens = get_agent_max_tokens(orch_agent)
+        # (max_tokens is already calculated above)
 
         # Sync session summary from history if it was just compressed
         current_summary = session.get('summary', '')
@@ -571,10 +639,22 @@ def create_app(agents, agent_pool, config=None):
 
         # Stats: use cached h_stats when available to skip O(n) history iteration each tick
         active_h = agent_pool.slice_history_for_llm(session['history']) if agent_pool else session['history']
-        h_stats = cached_h_stats if cached_h_stats is not None else get_history_stats(active_h)
-        r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
-
+        
         orch_agent = get_agent()
+        max_tokens = get_agent_max_tokens(orch_agent)
+        
+        if cached_h_stats is None:
+            if max_tokens > 0:
+                msg_objs = [Message(**m) if isinstance(m, dict) else copy.deepcopy(m) for m in active_h]
+                try:
+                    active_h = _truncate_input_messages_roughly(msg_objs, max_tokens, agent_name="Orchestrator")
+                except Exception as e:
+                    logger.error(f"Failed to truncate orchestrator messages for stream stats: {e}")
+            h_stats = get_history_stats(active_h)
+        else:
+            h_stats = cached_h_stats
+            
+        r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
         return {
             'history_count': history_count,
             'response_messages': response_msgs,
@@ -909,6 +989,8 @@ def create_app(agents, agent_pool, config=None):
                             # 2. Inject hint into main orchestrator history
                             loop_hint = f"[SYSTEM]: A repetitive loop was detected for {agent_name} ({loop_reason}). Please try a different approach."
                             current_history.append({ROLE: USER, CONTENT: loop_hint})
+                            if agent_pool:
+                                agent_pool.instance_conversations[session['session_name']].append({ROLE: USER, CONTENT: loop_hint})
                             
                             # 3. Notify UI that we are retrying
                             asyncio.run_coroutine_threadsafe(
@@ -961,9 +1043,12 @@ def create_app(agents, agent_pool, config=None):
             if session['generation_id'] != gen_id:
                 return
 
-            # If we retried or rolled back, session['history'] is now stale.
-            # Sync it with current_history (which includes our rollbacks/hints).
-            session['history'] = current_history
+            # If we retried or rolled back, or if a tool like compress_context mutated the pool,
+            # we MUST sync session['history'] from the authoritative pool state.
+            if agent_pool and session['session_name'] in agent_pool.instance_conversations:
+                session['history'] = copy.deepcopy(agent_pool.instance_conversations[session['session_name']])
+            else:
+                session['history'] = current_history
 
             if responses:
                 for r in responses:
@@ -1321,6 +1406,7 @@ def create_app(agents, agent_pool, config=None):
                         session['session_name'] = data['session_name']
                     if 'generate_cfg' in data:
                         session['generate_cfg'] = data['generate_cfg']
+                        propagate_ui_config(session['generate_cfg'], agent_pool)
 
                     # Check for /rollback command
                     if text.startswith('/rollback'):
@@ -1490,6 +1576,7 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'update_config':
                     if 'generate_cfg' in data:
                         session['generate_cfg'] = data['generate_cfg']
+                        propagate_ui_config(session['generate_cfg'], agent_pool)
                         ui_cfg = data['generate_cfg']
                         if 'mcpServers' in ui_cfg:
                             mcp_servers = ui_cfg['mcpServers']
@@ -1706,7 +1793,7 @@ def create_app(agents, agent_pool, config=None):
                                     else:
                                         # Strict enforcement: Invalid format = Automatic NO (Safety)
                                         logger.info(f"[SECURITY] Automatic Rejection for {rid} (Ambiguous/Invalid Format)")
-                                        reject_msg = f"SECURITY VERIFICATION FAILED: The security advisor provided an ambiguous response without a clear [YES] or [NO] verdict. For safety, the operation has been automatically rejected. Please ensure your response ends with an explicit [YES] or [NO] verdict followed by your justification."
+                                        reject_msg = f"SECURITY VERIFICATION FAILED: The security advisor provided an ambiguous response without a clear [YES] or [NO] verdict. For safety, the operation has been automatically rejected. Please try a different method or provide a clearer justification."
                                         agent_pool.operation_manager.user_reject(rid, reject_msg)
                                         
                                         # Also notify the UI
@@ -1729,29 +1816,59 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'edit_message':
                     idx = data.get('index')
                     content = data.get('content', '')
+                    target_name = data.get('instance_name') or session['session_name']
+                    
+                    history = []
+                    if target_name == session['session_name']:
+                        history = session['history']
+                    elif agent_pool and target_name in agent_pool.instance_conversations:
+                        history = agent_pool.instance_conversations[target_name]
+                        
                     if (idx is not None
                             and not session['generating']
-                            and 0 <= idx < len(session['history'])):
-                        msg = session['history'][idx]
+                            and 0 <= idx < len(history)):
+                        msg = history[idx]
                         if isinstance(msg, dict):
-                            msg[CONTENT] = _parse_multimodal_content(content)
+                            # If this is a compression marker, ensure tags are preserved
+                            if COMPRESSION_MARKER in str(msg.get(CONTENT, "")) or "<context_summary>" in str(msg.get(CONTENT, "")):
+                                if COMPRESSION_MARKER in content or "<context_summary>" in content:
+                                    msg[CONTENT] = content
+                                else:
+                                    msg[CONTENT] = f"{COMPRESSION_MARKER}\n\n<context_summary>\n{content}\n</context_summary>"
+                                
+                                # Sync the summary tracker
+                                match = re.search(r"<context_summary>[\s\n]*(.*?)[\s\n]*</context_summary>", msg[CONTENT], re.DOTALL)
+                                if match and agent_pool:
+                                    agent_pool.instance_summaries[target_name] = match.group(1).strip()
+                            else:
+                                msg[CONTENT] = _parse_multimodal_content(content)
+                                
                             if '_ui_cache' in msg:
                                 del msg['_ui_cache']
+                        
                         if agent_pool:
-                            logger_inst = agent_pool.get_logger(session['session_name'], 'Orchestrator')
-                            logger_inst.reset_history(session['history'], rewrite=True)
+                            logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
+                            logger_inst.reset_history(history, rewrite=True)
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'delete_messages':
                     if session['generating']:
                         continue
+                    target_name = data.get('instance_name') or session['session_name']
+                    
+                    history = []
+                    if target_name == session['session_name']:
+                        history = session['history']
+                    elif agent_pool and target_name in agent_pool.instance_conversations:
+                        history = agent_pool.instance_conversations[target_name]
+                        
                     indices = sorted(data.get('indices', []), reverse=True)
                     for idx in indices:
-                        if 0 <= idx < len(session['history']):
-                            session['history'].pop(idx)
+                        if 0 <= idx < len(history):
+                            history.pop(idx)
                     if agent_pool:
-                        logger_inst = agent_pool.get_logger(session['session_name'], 'Orchestrator')
-                        logger_inst.reset_history(session['history'], rewrite=True)
+                        logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
+                        logger_inst.reset_history(history, rewrite=True)
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'select_agent':
@@ -1771,88 +1888,7 @@ def create_app(agents, agent_pool, config=None):
                     
                     await broadcast({'type': 'state', **build_state()})
 
-                elif msg_type == 'edit_summary':
-                    target_name = data.get('instance_name')
-                    new_summary_content = data.get('content', '')
-                    if not target_name:
-                        target_name = session['session_name']
-                    
-                    # 1. Update history list (find the compression message)
-                    history_to_update = []
-                    if target_name == session['session_name']:
-                        history_to_update = session['history']
-                    elif agent_pool and target_name in agent_pool.instance_conversations:
-                        history_to_update = agent_pool.instance_conversations[target_name]
-                    if history_to_update:
-                        summary_found = False
-                        # Iterate in REVERSE to find the LATEST summary (the active one)
-                        for msg in reversed(history_to_update):
-                            role = msg.get(ROLE)
-                            old_content = msg.get(CONTENT, '')
-                            # Specifically target the USER boundary marker
-                            if role == USER and isinstance(old_content, str) and (COMPRESSION_MARKER in old_content or "<context_summary>" in old_content):
-                                # Check if the user already included tags/markers in their edit
-                                if COMPRESSION_MARKER in new_summary_content or "<context_summary>" in new_summary_content:
-                                    msg[CONTENT] = new_summary_content
-                                else:
-                                    # Wrap it in the standard template
-                                    msg[CONTENT] = COMPRESSION_BASELINE_TEMPLATE.format(
-                                        header="Manual edit",
-                                        summary=new_summary_content
-                                    )
-                                    
-                                # Update the actual message object too if it's not a dict
-                                if hasattr(msg, 'content'):
-                                    msg.content = msg[CONTENT]
-                                
-                                # CRITICAL: Clear UI cache so the update reflects in the next state broadcast
-                                if isinstance(msg, dict):
-                                    if '_ui_cache' in msg: del msg['_ui_cache']
-                                else:
-                                    if hasattr(msg, '_ui_cache'): delattr(msg, '_ui_cache')
-                                    if hasattr(msg, 'extra') and msg.extra and '_ui_cache' in msg.extra:
-                                        del msg.extra['_ui_cache']
-                                
-                                summary_found = True
-                                # After finding and updating the LATEST summary, 
-                                # we stop so we don't accidentally update/mess with old archived ones
-                                break
-                        
-                        if not summary_found:
-                            # 1.5 Inject a new summary message if none existed
-                            new_msg = {
-                                ROLE: USER,
-                                CONTENT: COMPRESSION_BASELINE_TEMPLATE.format(
-                                    header="Manual edit",
-                                    summary=new_summary_content
-                                )
-                            }
-                            # Insert after SYSTEM message if present, otherwise at start
-                            insert_at = 0
-                            if len(history_to_update) > 0 and history_to_update[0].get(ROLE) == SYSTEM:
-                                insert_at = 1
-                            history_to_update.insert(insert_at, new_msg)
-                            summary_found = True
-                    
-                    # 2. Update AgentPool tracker
-                    if agent_pool:
-                        # CRITICAL: Ensure both session and pool are using the EXACT SAME list object
-                        # to prevent state drift where one reverts while the other is updated.
-                        if target_name == session['session_name']:
-                             agent_pool.instance_conversations[target_name] = session['history']
-                             session['summary'] = new_summary_content
-                        
-                        agent_pool.instance_summaries[target_name] = new_summary_content
-                        
-                        if target_name in agent_pool.sub_agent_state:
-                            agent_pool.sub_agent_state[target_name]['messages'] = list(agent_pool.instance_conversations[target_name])
-                        
-                        # 3. Sync to persistent log file
-                        agent_class = agent_pool.instance_classes.get(target_name, 'Orchestrator') if target_name != session['session_name'] else 'Orchestrator'
-                        logger_inst = agent_pool.get_logger(target_name, agent_class)
-                        logger_inst.update_history(history_to_update)
-                        
-                    await broadcast({'type': 'state', **build_state()})
+
 
                 elif msg_type == 'load_session':
                     path = data.get('path')

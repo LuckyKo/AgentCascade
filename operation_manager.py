@@ -739,11 +739,11 @@ class OperationManager:
 
     # ─── Context Compression (still internal, auto-approved) ──────────────
 
-    def apply_context_compression(self, agent_name: str, summary: str, fraction: float, agent_obj: Optional[Any] = None):
+    def apply_context_compression(self, agent_name: str, summary: str, fraction: float, num_to_remove: int = None, agent_obj: Optional[Any] = None):
         """Apply context compression — this is internal so no user approval needed."""
         if not self.agent_pool:
             raise ValueError("agent_pool not connected to OperationManager")
-        self.agent_pool._apply_context_compression(agent_name, summary, fraction, agent_obj=agent_obj)
+        self.agent_pool._apply_context_compression(agent_name, summary, fraction, num_to_remove=num_to_remove, agent_obj=agent_obj)
 
     # ─── Utilities ────────────────────────────────────────────────────────
 

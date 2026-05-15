@@ -53,27 +53,46 @@ class AgentInstanceLogger:
         self._initial_save()
 
     def _format_message(self, message: Union[Dict, Any]) -> Dict:
-        """Ensure message is a dict and has a timestamp."""
+        """Ensure message is a dict and has a timestamp. Mutates input to preserve timestamp."""
         if hasattr(message, 'model_dump'):  # For Pydantic-based Message
+            # If it already has a timestamp, just use it
+            if getattr(message, 'timestamp', None):
+                return message.model_dump()
+            
             msg_dict = message.model_dump()
-        elif hasattr(message, 'to_dict'):
-            msg_dict = message.to_dict()
-        elif isinstance(message, dict):
-            msg_dict = copy.deepcopy(message)
-        else:
-            # Fallback for generic objects or Message dataclass
-            msg_dict = {}
-            for k in ['role', 'content', 'name', 'function_call', 'extra']:
-                if hasattr(message, k):
-                    val = getattr(message, k)
-                    if val is not None:
-                        msg_dict[k] = val
-            if not msg_dict and isinstance(message, str):
-                msg_dict = {'role': 'unknown', 'content': message}
+            # Generate and try to inject back into object so future calls are stable
+            ts = datetime.datetime.now().isoformat()
+            try:
+                message.timestamp = ts
+            except Exception:
+                pass
+            msg_dict['timestamp'] = ts
+            return msg_dict
+
+        if isinstance(message, dict):
+            # Mutate in-place to ensure stability across multiple update_history calls
+            if 'timestamp' not in message:
+                message['timestamp'] = datetime.datetime.now().isoformat()
+            return message
+
+        # Fallback for generic objects or Message dataclass
+        msg_dict = {}
+        for k in ['role', 'content', 'name', 'function_call', 'extra', 'timestamp']:
+            if hasattr(message, k):
+                val = getattr(message, k)
+                if val is not None:
+                    msg_dict[k] = val
         
-        # Add timestamp if missing
         if 'timestamp' not in msg_dict:
-            msg_dict['timestamp'] = datetime.datetime.now().isoformat()
+            ts = datetime.datetime.now().isoformat()
+            msg_dict['timestamp'] = ts
+            try:
+                setattr(message, 'timestamp', ts)
+            except Exception:
+                pass
+        
+        if not msg_dict and isinstance(message, str):
+            msg_dict = {'role': 'unknown', 'content': message, 'timestamp': datetime.datetime.now().isoformat()}
         
         return msg_dict
 
@@ -94,6 +113,46 @@ class AgentInstanceLogger:
         formatted_msg = self._format_message(message)
         self.data["history"].append(formatted_msg)
         self._append_line(formatted_msg)
+
+    def insert_compression_marker(self, summary_msg: Any, active_count: int):
+        """Insert a compression summary marker into the cumulative log at the
+        correct position, calculated arithmetically from the tail.
+
+        Unlike ``update_history`` (which uses content-matching to locate the
+        insertion point), this method computes the position using the number
+        of *active* messages that survived the destructive compression in the
+        AgentPool.  This eliminates ambiguity when two or more messages share
+        identical content — the content-matching approach can match an earlier
+        duplicate, placing the new summary *before* a previous one.
+
+        Args:
+            summary_msg: The compression summary message (USER role with
+                         ``<context_summary>`` tags).
+            active_count: Number of messages that survived compression
+                          (i.e. ``len(pool_history) - 2`` for SYSTEM + SUMMARY
+                          + active, or the exact tail count the Pool provides).
+        """
+        formatted = self._format_message(summary_msg)
+        log_history = self.data["history"]
+
+        # Insertion point: the summary belongs right before the active tail.
+        # log_history = [SYSTEM, ...old_msgs..., *active_tail]
+        #                                       ^-- insert here
+        insert_pos = max(0, len(log_history) - active_count)
+
+        # Safety: Never insert before the SYSTEM message (index 0)
+        if insert_pos == 0 and log_history and log_history[0].get('role') == 'system':
+            insert_pos = 1
+
+        log_history.insert(insert_pos, formatted)
+
+        logger.info(
+            f"Logger [{self.instance_name}]: Inserted compression marker at "
+            f"index {insert_pos} (tail={active_count}, log_len={len(log_history)})."
+        )
+
+        # Rewrite the entire file since we inserted in the middle
+        self.reset_history(log_history, rewrite=True)
 
     def update_history(self, history: List[Any]):
         """
@@ -167,17 +226,27 @@ class AgentInstanceLogger:
                         break
             
             if found_idx != -1:
-                # We found a match (or an update slot)! 
+                # We found a match (or an update slot)!
                 # If we have a buffer of un-matched messages, they were inserted here!
                 if buffer:
-                    logger.info(f"Logger [{self.instance_name}]: Surgically inserting {len(buffer)} messages into log at index {last_match_in_log + 1}.")
+                    # Detect compression: if there's a gap between last_match_in_log and found_idx,
+                    # it means old messages were removed from pool by destructive compression.
+                    # Insert summary at the gap boundary (found_idx), not after last_match_in_log.
+                    if found_idx > last_match_in_log + 1:
+                        insert_pos = found_idx
+                        logger.info(f"Logger [{self.instance_name}]: Compression detected — inserting {len(buffer)} message(s) into log at gap boundary index {insert_pos}.")
+                    else:
+                        insert_pos = last_match_in_log + 1
+                        logger.info(f"Logger [{self.instance_name}]: Surgically inserting {len(buffer)} messages into log at index {insert_pos}.")
                     # Update our internal cumulative history
-                    self.data["history"] = old_history[:last_match_in_log + 1] + buffer + old_history[last_match_in_log + 1:]
+                    self.data["history"] = old_history[:insert_pos] + buffer + old_history[insert_pos:]
                     old_history = self.data["history"]
-                    last_match_in_log += len(buffer)
+                    # Adjust found_idx to account for the splice — the element that
+                    # was at found_idx in the old array is now len(buffer) positions later.
+                    found_idx += len(buffer)
                     buffer = []
                     needs_rewrite = True # We inserted in the middle, must rewrite
-                
+
                 last_match_in_log = found_idx
             else:
                 # No match found yet, add to buffer

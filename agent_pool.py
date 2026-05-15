@@ -522,7 +522,7 @@ rules:
             summary_msg = cleaned_messages[latest_summary_idx].get(CONTENT, '')
             import re
             # Only match content INSIDE the tags
-            match = re.search(r"<context_summary>\s*\n(.*?)\s*</context_summary>", summary_msg, re.DOTALL)
+            match = re.search(r"<context_summary>[\s\n]*(.*?)[\s\n]*</context_summary>", summary_msg, re.DOTALL)
             if match:
                 self.instance_summaries[instance_name] = match.group(1).strip()
 
@@ -571,7 +571,7 @@ rules:
         messages = self.instance_conversations.get(instance_name, [])
         if not messages: return
         
-        # 1. Prune adjacent identical messages (same role and content)
+        # 1. Prune adjacent identical messages (same role, content, name, AND function_call)
         new_msgs = []
         for m in messages:
             if not new_msgs:
@@ -581,8 +581,13 @@ rules:
             if str(prev.get(ROLE)) == str(m.get(ROLE)) and \
                str(prev.get(CONTENT)).strip() == str(m.get(CONTENT)).strip() and \
                str(prev.get('name')) == str(m.get('name')):
-                logger.info(f"Cleanup [{instance_name}]: Pruned adjacent identical message.")
-                continue
+                # Also check function_call — parallel tool calls have identical role/content/name
+                # but different function_calls; pruning them loses valid messages
+                prev_fc = prev.get('function_call')
+                curr_fc = m.get('function_call')
+                if (prev_fc is None and curr_fc is None) or prev_fc == curr_fc:
+                    logger.debug(f"Cleanup [{instance_name}]: Pruned adjacent identical message.")
+                    continue
             new_msgs.append(m)
         messages = new_msgs
 
@@ -607,7 +612,7 @@ rules:
                                     matches = False
                                     break
                             if matches:
-                                logger.info(f"Cleanup [{instance_name}]: Pruned {length} echo messages found around summary.")
+                                logger.debug(f"Cleanup [{instance_name}]: Pruned {length} echo messages found around summary.")
                                 del messages[i+1 : i+1+length]
                                 i = -1
                                 break
@@ -631,7 +636,7 @@ rules:
                         matches = False
                         break
                 if matches:
-                    logger.info(f"Cleanup [{instance_name}]: Pruned repeated sequence of {n} messages starting at index {i+n}.")
+                    logger.debug(f"Cleanup [{instance_name}]: Pruned repeated sequence of {n} messages starting at index {i+n}.")
                     del messages[i+n : i+2*n]
                     i = -1 # Restart
                     break
@@ -642,7 +647,7 @@ rules:
         
         self.instance_conversations[instance_name] = messages
     
-    def _apply_context_compression(self, agent_name: str, summary: str, fraction: float, agent_obj=None):
+    def _apply_context_compression(self, agent_name: str, summary: str, fraction: float, num_to_remove: int = None, agent_obj=None):
         """
         Actually replace the oldest messages in an agent's history with a summary.
         Called by OperationManager after approval.
@@ -663,75 +668,50 @@ rules:
         
         from agent_cascade.utils.tokenization_qwen import count_tokens
         
-        # Calculate total tokens to find the actual fraction of content to compress
-        total_tokens = 0
-        token_counts = []
-        for msg in messages_to_compress:
-            tokens = agent_obj._count_message_tokens(msg) if agent_obj and hasattr(agent_obj, '_count_message_tokens') else 0
-            if not tokens:
-                # Fallback if agent_obj isn't provided
-                from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
-                if isinstance(msg, dict):
-                    role = msg.get('role', '')
-                    function_call = msg.get('function_call')
-                    if role == ASSISTANT and function_call:
-                        tokens = qwen_count(f'{function_call}')
+        if num_to_remove is None:
+            # Fallback: Calculate total tokens to find the actual fraction of content to compress
+            total_tokens = 0
+            token_counts = []
+            for msg in messages_to_compress:
+                tokens = agent_obj._count_message_tokens(msg) if agent_obj and hasattr(agent_obj, '_count_message_tokens') else 0
+                if not tokens:
+                    # Fallback if agent_obj isn't provided
+                    from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+                    if isinstance(msg, dict):
+                        role = msg.get('role', '')
+                        function_call = msg.get('function_call')
+                        if role == ASSISTANT and function_call:
+                            tokens = qwen_count(f'{function_call}')
+                        else:
+                            content = extract_text_from_message(Message(**msg), add_upload_info=True)
+                            tokens = qwen_count(content)
                     else:
-                        content = extract_text_from_message(Message(**msg), add_upload_info=True)
-                        tokens = qwen_count(content)
-                else:
-                    if msg.role == ASSISTANT and msg.function_call:
-                        tokens = qwen_count(f'{msg.function_call}')
-                    else:
-                        content = extract_text_from_message(msg, add_upload_info=True)
-                        tokens = qwen_count(content)
-                        
-            token_counts.append(tokens)
-            total_tokens += tokens
+                        if msg.role == ASSISTANT and msg.function_call:
+                            tokens = qwen_count(f'{msg.function_call}')
+                        else:
+                            content = extract_text_from_message(msg, add_upload_info=True)
+                            tokens = qwen_count(content)
+                            
+                token_counts.append(tokens)
+                total_tokens += tokens
+                
+            target_tokens = int(total_tokens * fraction)
             
-        target_tokens = int(total_tokens * fraction)
-        
-        tokens_seen = 0
-        num_to_remove = 0
-        for count in token_counts:
-            tokens_seen += count
-            num_to_remove += 1
-            if tokens_seen >= target_tokens and num_to_remove < len(messages_to_compress) - 1:
-                break
+            tokens_seen = 0
+            num_to_remove = 0
+            for count in token_counts:
+                tokens_seen += count
+                num_to_remove += 1
+                if tokens_seen >= target_tokens and num_to_remove < len(messages_to_compress) - 1:
+                    break
                 
         # Ensure we remove at least 1 message if possible
         num_to_remove = max(1, num_to_remove)
         
-        # ADJUSTMENT: Ensure the first remaining message is a safe boundary.
-        # Specifically, we scan forward from num_to_remove to find a message that is NOT a FUNCTION return.
-        # However, we must NEVER remove the very last message in the history.
-        found_safe = False
-        temp_remove = num_to_remove
-        while temp_remove < len(messages_to_compress):
-            next_msg = messages_to_compress[temp_remove]
-            role = next_msg.get('role') if isinstance(next_msg, dict) else getattr(next_msg, 'role', '')
-            if role != FUNCTION:
-                found_safe = True
-                num_to_remove = temp_remove
-                break
-            temp_remove += 1
-            
-        # If we didn't find a safe message forward, scan BACKWARD.
-        if not found_safe:
-            temp_remove = num_to_remove - 1
-            while temp_remove >= 0:
-                next_msg = messages_to_compress[temp_remove]
-                role = next_msg.get('role') if isinstance(next_msg, dict) else getattr(next_msg, 'role', '')
-                if role != FUNCTION:
-                    found_safe = True
-                    num_to_remove = temp_remove
-                    break
-                temp_remove -= 1
-        
-        # If STILL none found, don't remove anything to avoid crashes.
-        if not found_safe:
-            logger.warning(f"Compression for {agent_name} could not find a safe boundary to start with. Skipping compression.")
-            return
+        # The compression summary marker itself acts as a safe starting point 
+        # for the active context, so we don't need to scan for non-FUNCTION roles.
+        # This ensures the exact fraction requested by the user is respected.
+        pass
             
         if num_to_remove <= 0:
             return
@@ -746,29 +726,28 @@ rules:
         is_dict = isinstance(system_msg, dict) if system_msg else isinstance(messages_to_compress[0], dict)
         summary_msg = {'role': USER, 'content': str(summary_text)} if is_dict else Message(role=USER, content=str(summary_text))
         
-        # 1. DESTRUCTIVE: Remove the messages that were summarized from memory
-        # This keeps the AgentPool lean and matches the user design (middle bar).
-        for _ in range(num_to_remove):
-            if len(history) > start_idx:
-                history.pop(start_idx)
+        # 1. CUMULATIVE: Insert summary marker at the boundary position.
+        #    The boundary is right after the summarized messages (start_idx + num_to_remove).
+        #    We do NOT pop the summarized messages to provide full visibility in the UI.
+        #    The slice_history_for_llm method handles actual LLM truncation by scanning
+        #    for the latest <context_summary> tag.
+        insert_pos = start_idx + num_to_remove
+        history.insert(insert_pos, summary_msg)
         
-        # 2. Insert summary marker at the boundary position
-        history.insert(start_idx, summary_msg)
-        
-        # Track the active summary
+        # 2. Track the active summary
         self.instance_summaries[agent_name] = summary
         
         # 3. Notify the logger that a compression event happened.
+        #    Use dedicated arithmetic insertion (tail-counting) to ensure the 
+        #    log marker matches the memory boundary precisely.
         if agent_name in self.instance_loggers:
-            # Run cleanup to catch any lingering echoes
-            self._cleanup_history(agent_name)
+            # active_count = messages that were NOT summarized (everything after the NEW summary)
+            active_count = len(history) - insert_pos - 1
+            self.instance_loggers[agent_name].insert_compression_marker(
+                summary_msg, active_count
+            )
             
-            # For the logs, we want a CUMULATIVE log with a surgical summary insertion.
-            # We use update_history which handles the surgical merge automatically.
-            history = self.get_conversation(agent_name)
-            self.instance_loggers[agent_name].update_history(history)
-            
-        logger.info(f"Destructive compression: Removed {num_to_remove} messages for agent '{agent_name}'. Memory now starts with summary.")
+        logger.info(f"Cumulative compression: Inserted summary after {num_to_remove} messages for agent '{agent_name}'. Full history preserved in memory.")
     
     def get_agent_info(self, agent_name: str) -> Optional[dict]:
         """Get info about a specific agent."""

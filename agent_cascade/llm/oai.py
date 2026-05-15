@@ -185,8 +185,14 @@ class TextChatAtOAI(BaseFnCallModel):
                             logger.debug(f"Individual model metadata query failed: {inner_e}")
                     
                     if ctx_len:
-                        logger.info(f"Dynamically detected context window for {target_model.get('id')}: {ctx_len}")
-                        self.generate_cfg['max_input_tokens'] = int(ctx_len)
+                        detected_len = int(ctx_len)
+                        # Only auto-update if not manually set by user, or if we are upgrading from a default/small value
+                        current_val = self.generate_cfg.get('max_input_tokens')
+                        if not current_val or current_val == 58000 or current_val == 4096:
+                            logger.info(f"Dynamically detected context window for {target_model.get('id')}: {detected_len}")
+                            self.generate_cfg['max_input_tokens'] = detected_len
+                        else:
+                            logger.debug(f"Detected context window {detected_len} for {target_model.get('id')}, but keeping user-defined limit of {current_val}.")
                     else:
                         logger.info(f"Model {target_model.get('id')} found, but could not detect context length via API.")
                 else:

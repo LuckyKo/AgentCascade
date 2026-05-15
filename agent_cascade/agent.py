@@ -176,7 +176,7 @@ class Agent(ABC):
                              functions=functions,
                              stream=stream,
                              extra_generate_cfg=merge_generate_cfgs(
-                                 base_generate_cfg=self.extra_generate_cfg,
+                                 base_generate_cfg={**self.extra_generate_cfg, 'agent_name': self.name},
                                  new_generate_cfg=extra_generate_cfg,
                              ))
 

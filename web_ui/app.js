@@ -115,10 +115,7 @@ const settingMcpServers = $('#setting-mcp-servers');
 const afkToggle = $('#afkToggle');
 const autoSecurityToggle = $('#autoSecurityToggle');
 const settingAfkMessage = $('#setting-afk-message');
-const settingSummaryText = $('#setting-summary-text');
-const settingSummaryAgentSelect = $('#setting-summary-agent-select');
-const refreshMemoryBtn = $('#refresh-memory-btn');
-const saveSummaryBtn = $('#save-summary-btn');
+
 
 // Range outputs
 const ranges = [
@@ -762,7 +759,7 @@ function handleServerMessage(data) {
         fetchTelemetry();
       }
       
-      updateMemoryTab();
+
       break;
 
     case 'stream_update': {
@@ -1313,14 +1310,23 @@ function getEditClone(textarea) {
   return editClone;
 }
 
-function startEdit(index, selectedText = '', proportion = 0) {
-  const msg = state.messages[index];
+function startEdit(index, selectedText = '', proportion = 0, instanceName = null) {
+  const msgs = instanceName ? (state.subAgents[instanceName] ? state.subAgents[instanceName].messages : []) : state.messages;
+  const msg = msgs[index];
   if (!msg || msg.function_call || msg.role === 'function' || state.generating) return;
 
   state.editingIndex = index;
+  state.editingInstance = instanceName;
 
-  const bubble = messagesEl.querySelector(`.message[data-index="${index}"]`);
+  const containerSelector = instanceName ? `#panelSub-${instanceName} .sub-agent-messages` : '.messages-scroll';
+  const scrollContainer = document.querySelector(containerSelector);
+  if (!scrollContainer) return;
+
+  const bubbleSelector = instanceName ? '.sub-msg' : '.message';
+  const bubbles = scrollContainer.querySelectorAll(bubbleSelector);
+  const bubble = Array.from(bubbles).find(b => b.dataset.index == index);
   if (!bubble) return;
+
 
   const contentDiv = bubble.querySelector('.msg-content');
   const originalContent = msg.content || '';
@@ -1346,14 +1352,12 @@ function startEdit(index, selectedText = '', proportion = 0) {
   toolbar.className = 'edit-toolbar';
 
   const saveBtn = document.createElement('button');
-  saveBtn.className = 'btn btn-primary btn-sm';
-  saveBtn.textContent = '✓ Save';
-  saveBtn.onclick = () => finishEdit(index, textarea.value);
+  saveBtn.onclick = () => finishEdit(index, textarea.value, instanceName);
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn btn-secondary btn-sm';
   cancelBtn.textContent = '✗ Cancel';
-  cancelBtn.onclick = () => cancelEdit(index);
+  cancelBtn.onclick = () => cancelEdit(index, instanceName);
 
   toolbar.appendChild(saveBtn);
   toolbar.appendChild(cancelBtn);
@@ -1430,44 +1434,79 @@ function startEdit(index, selectedText = '', proportion = 0) {
   });
 }
 
-function finishEdit(index, newContent) {
-  if (state.editingIndex === index) state.editingIndex = null;
-  state.messages[index].content = newContent; // Optimistic update
-  send({ type: 'edit_message', index, content: newContent });
+function finishEdit(index, newContent, instanceName = null) {
+  if (state.editingIndex === index && state.editingInstance === instanceName) {
+    state.editingIndex = null;
+    state.editingInstance = null;
+  }
+  
+  const msgs = instanceName ? (state.subAgents[instanceName] ? state.subAgents[instanceName].messages : []) : state.messages;
+  if (msgs[index]) msgs[index].content = newContent; // Optimistic update
+  
+  send({ type: 'edit_message', index, content: newContent, instance_name: instanceName });
 
   // Localized re-render
-  const bubble = messagesEl.querySelector(`.message[data-index="${index}"]`);
+  const containerSelector = instanceName ? `#panelSub-${instanceName} .sub-agent-messages` : '.messages-scroll';
+  const scrollContainer = document.querySelector(containerSelector);
+  if (!scrollContainer) return;
+
+  const bubbleSelector = instanceName ? '.sub-msg' : '.message';
+  const bubbles = scrollContainer.querySelectorAll(bubbleSelector);
+  const bubble = Array.from(bubbles).find(b => b.dataset.index == index);
   if (!bubble) return;
-  bubble.querySelector('.msg-content').classList.remove('editing');
-  updateBubbleContent(bubble, state.messages[index]);
+
+  bubble.querySelector('.sub-msg-content, .msg-content').classList.remove('editing');
+  if (instanceName) {
+    updateSubBubbleContent(bubble, msgs[index]);
+  } else {
+    updateBubbleContent(bubble, msgs[index]);
+  }
 }
 
-function cancelEdit(index) {
-  if (state.editingIndex === index) state.editingIndex = null;
+function cancelEdit(index, instanceName = null) {
+  if (state.editingIndex === index && state.editingInstance === instanceName) {
+    state.editingIndex = null;
+    state.editingInstance = null;
+  }
 
   // Localized re-render
-  const bubble = messagesEl.querySelector(`.message[data-index="${index}"]`);
+  const containerSelector = instanceName ? `#panelSub-${instanceName} .sub-agent-messages` : '.messages-scroll';
+  const scrollContainer = document.querySelector(containerSelector);
+  if (!scrollContainer) return;
+
+  const bubbleSelector = instanceName ? '.sub-msg' : '.message';
+  const bubbles = scrollContainer.querySelectorAll(bubbleSelector);
+  const bubble = Array.from(bubbles).find(b => b.dataset.index == index);
   if (!bubble) return;
-  bubble.querySelector('.msg-content').classList.remove('editing');
-  updateBubbleContent(bubble, state.messages[index]);
+
+  bubble.querySelector('.sub-msg-content, .msg-content').classList.remove('editing');
+  const msgs = instanceName ? (state.subAgents[instanceName] ? state.subAgents[instanceName].messages : []) : state.messages;
+  if (instanceName) {
+    updateSubBubbleContent(bubble, msgs[index]);
+  } else {
+    updateBubbleContent(bubble, msgs[index]);
+  }
 }
 
-function deleteMessage(index) {
-  const msg = state.messages[index];
+
+function deleteMessage(index, instanceName = null) {
+  const msgs = instanceName ? (state.subAgents[instanceName] ? state.subAgents[instanceName].messages : []) : state.messages;
+  const msg = msgs[index];
   if (!msg) return;
 
   // If deleting an assistant message with a function_call, also delete the function result
   const indicesToDelete = [index];
-  if (msg.function_call && index + 1 < state.messages.length && state.messages[index + 1].role === 'function') {
+  if (msg.function_call && index + 1 < msgs.length && msgs[index + 1].role === 'function') {
     indicesToDelete.push(index + 1);
   }
   // If deleting a function result, also delete the preceding function call
-  if (msg.role === 'function' && index - 1 >= 0 && state.messages[index - 1].function_call) {
+  if (msg.role === 'function' && index - 1 >= 0 && msgs[index - 1].function_call) {
     indicesToDelete.push(index - 1);
   }
 
-  send({ type: 'delete_messages', indices: [...new Set(indicesToDelete)] });
+  send({ type: 'delete_messages', indices: [...new Set(indicesToDelete)], instance_name: instanceName });
 }
+
 
 // ── Approvals ────────────────────────────────────────────────────────────────
 
@@ -1849,7 +1888,7 @@ function renderSubAgentPanel(panel, agentData, name) {
   })();
   const funcCallLen = (lastMsg && lastMsg.function_call && lastMsg.function_call.arguments) ? String(lastMsg.function_call.arguments).length : 0;
   const contentKey = msgs.length + ':' + lastMsgTextLen + ':' + (lastMsg ? String(lastMsg.reasoning_content || '').length : 0) + ':' + funcCallLen;
-  if (panel.dataset.contentKey === contentKey) {
+  if (panel.dataset.contentKey === contentKey || (state.editingIndex !== null && state.editingInstance === name)) {
     if (wasAtBottom) scrollContainer.scrollTop = scrollContainer.scrollHeight;
     return;
   }
@@ -1862,13 +1901,16 @@ function renderSubAgentPanel(panel, agentData, name) {
   if (currentCount < lastCount || lastCount === 0) {
     scrollContainer.innerHTML = '';
     for (let i = 0; i < currentCount; i++) {
-      scrollContainer.appendChild(createSubMsgEl(msgs[i], agentData.active && i === currentCount - 1));
+      const el = createSubMsgEl(msgs[i], i, name, agentData.active && i === currentCount - 1);
+      scrollContainer.appendChild(el);
     }
   } else {
     // Append new messages
     for (let i = lastCount; i < currentCount; i++) {
-      scrollContainer.appendChild(createSubMsgEl(msgs[i], agentData.active && i === currentCount - 1));
+      const el = createSubMsgEl(msgs[i], i, name, agentData.active && i === currentCount - 1);
+      scrollContainer.appendChild(el);
     }
+
     // Update the last message if it's still being generated
     if (scrollContainer.lastElementChild) {
       updateSubBubbleContent(scrollContainer.lastElementChild, msgs[currentCount - 1], agentData.active);
@@ -1880,25 +1922,84 @@ function renderSubAgentPanel(panel, agentData, name) {
   if (wasAtBottom) scrollContainer.scrollTop = scrollContainer.scrollHeight;
 }
 
-function createSubMsgEl(msg, isGenerating) {
+function createSubMsgEl(msg, index, instanceName, isGenerating) {
   const div = document.createElement('div');
   div.className = `sub-msg sub-msg-${msg.role || 'unknown'}`;
+  div.dataset.index = index;
+
+  const isEditable = !msg.function_call && msg.role !== 'function' && msg.role !== 'system';
+
+  const header = document.createElement('div');
+  header.className = 'sub-msg-header';
+  header.style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;";
 
   const label = document.createElement('div');
   label.className = 'sub-msg-label';
+  label.style = "margin-bottom: 0;";
   label.textContent = msg.role === 'user' ? '📤 Task' :
     msg.role === 'function' ? `📋 ${msg.name || 'result'}` :
       msg.name || 'Agent';
 
+  header.appendChild(label);
+
+  // Actions
+  const actions = document.createElement('div');
+  actions.className = 'msg-actions';
+
+  if (isEditable) {
+    const editBtn = document.createElement('button');
+    editBtn.className = 'msg-action-btn';
+    editBtn.textContent = '✏️';
+    editBtn.title = 'Edit message';
+    editBtn.onclick = (e) => { e.stopPropagation(); startEdit(index, '', 0, instanceName); };
+    actions.appendChild(editBtn);
+  }
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'msg-action-btn msg-action-delete';
+  delBtn.textContent = '🗑️';
+  delBtn.title = 'Delete message';
+  delBtn.onclick = (e) => { e.stopPropagation(); deleteMessage(index, instanceName); };
+  actions.appendChild(delBtn);
+
+  header.appendChild(actions);
+  div.appendChild(header);
+
   const content = document.createElement('div');
   content.className = 'sub-msg-content';
 
-  div.appendChild(label);
   div.appendChild(content);
+
+  // Double click edit
+  div.addEventListener('dblclick', (e) => {
+    if (state.generating || !isEditable) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+
+    let selectedText = sel.toString().trim();
+    if (!selectedText) return;
+
+    if (e.target.closest('.sub-msg-header')) return;
+
+    const contentDiv = div.querySelector('.sub-msg-content');
+    if (!contentDiv) return;
+
+    const range = sel.getRangeAt(0);
+    const preCaretRange = range.cloneRange();
+    preCaretRange.selectNodeContents(contentDiv);
+    preCaretRange.setEnd(range.startContainer, range.startOffset);
+    const renderedOffset = preCaretRange.toString().length;
+    const renderedLength = contentDiv.textContent.length;
+
+    const proportion = renderedLength > 0 ? renderedOffset / renderedLength : 0;
+
+    startEdit(index, selectedText, proportion, instanceName);
+  });
 
   updateSubBubbleContent(div, msg, isGenerating);
   return div;
 }
+
 
 function updateSubBubbleContent(bubble, msg, isGenerating) {
   const content = bubble.querySelector('.sub-msg-content');
@@ -1956,7 +2057,6 @@ function switchMainTab(tabId) {
   }
   
   state.activeSubTab = tabId;
-  updateMemoryTab();
 }
 
 // Wire up the static Chat tab
@@ -2060,14 +2160,6 @@ document.querySelectorAll('.settings-tab').forEach(btn => {
     btn.classList.add('active');
     const panel = document.getElementById(btn.dataset.tab);
     if (panel) panel.classList.add('active');
-    
-    if (btn.dataset.tab === 'settings-memory') {
-      // On first open, default to active tab
-      if (settingSummaryAgentSelect) {
-         settingSummaryAgentSelect.value = state.activeSubTab || 'chat';
-      }
-      updateMemoryTab();
-    }
   });
 });
 
@@ -2307,60 +2399,7 @@ function formatMultimodalContent(text) {
   return text.replace(imageRegex, "[Image: $1]");
 }
 
-let lastMemorySelectedId = null;
 
-function updateMemoryTab(forceRebuild = false) {
-  if (!settingSummaryText || !settingSummaryAgentSelect) return;
-  
-  // 1. Sync select options with current sub-agents
-  const subAgentNames = Object.keys(state.subAgents || {}).sort();
-  const optionValues = ['chat', ...subAgentNames.map(n => 'sub-' + n)];
-  
-  // Only rebuild options if list of sub-agents changed or forced
-  const currentOptionValues = Array.from(settingSummaryAgentSelect.options).map(o => o.value);
-  if (forceRebuild || JSON.stringify(optionValues) !== JSON.stringify(currentOptionValues)) {
-    const prevVal = settingSummaryAgentSelect.value;
-    settingSummaryAgentSelect.innerHTML = `
-      <option value="chat">Main Orchestrator</option>
-      ${subAgentNames.map(name => `<option value="sub-${name}">${escapeHtml(name)}</option>`).join('')}
-    `;
-    // Try to restore previous selection, or follow active tab if it's the first time
-    if (optionValues.includes(prevVal)) {
-      settingSummaryAgentSelect.value = prevVal;
-    } else {
-      settingSummaryAgentSelect.value = state.activeSubTab || 'chat';
-    }
-  }
-
-  const selectedId = settingSummaryAgentSelect.value;
-  
-  // 2. SKIP update if user is currently typing to prevent overwrite/jump
-  // OR if we just performed an edit (2s grace period) to prevent race condition reverts
-  // from WebSocket state broadcasts arriving mid-click.
-  const isEditing = document.activeElement === settingSummaryText || document.activeElement === saveSummaryBtn;
-  const inGracePeriod = (Date.now() - state.lastMemoryEditTime) < 2000;
-  
-  if (!forceRebuild && selectedId === lastMemorySelectedId && (isEditing || inGracePeriod)) {
-    return;
-  }
-  lastMemorySelectedId = selectedId;
-  
-  if (selectedId === 'chat') {
-    settingSummaryText.value = state.summary || "";
-  } else if (selectedId.startsWith('sub-')) {
-    const name = selectedId.substring(4);
-    const sa = state.subAgents[name];
-    settingSummaryText.value = (sa && sa.summary) ? sa.summary : "";
-  }
-}
-
-if (refreshMemoryBtn) {
-  refreshMemoryBtn.addEventListener('click', () => updateMemoryTab(true));
-}
-
-if (settingSummaryAgentSelect) {
-  settingSummaryAgentSelect.addEventListener('change', () => updateMemoryTab(false));
-}
 
 // ── Image Handling ───────────────────────────────────────────────────────────
 
@@ -2648,51 +2687,7 @@ if ($('#restart-server-btn')) {
   });
 }
 
-if (saveSummaryBtn) {
-  saveSummaryBtn.addEventListener('click', () => {
-    const content = settingSummaryText.value;
-    const selectedId = settingSummaryAgentSelect ? settingSummaryAgentSelect.value : (state.activeSubTab || 'chat');
-    const instanceName = selectedId.startsWith('sub-') ? selectedId.substring(4) : state.sessionName;
-    
-    // Set timestamp to prevent state broadcast from reverting this box for the next 2 seconds
-    state.lastMemoryEditTime = Date.now();
-    
-    send({
-      type: 'edit_summary',
-      instance_name: instanceName,
-      content: content
-    });
-    
-    // Immediate UI feedback
-    const originalHTML = saveSummaryBtn.innerHTML;
-    saveSummaryBtn.innerHTML = `
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-        <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
-      </svg>
-      Updated!
-    `;
-    saveSummaryBtn.classList.remove('btn-primary');
-    saveSummaryBtn.classList.add('btn-success');
-    
-    // Revert button style after a delay
-    setTimeout(() => {
-        saveSummaryBtn.innerHTML = originalHTML;
-        saveSummaryBtn.classList.add('btn-primary');
-        saveSummaryBtn.classList.remove('btn-success');
-    }, 2000);
-    
-    setTimeout(() => {
-      saveSummaryBtn.innerHTML = `
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-          <path d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/>
-        </svg>
-        Update Memory
-      `;
-      saveSummaryBtn.classList.remove('btn-success');
-      saveSummaryBtn.classList.add('btn-primary');
-    }, 2000);
-  });
-}
+
 
 // ── Telemetry Panel ──────────────────────────────────────────────────────────
 

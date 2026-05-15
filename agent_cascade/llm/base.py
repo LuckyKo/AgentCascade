@@ -193,8 +193,9 @@ class BaseChatModel(ABC):
             messages = [Message(role=SYSTEM, content=DEFAULT_SYSTEM_MESSAGE)] + messages
 
         # Not precise. It's hard to estimate tokens related with function calling and multimodal items.
-        max_input_tokens = generate_cfg.pop('max_input_tokens', DEFAULT_MAX_INPUT_TOKENS)
-        
+        max_input_tokens = generate_cfg.get('max_input_tokens', DEFAULT_MAX_INPUT_TOKENS)
+        logger.debug(f"[CHAT_DEBUG] Using max_input_tokens: {max_input_tokens}")
+
         agent_settings = [
             'disabled_tools', 'max_turns', 'auto_continue', 'auto_rollback_on_loop',
             'read_file_limit', 'mcpServers', 'work_access_folders',
@@ -202,11 +203,13 @@ class BaseChatModel(ABC):
         ]
         for setting in agent_settings:
             generate_cfg.pop(setting, None)
-            
+
         if max_input_tokens > 0:
+            agent_name = generate_cfg.get('agent_name', 'Unknown')
             messages = _truncate_input_messages_roughly(
                 messages=messages,
                 max_tokens=max_input_tokens,
+                agent_name=agent_name,
             )
 
         if functions:
@@ -636,7 +639,7 @@ def _truncate_at_stop_word(text: str, stop: List[str]):
     return truncated, text
 
 
-def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int) -> List[Message]:
+def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int, agent_name: str = 'Unknown') -> List[Message]:
     if len([m for m in messages if m.role == SYSTEM]) >= 2:
         raise ModelServiceError(
             code='400',
@@ -812,7 +815,8 @@ def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int) -
         indexed_messages_per_user[last_user_idx].append([msg_idx, msg])
 
     all_tokens = sum([x for x in message_tokens.values()])
-    logger.info(f'ALL tokens: {all_tokens}, Available tokens: {available_token}')
+    # Log stats with agent name to avoid confusion in multi-agent logs
+    logger.info(f'Agent [{agent_name}] - ALL tokens: {all_tokens}, Available tokens: {available_token}')
     if all_tokens <= available_token:
         return messages
     if available_token <= 0:
