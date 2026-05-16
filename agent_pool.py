@@ -30,9 +30,10 @@ from api_router import APIRouter
 class AgentPool:
     """Manages a pool of specialized sub-agents."""
     
-    def __init__(self, llm_cfg: dict, agents_dir: str = 'agents'):
+    def __init__(self, llm_cfg: dict, agents_dir: str = 'agents', workspace_dir: Optional[str] = None):
         self.llm_cfg = llm_cfg
         self.agents_dir = Path(agents_dir)
+        self.workspace_dir = Path(workspace_dir) if workspace_dir else Path(DEFAULT_WORKSPACE)
         
         # Agent templates (loaded by class name)
         self.agents: Dict[str, Assistant] = {}
@@ -40,16 +41,16 @@ class AgentPool:
         
         # Initialize OperationManager for blocking approvals
         from operation_manager import OperationManager
-        self.operation_manager = OperationManager(base_dir=DEFAULT_WORKSPACE, agent_pool=self)
+        self.operation_manager = OperationManager(base_dir=str(self.workspace_dir), agent_pool=self)
         
         # Initialize Telemetry Collector for performance tracking
-        telemetry_dir = str(Path(DEFAULT_WORKSPACE) / 'telemetry')
+        telemetry_dir = str(self.workspace_dir / 'telemetry')
         self.telemetry = TelemetryCollector(log_dir=telemetry_dir)
         
         # API Router for multi-endpoint management (uses llm_cfg as default fallback)
         self.api_router = APIRouter(
             default_llm_cfg=llm_cfg,
-            config_dir=str(Path(DEFAULT_WORKSPACE) / 'config')
+            config_dir=str(self.workspace_dir / 'config')
         )
         
         # Persistent conversation histories for each named instance
@@ -94,6 +95,50 @@ class AgentPool:
         
         # Auto-load all agents from the agents directory
         self._discover_agents()
+
+
+    def discover_instances(self):
+        """Scan the logs directory and reload existing instances."""
+        log_dir = self.workspace_dir / 'logs'
+        if not log_dir.exists():
+            return
+
+        # Find the most recent log file for each (agent_class, instance_name)
+        latest_logs = {} # (agent_class, instance_name) -> (mtime, path)
+        
+        for log_file in log_dir.glob('*.jsonl'):
+            try:
+                # Filename format: {agent_class}_{instance_name}_{timestamp}.jsonl
+                parts = log_file.stem.split('_')
+                if len(parts) < 3: continue
+                
+                # Handling names with underscores
+                agent_class = parts[0]
+                timestamp = parts[-2] + "_" + parts[-1]
+                instance_name = "_".join(parts[1:-2])
+                
+                mtime = log_file.stat().st_mtime
+                key = (agent_class, instance_name)
+                if key not in latest_logs or mtime > latest_logs[key][0]:
+                    latest_logs[key] = (mtime, log_file)
+            except Exception:
+                continue
+
+        for (agent_class, instance_name), (mtime, path) in latest_logs.items():
+            if instance_name == 'Maine': continue # Main session handled by api_server
+            
+            # Load the instance if it's not already in memory
+            if instance_name not in self.instance_conversations:
+                logger.info(f"Recovering sub-agent instance '{instance_name}' ({agent_class}) from log...")
+                self.load_session_from_log(str(path), target_instance=instance_name)
+                # Initialize state for UI
+                self.sub_agent_state[instance_name] = {
+                    'active': False,
+                    'agent_name': f"{instance_name} ({agent_class})",
+                    'messages': self.instance_conversations[instance_name],
+                }
+                self.instance_classes[instance_name] = agent_class
+
 
     # ── Per-Agent Message Queue Helpers ──────────────────────────────────────
 
@@ -337,6 +382,16 @@ rules:
         
         for agent_name, agent in self.agents.items():
             if hasattr(agent, 'llm') and hasattr(agent.llm, 'generate_cfg'):
+                # Check if this agent has a specialized routing chain in the APIRouter.
+                # If so, we MUST NOT overwrite its infrastructure (model, base, key) 
+                # with the General Settings, as that would bypass the Router's assignment.
+                has_specialized_routing = False
+                if hasattr(self, 'api_router'):
+                    # We use lower() to match the runtime resolution in OrchestratorAgent._call_llm
+                    agent_type = getattr(agent, 'agent_type', agent_name).lower()
+                    if self.api_router.get_agent_priorities(agent_type):
+                        has_specialized_routing = True
+
                 # Clean sub-agent config of any internal keys before updating
                 for key in EXCLUDE_KEYS:
                     agent.llm.generate_cfg.pop(key, None)
@@ -361,16 +416,20 @@ rules:
                         if k not in ['model', 'model_type', 'api_key', 'api_base', 'base_url', 'model_server']:
                             agent.llm.generate_cfg[k] = v
                 
-                # Also update other relevant top-level attributes if necessary
-                for attr in ['model', 'model_type', 'api_key']:
-                    if attr in update_data:
-                        setattr(agent.llm, attr, update_data[attr])
-                if 'api_base' in update_data or 'base_url' in update_data or 'model_server' in update_data:
-                    val = update_data.get('api_base') or update_data.get('base_url') or update_data.get('model_server')
-                    if hasattr(agent.llm, 'api_base'):
-                        agent.llm.api_base = val
-                    if hasattr(agent.llm, 'base_url'):
-                        agent.llm.base_url = val
+                # Also update other relevant top-level attributes IF the agent doesn't have specialized routing.
+                # If it DOES have specialized routing, we let the APIRouter handle the model/base/key at runtime.
+                if not has_specialized_routing:
+                    for attr in ['model', 'model_type', 'api_key']:
+                        if attr in update_data:
+                            setattr(agent.llm, attr, update_data[attr])
+                    if 'api_base' in update_data or 'base_url' in update_data or 'model_server' in update_data:
+                        val = update_data.get('api_base') or update_data.get('base_url') or update_data.get('model_server')
+                        if hasattr(agent.llm, 'api_base'):
+                            agent.llm.api_base = val
+                        if hasattr(agent.llm, 'base_url'):
+                            agent.llm.base_url = val
+                else:
+                    logger.debug(f"Skipping infrastructure override for agent '{agent_name}' because it has specialized APIRouter priorities.")
         logger.debug("Propagated LLM config changes to all active agents in the pool.")
         
         # Keep the API Router's default fallback in sync with General Settings

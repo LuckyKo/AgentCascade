@@ -46,61 +46,58 @@ class CompressContext(BaseTool):
     
     
     def _generate_summary(self, target_messages: List[Union[dict, Message]]) -> str:
-        """Internal helper to generate a summary for a list of messages."""
-        # Format the messages for the summary prompt
+        """Internal helper to generate a summary for a list of messages using the Compression Agent."""
+        if not self.agent_pool:
+            return "ERROR: agent_pool not connected"
+            
+        # 1. Ensure the compression agent is loaded
+        if not self.agent_pool.get_agent('compression_agent'):
+            try:
+                self.agent_pool.load_agent('compression_agent')
+            except Exception as e:
+                logger.error(f"Failed to load compression_agent: {e}")
+                return f"ERROR: Could not load compression_agent: {e}"
+        
+        comp_agent = self.agent_pool.get_agent('compression_agent')
+        
+        # 2. Format the messages for the summary prompt
         history_text = ""
         for msg in target_messages:
             role = msg.get('role', 'unknown').upper() if isinstance(msg, dict) else getattr(msg, 'role', 'unknown').upper()
             content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
             if isinstance(content, list):
-                # Ensure all parts are converted to strings safely, handling None values in ContentItems
                 content = " ".join([str(item.get('text', '') or '') if isinstance(item, dict) else str(getattr(item, 'text', None) or item) for item in content])
             history_text += f"{role}: {content}\n\n"
             
-        # Call LLM to generate summary
-        from agent_cascade.llm import get_chat_model
-        import copy
-        llm_cfg = copy.deepcopy(self.agent_pool.llm_cfg)
-        
-        # Ensure timeout is sufficiently high for massive context summaries locally
-        if 'generate_cfg' not in llm_cfg:
-            llm_cfg['generate_cfg'] = {}
-        llm_cfg['generate_cfg']['request_timeout'] = 300  # 5 minutes
-        # Don't truncate before summarizing — we already budget tokens ourselves.
-        llm_cfg['generate_cfg'].pop('max_input_tokens', None)
-
-        llm = get_chat_model(llm_cfg)
-        
         summary_prompt = COMPRESSION_PROMPT.format(history_text=history_text)
+        history = [{'role': USER, 'content': summary_prompt}]
         
+        # 3. Run the compression agent
+        #    We do NOT pass any LLM config overrides here, allowing the agent to follow its 
+        #    assigned API Router settings (similar to the Security Advisor fix).
         summary = ""
         try:
             from agent_cascade.utils.utils import extract_text_from_message
-            responses = list(llm.chat([Message(role=USER, content=summary_prompt)]))
-            if responses and responses[-1]:
-                # The LLM output could be split across multiple message objects in the final yield
-                # (e.g., DeepSeek / OAI client yields one for reasoning, one for content)
-                summary_parts = []
-                for msg_obj in responses[-1]:
-                    part = extract_text_from_message(msg_obj, add_upload_info=False)
-                    if part.strip():
-                        summary_parts.append(part.strip())
-                summary = "\n\n".join(summary_parts)
-                
-                # Fallback: If content is empty but the model provided reasoning_content, use that
-                if not summary.strip():
-                    for msg_obj in responses[-1]:
-                        reasoning = msg_obj.get('reasoning_content', '') if isinstance(msg_obj, dict) else getattr(msg_obj, 'reasoning_content', '')
-                        if reasoning.strip():
-                            summary = reasoning.strip()
-                            break
+            import re
+            
+            final_msgs = []
+            for partial in comp_agent.run(history, agent_instance_name='compression_agent'):
+                final_msgs = partial
+            
+            if final_msgs:
+                # The agent might have multiple assistant messages if it called tools (unlikely for compression)
+                # We take the content of the last assistant message.
+                for msg_obj in reversed(final_msgs):
+                    role = msg_obj.get('role', '') if isinstance(msg_obj, dict) else getattr(msg_obj, 'role', '')
+                    if role == 'assistant':
+                        content = extract_text_from_message(msg_obj, add_upload_info=False)
                         
-                # Cleanup common LM Studio meta-commentary
-                import re
-                summary = re.sub(r'<(think|thought)>.*?</\1>', '', summary, flags=re.IGNORECASE | re.DOTALL)
-                summary = re.sub(r'\[(THINK|THOUGHT)\].*?\[/\1\]', '', summary, flags=re.IGNORECASE | re.DOTALL)
-                
-                summary = summary.strip()
+                        # Cleanup thinking blocks
+                        content = re.sub(r'<(think|thought)>.*?</\1>', '', content, flags=re.IGNORECASE | re.DOTALL)
+                        content = re.sub(r'\[(THINK|THOUGHT)\].*?\[/\1\]', '', content, flags=re.IGNORECASE | re.DOTALL)
+                        
+                        summary = content.strip()
+                        break
                 
                 # Strip conversational filler prefixes
                 prefixes = ["here is a summary", "here is the summary", "summary:", "in summary,", "here's a summary", "**summary**:"]
@@ -109,13 +106,12 @@ class CompressContext(BaseTool):
                     if lower_summary.startswith(prefix):
                         summary = summary[len(prefix):].strip()
                         summary = summary.lstrip(':\n \t')
-                        lower_summary = summary.lower() # update for next check
+                        lower_summary = summary.lower()
+            
             return summary
         except Exception as e:
-            import traceback
-            error_msg = f"{e}\n{traceback.format_exc()}"
-            logger.error(f"Failed to generate summary: {error_msg}")
-            return f"ERROR: Exception occurred while generating summary. Check logs."
+            logger.error(f"Failed to generate summary via compression_agent: {e}")
+            return f"ERROR: Exception occurred while generating summary: {e}"
 
     def call(self, params: str, **kwargs) -> str:
         params = self._verify_json_format_args(params)
@@ -175,23 +171,54 @@ class CompressContext(BaseTool):
             return "ERROR: No active messages to compress."
 
         # 2. Calculate how many messages to DISCARD from the active set.
-        #    As per your example: 33% compression on 30 messages -> discard 10, keep 20.
-        num_to_discard = int(len(active_set) * fraction)
+        #    We now use a token-aware calculation to ensure the fraction
+        #    requested corresponds to actual context space reclaimed.
+        from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+        from agent_cascade.utils.utils import extract_text_from_message
+        
+        total_tokens = 0
+        token_counts = []
+        for msg in active_set:
+            # Simple token estimation for better accuracy than message count
+            content = extract_text_from_message(msg if isinstance(msg, Message) else Message(**msg), add_upload_info=True)
+            tokens = qwen_count(content)
+            token_counts.append(tokens)
+            total_tokens += tokens
+            
+        target_tokens = int(total_tokens * fraction)
+        
+        tokens_seen = 0
+        num_to_discard = 0
+        if total_tokens > 0:
+            for count in token_counts:
+                tokens_seen += count
+                num_to_discard += 1
+                # Stop once we've reached the target token budget
+                if tokens_seen >= target_tokens:
+                    break
+        else:
+            # Fallback to message count if tokens can't be calculated
+            num_to_discard = int(len(active_set) * fraction)
         
         # Safety: ensure we leave at least 2 active messages at the tail for continuity.
         # We also allow num_to_discard to be 0 if the history is too short to keep 2 messages.
         num_to_discard = max(0, min(num_to_discard, len(active_set) - 2))
 
-        # 3. Determine the total count of messages to be included in the new summary.
-        #    In a cumulative history, this is (all previous messages) + (newly discarded messages).
+        # 3. Determine the messages to be sent to the Compression Agent for summarization.
+        #    To optimize context usage, we surgically send only the messages being 
+        #    compressed plus the latest summary as the starting boundary.
         if latest_summary_idx != -1:
-            # messages before summary (latest_summary_idx - start_idx) 
-            # + the summary itself (1) + new messages (num_to_discard)
+            # Part A: The latest summary (context boundary).
+            # Part B: The new messages from the active set being discarded.
+            target_messages = history[latest_summary_idx : latest_summary_idx + 1 + num_to_discard]
+            
+            # num_to_summarize remains the contiguous count from start_idx 
+            # to be replaced by the new summary in the authoritative history.
             num_to_summarize = (latest_summary_idx - start_idx + 1) + num_to_discard
         else:
+            # First compression: just send the messages we are about to compress.
             num_to_summarize = num_to_discard
-            
-        target_messages = messages_to_compress[:num_to_summarize]
+            target_messages = messages_to_compress[:num_to_summarize]
         
         # Determine compression mode (default 'auto' = LLM-generated summary)
         mode = params.get('mode', 'auto')

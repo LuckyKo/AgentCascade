@@ -27,7 +27,7 @@ from agent_cascade.llm.schema import (
 )
 import agent_cascade.settings
 agent_cascade.settings.MAX_LLM_CALL_PER_RUN = 100
-from agent_cascade.settings import MAX_LLM_CALL_PER_RUN
+from agent_cascade.settings import MAX_LLM_CALL_PER_RUN, DEFAULT_MAX_INPUT_TOKENS
 from agent_cascade.tools.base import BaseTool
 from agent_cascade.utils.utils import (
     extract_text_from_message,
@@ -394,27 +394,31 @@ class OrchestratorAgent(Assistant):
         self.llm.generate_cfg, because generate_cfg.pop('max_input_tokens')
         is called during the first chat() call, removing it permanently.
         """
-        from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
-        max_tokens = DEFAULT_MAX_INPUT_TOKENS  # 58000
+        # 1. Try the API Router if available (it handles per-endpoint MIN logic)
+        if hasattr(self, 'agent_pool') and self.agent_pool and hasattr(self.agent_pool, 'api_router') and self.agent_pool.api_router:
+            router_limit = self.agent_pool.api_router.get_effective_max_tokens(self.agent_type.lower())
+            if router_limit > 0:
+                return router_limit
 
-        # 1. Try the LLM's original cfg (immutable source of truth)
+        # 2. Try the LLM's original cfg (immutable source of truth)
         if hasattr(self, 'llm') and hasattr(self.llm, 'cfg'):
             cfg = self.llm.cfg
             # Check generate_cfg sub-dict first, then top-level
             agent_max = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens')
             if agent_max:
-                max_tokens = int(agent_max)
+                return int(agent_max)
 
-        # 2. Fallback to pool-level config
-        if max_tokens == DEFAULT_MAX_INPUT_TOKENS and hasattr(self, 'agent_pool') and self.agent_pool:
+        # 3. Fallback to pool-level config
+        if hasattr(self, 'agent_pool') and self.agent_pool:
             llm_cfg = getattr(self.agent_pool, 'llm_cfg', {})
             pool_max = (
                 llm_cfg.get('generate_cfg', {}).get('max_input_tokens')
                 or llm_cfg.get('max_input_tokens')
             )
             if pool_max:
-                max_tokens = int(pool_max)
-        return max_tokens
+                return int(pool_max)
+        
+        return DEFAULT_MAX_INPUT_TOKENS
 
     def _truncate_tool_result(
         self,
@@ -955,12 +959,14 @@ class OrchestratorAgent(Assistant):
                 # Normalize Gemma-style thinking blocks into reasoning_content if not already present
                 content = msg.get(CONTENT, '')
                 if not msg.get('reasoning_content') and isinstance(content, str) and '<|channel>thought' in content.lower():
+                    # Only strip if it's at the very beginning of the content to avoid stripping 
+                    # markers inside file content or tutorial text.
                     import re
-                    gemma_pattern = r"<\|channel>thought\n?([\s\S]*?)\n?<channel\|>"
+                    gemma_pattern = r"^\s*<\|channel>thought\n?([\s\S]*?)\n?<channel\|>"
                     match = re.search(gemma_pattern, content, re.IGNORECASE)
                     if match:
                         msg['reasoning_content'] = match.group(1).strip()
-                        msg[CONTENT] = re.sub(gemma_pattern, "", content, flags=re.IGNORECASE).strip()
+                        msg[CONTENT] = re.sub(gemma_pattern, "", content, count=1, flags=re.IGNORECASE).strip()
 
                 m = copy.deepcopy(msg)
                 if m.get('reasoning_content'):

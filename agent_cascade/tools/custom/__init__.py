@@ -8,6 +8,7 @@ from .shell_cmd import ShellCmd
 from .system_info import SystemInfo
 from .read_logs import ReadLogs
 from .calculation import Calculate
+from .code_map import CodeMap
 
 __all__ = [
     'ReadFile',
@@ -26,4 +27,5 @@ __all__ = [
     'SystemInfo',
     'ReadLogs',
     'Calculate',
+    'CodeMap',
 ]

@@ -32,6 +32,7 @@ class AgentInstanceLogger:
                 "agent_class": agent_class,
                 "instance_name": instance_name,
                 "start_timestamp": self.start_time.isoformat(),
+                "last_update": self.start_time.isoformat(),
                 "current_log_path": self.log_path,
                 "working_dir": os.getcwd(),  # Default to current CWD
                 "supervisor": "System",      # Default supervisor
@@ -42,11 +43,8 @@ class AgentInstanceLogger:
         # Merge base metadata if provided (e.g. from a loaded session)
         if base_metadata:
             for k, v in base_metadata.items():
-                if k not in self.data["metadata"]:
-                    self.data["metadata"][k] = v
-                elif k == "original_log_path":
-                     # Carry over origin if it exists, or set it if we're the first continuation
-                     self.data["metadata"][k] = v
+                # Allow overwriting defaults like working_dir or supervisor
+                self.data["metadata"][k] = v
             # If we don't have an original_log_path yet and we are continuing, set it
             if "original_log_path" not in self.data["metadata"] and "current_log_path" in base_metadata:
                 self.data["metadata"]["original_log_path"] = base_metadata["current_log_path"]
@@ -108,8 +106,13 @@ class AgentInstanceLogger:
         """Write metadata as the first line."""
         self._append_line({"metadata": self.data["metadata"]})
 
+    def update_timestamp(self):
+        """Update the last_update metadata timestamp."""
+        self.data["metadata"]["last_update"] = datetime.datetime.now().isoformat()
+
     def log_message(self, message: Any):
         """Append a single message to history and file."""
+        self.update_timestamp()
         formatted_msg = self._format_message(message)
         self.data["history"].append(formatted_msg)
         self._append_line(formatted_msg)
@@ -160,6 +163,7 @@ class AgentInstanceLogger:
         Only appends new messages found in `history` that aren't in the log yet.
         Handles context compression by identifying the most advanced sync point.
         """
+        self.update_timestamp()
         old_history = self.data["history"]
         last_match_in_log = -1
         needs_rewrite = False

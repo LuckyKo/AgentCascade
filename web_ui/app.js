@@ -800,7 +800,30 @@ function handleServerMessage(data) {
       state.messages.push(...responseMsgs);
 
       const oldStackStr = (state.activeStack || []).join(',');
-      if (data.sub_agents) state.subAgents = data.sub_agents;
+      if (data.sub_agents) {
+        for (const [name, sa] of Object.entries(data.sub_agents)) {
+          if (sa.is_partial) {
+            const existing = state.subAgents[name];
+            if (existing && existing.messages) {
+              const hCount = sa.history_count || 0;
+              const startIdx = hCount - sa.messages.length;
+              if (startIdx >= 0) {
+                // Merge: replace only the changed tail of the message history
+                existing.messages.length = startIdx;
+                existing.messages.push(...sa.messages);
+              }
+              // Sync other metadata fields
+              Object.assign(existing, sa);
+              delete existing.is_partial; // local state should be complete
+            } else {
+              // Fallback: if we don't have existing state, we can't merge partials
+              state.subAgents[name] = sa;
+            }
+          } else {
+            state.subAgents[name] = sa;
+          }
+        }
+      }
       if (data.active_stack) state.activeStack = data.active_stack;
       state.generating = true;
       const newStackStr = (state.activeStack || []).join(',');
@@ -825,13 +848,13 @@ function handleServerMessage(data) {
       // Update UI controls (stop button, send disabled state, etc.)
       updateControls();
 
-      // Throttle sub-agent rendering to ~750ms to match server refresh rate.
-      // The server only updates sub_agents every ~5 ticks (~750ms), so rendering
-      // more frequently is wasted work. Active flags (state.activeStack) are still
-      // updated on every tick above, keeping the activity feed responsive.
+      // Throttle sub-agent rendering. Render more frequently (100ms) if a sub-agent is active 
+      // to ensure smooth streaming. Otherwise use a slower rate for idle agents.
+      const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
+      const subThrottle = isSubAgentActive ? 100 : 750;
       const now = performance.now();
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
-      if (stackChanged || now - state.genStats.lastSubAgentRender > 750) {
+      if (stackChanged || now - state.genStats.lastSubAgentRender > subThrottle) {
         renderSubAgents();
         state.genStats.lastSubAgentRender = now;
         
@@ -967,15 +990,16 @@ function renderMessages() {
   const msgs = state.messages;
   const container = messagesEl;
 
-  updateContextBar(document.getElementById('chatContextFill'), msgs, state.totalTokens, state.maxTokens);
+
 
   // Word count and token estimation from Backend
-  if (statusWords) {
-    statusWords.textContent = `${state.totalWords} words`;
-  }
-  if (statusTokens) {
-    statusTokens.textContent = `${state.totalTokens} tokens`;
-  }
+  if (statusWords) statusWords.textContent = `${state.totalWords} words`;
+  if (statusTokens) statusTokens.textContent = `${state.totalTokens} tokens`;
+
+  // LAZY RENDERING: If the main chat isn't visible, skip expensive message DOM work.
+  // We still update the stats and context bar above so they are current.
+  const isChatVisible = !state.activeSubTab || state.activeSubTab === 'chat';
+  if (!isChatVisible) return;
 
   // Quick check: if nothing meaningful changed, skip heavy re-render
   const currentCount = msgs.length;
@@ -985,6 +1009,7 @@ function renderMessages() {
   // Full re-render if count changed significantly or decreased
   if (currentCount < lastRenderedCount || currentCount === 0) {
     fullRender(msgs, container);
+    updateContextBar(document.getElementById('chatContextFill'), msgs, state.totalTokens, state.maxTokens);
     lastRenderedCount = currentCount;
     lastLastContent = lastContent;
     return;
@@ -995,6 +1020,7 @@ function renderMessages() {
     for (let i = lastRenderedCount; i < currentCount; i++) {
       container.appendChild(createMessageEl(msgs[i], i));
     }
+    updateContextBar(document.getElementById('chatContextFill'), msgs, state.totalTokens, state.maxTokens);
     lastRenderedCount = currentCount;
   }
 
@@ -1025,37 +1051,45 @@ function updateMainActivityBar() {
 
   const activityText = bar.querySelector('.activity-text');
   const chatTab = document.getElementById('mainTabChat');
+  
+  let newStatus = '';
+  let isActive = false;
 
   if (state.generating) {
-    bar.classList.add('active');
-    if (chatTab) chatTab.classList.add('agent-active');
-
+    isActive = true;
     if (state.is_waiting) {
-      activityText.innerHTML = '<span class="waiting-spin">⏳</span> Waiting for API slot...';
+      newStatus = '<span class="waiting-spin">⏳</span> Waiting for API slot...';
     } else {
       const msgs = state.messages || [];
       const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
-      if (lastMsg) {
-        activityText.textContent = getActivityPreview(lastMsg);
-      } else {
-        activityText.textContent = 'Agent Starting...';
-      }
+      newStatus = lastMsg ? getActivityPreview(lastMsg) : 'Agent Starting...';
     }
-    if (state.totalTokens !== undefined) {
-      activityText.textContent += ` (${state.totalWords} words, ${state.totalTokens} tokens)`;
-    }
+  } else {
+    newStatus = 'Agent Idle';
+  }
+
+  if (state.totalTokens !== undefined) {
+    newStatus += ` (${state.totalWords} words, ${state.totalTokens} tokens)`;
+  }
+
+  // Only update DOM if status changed
+  if (state.lastActivityStatus !== newStatus) {
+    activityText.innerHTML = newStatus;
+    state.lastActivityStatus = newStatus;
+  }
+
+  if (isActive) {
+    bar.classList.add('active');
+    if (chatTab) chatTab.classList.add('agent-active');
   } else {
     bar.classList.remove('active');
     if (chatTab) chatTab.classList.remove('agent-active');
-    activityText.textContent = 'Agent Idle';
-    if (state.totalTokens !== undefined) {
-      activityText.textContent += ` (${state.totalWords} words, ${state.totalTokens} tokens)`;
-    }
   }
 
-  // Also update main chat tab
-  if (chatTab) {
-    chatTab.innerHTML = `<span class="main-tab-icon">💬</span> Chat`;
+  // Only update tab label if needed
+  const newTabLabel = `<span class="main-tab-icon">💬</span> Chat`;
+  if (chatTab && chatTab.innerHTML !== newTabLabel) {
+    chatTab.innerHTML = newTabLabel;
   }
 
   // Persistent Queue Notification
@@ -1180,7 +1214,7 @@ function createMessageEl(msg, index) {
         }
     }
     
-    html += renderMarkdown(text);
+    html += renderMarkdown(text, false); // Initial render is final
   }
 
   contentDiv.innerHTML = html;
@@ -1216,7 +1250,7 @@ function updateBubbleContent(bubble, msg) {
             }
         }
     }
-    html += renderMarkdown(text);
+    html += renderMarkdown(text, !isGenerating);
   }
   setInnerHtmlWithState(contentDiv, html);
 }
@@ -1235,8 +1269,19 @@ function setInnerHtmlWithState(el, html) {
   });
 }
 
-function renderMarkdown(text) {
+function renderMarkdown(text, allowThinking = true) {
   if (!text || !text.trim()) return '';
+
+  // PERFORMANCE OPTIMIZATION: Only perform expensive thinking-block parsing 
+  // on final messages or if specifically requested. During streaming, we skip
+  // O(N^2) regex work to keep the UI responsive.
+  if (!allowThinking) {
+    try {
+      return marked.parse(text);
+    } catch {
+      return `<p>${escapeHtml(text)}</p>`;
+    }
+  }
 
   // Handle <think> tags or Gemma-style thought tags in content
   let thought = null;
@@ -1245,8 +1290,8 @@ function renderMarkdown(text) {
   let after = '';
   let tagLen = 0;
 
-  const thinkMatch = text.match(/<think>([\s\S]*?)(<\/think>|$)/i);
-  const gemmaMatch = text.match(/<\|channel>thought([\s\S]*?)(<channel\|>|$)/i);
+   const thinkMatch = text.match(/^\s*<think>([\s\S]*?)(<\/think>|$)/i);
+   const gemmaMatch = text.match(/^\s*<\|channel>thought([\s\S]*?)(<channel\|>|$)/i);
 
   if (thinkMatch) {
     thought = thinkMatch[1];
@@ -1264,9 +1309,9 @@ function renderMarkdown(text) {
 
   if (thought !== null) {
     let html = '';
-    if (before.trim()) html += renderMarkdown(before);
+    if (before.trim()) html += renderMarkdown(before, true);
     html += renderThinkingBlock(thought, isOpen);
-    if (after.trim()) html += renderMarkdown(after);
+    if (after.trim()) html += renderMarkdown(after, true);
     return html;
   }
 
@@ -1882,11 +1927,7 @@ function renderSubAgentPanel(panel, agentData, name) {
   // 3. LAZY RENDERING: Skip expensive message work if the tab isn't visible
   if (!isVisible) return;
 
-  // 4. Update Context Bar (only if visible)
-  const fillEl = document.getElementById('subContextFill-' + name);
-  if (fillEl) {
-    updateContextBar(fillEl, msgs, agentData.total_tokens, agentData.max_tokens);
-  }
+
 
   const wasAtBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 50;
 
@@ -1917,12 +1958,16 @@ function renderSubAgentPanel(panel, agentData, name) {
       const el = createSubMsgEl(msgs[i], i, name, agentData.active && i === currentCount - 1);
       scrollContainer.appendChild(el);
     }
+    const fillEl = document.getElementById('subContextFill-' + name);
+    if (fillEl) updateContextBar(fillEl, msgs, agentData.total_tokens, agentData.max_tokens);
   } else {
     // Append new messages
     for (let i = lastCount; i < currentCount; i++) {
       const el = createSubMsgEl(msgs[i], i, name, agentData.active && i === currentCount - 1);
       scrollContainer.appendChild(el);
     }
+    const fillEl = document.getElementById('subContextFill-' + name);
+    if (fillEl) updateContextBar(fillEl, msgs, agentData.total_tokens, agentData.max_tokens);
     // Update the last message if it's still being generated
     if (scrollContainer.lastElementChild) {
       updateSubBubbleContent(scrollContainer.lastElementChild, msgs[currentCount - 1], agentData.active);
@@ -2026,7 +2071,7 @@ function updateSubBubbleContent(bubble, msg, isGenerating) {
   } else if (msg.role === 'function') {
     html += renderToolResult(msg);
   } else {
-    html += renderMarkdown(msg.content || '');
+    html += renderMarkdown(msg.content || '', !isGenerating);
   }
 
   setInnerHtmlWithState(content, html);
@@ -2056,6 +2101,13 @@ function switchMainTab(tabId) {
   }
   
   state.activeSubTab = tabId;
+  
+  // Trigger immediate render of the newly visible content
+  if (tabId === 'chat') {
+    renderMessages();
+  } else {
+    renderSubAgents();
+  }
 }
 
 // Wire up the static Chat tab
@@ -2957,11 +3009,11 @@ function renderApiEndpoints() {
               <button class="api-key-toggle" title="Show/Hide">👁</button>
             </div>
           </label>
+          <label class="setting-field">
+            <span>Model</span>
+            <input type="text" class="ep-input-model" value="${escapeHtml(ep.model)}">
+          </label>
           <div style="display:flex;gap:8px;">
-            <label class="setting-field" style="flex:2;">
-              <span>Model</span>
-              <input type="text" class="ep-input-model" value="${escapeHtml(ep.model)}">
-            </label>
             <label class="setting-field" style="flex:1;">
               <span>Retries</span>
               <input type="number" min="0" max="10" class="ep-input-retries" value="${ep.max_retries}">
@@ -2969,6 +3021,10 @@ function renderApiEndpoints() {
             <label class="setting-field" style="flex:1;">
               <span>Concurrency</span>
               <input type="number" min="0" max="100" class="ep-input-concurrency" value="${ep.concurrency_limit || 0}" title="0 = Unlimited. Set to 1 for local servers like LM Studio.">
+            </label>
+            <label class="setting-field" style="flex:1;">
+              <span>Token Limit</span>
+              <input type="number" min="0" step="1000" class="ep-input-tokens" value="${ep.max_input_tokens || 0}" title="0 = Use General Settings. Caps context for this endpoint.">
             </label>
           </div>
           <button class="api-endpoint-delete">Delete Endpoint</button>
@@ -3049,6 +3105,7 @@ function renderApiEndpoints() {
       ep.model = card.querySelector('.ep-input-model').value.trim();
       ep.max_retries = parseInt(card.querySelector('.ep-input-retries').value) || 0;
       ep.concurrency_limit = parseInt(card.querySelector('.ep-input-concurrency').value) || 0;
+      ep.max_input_tokens = parseInt(card.querySelector('.ep-input-tokens').value) || 0;
       sendApiRouterUpdate();
     };
 
@@ -3070,11 +3127,25 @@ function renderAgentApiAssignments() {
   const endpoints = state.api_router.endpoints || [];
   const priorities = state.api_router.agent_priorities || {};
 
-  // Extract unique agent types from loaded agents
-  const agentTypes = [...new Set(state.agents.map(a => a.name.toLowerCase()))];
+  // Extract unique agent types and their friendly names
+  const typeToName = {};
+  if (state.agents) {
+    state.agents.forEach(a => {
+      const type = (a.agent_type || 'orchestrator').toLowerCase();
+      if (!typeToName[type]) typeToName[type] = a.name;
+    });
+  }
+  
+  const agentTypes = Object.keys(typeToName);
   // Ensure orchestrator and coder are always in the list even if missing
-  if (!agentTypes.includes('orchestrator')) agentTypes.unshift('orchestrator');
-  if (!agentTypes.includes('coder')) agentTypes.push('coder');
+  if (!agentTypes.includes('orchestrator')) {
+    agentTypes.unshift('orchestrator');
+    typeToName['orchestrator'] = 'Orchestrator';
+  }
+  if (!agentTypes.includes('coder') && !agentTypes.includes('coder_agent')) {
+    agentTypes.push('coder');
+    typeToName['coder'] = 'Coder';
+  }
 
   if (endpoints.length === 0) {
     container.innerHTML = `
@@ -3087,6 +3158,7 @@ function renderAgentApiAssignments() {
   container.innerHTML = agentTypes.map(type => {
     const assignedIds = priorities[type] || [];
     const availableEndpoints = endpoints.filter(ep => !assignedIds.includes(ep.id));
+    const friendlyName = typeToName[type] || (type.charAt(0).toUpperCase() + type.slice(1));
     
     let addSelectHtml = '';
     if (availableEndpoints.length > 0) {
@@ -3115,7 +3187,7 @@ function renderAgentApiAssignments() {
     return `
       <div class="agent-api-assignment" data-type="${escapeHtml(type)}">
         <div class="agent-api-assignment-header">
-          <div class="agent-api-assignment-name">${type.charAt(0).toUpperCase() + type.slice(1)}:</div>
+          <div class="agent-api-assignment-name">${escapeHtml(friendlyName)}:</div>
           <div class="agent-api-assignment-add">
             ${addSelectHtml}
           </div>

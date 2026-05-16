@@ -173,8 +173,13 @@ def create_agent_from_soul(llm_cfg: dict, soul_path: str = 'soul.md', agent_clas
     # Build formatted name: "Role Name" (e.g., "Writer Bob")
     # Avoid duplication if the role name is already part of the name (e.g. "Writer Writer")
     raw_name = config.get('name', 'Assistant')
-    if role_name and not raw_name.lower().startswith(role_name.lower()):
-        formatted_name = f"{role_name.capitalize()} {raw_name}"
+    
+    # Normalize for comparison (replace underscores with spaces)
+    role_norm = (role_name or "").lower().replace('_', ' ')
+    name_norm = raw_name.lower().replace('_', ' ')
+    
+    if role_name and not name_norm.startswith(role_norm):
+        formatted_name = f"{role_name.replace('_', ' ').title()} {raw_name}"
     else:
         formatted_name = raw_name
 
@@ -185,12 +190,14 @@ def create_agent_from_soul(llm_cfg: dict, soul_path: str = 'soul.md', agent_clas
         description=config.get('tagline', 'A helpful AI assistant'),
         system_message=system_prompt,
         function_list=[],  # Empty - tools added manually by agent_orchestrator
-        agent_type=role_name.capitalize() if role_name else raw_name,
+        agent_type=role_name.replace('_', ' ').title() if role_name else raw_name,
         **agent_kwargs
     )
     
     # Store config and base system message for later dynamic updates
-    agent.agent_configs = {config.get('name', 'assistant'): config}
+    # Use role_name if available to ensure compatibility with AgentPool tracking (slug vs display name)
+    config_key = role_name if role_name else config.get('name', 'assistant')
+    agent.agent_configs = {config_key: config}
     agent.base_system_message = system_prompt
 
     return agent, config

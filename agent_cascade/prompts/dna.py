@@ -28,12 +28,13 @@ DEFAULT_SYSTEM_MESSAGE: str = 'You are a helpful assistant.'
 COMPRESSION_MARKER = "--- CONTEXT COMPRESSED"
 
 COMPRESSION_PROMPT = (
-    "You are a memory compression assistant. Your task is to summarize the following conversation history.\n"
+    "Summarize the following conversation history.\n"
     "Focus strictly on key decisions, important facts, established context, and the current state of tasks.\n"
     "CRITICAL RULES:\n"
     "1. Output ONLY the summary. Do not include introductory or concluding remarks (e.g. 'Here is a summary').\n"
     "2. Do not include meta-commentary or thinking process.\n"
-    "3. Remain concise but comprehensive enough so that future turns can proceed without the original messages.\n\n"
+    "3. Remain concise but comprehensive enough so that future turns can proceed without the original messages.\n"
+    "4. Retain initial request and progress of the task in the summary.\n\n"
     "--- START HISTORY ---\n{history_text}\n--- END HISTORY ---\n\n"
     "Summary:"
 )
@@ -318,7 +319,8 @@ TOOL_METADATA = {
             "Use when you're done with a sub-agent and don't need its context anymore."
         ),
         'parameters': {
-            'instance_name': 'Name of the sub-agent instance to dismiss'
+            'instance_name': 'Name of the sub-agent instance to dismiss (optional if all_idle is true)',
+            'all_idle': 'If true, dismiss all sub-agents that are currently IDLE. Default is false.'
         }
     },
     'list_agents': {
@@ -350,6 +352,16 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'expression': 'The mathematical expression to evaluate (e.g., "sin(pi/2) + randint(1, 10)").'
+        }
+    },
+    'code_map': {
+        'description': (
+            'Quickly map a code file to see its structure (classes, functions, methods) and their line numbers. '
+            'Use this for an overview of large files before performing targeted reads.'
+        ),
+        'parameters': {
+            'path': 'Path to the file to map (relative to workspace root).',
+            'force_as': 'Optional. Force parsing as a specific language (e.g., "python", "javascript", "cpp", "java").'
         }
     }
 }

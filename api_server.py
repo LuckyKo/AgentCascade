@@ -45,7 +45,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from agent_cascade.log import logger
-from agent_cascade.settings import DEFAULT_WORKSPACE
+from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_MAX_INPUT_TOKENS
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX
 from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_BASELINE_TEMPLATE, COMPRESSION_MARKER
@@ -85,23 +85,9 @@ def _parse_multimodal_content(text):
 
 
 
-    return {'tokens': total_tokens, 'words': total_words}
 
 
-def get_agent_max_tokens(agent) -> int:
-    """Resolve the effective max_input_tokens from agent LLM config."""
-    from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
-    if hasattr(agent, 'llm'):
-        if hasattr(agent.llm, 'generate_cfg'):
-            agent_max = agent.llm.generate_cfg.get('max_input_tokens')
-            if agent_max:
-                return int(agent_max)
-        if hasattr(agent.llm, 'cfg'):
-            cfg = agent.llm.cfg
-            agent_max = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens')
-            if agent_max:
-                return int(agent_max)
-    return DEFAULT_MAX_INPUT_TOKENS
+
 
 
 
@@ -344,6 +330,36 @@ def create_app(agents, agent_pool, config=None):
     )
 
     # ── Helpers ───────────────────────────────────────────────────────────
+    def get_agent_max_tokens(agent) -> int:
+        """Resolve the effective max_input_tokens from agent LLM config."""
+        # 1. Try API Router if available
+        if agent_pool and hasattr(agent_pool, 'api_router') and agent_pool.api_router:
+            agent_type = getattr(agent, 'agent_type', 'orchestrator').lower()
+            router_limit = agent_pool.api_router.get_effective_max_tokens(agent_type)
+            if router_limit > 0:
+                return router_limit
+
+        # 2. Try the agent instance logic
+        if hasattr(agent, 'llm'):
+            if hasattr(agent.llm, 'generate_cfg'):
+                agent_max = agent.llm.generate_cfg.get('max_input_tokens')
+                if agent_max:
+                    return int(agent_max)
+            if hasattr(agent.llm, 'cfg'):
+                cfg = agent.llm.cfg
+                agent_max = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens')
+                if agent_max:
+                    return int(agent_max)
+        
+        # 3. Fallback to pool/global settings
+        if agent_pool:
+            llm_cfg = getattr(agent_pool, 'llm_cfg', {})
+            pool_max = llm_cfg.get('generate_cfg', {}).get('max_input_tokens') or llm_cfg.get('max_input_tokens')
+            if pool_max:
+                return int(pool_max)
+
+        return DEFAULT_MAX_INPUT_TOKENS
+
     def _save_session_history():
         try:
             if not agent_pool:
@@ -446,7 +462,7 @@ def create_app(agents, agent_pool, config=None):
             return agents[idx]
         return agents[0]
 
-    def get_sub_agent_state():
+    def get_sub_agent_state(streaming=False):
         result = {}
         if agent_pool and hasattr(agent_pool, 'sub_agent_state'):
             for name, state in agent_pool.sub_agent_state.items():
@@ -476,10 +492,21 @@ def create_app(agents, agent_pool, config=None):
                                 summary = match.group(1).strip()
                                 break
                 
+                # Optimization: During streaming, we only send the tail of the message list
+                # to avoid O(N^2) JSON traffic and parsing lag in the browser.
+                if streaming and state.get('active') and len(msgs) > 5:
+                    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-3:])]
+                    is_partial = True
+                else:
+                    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
+                    is_partial = False
+                
                 result[name] = {
                     'active': state.get('active', False),
                     'agent_name': agent_class,
-                    'messages': [serialize_message(m, i) for i, m in enumerate(msgs)],
+                    'messages': serialized_msgs,
+                    'is_partial': is_partial,
+                    'history_count': len(msgs),
                     'total_tokens': stats['tokens'],
                     'total_words': stats['words'],
                     'max_tokens': max_tokens,
@@ -558,6 +585,7 @@ def create_app(agents, agent_pool, config=None):
             'telemetry': _safe_get_telemetry(),
             'agents': [
                 {'name': getattr(a, 'name', f'Agent-{i}'), 'index': i,
+                 'agent_type': getattr(a, 'agent_type', 'orchestrator').lower(),
                  'description': getattr(a, 'description', ''),
                  'tools': list(a.function_map.keys()) if hasattr(a, 'function_map') else [],
                  'default_tools': getattr(a, 'default_tools', list(a.function_map.keys()) if hasattr(a, 'function_map') else [])}
@@ -608,7 +636,7 @@ def create_app(agents, agent_pool, config=None):
         return {
             'history_count': history_count,
             'response_messages': response_msgs,
-            'sub_agents': sub_agents if sub_agents is not None else get_sub_agent_state(),
+            'sub_agents': sub_agents if sub_agents is not None else get_sub_agent_state(streaming=True),
             'active_stack': get_active_stack(),
             'approvals': get_approvals(),
             'generating': True,
@@ -1729,7 +1757,9 @@ def create_app(agents, agent_pool, config=None):
                                         'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
                                         'max_turns', 'mcpServers', 'work_access_folders', 'seed',
                                         'read_file_limit', 'grep_char_limit', 'shell_char_limit', 'code_char_limit',
-                                        'disabled_tools'
+                                        'disabled_tools',
+                                        # Exclude endpoint-identifying keys to let the agent use its own assigned API Router config
+                                        'model', 'model_server', 'api_base', 'base_url', 'api_key', 'model_type'
                                     )
                                     ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
                                     llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
@@ -1753,7 +1783,7 @@ def create_app(agents, agent_pool, config=None):
                                             clean_content = content
                                             if reasoning:
                                                 # Check if content starts with a thinking block that matches reasoning
-                                                think_match = re.search(r'<(think|thought)>([\s\S]*?)(</think>|$)', content, re.IGNORECASE)
+                                                think_match = re.search(r'^\s*<(think|thought)>([\s\S]*?)(</think>|$)', content, re.IGNORECASE)
                                                 if think_match:
                                                     embedded_thought = think_match.group(2).strip()
                                                     # If they are very similar, we consider it a duplicate
@@ -1772,7 +1802,11 @@ def create_app(agents, agent_pool, config=None):
                                                 
                                             # For parsing, we always want the content WITHOUT any thinking blocks
                                             if content:
-                                                parsing_response = re.sub(r'<(think|thought)>.*?(</\1>|$)', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
+                                                if '<think' in content.lower() or '<thought' in content.lower():
+                                                    # Only strip if it's at the very beginning to avoid stripping markers inside file content
+                                                    parsing_response = re.sub(r'^\s*<(think|thought)>.*?(</\1>|$)', '', content, count=1, flags=re.IGNORECASE | re.DOTALL).strip()
+                                                else:
+                                                    parsing_response = content.strip()
                                         elif role == 'function':
                                             fname = msg.get('name', '') if isinstance(msg, dict) else getattr(msg, 'name', '')
                                             display_response += f"*(Result from {fname} - {len(str(content))} chars)*\n\n"
@@ -1782,80 +1816,57 @@ def create_app(agents, agent_pool, config=None):
                                     raw_parsing_text = parsing_response
                                     
                                     parsing_text = raw_parsing_text
-                                    parsing_text = re.sub(r'<(think|thought)>.*?</\1>', '', parsing_text, flags=re.IGNORECASE | re.DOTALL)
-                                    parsing_text = re.sub(r'\[(THINK|THOUGHT)\].*?\[/\1\]', '', parsing_text, flags=re.IGNORECASE | re.DOTALL)
-                                    # Only strip unclosed blocks at the very end of the string
-                                    parsing_text = re.sub(r'<(think|thought)>[^<]*$', '', parsing_text, flags=re.IGNORECASE | re.DOTALL)
+                                    if '<think' in parsing_text.lower() or '<thought' in parsing_text.lower():
+                                        parsing_text = re.sub(r'^\s*<(think|thought)>.*?</\1>', '', parsing_text, count=1, flags=re.IGNORECASE | re.DOTALL)
+                                    if '[think' in parsing_text.lower() or '[thought' in parsing_text.lower():
+                                        parsing_text = re.sub(r'^\s*\[(THINK|THOUGHT)\].*?\[/\1\]', '', parsing_text, count=1, flags=re.IGNORECASE | re.DOTALL)
+                                    
+                                    # Only strip unclosed blocks at the very end of the string if they are at the START of the remaining text
+                                    if '<think' in parsing_text.lower() or '<thought' in parsing_text.lower():
+                                        parsing_text = re.sub(r'^\s*<(think|thought)>[^<]*$', '', parsing_text, flags=re.IGNORECASE | re.DOTALL)
                                     
                                     parsing_response = parsing_text.strip()
                                     
                                     # 1. Clean the text: Remove reasoning blocks completely to avoid false positives in "thinking"
                                     # This handles both <think> tags and [THINK] tags
-                                    clean_text = re.sub(r'<(think|thought)>.*?(</\1>|$)', '', raw_parsing_text, flags=re.IGNORECASE | re.DOTALL)
-                                    clean_text = re.sub(r'\[(THINK|THOUGHT)\].*?(\[/\1\]|$)', '', clean_text, flags=re.IGNORECASE | re.DOTALL).strip()
+                                    clean_text = raw_parsing_text
+                                    if '<think' in clean_text.lower() or '<thought' in clean_text.lower():
+                                        clean_text = re.sub(r'^\s*<(think|thought)>.*?(</\1>|$)', '', clean_text, count=1, flags=re.IGNORECASE | re.DOTALL)
+                                    if '[think' in clean_text.lower() or '[thought' in clean_text.lower():
+                                        clean_text = re.sub(r'^\s*\[(THINK|THOUGHT)\].*?(\[/\1\]|$)', '', clean_text, count=1, flags=re.IGNORECASE | re.DOTALL).strip()
+                                    clean_text = clean_text.strip()
                                     
                                     check_text = clean_text.upper()
                                     
-                                    # 2. Identify verdicts in the clean text only
-                                    is_yes = bool(re.search(r'\[YES\]', check_text))
-                                    is_no = bool(re.search(r'\[NO\]', check_text))
+                                    # 2. Simplified Verdict Extraction: Check ONLY the last non-empty line
+                                    lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
+                                    last_line = lines[-1] if lines else ""
                                     
-                                    # If both are present, pick the LAST one in the clean text
-                                    verdict_idx = -1
-                                    final_verdict = None
+                                    # Remove markdown bolding if present (e.g. **[YES]**)
+                                    last_line_clean = re.sub(r'(\*\*|__)', '', last_line).strip()
+                                    last_line_upper = last_line_clean.upper()
                                     
-                                    # 2. Extract verdict: find [YES] or [NO] tokens (case-insensitive)
-                                    yes_matches = list(re.finditer(r'\[YES\]', check_text))
-                                    no_matches = list(re.finditer(r'\[NO\]', check_text))
+                                    is_yes = last_line_upper.startswith('[YES]')
+                                    is_no = last_line_upper.startswith('[NO]')
                                     
-                                    is_yes = len(yes_matches) > 0
-                                    is_no = len(no_matches) > 0
-                                    verdict_idx = -1
-                                    verdict_end_idx = -1
-                                    
-                                    if is_yes or is_no:
-                                        last_yes = yes_matches[-1].start() if yes_matches else -1
-                                        last_no = no_matches[-1].start() if no_matches else -1
-                                        
-                                        if last_yes > last_no:
-                                            is_yes, is_no = True, False
-                                            verdict_idx = last_yes
-                                            verdict_end_idx = yes_matches[-1].end()
-                                        else:
-                                            is_yes, is_no = False, True
-                                            verdict_idx = last_no
-                                            verdict_end_idx = no_matches[-1].end()
-                                            
-                                    # Fallback 1: Check for "Verdict: YES" or "Verdict: NO" without brackets
-                                    if not is_yes and not is_no:
-                                        v_yes = re.search(r'VERDICT:\s*YES', check_text)
-                                        v_no = re.search(r'VERDICT:\s*NO', check_text)
-                                        if v_yes and (not v_no or v_yes.start() > v_no.start()):
-                                            is_yes = True
-                                            verdict_idx = v_yes.start()
-                                            verdict_end_idx = v_yes.end()
-                                        elif v_no:
-                                            is_no = True
-                                            verdict_idx = v_no.start()
-                                            verdict_end_idx = v_no.end()
-                                            
-                                    # 3. Extract justification: everything AFTER the final verdict token
                                     justification = ""
-                                    if verdict_idx != -1:
-                                        justification = clean_text[verdict_end_idx:].strip()
-                                        # Clean up leftover markdown bolding (e.g. from **[YES]**) or common prefixes
-                                        justification = re.sub(r'^(\*\*|__)?[:\s-]*', '', justification).strip()
-                                        # Strip leading "Reason:" or similar
+                                    if is_yes:
+                                        justification = last_line_clean[5:].strip()
+                                    elif is_no:
+                                        justification = last_line_clean[4:].strip()
+                                        
+                                    if is_yes or is_no:
+                                        # Strip "Reason:", "Justification:", etc.
                                         justification = re.sub(r'^(Reason|Justification|Verdict|Tips)[:\s-]*', '', justification, flags=re.IGNORECASE).strip()
                                     
-                                    # Fallback 2: if no explicit verdict found, look for safe/unsafe keywords in clean text
-                                    if not is_yes and not is_no:
-                                        if "SAFE" in check_text and "UNSAFE" not in check_text:
+                                    # Fallback: if no [YES]/[NO] on last line, check if the entire response is JUST the verdict
+                                    if not is_yes and not is_no and len(lines) == 1:
+                                        if last_line_upper == 'YES' or last_line_upper == 'SAFE':
                                             is_yes = True
-                                            justification = clean_text
-                                        elif "UNSAFE" in check_text or "DANGEROUS" in check_text or "REJECT" in check_text:
+                                            justification = last_line
+                                        elif last_line_upper == 'NO' or last_line_upper == 'UNSAFE':
                                             is_no = True
-                                            justification = clean_text
+                                            justification = last_line
                                     
                                     if is_yes or is_no:
                                         if auto_apply:
@@ -2097,3 +2108,32 @@ def create_app(agents, agent_pool, config=None):
             return JSONResponse(status_code=500, content={"message": str(e)})
 
     return app
+
+
+if __name__ == "__main__":
+    import uvicorn
+    import argparse
+    from agent_pool import AgentPool
+
+    parser = argparse.ArgumentParser(description="AgentCascade API Server")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--port", type=int, default=12345, help="Port to bind to")
+    parser.add_argument("--workspace", type=str, default=str(DEFAULT_WORKSPACE), help="Workspace directory")
+    args = parser.parse_args()
+
+    # Initialize the global agent_pool
+    initial_llm_cfg = {
+        'model': os.getenv('QWEN_AGENT_MODEL', 'gpt-4o'),
+        'api_base': os.getenv('QWEN_AGENT_API_BASE', 'https://api.openai.com/v1'),
+        'api_key': os.getenv('QWEN_AGENT_API_KEY', 'EMPTY'),
+    }
+    
+    agent_pool = AgentPool(llm_cfg=initial_llm_cfg, workspace_dir=args.workspace)
+    
+    # Pre-load agents
+    orch_agent = agent_pool.get_instance('Maine', 'Orchestrator')
+    
+    app = create_app(agents=[orch_agent], agent_pool=agent_pool)
+    
+    print(f"Starting AgentCascade API Server on {args.host}:{args.port}")
+    uvicorn.run(app, host=args.host, port=args.port)

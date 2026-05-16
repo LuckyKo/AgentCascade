@@ -13,7 +13,7 @@ from agent_cascade.tools.code_interpreter import CodeInterpreter
 from agent_cascade.tools.custom import (
     ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep,
     DeleteFile, CopyFile, MoveFile, DismissAgent, ListAgents, ShellCmd, SystemInfo,
-    ReadLogs, Calculate,
+    ReadLogs, Calculate, CodeMap,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
 from soul_loader import create_agent_from_soul
@@ -104,6 +104,11 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
     read_logs_tool.agent_pool = agent_pool
     agent.function_map['read_logs'] = read_logs_tool
 
+    # ── Code Mapping ──
+    code_map_tool = CodeMap()
+    code_map_tool.agent_pool = agent_pool
+    agent.function_map['code_map'] = code_map_tool
+
     # ── Code Interpreter (sandbox) ──
     try:
         code_tool = CodeInterpreter(cfg={'work_dir': str(agent_pool.operation_manager.base_dir)})
@@ -193,9 +198,9 @@ def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None) -> Assistant:
         agent = OrchestratorAgent(
             agent_pool=agent_pool,
             llm=agent_llm_cfg,
-            name=agent_name.capitalize(),
-            agent_type=agent_name.capitalize(),
-            description=f'{agent_name.capitalize()} agent',
+            name=agent_name.replace('_', ' ').title(),
+            agent_type=agent_name.replace('_', ' ').title(),
+            description=f"{agent_name.replace('_', ' ').title()} agent",
             system_message=system_prompt,
             function_list=[],
         )
@@ -222,7 +227,7 @@ def load_sub_agent_with_tools(agent_pool, agent_name: str, llm_cfg: dict) -> Ass
 
 def _default_agent_prompt(agent_pool, agent_name: str) -> str:
     """Fallback system prompt when no soul.md exists."""
-    prompt = f"""You are {agent_name.capitalize()}, an AI assistant that can coordinate with specialized sub-agents.
+    prompt = f"""You are {agent_name.replace('_', ' ').title()}, an AI assistant that can coordinate with specialized sub-agents.
 
 Available sub-agents:
 """

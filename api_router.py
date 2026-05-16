@@ -35,6 +35,7 @@ class APIEndpoint:
     enabled: bool = True               # Toggle on/off without deleting
     max_retries: int = 2               # Per-endpoint retry count before moving to next
     concurrency_limit: int = 0         # 0 = unlimited, 1+ = max parallel requests for this server
+    max_input_tokens: int = 0          # 0 = unlimited/auto, 1+ = specific limit for this model
 
     def __post_init__(self):
         if not self.id:
@@ -48,6 +49,7 @@ class APIEndpoint:
             'api_base': self.api_base,
             'api_key': self.api_key,
             'model_type': self.model_type,
+            'max_input_tokens': self.max_input_tokens,
         }
 
     def to_dict(self) -> dict:
@@ -55,6 +57,8 @@ class APIEndpoint:
 
     @classmethod
     def from_dict(cls, data: dict) -> 'APIEndpoint':
+        if not isinstance(data, dict):
+            return cls()
         # Filter to only known fields to prevent TypeError on unexpected keys
         known = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known}
@@ -178,6 +182,29 @@ class APIRouter:
             return chain[0]
         return copy.deepcopy(self.default_llm_cfg)
 
+    def get_effective_max_tokens(self, agent_type: str) -> int:
+        """
+        Returns the effective max_input_tokens for an agent type.
+        Calculates the MIN of (general settings limit) and (highest priority endpoint limit).
+        """
+        general_limit = (self.default_llm_cfg or {}).get('max_input_tokens', 0)
+        
+        # Find the first enabled endpoint for this agent_type
+        ep_limit = 0
+        with self._lock:
+            for eid in self.agent_priorities.get(agent_type, []):
+                ep = self.endpoints.get(eid)
+                if ep and ep.enabled:
+                    ep_limit = ep.max_input_tokens
+                    break
+        
+        # Resolve MIN logic
+        if general_limit <= 0:
+            return ep_limit
+        if ep_limit <= 0:
+            return general_limit
+        return min(general_limit, ep_limit)
+
     def get_endpoint_chain(self, agent_type: str) -> List[dict]:
         """
         Returns an ordered list of LLM configs to try for the given agent type:
@@ -187,10 +214,20 @@ class APIRouter:
         configs = []
 
         # 1. Agent-specific endpoints
+        general_limit = (self.default_llm_cfg or {}).get('max_input_tokens', 0)
+        
         for eid in self.agent_priorities.get(agent_type, []):
             ep = self.endpoints.get(eid)
             if ep and ep.enabled:
-                configs.append(ep.to_llm_cfg())
+                cfg = ep.to_llm_cfg()
+                
+                # Apply MIN logic: min(endpoint_limit, general_limit)
+                ep_limit = ep.max_input_tokens
+                if general_limit > 0:
+                    if ep_limit <= 0 or ep_limit > general_limit:
+                        cfg['max_input_tokens'] = general_limit
+                
+                configs.append(cfg)
 
         # 2. Always append the default as last resort
         configs.append(copy.deepcopy(self.default_llm_cfg))
@@ -357,17 +394,27 @@ class APIRouter:
         if not self._config_path.exists():
             return
         try:
-            with open(self._config_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            with open(self._config_path, 'r', encoding='utf-8-sig') as f:
+                content = f.read().strip()
+                if not content:
+                    return
+                data = json.loads(content)
+
+            if not isinstance(data, dict):
+                logger.warning(f"[APIRouter] Config file {self._config_path} is not a dictionary. Skipping.")
+                return
 
             for ep_data in data.get('endpoints', []):
-                ep = APIEndpoint.from_dict(ep_data)
-                self.endpoints[ep.id] = ep
+                try:
+                    ep = APIEndpoint.from_dict(ep_data)
+                    self.endpoints[ep.id] = ep
+                except Exception as e:
+                    logger.error(f"[APIRouter] Failed to parse endpoint data: {e}")
 
             self.agent_priorities = data.get('agent_priorities', {})
             logger.info(f"[APIRouter] Loaded {len(self.endpoints)} endpoints from {self._config_path}")
         except Exception as e:
-            logger.error(f"[APIRouter] Failed to load config: {e}")
+            logger.error(f"[APIRouter] Failed to load config from {self._config_path}: {e}")
 
     # ── Serialization (for UI transport) ─────────────────────────────────
 

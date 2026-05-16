@@ -10,7 +10,26 @@ Usage:
 """
 
 import json
+import os
 import requests
+from pathlib import Path
+
+# ── Workspace Detection ──────────────────────────────────────────────────────
+# Detect if we should use a sibling 'AgentWorkspace' instead of the local folder
+PROJECT_ROOT = Path(__file__).parent.absolute()
+WORKSPACE_DIR = os.getenv('QWEN_AGENT_DEFAULT_WORKSPACE')
+
+if not WORKSPACE_DIR:
+    sibling_ws = PROJECT_ROOT.parent / 'AgentWorkspace'
+    if sibling_ws.exists():
+        WORKSPACE_DIR = str(sibling_ws)
+        os.environ['QWEN_AGENT_DEFAULT_WORKSPACE'] = WORKSPACE_DIR
+        print(f"[INIT] Detected sibling workspace: {WORKSPACE_DIR}")
+    else:
+        WORKSPACE_DIR = str(PROJECT_ROOT / 'workspace')
+        os.environ['QWEN_AGENT_DEFAULT_WORKSPACE'] = WORKSPACE_DIR
+        print(f"[INIT] Using local workspace: {WORKSPACE_DIR}")
+
 from bs4 import BeautifulSoup
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_orchestrator import AgentPool, load_orchestrator_agent
@@ -114,7 +133,7 @@ def initialize_agents():
     print("Initializing Agent Orchestrator (API Server)...")
     print("=" * 50)
 
-    agent_pool = AgentPool(llm_cfg, 'agents')
+    agent_pool = AgentPool(llm_cfg, 'agents', workspace_dir=WORKSPACE_DIR)
 
     # Instantiate heavy tools ONCE to share across all agents and prevent OOM
     shared_tools = {}
