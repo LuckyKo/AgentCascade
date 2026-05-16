@@ -1,7 +1,20 @@
+# Agent Cascade 
+Agent Cascade is a modular, multi-agent system for complex operations, designed for maximum resilience and self-evolution.
+The goal is to create a system that can operate autonomously for extended periods, learning from its mistakes and continuously improving itself.
+It uses a modular, multi-agent architecture with a unique supervisor-worker dynamic that enables rapid adaptation and recovery from errors.
+
+# Capabilities
+- **Rollback on loops** - detect repeating patterns and roll back to a previous state. Overseer agent will get pinged to check why agents are looping and take action - including dismissing the misssbehaving agent if nescessary, with a notification.
+- **Full memory persistence** - Agent logs are continuously written to a file and can be restored to any point in time.
+- **Message queuing** - Agents can receive new messages while working on another task, and will process them in order.
+- **Smart Truncation** - The system monitors incoming tool responses and truncates them based on user defined limits (nr of characters or tokens) to prevent overloading the context window. Spillover files are provided with full content.
+- **Active Self-Improvement** - The Overseer agent checks working agents performance regularly, evaluates the system performance and suggests improvements to the prompts, configuration and even the framework itself (including the very prompts and configuration). All configurations and prompts are stored in the DNA directory, with plans to expand to multiple versions for A/B testing. Overseer will handle tracking and performance evaluation if different configs. We aim for most tasks completed sucessfully with least amount of token usage.
+
+
 # TODO:
 
-[x] Add telemetry for agent performace and tool usage effectiveness tracking
-[ ] Add multiple API endpoints for all LLMs, shown in a list to access in priority order (movable up/down via arrows). A toggle for each one if it's enabled or not, with a button to expand it for API KEY/model details.
+[ ] Implement parralel agents (subagents) running at the same time on diffrent tasks.
+[ ] Add multiple API endpoints for all LLMs, shown in a list to access in priority order (movable up/down). A toggle for each one if it's enabled or not, with a button to expand it for API KEY/model details.
 [x] Add a button for DNA and agent soul refresh at any time. (replace the Retry button in left tab). Also change the Reset button to "New Session".
 [x] Parametrize all internal prompts to easy swap for A-B testing (eventually creating a DNA that saves a specific configuration of the framework with propts and other parameters
 [ ] Add skills (or cron job like system)
@@ -10,7 +23,7 @@
 [x] Add context summary viewing/editing to Web UI.
 [x] Change security prompt to be an individual security Expert agent, the Ask Agent during Aprooval operation becomes a regular agent call that is not included in our agent chat log (will be a separate verification system). Will give security extended ability to verify the safety of the file changes before aproving them, or even do internet searches for more info.
 [x] Add a generalist agent focused on efficiency and speed.
-[ ] Add an Overseer agent that periodically checks on the heath of the system, reads logs and telemetry, check if running agents got stuck in undetectable loops or migrated goals towards something that the user never asked for, suggests fixes and improvements into a sugesstion box. Main agent will pull from the sugesstion box during idle times when user is AFK to self improve the agents or the framework during our daily operation - do the whole DNA A/B testing thing. Overseeer agent will always get its full working que compressed when it finishes and save it into the suggestion box (no chat messages) - should be persistent across sessions. We'll set the interval at whitch it activates, it will silently interrupt running agents when it activates and resume them like it never happend when its done (unless it decides to kill an agent). Will have an on/off toggle in settings.
+[ ] Add an Overseer agent that periodically checks on the heath of the system, reads logs and telemetry, check if running agents got stuck in undetectable loops or migrated goals towards something that the user never asked for, suggests fixes and improvements into a sugesstion box. Main agent will pull from the sugesstion box during idle times when user is AFK to self improve the agents or the framework during our daily operation - do the whole DNA A/B testing thing. Overseeer agent will always get its full working que compressed when it finishes and save it into the suggestion box (no chat messages) - should be persistent across sessions. We'll set the interval at whitch it activates, it will silently interrupt running agents when it activates and resume them like it never happend when its done (unless it decides to kill an agent), or work in parralel using a different API endpoint.
 [ ] Improve Activity bar when not streaming in tokens: show if we are in a process (compression/security audit etc) or waiting for a tool to respond.
 [x] Add an close buton to subagent tabs to allow closing them (dismisses agent just like the tool call does).
 [ ] Change User messaging logic to an async queue system, able to receive new commnads from API calls, working similar to our existing async interruption system. Depending on what agent tab we have open in the web_ui, the messages will be sent to that particular agent (if a subagent is working and we switch tabs to maine and send one there, that message will be added to maine's message queue and will be processed once subagent finishes and returns focus to maine). The API calls needs to have E2E encryption, we'll make a separate app to interract with it for testing purposes, eventually it should be able to be called from regular messaging apps (like Telegram/Whatsapp etc).

@@ -1831,6 +1831,17 @@ body {
   color: #000;
 }
 
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.waiting-spin {
+  display: inline-block;
+  animation: spin 2s linear infinite;
+  margin-right: 4px;
+}
+
 /* ─── Context Bar ─────────────────────────────────────────────────────────── */
 
 .context-bar {
@@ -1958,3 +1969,276 @@ body {
   color: var(--accent);
 }
 
+/* ─── API Endpoints Management ──────────────────────────────────────────── */
+
+.btn-small {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius-sm);
+  background: var(--accent-glow);
+  color: var(--accent);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-small:hover {
+  background: var(--accent-dim);
+  color: var(--text-primary);
+}
+
+.api-endpoint-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  margin-bottom: 4px;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.api-endpoint-card:hover {
+  border-color: var(--accent-dim);
+}
+
+.api-endpoint-card.disabled {
+  opacity: 0.55;
+}
+
+.api-endpoint-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.api-endpoint-toggle {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.api-endpoint-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.api-endpoint-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.api-endpoint-arrows {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.api-endpoint-arrows button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  padding: 0 3px;
+  transition: color 0.15s;
+}
+
+.api-endpoint-arrows button:hover {
+  color: var(--accent);
+}
+
+.api-endpoint-expand {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+  transition: color 0.15s, transform 0.2s;
+}
+
+.api-endpoint-expand:hover {
+  color: var(--text-primary);
+}
+
+.api-endpoint-expand.open {
+  transform: rotate(90deg);
+}
+
+.api-endpoint-details {
+  display: none;
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--bg-elevated);
+  gap: 8px;
+}
+
+.api-endpoint-details.open {
+  display: flex;
+  flex-direction: column;
+}
+
+.api-endpoint-details .setting-field {
+  margin-bottom: 0;
+}
+
+.api-endpoint-details input,
+.api-endpoint-details select {
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.api-endpoint-details .api-key-field {
+  display: flex;
+  gap: 4px;
+}
+
+.api-endpoint-details .api-key-field input {
+  flex: 1;
+}
+
+.api-key-toggle {
+  background: none;
+  border: 1px solid var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size: 12px;
+  transition: all 0.15s;
+}
+
+.api-key-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.api-endpoint-delete {
+  align-self: flex-end;
+  padding: 4px 12px;
+  font-size: 11px;
+  background: var(--danger-dim);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.api-endpoint-delete:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* Agent API Assignments */
+
+.agent-api-assignment {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--bg-elevated);
+}
+
+.agent-api-assignment:last-child {
+  border-bottom: none;
+}
+
+.agent-api-assignment-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.agent-api-assignment-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 90px;
+}
+
+.agent-api-assignment-add {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+}
+
+.agent-api-assignment-add select {
+  flex: 1;
+  font-size: 11px;
+  padding: 3px 6px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+}
+
+.agent-api-assignment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: 90px;
+}
+
+.agent-api-priority-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 3px 6px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--bg-elevated);
+}
+
+.agent-api-priority-item .priority-num {
+  font-weight: 700;
+  color: var(--accent);
+  min-width: 14px;
+}
+
+.agent-api-priority-item .priority-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-api-priority-item button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 2px;
+  transition: color 0.15s;
+}
+
+.agent-api-priority-item button:hover {
+  color: var(--danger);
+}
+
+.agent-api-default-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-left: 90px;
+  padding: 4px 0;
+}

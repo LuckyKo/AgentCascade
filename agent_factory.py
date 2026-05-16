@@ -147,7 +147,7 @@ Workspace & Path Reference:
 """
 
 
-def load_agent(agent_pool, agent_name: str, llm_cfg: dict) -> Assistant:
+def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None) -> Assistant:
     """
     Load any agent (including the orchestrator) from its soul.md.
     
@@ -158,18 +158,29 @@ def load_agent(agent_pool, agent_name: str, llm_cfg: dict) -> Assistant:
     Args:
         agent_pool: The AgentPool instance.
         agent_name: The agent's role name (e.g. 'orchestrator', 'coder').
-        llm_cfg: LLM configuration dictionary.
+        llm_cfg: Legacy fallback parameter (ignored if APIRouter is active).
         
     Returns:
         Fully configured OrchestratorAgent instance.
     """
     from agent_orchestrator import OrchestratorAgent
+    import copy
+
+    # Ensure each agent gets its own distinct LLM instance config
+    # to avoid state bleed across parallel threads.
+    if hasattr(agent_pool, 'api_router'):
+        agent_llm_cfg = agent_pool.api_router.get_llm_config(agent_name)
+    else:
+        agent_llm_cfg = llm_cfg or agent_pool.llm_cfg
+        
+    # Deepcopy to prevent shared references in the LLM object tree
+    agent_llm_cfg = copy.deepcopy(agent_llm_cfg)
 
     soul_path = agent_pool.agents_dir / f'{agent_name}_soul.md'
 
     if soul_path.exists():
         agent, config = create_agent_from_soul(
-            llm_cfg,
+            agent_llm_cfg,
             str(soul_path),
             agent_class=OrchestratorAgent,
             agent_pool=agent_pool,
@@ -181,7 +192,7 @@ def load_agent(agent_pool, agent_name: str, llm_cfg: dict) -> Assistant:
         system_prompt = _default_agent_prompt(agent_pool, agent_name)
         agent = OrchestratorAgent(
             agent_pool=agent_pool,
-            llm=llm_cfg,
+            llm=agent_llm_cfg,
             name=agent_name.capitalize(),
             agent_type=agent_name.capitalize(),
             description=f'{agent_name.capitalize()} agent',

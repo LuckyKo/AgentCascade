@@ -163,7 +163,7 @@ CALL_AGENT_SCHEMA = {
         'If the instance_name already exists, the session continues with the existing context. '
         'Otherwise, a new session is started using the specified agent_class.\n\n'
         'Example usage:\n'
-        '{"name": "call_agent", "arguments": {"agent_class": "coder", "instance_name": "worker1", "task": "Write a script"}}'
+        '{"name": "call_agent", "arguments": {"agent_class": "coder", "instance_name": "worker1", "task": "Write a script", "parallel_launch": true}}'
     ),
     'parameters': {
         'type': 'object',
@@ -183,6 +183,10 @@ CALL_AGENT_SCHEMA = {
             'context': {
                 'type': 'string',
                 'description': 'Optional background context for the sub-agent'
+            },
+            'parallel_launch': {
+                'type': 'boolean',
+                'description': 'Set to true to run the agent asynchronously in the background. Defaults to false (sequential).'
             },
         },
         'required': ['agent_class', 'instance_name', 'task'],
@@ -227,6 +231,62 @@ class _SubAgentFunctionProxy(BaseTool):
         # Should never be reached — intercepted in _run
         return 'ERROR: This tool should be intercepted by OrchestratorAgent._run'
 
+import concurrent.futures
+
+class ParallelAgentManager:
+    """
+    Manages parallel execution of sub-agents using a thread pool.
+    Results are queued back to the originating agent via AgentPool.enqueue_message.
+    """
+    def __init__(self, agent_pool: AgentPool, max_workers: int = 10):
+        self.agent_pool = agent_pool
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        self.active_tasks = {} # instance_name -> (Future, owner_session)
+    
+    def has_active_tasks(self, session_name: str) -> bool:
+        """Check if there are any active parallel tasks owned by the given session."""
+        return any(owner == session_name for _, owner in self.active_tasks.values())
+
+    def submit_task(self, orchestrator, tool_name: str, tool_args: dict, current_response: List[Message], manager_history: List[Message]) -> str:
+        """Submit a sub-agent stream to the background pool and return immediately."""
+        instance_name = tool_args.get('instance_name', 'unknown')
+        
+        # We need a safe copy of the history to prevent thread mutation issues
+        # (Though _stream_sub_agent_call itself makes copies, passing references 
+        # from a live orchestrator turn can be risky).
+        safe_response = copy.deepcopy(current_response)
+        safe_history = copy.deepcopy(manager_history)
+
+        def task_wrapper():
+            # Because _stream_sub_agent_call is a generator for the WebUI, 
+            # we must iterate it to completion to get the final return value.
+            try:
+                gen = orchestrator._stream_sub_agent_call(tool_name, tool_args, safe_response, safe_history)
+                result = None
+                try:
+                    while True:
+                        next(gen)
+                except StopIteration as e:
+                    result = e.value
+                
+                # Format the parallel completion message
+                completion_msg = f"[Parallel Sub-Agent '{instance_name}' Finished]:\n{result}"
+                
+                # Push the result asynchronously into the caller's message queue
+                self.agent_pool.enqueue_message(orchestrator.session_name, completion_msg)
+                
+            except Exception as e:
+                logger.error(f"Parallel sub-agent {instance_name} failed: {e}", exc_info=True)
+                error_msg = f"[Parallel Sub-Agent '{instance_name}' Failed]:\n{str(e)}"
+                self.agent_pool.enqueue_message(orchestrator.session_name, error_msg)
+            finally:
+                if instance_name in self.active_tasks:
+                    del self.active_tasks[instance_name]
+
+        future = self.executor.submit(task_wrapper)
+        self.active_tasks[instance_name] = (future, orchestrator.session_name)
+        return f"[Started agent '{instance_name}' in parallel. You will be notified via an async message when it finishes. You may continue with other tasks.]"
+
 
 class OrchestratorAgent(Assistant):
     """
@@ -242,6 +302,7 @@ class OrchestratorAgent(Assistant):
         self.agent_pool = agent_pool
         self.agent_type = agent_type
         self.session_name: str = "Maine"
+        self.auto_continue_enabled = True # Toggleable in UI
         from agent_cascade.utils.tokenization_qwen import count_tokens
         self._count_tokens = count_tokens
         
@@ -249,6 +310,49 @@ class OrchestratorAgent(Assistant):
         self.tool_result_max_chars = getattr(agent_cascade.settings, 'DEFAULT_TOOL_RESULT_MAX_CHARS', 10000)
         if 'tool_result_max_chars' in kwargs:
             self.tool_result_max_chars = kwargs['tool_result_max_chars']
+
+    def _call_llm(
+        self,
+        messages: List[Message],
+        functions: List[dict] = None,
+        stream: bool = True,
+        extra_generate_cfg: dict = None,
+    ) -> Iterator[List[Message]]:
+        """
+        Injected LLM call wrapper that routes through APIRouter for multi-endpoint
+        failover and ensures correct model selection.
+        """
+        if not hasattr(self.agent_pool, 'api_router') or not self.agent_pool.api_router:
+            return super()._call_llm(messages, functions, stream, extra_generate_cfg)
+
+        # 1. Base generation config from the agent's internal state (held by the LLM object)
+        merged_cfg = copy.deepcopy(getattr(self.llm, 'generate_cfg', {}))
+        
+        # 2. Merge UI overrides (temperature, etc.)
+        if extra_generate_cfg:
+            merged_cfg.update(extra_generate_cfg)
+
+        def _execute_llm(llm_cfg: dict) -> Iterator[List[Message]]:
+            # 3. Final Merge: The Router's specific endpoint config (llm_cfg) 
+            # ALWAYS takes priority for infrastructure (model, base, key).
+            final_cfg = copy.deepcopy(merged_cfg)
+            final_cfg.update(llm_cfg)
+            
+            # Use the high-level chat() method to ensure functions/tools are properly
+            # handled and passed to the model server.
+            return self.llm.chat(
+                messages=messages,
+                functions=functions,
+                stream=stream,
+                delta_stream=False,
+                extra_generate_cfg=final_cfg
+            )
+
+        # Delegate to the router for failover
+        return self.agent_pool.api_router.call_with_fallback(
+            self.agent_type.lower(),
+            _execute_llm
+        )
 
     def _count_message_tokens(self, msg: Union[Message, dict]) -> int:
         from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
@@ -844,12 +948,20 @@ class OrchestratorAgent(Assistant):
             # Process the FINAL output of this LLM turn
             output = turn_output
             
-            # --- UPDATE HISTORY ---
-            # We must ensure reasoning_content is visible to the LLM in the next turn.
-            # Most providers don't support 'reasoning_content' in input history,
-            # so we merge it into content using standard tags.
+            # --- NORMALIZE AND UPDATE HISTORY ---
+            # Extract reasoning from model-specific tags (like Gemma's) and standardize to <think>
             history_output = []
             for msg in output:
+                # Normalize Gemma-style thinking blocks into reasoning_content if not already present
+                content = msg.get(CONTENT, '')
+                if not msg.get('reasoning_content') and isinstance(content, str) and '<|channel>thought' in content.lower():
+                    import re
+                    gemma_pattern = r"<\|channel>thought\n?([\s\S]*?)\n?<channel\|>"
+                    match = re.search(gemma_pattern, content, re.IGNORECASE)
+                    if match:
+                        msg['reasoning_content'] = match.group(1).strip()
+                        msg[CONTENT] = re.sub(gemma_pattern, "", content, flags=re.IGNORECASE).strip()
+
                 m = copy.deepcopy(msg)
                 if m.get('reasoning_content'):
                     reasoning = f"<think>\n{m['reasoning_content']}\n</think>\n"
@@ -857,7 +969,6 @@ class OrchestratorAgent(Assistant):
                     if old_content is None:
                         m[CONTENT] = reasoning
                     elif isinstance(old_content, list):
-                        # Prepend reasoning as a new text item if it's a list
                         m[CONTENT] = [ContentItem(text=reasoning)] + old_content
                     else:
                         m[CONTENT] = reasoning + str(old_content)
@@ -882,9 +993,12 @@ class OrchestratorAgent(Assistant):
                 num_llm_calls_available += 1
                 # Inject a system prompt to continue
                 cont_msg = Message(role=USER, content="[SYSTEM]: Your previous response was cut off by the length limit. Please continue exactly from where you left off, without repeating yourself.")
+                messages.append(cont_msg)
+                response.append(cont_msg)
                 llm_messages.append(cont_msg)
-                # Yield a small hint to the UI
-                yield response + output + [Message(role=ASSISTANT, content="... (Continuing output due to length limit)")]
+                logger_inst.log_message(cont_msg)
+                # Yield with a hint
+                yield response + [Message(role=ASSISTANT, content="... (Continuing output due to length limit)")]
     
             used_any_tool = False
             for out in output:
@@ -898,10 +1012,24 @@ class OrchestratorAgent(Assistant):
                 _tool_error = ""
                 try:
                     if tool_name in self.STREAMING_TOOLS:
-                        # ── Streaming sub-agent call ──
-                        tool_result = yield from self._stream_sub_agent_call(
-                            tool_name, tool_args, response, messages
-                        )
+                        # ── Sub-agent call ──
+                        parsed_args = tool_args
+                        if isinstance(tool_args, str):
+                            try:
+                                parsed_args = json_loads(tool_args)
+                            except Exception:
+                                parsed_args = {}
+
+                        if isinstance(parsed_args, dict) and parsed_args.get('parallel_launch') is True:
+                            # ── Parallel background execution ──
+                            tool_result = self.agent_pool.parallel_manager.submit_task(
+                                self, tool_name, parsed_args, response, messages
+                            )
+                        else:
+                            # ── Synchronous streaming execution ──
+                            tool_result = yield from self._stream_sub_agent_call(
+                                tool_name, tool_args, response, messages
+                            )
                     else:
                         # ── Normal synchronous tool ──
                         
@@ -1119,6 +1247,16 @@ class OrchestratorAgent(Assistant):
                     pass
                 else:
                     # Final answer or real content provided, or no thinking at all.
+                    # WAIT if there are active parallel tasks for this instance
+                    if self.agent_pool.parallel_manager.has_active_tasks(instance):
+                        # Poll for either a new message or all tasks completion
+                        while not self.agent_pool.has_messages(instance) and \
+                              self.agent_pool.parallel_manager.has_active_tasks(instance):
+                            if self.agent_pool.stopped: break
+                            time.sleep(0.5)
+                        
+                        if self.agent_pool.has_messages(instance):
+                            continue # Loop back to drain_queue
                     break
     
             # No final update_history needed: all messages are logged individually
@@ -1419,8 +1557,13 @@ class OrchestratorAgent(Assistant):
                             
                             if is_truncated and auto_continue_enabled and not self.agent_pool.stopped:
                                 logger.info(f"Sub-agent {instance_name} truncated by length limit. Auto-triggering continuation...")
-                                cont_msg = Message(role=USER, content="[SYSTEM]: Your previous response was cut off by the token limit. Please continue exactly from where you left off, without repeating yourself.")
+                                cont_msg = Message(role=USER, content="[SYSTEM]: Your previous response was cut off by the length limit. Please continue exactly from where you left off, without repeating yourself.")
                                 messages.append(cont_msg)
+                                # Log it
+                                try:
+                                    logger_inst.log_message(cont_msg)
+                                except Exception:
+                                    pass
                                 # Recursive call to continue the same LLM turn
                                 yield from hooked_call_llm(self_agent, messages, **kwargs_llm)
 
@@ -1558,6 +1701,8 @@ class OrchestratorAgent(Assistant):
         finally:
             # Clean up state
             state['active'] = False
+            # Ensure the UI state reflects the full history including the final turn results
+            state['messages'] = list(conv)
             self.agent_pool.sub_agent_state[instance_name] = state
             
             # Remove from active stack (pop the most recent occurrence)

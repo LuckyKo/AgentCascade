@@ -484,7 +484,8 @@ def create_app(agents, agent_pool, config=None):
                     'total_words': stats['words'],
                     'max_tokens': max_tokens,
                     'summary': summary,
-                    'has_queued_messages': agent_pool.has_messages(name)
+                    'has_queued_messages': agent_pool.has_messages(name),
+                    'is_waiting': agent_pool.api_router.is_waiting(name) if hasattr(agent_pool, 'api_router') else False,
                 }
         return result
 
@@ -564,7 +565,9 @@ def create_app(agents, agent_pool, config=None):
             ],
             'current_model': getattr(get_agent().llm, 'model', 'Unknown') if hasattr(get_agent(), 'llm') and get_agent().llm else 'Unknown',
             'default_workspace': str(agent_pool.operation_manager.base_dir) if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager else str(DEFAULT_WORKSPACE),
-            'has_queued_messages': agent_pool.has_messages(session['session_name']) if agent_pool else False
+            'has_queued_messages': agent_pool.has_messages(session['session_name']) if agent_pool else False,
+            'is_waiting': agent_pool.api_router.is_waiting(session['session_name']) if agent_pool and hasattr(agent_pool, 'api_router') else False,
+            'api_router': agent_pool.api_router.to_dict() if agent_pool and hasattr(agent_pool, 'api_router') else {'endpoints': [], 'agent_priorities': {}},
         }
 
     def build_stream_update(responses, cached_h_stats=None, sub_agents=None, telemetry=None):
@@ -770,6 +773,7 @@ def create_app(agents, agent_pool, config=None):
             while retry_count <= max_auto_retries:
                 should_retry = False
                 responses = []
+                session['_last_resp_len'] = 0
                 last_send = 0
                 tick_num = 0
                 
@@ -802,9 +806,26 @@ def create_app(agents, agent_pool, config=None):
                         
                         current_stack = list(get_active_stack())
                         stack_changed = (current_stack != getattr(agent_pool, '_last_seen_stack', None))
+                        
+                        # Detect if a new message was added or a tool is being called/returned
+                        resp_len = len(responses)
+                        last_resp_len = session.get('_last_resp_len', 0)
+                        len_changed = (resp_len != last_resp_len)
+                        
+                        has_tool_event = False
+                        if resp_len > 0:
+                            last_m = responses[-1]
+                            if isinstance(last_m, dict):
+                                has_tool_event = last_m.get('function_call') or last_m.get(ROLE) == FUNCTION
+                            else:
+                                has_tool_event = getattr(last_m, 'function_call', None) or getattr(last_m, 'role', '') == FUNCTION
 
-                        if now - last_send > 0.15 or stack_changed:
-                            if tick_num % 5 == 0 or stack_changed:
+                        if now - last_send > 0.15 or stack_changed or len_changed or has_tool_event:
+                            session['_last_resp_len'] = resp_len
+                            
+                            # Force sub-agent cache update if stack changed, tool event occurred, or any sub-agent is active
+                            any_sa_active = any(sa.get('active') for sa in agent_pool.sub_agent_state.values()) if (agent_pool and hasattr(agent_pool, 'sub_agent_state')) else False
+                            if tick_num % 5 == 0 or stack_changed or has_tool_event or any_sa_active:
                                 sub_agents_cache = get_sub_agent_state()
                                 if agent_pool:
                                     agent_pool._last_seen_stack = current_stack
@@ -822,6 +843,7 @@ def create_app(agents, agent_pool, config=None):
                             asyncio.run_coroutine_threadsafe(
                                 send_queue.put({'type': 'stream_update', **delta}), loop
                             )
+                            last_send = now
                             
                             # Loop Detection
                             loop_info = detect_loop(current_history + responses)
@@ -1016,18 +1038,24 @@ def create_app(agents, agent_pool, config=None):
             if hasattr(agent_runner, 'turn_final_messages') and agent_runner.turn_final_messages:
                 tfm = agent_runner.turn_final_messages
                 
-                # Check if this is just a sliced view (starts with SYSTEM + <context_summary> USER message)
-                # If it's a slice, we should NOT clear the full session history, as that would
-                # cause a 'full rollback' effect in the UI.
+                # Check if this is just a sliced view (starts with SYSTEM + summary marker)
                 is_slice = False
-                if len(tfm) > 1 and len(tfm) < len(session['history']):
-                    msg1_content = tfm[1].get(CONTENT, '') if isinstance(tfm[1], dict) else getattr(tfm[1], 'content', '')
-                    if isinstance(msg1_content, str) and "<context_summary>" in msg1_content:
-                        # It's a sliced view. Only sync if it's SHORTER than even the working history
-                        # we started with (which would imply a rollback happened inside the turn).
+                if len(tfm) > 0 and len(tfm) < len(session['history']):
+                    # Robust check: if ANY of the first few messages contain the compression marker, it's a slice.
+                    # This handles cases where System messages might be duplicated or shifted.
+                    from agent_cascade.prompts.dna import COMPRESSION_MARKER
+                    for m in tfm[:5]:
+                        content = m.get(CONTENT, '') if isinstance(m, dict) else getattr(m, 'content', '')
+                        if isinstance(content, str) and COMPRESSION_MARKER in content:
+                            is_slice = True
+                            break
+                    
+                    # Fallback: if we just started a turn and the number of messages returned 
+                    # matches our working set (plus any new responses), it's likely a slice.
+                    if not is_slice and 'working_history' in locals():
                         if len(tfm) >= len(working_history):
                             is_slice = True
-                
+
                 if not is_slice and len(tfm) < len(session['history']):
                     logger.info(f"Syncing history from agent state ({len(tfm)} vs {len(session['history'])} messages).")
                     session['history'].clear()
@@ -1308,6 +1336,90 @@ def create_app(agents, agent_pool, config=None):
                 return FileResponse(path, media_type='application/jsonlines', filename=os.path.basename(path))
         return JSONResponse(status_code=404, content={"message": "No telemetry data available"})
 
+    # ── API Router Endpoints ──────────────────────────────────────────────
+
+    @app.get("/api/endpoints")
+    async def api_list_endpoints():
+        """List all configured API endpoints and agent priorities."""
+        if agent_pool and hasattr(agent_pool, 'api_router'):
+            return agent_pool.api_router.to_dict()
+        return {"endpoints": [], "agent_priorities": {}}
+
+    @app.post("/api/endpoints")
+    async def api_add_endpoint(data: dict):
+        """Add a new API endpoint."""
+        if not agent_pool or not hasattr(agent_pool, 'api_router'):
+            return JSONResponse(status_code=500, content={"message": "No API router"})
+        
+        from api_router import APIEndpoint
+        try:
+            ep = APIEndpoint(
+                name=data.get('name', 'New Endpoint'),
+                api_base=data.get('api_base', ''),
+                api_key=data.get('api_key', 'EMPTY'),
+                model=data.get('model', ''),
+                model_type=data.get('model_type', 'qwenvl_oai'),
+                enabled=data.get('enabled', True),
+                max_retries=data.get('max_retries', 2),
+            )
+            ep_id = agent_pool.api_router.add_endpoint(ep)
+            await broadcast({'type': 'state', **build_state()})
+            return {"status": "ok", "endpoint_id": ep_id}
+        except Exception as e:
+            return JSONResponse(status_code=400, content={"message": str(e)})
+
+    @app.put("/api/endpoints/{endpoint_id}")
+    async def api_update_endpoint(endpoint_id: str, data: dict):
+        """Update an existing API endpoint."""
+        if not agent_pool or not hasattr(agent_pool, 'api_router'):
+            return JSONResponse(status_code=500, content={"message": "No API router"})
+        
+        ok = agent_pool.api_router.update_endpoint(endpoint_id, data)
+        if ok:
+            await broadcast({'type': 'state', **build_state()})
+            return {"status": "ok"}
+        return JSONResponse(status_code=404, content={"message": "Endpoint not found"})
+
+    @app.delete("/api/endpoints/{endpoint_id}")
+    async def api_delete_endpoint(endpoint_id: str):
+        """Delete an API endpoint."""
+        if not agent_pool or not hasattr(agent_pool, 'api_router'):
+            return JSONResponse(status_code=500, content={"message": "No API router"})
+        
+        ok = agent_pool.api_router.remove_endpoint(endpoint_id)
+        if ok:
+            await broadcast({'type': 'state', **build_state()})
+            return {"status": "ok"}
+        return JSONResponse(status_code=404, content={"message": "Endpoint not found"})
+
+    @app.post("/api/endpoints/priorities")
+    async def api_set_priorities(data: dict):
+        """Set agent-type API endpoint priorities.
+        
+        Body: { "agent_priorities": { "orchestrator": ["id1", "id2"], ... } }
+        """
+        if not agent_pool or not hasattr(agent_pool, 'api_router'):
+            return JSONResponse(status_code=500, content={"message": "No API router"})
+        
+        priorities = data.get('agent_priorities', {})
+        for agent_type, endpoint_ids in priorities.items():
+            agent_pool.api_router.set_agent_priorities(agent_type, endpoint_ids)
+        await broadcast({'type': 'state', **build_state()})
+        return {"status": "ok"}
+
+    @app.post("/api/endpoints/bulk")
+    async def api_bulk_update_endpoints(data: dict):
+        """Bulk update all endpoints and priorities (from UI save).
+        
+        Body: { "endpoints": [...], "agent_priorities": {...} }
+        """
+        if not agent_pool or not hasattr(agent_pool, 'api_router'):
+            return JSONResponse(status_code=500, content={"message": "No API router"})
+        
+        agent_pool.api_router.from_dict(data)
+        await broadcast({'type': 'state', **build_state()})
+        return {"status": "ok"}
+
     # ── WebSocket ─────────────────────────────────────────────────────────
 
     @app.websocket("/ws/chat")
@@ -1550,6 +1662,20 @@ def create_app(agents, agent_pool, config=None):
                                     agent_pool.operation_manager.set_base_dir(new_ws)
                     await broadcast({'type': 'state', **build_state()})
 
+                elif msg_type == 'update_endpoints':
+                    # Bulk update all endpoints and priorities from UI
+                    if agent_pool and hasattr(agent_pool, 'api_router'):
+                        agent_pool.api_router.from_dict(data)
+                    await broadcast({'type': 'state', **build_state()})
+
+                elif msg_type == 'update_api_priorities':
+                    # Update just the agent-type → endpoint priority mappings
+                    if agent_pool and hasattr(agent_pool, 'api_router'):
+                        priorities = data.get('agent_priorities', {})
+                        for agent_type, endpoint_ids in priorities.items():
+                            agent_pool.api_router.set_agent_priorities(agent_type, endpoint_ids)
+                    await broadcast({'type': 'state', **build_state()})
+
                 elif msg_type == 'approve':
                     rid = data.get('request_id')
                     if rid and agent_pool:
@@ -1678,33 +1804,51 @@ def create_app(agents, agent_pool, config=None):
                                     verdict_idx = -1
                                     final_verdict = None
                                     
+                                    # 2. Extract verdict: find [YES] or [NO] tokens (case-insensitive)
+                                    yes_matches = list(re.finditer(r'\[YES\]', check_text))
+                                    no_matches = list(re.finditer(r'\[NO\]', check_text))
+                                    
+                                    is_yes = len(yes_matches) > 0
+                                    is_no = len(no_matches) > 0
+                                    verdict_idx = -1
+                                    verdict_end_idx = -1
+                                    
                                     if is_yes or is_no:
-                                        yes_match = list(re.finditer(r'\[YES\]', check_text))
-                                        no_match = list(re.finditer(r'\[NO\]', check_text))
-                                        
-                                        last_yes = yes_match[-1].start() if yes_match else -1
-                                        last_no = no_match[-1].start() if no_match else -1
+                                        last_yes = yes_matches[-1].start() if yes_matches else -1
+                                        last_no = no_matches[-1].start() if no_matches else -1
                                         
                                         if last_yes > last_no:
                                             is_yes, is_no = True, False
                                             verdict_idx = last_yes
-                                            # Find the end of the matched YES token in original case clean_text
-                                            verdict_end_idx = yes_match[-1].end()
-                                            final_verdict = "YES"
+                                            verdict_end_idx = yes_matches[-1].end()
                                         else:
                                             is_yes, is_no = False, True
                                             verdict_idx = last_no
-                                            verdict_end_idx = no_match[-1].end()
-                                            final_verdict = "NO"
+                                            verdict_end_idx = no_matches[-1].end()
+                                            
+                                    # Fallback 1: Check for "Verdict: YES" or "Verdict: NO" without brackets
+                                    if not is_yes and not is_no:
+                                        v_yes = re.search(r'VERDICT:\s*YES', check_text)
+                                        v_no = re.search(r'VERDICT:\s*NO', check_text)
+                                        if v_yes and (not v_no or v_yes.start() > v_no.start()):
+                                            is_yes = True
+                                            verdict_idx = v_yes.start()
+                                            verdict_end_idx = v_yes.end()
+                                        elif v_no:
+                                            is_no = True
+                                            verdict_idx = v_no.start()
+                                            verdict_end_idx = v_no.end()
                                             
                                     # 3. Extract justification: everything AFTER the final verdict token
                                     justification = ""
                                     if verdict_idx != -1:
                                         justification = clean_text[verdict_end_idx:].strip()
+                                        # Clean up leftover markdown bolding (e.g. from **[YES]**) or common prefixes
+                                        justification = re.sub(r'^(\*\*|__)?[:\s-]*', '', justification).strip()
                                         # Strip leading "Reason:" or similar
-                                        justification = re.sub(r'^[:\s-]*(Reason|Justification|Verdict|Tips)[:\s-]*', '', justification, flags=re.IGNORECASE).strip()
+                                        justification = re.sub(r'^(Reason|Justification|Verdict|Tips)[:\s-]*', '', justification, flags=re.IGNORECASE).strip()
                                     
-                                    # Fallback: if no verdict found, look for safe/unsafe keywords in clean text
+                                    # Fallback 2: if no explicit verdict found, look for safe/unsafe keywords in clean text
                                     if not is_yes and not is_no:
                                         if "SAFE" in check_text and "UNSAFE" not in check_text:
                                             is_yes = True
@@ -1736,16 +1880,24 @@ def create_app(agents, agent_pool, config=None):
                                                 loop
                                             )
                                     else:
-                                        # Strict enforcement: Invalid format = Automatic NO (Safety)
-                                        logger.info(f"[SECURITY] Automatic Rejection for {rid} (Ambiguous/Invalid Format)")
-                                        reject_msg = f"SECURITY VERIFICATION FAILED: The security advisor provided an ambiguous response without a clear [YES] or [NO] verdict. For safety, the operation has been automatically rejected. Please try a different method or provide a clearer justification."
-                                        agent_pool.operation_manager.user_reject(rid, reject_msg)
-                                        
-                                        # Also notify the UI
-                                        asyncio.run_coroutine_threadsafe(
-                                            send_queue.put({'type': 'security_response', 'request_id': rid, 'response': display_response + f"\n\n**[AUTO-REJECTED: Ambiguous Format]**", 'verdict': 'AMBIGUOUS'}),
-                                            loop
-                                        )
+                                        if auto_apply:
+                                            # Strict enforcement: Invalid format = Automatic NO (Safety)
+                                            logger.info(f"[SECURITY] Automatic Rejection for {rid} (Ambiguous/Invalid Format)")
+                                            reject_msg = f"SECURITY VERIFICATION FAILED: The security advisor provided an ambiguous response without a clear [YES] or [NO] verdict. For safety, the operation has been automatically rejected. Please try a different method or provide a clearer justification."
+                                            agent_pool.operation_manager.user_reject(rid, reject_msg)
+                                            
+                                            # Also notify the UI
+                                            asyncio.run_coroutine_threadsafe(
+                                                send_queue.put({'type': 'security_response', 'request_id': rid, 'response': display_response + f"\n\n**[AUTO-REJECTED: Ambiguous Format]**", 'verdict': 'AMBIGUOUS'}),
+                                                loop
+                                            )
+                                        else:
+                                            # Manual mode: Let the user see the ambiguous response and decide
+                                            logger.info(f"[SECURITY] Ambiguous response for {rid} in manual mode. Waiting for user decision.")
+                                            asyncio.run_coroutine_threadsafe(
+                                                send_queue.put({'type': 'security_response', 'request_id': rid, 'response': display_response, 'verdict': 'AMBIGUOUS'}),
+                                                loop
+                                            )
                                 except Exception as e:
                                     logger.error(f"Security check failed: {e}")
                                     if auto_apply:

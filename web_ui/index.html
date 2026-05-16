@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2358a6ff'%3E%3Cpath d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
 </head>
 
@@ -381,6 +382,37 @@
           <!-- Agent & Tools Tab -->
           <div class="settings-tab-panel" id="settings-agent">
             <div class="settings-content">
+
+              <!-- API Endpoints Section -->
+              <div class="settings-section">
+                <h3 class="settings-section-title">API Endpoints
+                  <button id="btn-add-endpoint" class="btn-small" title="Add new API endpoint" style="margin-left:auto;font-size:11px;padding:2px 10px;">+ Add</button>
+                </h3>
+                <div id="api-endpoints-list" class="settings-section-body" style="gap:0;">
+                  <!-- Endpoint cards injected here by JS -->
+                  <div class="api-endpoint-empty" style="text-align:center;color:var(--text-dim);padding:12px;font-size:12px;">
+                    No extra endpoints configured. Agents use the General Settings API.
+                  </div>
+                </div>
+                <div style="padding:4px 8px;font-size:11px;color:var(--text-dim);">
+                  ℹ️ The General Settings API is always the last-resort fallback for all agents.
+                </div>
+              </div>
+
+              <!-- Agent API Assignments Section -->
+              <div class="settings-section">
+                <h3 class="settings-section-title">Agent API Assignments</h3>
+                <div id="agent-api-assignments" class="settings-section-body">
+                  <!-- Per-agent-type endpoint priority lists injected here by JS -->
+                  <div style="text-align:center;color:var(--text-dim);padding:12px;font-size:12px;">
+                    Add endpoints above, then assign them to agent types.
+                  </div>
+                </div>
+                <div style="padding:4px 8px;font-size:11px;color:var(--text-dim);">
+                  ℹ️ Agents try endpoints top-to-bottom. Falls back to General Settings API.
+                </div>
+              </div>
+
               <div class="settings-section">
                 <h3 class="settings-section-title">Agent Configuration</h3>
                 <div class="settings-section-body">
@@ -401,6 +433,10 @@
                   <label class="setting-field">
                     <span>Max Turns per Run</span>
                     <input type="number" id="setting-max-turns" min="1" max="500" value="50" />
+                  </label>
+                  <label class="setting-field">
+                    <span>Max Parallel Agents</span>
+                    <input type="number" id="setting-max-parallel" min="1" max="10" value="3" />
                   </label>
                   <label class="setting-field toggle-field">
                     <span>Auto-Continue (Truncation)</span>

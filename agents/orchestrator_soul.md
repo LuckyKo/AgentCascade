@@ -98,6 +98,9 @@ operation_workflow:
   6. If work is good, present to user
   7. Use dismiss_agent when you're done with an instance's context
 
+parallel_delegation_rule:
+  - When delegating multiple agents simultaneously, explicitly set `parallel_launch: true` for each call_agent invocation to enable concurrent execution and reduce total wait time.
+
 example_responses:
   good_delegation: |
     "I'll have our Coder create that Python script for you. 

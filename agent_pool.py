@@ -9,6 +9,7 @@ import copy
 import json
 import os
 import datetime
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -23,6 +24,7 @@ from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_logger import AgentInstanceLogger
 from telemetry import TelemetryCollector
 from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE, COMPRESSION_MARKER
+from api_router import APIRouter
 
 
 class AgentPool:
@@ -43,6 +45,12 @@ class AgentPool:
         # Initialize Telemetry Collector for performance tracking
         telemetry_dir = str(Path(DEFAULT_WORKSPACE) / 'telemetry')
         self.telemetry = TelemetryCollector(log_dir=telemetry_dir)
+        
+        # API Router for multi-endpoint management (uses llm_cfg as default fallback)
+        self.api_router = APIRouter(
+            default_llm_cfg=llm_cfg,
+            config_dir=str(Path(DEFAULT_WORKSPACE) / 'config')
+        )
         
         # Persistent conversation histories for each named instance
         self.instance_conversations: Dict[str, List] = {}
@@ -75,6 +83,14 @@ class AgentPool:
         
         # Backward compat: kept as a drain-only alias checked by legacy code
         self.async_message_queue: List[str] = []
+        
+        # Thread safety locks for parallel agent execution
+        self._state_lock = threading.Lock()           # Protects sub_agent_state, active_stack
+        self._conversation_lock = threading.Lock()    # Protects instance_conversations writes
+        
+        # Initialize Parallel Agent Manager
+        from agent_orchestrator import ParallelAgentManager
+        self.parallel_manager = ParallelAgentManager(self, max_workers=llm_cfg.get('max_parallel_agents', 3))
         
         # Auto-load all agents from the agents directory
         self._discover_agents()
@@ -356,6 +372,10 @@ rules:
                     if hasattr(agent.llm, 'base_url'):
                         agent.llm.base_url = val
         logger.debug("Propagated LLM config changes to all active agents in the pool.")
+        
+        # Keep the API Router's default fallback in sync with General Settings
+        if hasattr(self, 'api_router'):
+            self.api_router.update_default_llm_cfg(new_cfg)
     
     def list_agents(self) -> List[str]:
         """List all available agents."""

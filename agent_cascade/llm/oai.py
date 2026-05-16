@@ -144,23 +144,36 @@ class TextChatAtOAI(BaseFnCallModel):
                         target_model = m
                         break
                 
-                # 2. If no exact match and only one model, assume it's the one
+                # 2. If no exact match and only one model, assume it's the one 
+                # BUT ONLY if it's a plausible chat model and we are in dynamic mode.
                 if not target_model and len(data) == 1:
-                    target_model = data[0]
-                    if self.dynamic_model:
-                        new_model_id = target_model.get('id')
-                        logger.info(f"Auto-selected single available model '{new_model_id}' for calls and context detection.")
-                        self.model = new_model_id
-                        self.original_model = new_model_id
-                    else:
-                        logger.info(f"Using single available model '{target_model.get('id')}' for context detection.")
+                    m_id = data[0].get('id', '').lower()
+                    # Skip auto-selection for models that are clearly for other tasks (TTS, Whisper, etc.)
+                    non_chat_keywords = ['whisper', 'tts-', '-tts', 'embedding', 'rerank']
+                    is_plausible_chat = not any(k in m_id for k in non_chat_keywords)
+                    
+                    if is_plausible_chat:
+                        if self.dynamic_model:
+                            target_model = data[0]
+                            new_model_id = target_model.get('id')
+                            logger.info(f"Auto-selected single available model '{new_model_id}' for calls and context detection.")
+                            self.model = new_model_id
+                            self.original_model = new_model_id
+                        else:
+                            # User provided a model name, but it wasn't in the list. 
+                            # We can use the single available model for CONTEXT detection, but we keep the user's name for calls.
+                            target_model = data[0]
+                            logger.info(f"Using single available model '{target_model.get('id')}' for context length detection fallback.")
                 
                 # 3. Special case for LM Studio / whatever_is_on
                 if not target_model and (self.model == 'whatever_is_on' or not data):
                     # Use the first model if it exists and looks plausible
                     if data:
-                        target_model = data[0]
-                        logger.info(f"Picking first available model '{target_model.get('id')}' for potential context detection.")
+                        m_id = data[0].get('id', '').lower()
+                        non_chat_keywords = ['whisper', 'tts-', '-tts', 'embedding', 'rerank']
+                        if not any(k in m_id for k in non_chat_keywords):
+                            target_model = data[0]
+                            logger.info(f"Picking first available model '{target_model.get('id')}' for potential context detection.")
                 
                 if target_model:
                     # 4. Extract context length from model object (check direct and nested config)

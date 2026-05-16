@@ -725,6 +725,27 @@ function handleServerMessage(data) {
         updateTelemetryPanel(data.telemetry);
       }
 
+      if (data.api_router) {
+        if (!state.api_router) state.api_router = { endpoints: [], agent_priorities: {} };
+        
+        // Prevent overwriting local state and stealing focus if the user is actively editing
+        const epList = document.getElementById('api-endpoints-list');
+        const assignList = document.getElementById('agent-api-assignments');
+        
+        const isEditingEndpoints = epList && epList.contains(document.activeElement);
+        const isEditingAssignments = assignList && assignList.contains(document.activeElement);
+        
+        if (!isEditingEndpoints) {
+          state.api_router.endpoints = data.api_router.endpoints || [];
+          renderApiEndpoints();
+        }
+        
+        if (!isEditingAssignments) {
+          state.api_router.agent_priorities = data.api_router.agent_priorities || {};
+          renderAgentApiAssignments();
+        }
+      }
+
       if (data.current_model && statusModel) {
         statusModel.textContent = data.current_model;
       }
@@ -822,7 +843,11 @@ function handleServerMessage(data) {
               switchMainTab('sub-' + topAgent);
             }
           } else {
-            switchMainTab('chat');
+            // Only auto-switch back to chat if the user isn't already looking at a sub-agent tab.
+            // This allows them to keep reading the sub-agent output even after it finishes.
+            if (!state.activeSubTab || !state.activeSubTab.startsWith('sub-')) {
+              switchMainTab('chat');
+            }
           }
         }
       }
@@ -1005,12 +1030,16 @@ function updateMainActivityBar() {
     bar.classList.add('active');
     if (chatTab) chatTab.classList.add('agent-active');
 
-    const msgs = state.messages || [];
-    const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
-    if (lastMsg) {
-      activityText.textContent = getActivityPreview(lastMsg);
+    if (state.is_waiting) {
+      activityText.innerHTML = '<span class="waiting-spin">⏳</span> Waiting for API slot...';
     } else {
-      activityText.textContent = 'Agent Starting...';
+      const msgs = state.messages || [];
+      const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+      if (lastMsg) {
+        activityText.textContent = getActivityPreview(lastMsg);
+      } else {
+        activityText.textContent = 'Agent Starting...';
+      }
     }
     if (state.totalTokens !== undefined) {
       activityText.textContent += ` (${state.totalWords} words, ${state.totalTokens} tokens)`;
@@ -1209,14 +1238,31 @@ function setInnerHtmlWithState(el, html) {
 function renderMarkdown(text) {
   if (!text || !text.trim()) return '';
 
-  // Handle <think> tags in content (fallback for models that don't use reasoning_content field)
-  const thinkMatch = text.match(/<think>([\s\S]*?)(<\/think>|$)/);
+  // Handle <think> tags or Gemma-style thought tags in content
+  let thought = null;
+  let isOpen = false;
+  let before = '';
+  let after = '';
+  let tagLen = 0;
+
+  const thinkMatch = text.match(/<think>([\s\S]*?)(<\/think>|$)/i);
+  const gemmaMatch = text.match(/<\|channel>thought([\s\S]*?)(<channel\|>|$)/i);
+
   if (thinkMatch) {
-    const thought = thinkMatch[1];
-    const isOpen = !text.includes('</think>');
-    const before = text.substring(0, text.indexOf('<think>'));
-    const after = text.includes('</think>') ? text.substring(text.indexOf('</think>') + 8) : '';
-    
+    thought = thinkMatch[1];
+    isOpen = !text.includes('</think>');
+    before = text.substring(0, text.indexOf('<think>'));
+    after = text.includes('</think>') ? text.substring(text.indexOf('</think>') + 8) : '';
+  } else if (gemmaMatch) {
+    thought = gemmaMatch[1];
+    isOpen = !text.toLowerCase().includes('<channel|>');
+    const startIdx = text.toLowerCase().indexOf('<|channel>thought');
+    before = text.substring(0, startIdx);
+    const endIdx = text.toLowerCase().indexOf('<channel|>');
+    after = endIdx !== -1 ? text.substring(endIdx + 11) : '';
+  }
+
+  if (thought !== null) {
     let html = '';
     if (before.trim()) html += renderMarkdown(before);
     html += renderThinkingBlock(thought, isOpen);
@@ -1719,44 +1765,6 @@ function renderSubAgents() {
       mainTabPanels.appendChild(panel);
     }
 
-    // Ensure input area exists for sub-agent direct interaction
-    let inputArea = panel.querySelector('.input-area');
-    if (!inputArea) {
-      inputArea = document.createElement('div');
-      inputArea.className = 'input-area';
-      inputArea.innerHTML = `
-        <div class="input-wrapper">
-          <textarea placeholder="Message ${name}..." rows="1"></textarea>
-          <div class="sub-input-btns" style="display: flex; gap: 4px; align-items: center;">
-            <button class="btn btn-secondary sub-continue-btn" title="Continue (Ctrl+Shift+Enter)" style="padding: 6px 8px; font-size: 12px;">⏩</button>
-            <button class="btn btn-primary send-btn" title="Send (Enter)">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-                <path d="M2 21l21-9L2 3v7l15 2-15 2z" />
-              </svg>
-            </button>
-          </div>
-        </div>
-      `;
-      const textarea = inputArea.querySelector('textarea');
-      const sendBtn = inputArea.querySelector('.send-btn');
-      const contBtn = inputArea.querySelector('.sub-continue-btn');
-
-      textarea.addEventListener('input', () => autoResize(textarea));
-      textarea.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-          e.preventDefault();
-          sendMessage(textarea);
-        } else if (e.key === 'Enter' && e.shiftKey && e.ctrlKey) {
-          e.preventDefault();
-          continueMessage();
-        }
-      });
-      sendBtn.onclick = () => sendMessage(textarea);
-      if (contBtn) contBtn.onclick = () => continueMessage();
-
-      // We'll append it before the activity bar in renderSubAgentPanel
-    }
-
     // Render sub-agent messages into the panel
     renderSubAgentPanel(panel, sa[name], name);
 
@@ -1772,25 +1780,21 @@ function renderSubAgents() {
 }
 
 function renderSubAgentPanel(panel, agentData, name) {
+  const isVisible = state.activeSubTab === 'sub-' + name;
   const msgs = agentData.messages || [];
+  const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
 
-  const fillEl = document.getElementById('subContextFill-' + name);
-  if (fillEl) {
-    updateContextBar(fillEl, msgs, agentData.total_tokens, agentData.max_tokens);
-  }
-
-  // 1. Ensure scroll container exists
-  let scrollContainer = panel.querySelector('.sub-agent-messages');
-  if (!scrollContainer) {
-    scrollContainer = document.createElement('div');
-    scrollContainer.className = 'sub-agent-messages';
+  // 1. Ensure basic structure exists (once)
+  if (!panel.dataset.initialized) {
+    panel.dataset.initialized = "true";
+    
+    // Scroll Container
+    const scrollContainer = document.createElement('div');
+    scrollContainer.className = 'sub-agent-messages messages-scroll';
     panel.appendChild(scrollContainer);
-  }
-
-  // 2. Ensure activity bar exists and is at the bottom
-  let activityBar = panel.querySelector('.sub-agent-activity-bar');
-  if (!activityBar) {
-    activityBar = document.createElement('div');
+    
+    // Activity Bar
+    const activityBar = document.createElement('div');
     activityBar.className = 'sub-agent-activity-bar';
     activityBar.innerHTML = `
       <div class="activity-status">
@@ -1802,20 +1806,15 @@ function renderSubAgentPanel(panel, agentData, name) {
       <button class="btn btn-danger btn-sm terminate-btn" style="margin-left: auto; display: none; padding: 2px 8px; font-size: 11px;">Terminate</button>
     `;
     panel.appendChild(activityBar);
-  }
+    
+    const terminateBtn = activityBar.querySelector('.terminate-btn');
+    terminateBtn.onclick = () => {
+      send({ type: 'terminate_sub_agent', instance_name: name });
+      switchMainTab('chat');
+    };
 
-  const terminateBtn = activityBar.querySelector('.terminate-btn');
-  terminateBtn.onclick = () => {
-    send({ type: 'terminate_sub_agent', instance_name: name });
-    // Return focus to main chat tab
-    switchMainTab('chat');
-  };
-
-  // 3. Ensure input area is present and correctly ordered
-  let inputArea = panel.querySelector('.input-area');
-  if (!inputArea) {
-    // If not created in renderSubAgents (first run), create now
-    inputArea = document.createElement('div');
+    // Input Area
+    const inputArea = document.createElement('div');
     inputArea.className = 'input-area';
     inputArea.innerHTML = `
       <div class="input-wrapper">
@@ -1846,44 +1845,52 @@ function renderSubAgentPanel(panel, agentData, name) {
     });
     sendBtn.onclick = () => sendMessage(textarea);
     if (contBtn) contBtn.onclick = () => continueMessage();
+    
+    // Insert input area BEFORE activity bar
     panel.insertBefore(inputArea, activityBar);
-  } else {
-    // Ensure it's before activity bar
-    if (inputArea.nextSibling !== activityBar) {
-      panel.insertBefore(inputArea, activityBar);
-    }
   }
 
-  // 4. Always update activity bar status
+  const activityBar = panel.querySelector('.sub-agent-activity-bar');
+  const scrollContainer = panel.querySelector('.sub-agent-messages');
+  const terminateBtn = activityBar.querySelector('.terminate-btn');
   const activityText = activityBar.querySelector('.activity-text');
-  const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+  const queuedEl = activityBar.querySelector('.activity-queued');
+
+  // 2. Always update activity status (so pulses/dots are current even when hidden)
   if (agentData.active) {
     activityBar.classList.add('active');
-    if (lastMsg) {
-      activityText.textContent = getActivityPreview(lastMsg);
-    } else {
-      activityText.textContent = 'Agent Starting...';
+    let status = 'Agent Starting...';
+    
+    if (agentData.is_waiting) {
+      status = 'Waiting for API slot...';
+    } else if (lastMsg) {
+      status = getActivityPreview(lastMsg);
     }
-    // Update sub-agent stats in activity bar
+    
     if (agentData.total_tokens !== undefined) {
-      activityText.textContent += ` (${agentData.total_words} words, ${agentData.total_tokens} tokens)`;
+      status += ` (${agentData.total_words} words, ${agentData.total_tokens} tokens)`;
     }
+    if (activityText.textContent !== status) activityText.textContent = status;
     terminateBtn.style.display = 'block';
   } else {
     activityBar.classList.remove('active');
-    activityText.textContent = 'Agent Idle';
+    if (activityText.textContent !== 'Agent Idle') activityText.textContent = 'Agent Idle';
     terminateBtn.style.display = 'none';
   }
+  if (queuedEl) queuedEl.style.display = agentData.has_queued_messages ? 'block' : 'none';
 
-  // Persistent Queue Notification
-  const queuedEl = activityBar.querySelector('.activity-queued');
-  if (queuedEl) {
-    queuedEl.style.display = agentData.has_queued_messages ? 'block' : 'none';
+  // 3. LAZY RENDERING: Skip expensive message work if the tab isn't visible
+  if (!isVisible) return;
+
+  // 4. Update Context Bar (only if visible)
+  const fillEl = document.getElementById('subContextFill-' + name);
+  if (fillEl) {
+    updateContextBar(fillEl, msgs, agentData.total_tokens, agentData.max_tokens);
   }
 
   const wasAtBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 50;
 
-  // 4. Only re-render messages if content changed
+  // 5. Check Content Key to skip redundant renders
   const lastMsgTextLen = (() => {
     if (!lastMsg) return 0;
     if (Array.isArray(lastMsg.content)) {
@@ -1892,14 +1899,15 @@ function renderSubAgentPanel(panel, agentData, name) {
     return String(lastMsg.content || '').length;
   })();
   const funcCallLen = (lastMsg && lastMsg.function_call && lastMsg.function_call.arguments) ? String(lastMsg.function_call.arguments).length : 0;
-  const contentKey = msgs.length + ':' + lastMsgTextLen + ':' + (lastMsg ? String(lastMsg.reasoning_content || '').length : 0) + ':' + funcCallLen;
-  if (panel.dataset.contentKey === contentKey || (state.editingIndex !== null && state.editingInstance === name)) {
+  const contentKey = msgs.length + ':' + lastMsgTextLen + ':' + (lastMsg ? String(lastMsg.reasoning_content || '').length : 0) + ':' + funcCallLen + ':' + agentData.active;
+  
+  if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === msgs.length) {
     if (wasAtBottom) scrollContainer.scrollTop = scrollContainer.scrollHeight;
     return;
   }
   panel.dataset.contentKey = contentKey;
 
-  // 5. Render messages incrementally
+  // 6. Incremental Rendering
   const currentCount = msgs.length;
   const lastCount = parseInt(panel.dataset.lastRenderedCount || '0');
 
@@ -1915,7 +1923,6 @@ function renderSubAgentPanel(panel, agentData, name) {
       const el = createSubMsgEl(msgs[i], i, name, agentData.active && i === currentCount - 1);
       scrollContainer.appendChild(el);
     }
-
     // Update the last message if it's still being generated
     if (scrollContainer.lastElementChild) {
       updateSubBubbleContent(scrollContainer.lastElementChild, msgs[currentCount - 1], agentData.active);
@@ -1923,7 +1930,6 @@ function renderSubAgentPanel(panel, agentData, name) {
   }
   panel.dataset.lastRenderedCount = currentCount;
 
-  // 6. Final scroll
   if (wasAtBottom) scrollContainer.scrollTop = scrollContainer.scrollHeight;
 }
 
@@ -2020,19 +2026,7 @@ function updateSubBubbleContent(bubble, msg, isGenerating) {
   } else if (msg.role === 'function') {
     html += renderToolResult(msg);
   } else {
-    const textContent = msg.content || '';
-    const thinkMatch = textContent.match(/<think>([\s\S]*?)(<\/think>|$)/);
-    if (thinkMatch) {
-      const thought = thinkMatch[1];
-      const isOpen = !textContent.includes('</think>');
-      const before = textContent.substring(0, textContent.indexOf('<think>'));
-      const after = textContent.includes('</think>') ? textContent.substring(textContent.indexOf('</think>') + 8) : '';
-      if (before.trim()) html += renderMarkdown(before);
-      html += renderThinkingBlock(thought, isOpen);
-      if (after.trim()) html += renderMarkdown(after);
-    } else {
-      html += renderMarkdown(textContent);
-    }
+    html += renderMarkdown(msg.content || '');
   }
 
   setInnerHtmlWithState(content, html);
@@ -2663,6 +2657,7 @@ function getGenerateCfg() {
   if ($('#setting-max-context')) cfg.max_input_tokens = parseInt($('#setting-max-context').value) || 32768;
 
   if ($('#setting-max-turns')) cfg.max_turns = parseInt($('#setting-max-turns').value) || 50;
+  if ($('#setting-max-parallel')) cfg.max_parallel_agents = parseInt($('#setting-max-parallel').value) || 3;
   if ($('#setting-auto-continue')) cfg.auto_continue = $('#setting-auto-continue').checked;
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
@@ -2904,3 +2899,316 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     }
   });
 });
+
+// ── API Router Management ──────────────────────────────────────────────────
+
+function renderApiEndpoints() {
+  const listEl = document.getElementById('api-endpoints-list');
+  if (!listEl) return;
+
+  const endpoints = (state.api_router && state.api_router.endpoints) ? state.api_router.endpoints : [];
+  
+  if (endpoints.length === 0) {
+    listEl.innerHTML = `
+      <div class="api-endpoint-empty" style="text-align:center;color:var(--text-dim);padding:12px;font-size:12px;">
+        No extra endpoints configured. Agents use the General Settings API.
+      </div>`;
+    return;
+  }
+
+  // Preserve open states
+  const openDetails = new Set();
+  listEl.querySelectorAll('.api-endpoint-details.open').forEach(el => {
+    openDetails.add(el.dataset.id);
+  });
+
+  listEl.innerHTML = endpoints.map((ep, index) => {
+    const isFirst = index === 0;
+    const isLast = index === endpoints.length - 1;
+    const isOpen = openDetails.has(ep.id);
+    
+    return `
+      <div class="api-endpoint-card ${ep.enabled ? '' : 'disabled'}" data-id="${escapeHtml(ep.id)}">
+        <div class="api-endpoint-header">
+          <input type="checkbox" class="api-endpoint-toggle" ${ep.enabled ? 'checked' : ''} title="Enable/Disable">
+          <div class="api-endpoint-name" title="${escapeHtml(ep.name)}">${escapeHtml(ep.name)}</div>
+          <div class="api-endpoint-meta">${escapeHtml(ep.model || 'No model specified')}</div>
+          
+          <div class="api-endpoint-arrows">
+            <button class="api-endpoint-move-up" ${isFirst ? 'disabled style="opacity:0.2"' : ''} title="Move Up">▲</button>
+            <button class="api-endpoint-move-down" ${isLast ? 'disabled style="opacity:0.2"' : ''} title="Move Down">▼</button>
+          </div>
+          <button class="api-endpoint-expand ${isOpen ? 'open' : ''}">▸</button>
+        </div>
+        
+        <div class="api-endpoint-details ${isOpen ? 'open' : ''}" data-id="${escapeHtml(ep.id)}">
+          <label class="setting-field">
+            <span>Name</span>
+            <input type="text" class="ep-input-name" value="${escapeHtml(ep.name)}">
+          </label>
+          <label class="setting-field">
+            <span>API Endpoint</span>
+            <input type="text" class="ep-input-base" value="${escapeHtml(ep.api_base)}">
+          </label>
+          <label class="setting-field">
+            <span>API Key</span>
+            <div class="api-key-field">
+              <input type="password" class="ep-input-key" value="${escapeHtml(ep.api_key)}">
+              <button class="api-key-toggle" title="Show/Hide">👁</button>
+            </div>
+          </label>
+          <div style="display:flex;gap:8px;">
+            <label class="setting-field" style="flex:2;">
+              <span>Model</span>
+              <input type="text" class="ep-input-model" value="${escapeHtml(ep.model)}">
+            </label>
+            <label class="setting-field" style="flex:1;">
+              <span>Retries</span>
+              <input type="number" min="0" max="10" class="ep-input-retries" value="${ep.max_retries}">
+            </label>
+            <label class="setting-field" style="flex:1;">
+              <span>Concurrency</span>
+              <input type="number" min="0" max="100" class="ep-input-concurrency" value="${ep.concurrency_limit || 0}" title="0 = Unlimited. Set to 1 for local servers like LM Studio.">
+            </label>
+          </div>
+          <button class="api-endpoint-delete">Delete Endpoint</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Bind Events
+  listEl.querySelectorAll('.api-endpoint-card').forEach(card => {
+    const id = card.dataset.id;
+    const ep = endpoints.find(e => e.id === id);
+    if (!ep) return;
+
+    // Toggle Enable
+    card.querySelector('.api-endpoint-toggle').addEventListener('change', (e) => {
+      ep.enabled = e.target.checked;
+      sendApiRouterUpdate();
+    });
+
+    // Expand/Collapse
+    card.querySelector('.api-endpoint-expand').addEventListener('click', (e) => {
+      const btn = e.target;
+      const details = card.querySelector('.api-endpoint-details');
+      btn.classList.toggle('open');
+      details.classList.toggle('open');
+    });
+
+    // API Key Show/Hide
+    card.querySelector('.api-key-toggle').addEventListener('click', (e) => {
+      const input = card.querySelector('.ep-input-key');
+      if (input.type === 'password') {
+        input.type = 'text';
+        e.target.style.color = 'var(--accent)';
+      } else {
+        input.type = 'password';
+        e.target.style.color = '';
+      }
+    });
+
+    // Move Up
+    card.querySelector('.api-endpoint-move-up').addEventListener('click', () => {
+      const idx = endpoints.indexOf(ep);
+      if (idx > 0) {
+        [endpoints[idx-1], endpoints[idx]] = [endpoints[idx], endpoints[idx-1]];
+        sendApiRouterUpdate();
+      }
+    });
+
+    // Move Down
+    card.querySelector('.api-endpoint-move-down').addEventListener('click', () => {
+      const idx = endpoints.indexOf(ep);
+      if (idx < endpoints.length - 1) {
+        [endpoints[idx+1], endpoints[idx]] = [endpoints[idx], endpoints[idx+1]];
+        sendApiRouterUpdate();
+      }
+    });
+
+    // Delete
+    card.querySelector('.api-endpoint-delete').addEventListener('click', () => {
+      if (confirm(`Delete endpoint "${ep.name}"?`)) {
+        state.api_router.endpoints = endpoints.filter(e => e.id !== id);
+        // Clean up assignments
+        if (state.api_router.agent_priorities) {
+          for (const type in state.api_router.agent_priorities) {
+            state.api_router.agent_priorities[type] = state.api_router.agent_priorities[type].filter(e => e !== id);
+          }
+        }
+        sendApiRouterUpdate();
+      }
+    });
+
+    // Inputs blur (save on edit)
+    const saveEdits = () => {
+      ep.name = card.querySelector('.ep-input-name').value.trim();
+      ep.api_base = card.querySelector('.ep-input-base').value.trim();
+      ep.api_key = card.querySelector('.ep-input-key').value.trim() || 'EMPTY';
+      ep.model = card.querySelector('.ep-input-model').value.trim();
+      ep.max_retries = parseInt(card.querySelector('.ep-input-retries').value) || 0;
+      ep.concurrency_limit = parseInt(card.querySelector('.ep-input-concurrency').value) || 0;
+      sendApiRouterUpdate();
+    };
+
+    card.querySelectorAll('input:not(.api-endpoint-toggle)').forEach(input => {
+      input.addEventListener('blur', saveEdits);
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          input.blur();
+        }
+      });
+    });
+  });
+}
+
+function renderAgentApiAssignments() {
+  const container = document.getElementById('agent-api-assignments');
+  if (!container || !state.api_router || !state.agents) return;
+
+  const endpoints = state.api_router.endpoints || [];
+  const priorities = state.api_router.agent_priorities || {};
+
+  // Extract unique agent types from loaded agents
+  const agentTypes = [...new Set(state.agents.map(a => a.name.toLowerCase()))];
+  // Ensure orchestrator and coder are always in the list even if missing
+  if (!agentTypes.includes('orchestrator')) agentTypes.unshift('orchestrator');
+  if (!agentTypes.includes('coder')) agentTypes.push('coder');
+
+  if (endpoints.length === 0) {
+    container.innerHTML = `
+      <div style="text-align:center;color:var(--text-dim);padding:12px;font-size:12px;">
+        Add endpoints above, then assign them to agent types.
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = agentTypes.map(type => {
+    const assignedIds = priorities[type] || [];
+    const availableEndpoints = endpoints.filter(ep => !assignedIds.includes(ep.id));
+    
+    let addSelectHtml = '';
+    if (availableEndpoints.length > 0) {
+      addSelectHtml = `
+        <select class="agent-api-add-select">
+          <option value="">+ Add Endpoint</option>
+          ${availableEndpoints.map(ep => `<option value="${escapeHtml(ep.id)}">${escapeHtml(ep.name)}</option>`).join('')}
+        </select>
+      `;
+    }
+
+    let listHtml = assignedIds.map((eid, idx) => {
+      const ep = endpoints.find(e => e.id === eid);
+      if (!ep) return '';
+      return `
+        <div class="agent-api-priority-item">
+          <span class="priority-num">${idx + 1}.</span>
+          <span class="priority-name" title="${escapeHtml(ep.name)}">${escapeHtml(ep.name)}</span>
+          <button class="agent-api-move-up" data-id="${escapeHtml(eid)}" ${idx === 0 ? 'disabled style="opacity:0.2"' : ''}>▲</button>
+          <button class="agent-api-move-down" data-id="${escapeHtml(eid)}" ${idx === assignedIds.length - 1 ? 'disabled style="opacity:0.2"' : ''}>▼</button>
+          <button class="agent-api-remove" data-id="${escapeHtml(eid)}">✕</button>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div class="agent-api-assignment" data-type="${escapeHtml(type)}">
+        <div class="agent-api-assignment-header">
+          <div class="agent-api-assignment-name">${type.charAt(0).toUpperCase() + type.slice(1)}:</div>
+          <div class="agent-api-assignment-add">
+            ${addSelectHtml}
+          </div>
+        </div>
+        ${listHtml ? `<div class="agent-api-assignment-list">${listHtml}</div>` : `<div class="agent-api-default-label">(using General Settings API default)</div>`}
+      </div>
+    `;
+  }).join('');
+
+  // Bind Events
+  container.querySelectorAll('.agent-api-assignment').forEach(block => {
+    const type = block.dataset.type;
+    const assignedIds = priorities[type] || [];
+
+    // Add Select
+    const select = block.querySelector('.agent-api-add-select');
+    if (select) {
+      select.addEventListener('change', (e) => {
+        const id = e.target.value;
+        if (id) {
+          if (!priorities[type]) priorities[type] = [];
+          priorities[type].push(id);
+          sendApiRouterUpdate();
+        }
+      });
+    }
+
+    // List actions
+    block.querySelectorAll('.agent-api-priority-item').forEach(item => {
+      const id = item.querySelector('.agent-api-remove').dataset.id;
+      
+      item.querySelector('.agent-api-remove').addEventListener('click', () => {
+        priorities[type] = priorities[type].filter(eid => eid !== id);
+        if (priorities[type].length === 0) delete priorities[type];
+        sendApiRouterUpdate();
+      });
+
+      const upBtn = item.querySelector('.agent-api-move-up');
+      if (upBtn) {
+        upBtn.addEventListener('click', () => {
+          const idx = priorities[type].indexOf(id);
+          if (idx > 0) {
+            [priorities[type][idx-1], priorities[type][idx]] = [priorities[type][idx], priorities[type][idx-1]];
+            sendApiRouterUpdate();
+          }
+        });
+      }
+
+      const downBtn = item.querySelector('.agent-api-move-down');
+      if (downBtn) {
+        downBtn.addEventListener('click', () => {
+          const idx = priorities[type].indexOf(id);
+          if (idx < priorities[type].length - 1) {
+            [priorities[type][idx+1], priorities[type][idx]] = [priorities[type][idx], priorities[type][idx+1]];
+            sendApiRouterUpdate();
+          }
+        });
+      }
+    });
+  });
+}
+
+function sendApiRouterUpdate() {
+  if (!state.api_router) return;
+  // Send the bulk update via WebSocket
+  send({
+    type: 'update_endpoints',
+    endpoints: state.api_router.endpoints || [],
+    agent_priorities: state.api_router.agent_priorities || {}
+  });
+  // Optimistically re-render locally
+  renderApiEndpoints();
+  renderAgentApiAssignments();
+}
+
+const btnAddEndpoint = document.getElementById('btn-add-endpoint');
+if (btnAddEndpoint) {
+  btnAddEndpoint.addEventListener('click', (e) => {
+    e.stopPropagation(); // Prevent the settings section from collapsing
+    if (!state.api_router) state.api_router = { endpoints: [], agent_priorities: {} };
+    if (!state.api_router.endpoints) state.api_router.endpoints = [];
+    
+    // Add a new blank endpoint
+    state.api_router.endpoints.push({
+      id: crypto.randomUUID(),
+      name: 'New Endpoint',
+      api_base: 'http://localhost:1234/v1',
+      api_key: 'EMPTY',
+      model: '',
+      enabled: true,
+      max_retries: 2
+    });
+    
+    sendApiRouterUpdate();
+  });
+}
