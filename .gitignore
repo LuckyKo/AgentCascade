@@ -65,3 +65,6 @@ agent-cascade-docs/website/.source-docs/
 agent-cascade-docs/website/last-sync.json
 agent-cascade-docs/website/_pagefind/
 agent-cascade-docs/website/*.tsbuildinfo
+  
+# Temporary directory  
+temp/ 
