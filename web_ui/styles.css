@@ -985,6 +985,10 @@ body {
   opacity: 1;
 }
 
+.sub-msg:hover .msg-actions {
+  opacity: 1;
+}
+
 .msg-user {
   background: var(--user-bg);
   border-color: var(--user-border);
@@ -1202,6 +1206,11 @@ body {
   gap: 8px;
   margin-top: 8px;
   justify-content: flex-end;
+}
+
+.edit-toolbar .btn {
+  min-width: 80px;
+  flex-shrink: 0;
 }
 
 /* ─── Approvals ───────────────────────────────────────────────────────────── */

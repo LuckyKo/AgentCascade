@@ -729,9 +729,9 @@ def create_app(agents, agent_pool, config=None):
                 return new_cfg
 
             ui_cfg = sanitize_cfg(ui_cfg)
-            mcp_servers = ui_cfg.pop('mcpServers', None)
-            disabled_tools = ui_cfg.pop('disabled_tools', None)
-            work_access_folders = ui_cfg.pop('work_access_folders', None)
+            mcp_servers = ui_cfg.get('mcpServers')
+            disabled_tools = ui_cfg.get('disabled_tools')
+            work_access_folders = ui_cfg.get('work_access_folders')
 
             # Keys that should not be passed to the underlying LLM chat API
             NON_LLM_KEYS = (

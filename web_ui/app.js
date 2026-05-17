@@ -1481,11 +1481,13 @@ function startEdit(index, selectedText = '', proportion = 0, instanceName = null
   toolbar.className = 'edit-toolbar';
 
   const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn btn-primary btn-sm';
+  saveBtn.textContent = 'Save';
   saveBtn.onclick = () => finishEdit(index, textarea.value, instanceName);
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn btn-secondary btn-sm';
-  cancelBtn.textContent = '✗ Cancel';
+  cancelBtn.textContent = 'Cancel';
   cancelBtn.onclick = () => cancelEdit(index, instanceName);
 
   toolbar.appendChild(saveBtn);

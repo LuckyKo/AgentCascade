@@ -187,13 +187,38 @@ class Agent(ABC):
         subclasses should call this instead of manually reading disabled_tools.
         """
         disabled_map = getattr(self.llm, 'generate_cfg', {}).get('disabled_tools', {})
+        
+        # Check both display name and slugified name for robustness
         disabled = set(disabled_map.get(self.name, []))
+        if self.name:
+            slug = self.name.lower().replace(' ', '_')
+            if slug in disabled_map:
+                disabled.update(disabled_map[slug])
+        
+        # Also check agent_type if available
+        agent_type = getattr(self, 'agent_type', None)
+        if agent_type and agent_type in disabled_map:
+            disabled.update(disabled_map[agent_type])
+            
         return [func.function for name, func in self.function_map.items() if name not in disabled]
 
     def _get_disabled_tool_names(self) -> set:
         """Return the set of currently disabled tool names for this agent."""
         disabled_map = getattr(self.llm, 'generate_cfg', {}).get('disabled_tools', {})
-        return set(disabled_map.get(self.name, []))
+        
+        # Check both display name and slugified name for robustness
+        disabled = set(disabled_map.get(self.name, []))
+        if self.name:
+            slug = self.name.lower().replace(' ', '_')
+            if slug in disabled_map:
+                disabled.update(disabled_map[slug])
+
+        # Also check agent_type if available
+        agent_type = getattr(self, 'agent_type', None)
+        if agent_type and agent_type in disabled_map:
+            disabled.update(disabled_map[agent_type])
+            
+        return disabled
 
     def _call_tool(self, tool_name: str, tool_args: Union[str, dict] = '{}', **kwargs) -> Union[str, List[ContentItem]]:
         """The interface of calling tools for the agent.
