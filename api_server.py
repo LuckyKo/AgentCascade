@@ -467,15 +467,30 @@ def create_app(agents, agent_pool, config=None):
         if agent_pool and hasattr(agent_pool, 'sub_agent_state'):
             for name, state in agent_pool.sub_agent_state.items():
                 msgs = state.get('messages', [])
+                msg_count = len(msgs)
                 agent_class = state.get('agent_name', name)
                 
                 # Get max tokens for this agent class
                 agent_template = agent_pool.get_agent(agent_class)
                 max_tokens = get_agent_max_tokens(agent_template) if agent_template else 58000
                 
-                # Calculate tokens for the active 'working set' (after compression)
-                active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
-                stats = get_history_stats(active_msgs)
+                # FIX2: Only re-tokenize when the sub-agent's message list actually grows.
+                # During streaming, sub-agent histories are mostly static — they only change
+                # when a new message arrives from that sub-agent (rare during main agent ticks).
+                cache_key = '_sa_stats_' + name
+                last_count = session.get(cache_key + '_count', -1)
+                if msg_count > last_count:
+                    # New message(s) added — compute full stats via tiktoken
+                    active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
+                    stats = get_history_stats(active_msgs)
+                    session[cache_key + '_count'] = msg_count
+                elif cache_key in session:
+                    # Same messages AND cache exists — use cached stats (avoids tiktoken.encode per tick)
+                    stats = session.get(cache_key, {'tokens': 0, 'words': 0}).copy()
+                else:
+                    # First access or cache missing — compute stats to populate the cache
+                    active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
+                    stats = get_history_stats(active_msgs)
                 
                 # Dynamically extract summary from messages if missing from tracker (e.g. after restart)
                 summary = agent_pool.instance_summaries.get(name, "")
@@ -632,7 +647,18 @@ def create_app(agents, agent_pool, config=None):
         else:
             h_stats = cached_h_stats
             
-        r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
+        # FIX1: Only recompute response stats when new messages are added, not during streaming growth
+        resp_len_stats = len(responses) if responses else 0
+        if resp_len_stats > session.get('_last_resp_len_stats', 0):
+            # New message(s) added — compute full stats via tiktoken
+            r_stats = get_history_stats(responses)
+        else:
+            # Same messages, just growing text — use cached stats (avoids tiktoken.encode)
+            r_stats = session.get('_cached_r_stats', {'tokens': 0, 'words': 0}).copy()
+        # Cache for next tick
+        session['_last_resp_len_stats'] = resp_len_stats
+        session['_cached_r_stats'] = r_stats
+
         return {
             'history_count': history_count,
             'response_messages': response_msgs,
@@ -811,13 +837,12 @@ def create_app(agents, agent_pool, config=None):
                     pool_snapshots = agent_pool.capture_snapshots()
 
                 # Pre-compute history stats for streaming updates (based on active slice)
-                active_h = agent_pool.slice_history_for_llm(current_history) if agent_pool else current_history
-                cached_h_stats = get_history_stats(active_h)
+                # Also use as the sliced working set — no need to call twice
+                working_history = agent_pool.slice_history_for_llm(current_history) if agent_pool else current_history
+                cached_h_stats = get_history_stats(working_history)
                 sub_agents_cache = None
 
                 try:
-                    # Sliced working set for the LLM
-                    working_history = agent_pool.slice_history_for_llm(current_history) if agent_pool else current_history
                     
                     # LLM safe config: filter out UI-only or Orchestrator-specific keys
                     llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
@@ -873,56 +898,57 @@ def create_app(agents, agent_pool, config=None):
                             )
                             last_send = now
                             
-                            # Loop Detection
-                            loop_info = detect_loop(current_history + responses)
-                            if loop_info:
-                                loop_reason, pop_count = loop_info
-                                if auto_rollback_enabled and retry_count < max_auto_retries:
-                                    logger.warning(f"Loop detected: {loop_reason}. Surgical rollback enabled (Retry {retry_count+1}/{max_auto_retries}).")
-                                    
-                                    # 1. Surgical Rollback
-                                    # pop_count is relative to full_history (current_history + responses)
-                                    full_h = current_history + responses
-                                    refined_pop = _refine_pop_count(full_h, pop_count)
-                                    
-                                    if refined_pop > len(responses):
-                                        # Loop started in previous history turns
-                                        excess = refined_pop - len(responses)
-                                        if len(current_history) >= excess:
-                                            del current_history[-excess:]
-                                        responses = []
-                                    else:
-                                        # Loop is entirely within current response
-                                        del responses[-refined_pop:]
-                                    
-                                    # 1b. Record the soft rollback in the persistent log for the main session
-                                    if agent_pool:
-                                        orch_logger = agent_pool.get_logger(session['session_name'], 'Orchestrator')
-                                        orch_logger.rollback(refined_pop, soft=True, reason=loop_reason)
+                            # Loop Detection — throttled to every 10th tick to reduce overhead
+                            if tick_num % 10 == 0:
+                                loop_info = detect_loop(current_history + responses)
+                                if loop_info:
+                                    loop_reason, pop_count = loop_info
+                                    if auto_rollback_enabled and retry_count < max_auto_retries:
+                                        logger.warning(f"Loop detected: {loop_reason}. Surgical rollback enabled (Retry {retry_count+1}/{max_auto_retries}).")
 
-                                    # 2. Inject a hint to avoid the loop in the next attempt
-                                    loop_hint = f"[SYSTEM]: A repetitive loop was detected ({loop_reason}). Please try a different approach."
-                                    current_history.append({ROLE: USER, CONTENT: loop_hint})
-                                    
-                                    # 3. Notify UI that we are retrying
-                                    asyncio.run_coroutine_threadsafe(
-                                        send_queue.put({
-                                            'type': 'error', 
-                                            'message': f"🔄 Loop detected. Surgically rolling back and retrying ({retry_count+1}/{max_auto_retries})..."
-                                        }), loop
-                                    )
-                                    
-                                    should_retry = True
-                                    session['stop_requested'] = False
-                                    break 
-                                else:
-                                    logger.warning(f"Loop detected: {loop_reason}. Stopping generation.")
-                                    
-                                    # Rollback even on final stop to keep history clean for user intervention
-                                    if agent_pool:
-                                        agent_pool.rollback_to_snapshots(pool_snapshots, soft=True, reason=loop_reason)
-                                    if current_history:
-                                        current_history.pop()
+                                        # 1. Surgical Rollback
+                                        # pop_count is relative to full_history (current_history + responses)
+                                        full_h = current_history + responses
+                                        refined_pop = _refine_pop_count(full_h, pop_count)
+
+                                        if refined_pop > len(responses):
+                                            # Loop started in previous history turns
+                                            excess = refined_pop - len(responses)
+                                            if len(current_history) >= excess:
+                                                del current_history[-excess:]
+                                            responses = []
+                                        else:
+                                            # Loop is entirely within current response
+                                            del responses[-refined_pop:]
+
+                                        # 1b. Record the soft rollback in the persistent log for the main session
+                                        if agent_pool:
+                                            orch_logger = agent_pool.get_logger(session['session_name'], 'Orchestrator')
+                                            orch_logger.rollback(refined_pop, soft=True, reason=loop_reason)
+
+                                        # 2. Inject a hint to avoid the loop in the next attempt
+                                        loop_hint = f"[SYSTEM]: A repetitive loop was detected ({loop_reason}). Please try a different approach."
+                                        current_history.append({ROLE: USER, CONTENT: loop_hint})
+
+                                        # 3. Notify UI that we are retrying
+                                        asyncio.run_coroutine_threadsafe(
+                                            send_queue.put({
+                                                'type': 'error',
+                                                'message': f"🔄 Loop detected. Surgically rolling back and retrying ({retry_count+1}/{max_auto_retries})..."
+                                            }), loop
+                                        )
+
+                                        should_retry = True
+                                        session['stop_requested'] = False
+                                        break
+                                    else:
+                                        logger.warning(f"Loop detected: {loop_reason}. Stopping generation.")
+
+                                        # Rollback even on final stop to keep history clean for user intervention
+                                        if agent_pool:
+                                            agent_pool.rollback_to_snapshots(pool_snapshots, soft=True, reason=loop_reason)
+                                        if current_history:
+                                            current_history.pop()
                                     
                                     # Clear responses so the loop garbage isn't appended to history
                                     responses = []
@@ -1111,6 +1137,9 @@ def create_app(agents, agent_pool, config=None):
         finally:
             session['generating'] = False
             session['stop_requested'] = False
+            # FIX1: Reset cached response stats so next generation starts fresh
+            session.pop('_last_resp_len_stats', None)
+            session.pop('_cached_r_stats', None)
             if agent_pool:
                 agent_pool.stopped = False
             if has_llm and old_cfg:
@@ -1859,7 +1888,7 @@ def create_app(agents, agent_pool, config=None):
                                         # Strip "Reason:", "Justification:", etc.
                                         justification = re.sub(r'^(Reason|Justification|Verdict|Tips)[:\s-]*', '', justification, flags=re.IGNORECASE).strip()
                                     
-                                    # Fallback: if no [YES]/[NO] on last line, check if the entire response is JUST the verdict
+                                    # Fallback 1: if no [YES]/[NO] on last line, check if the entire response is JUST the verdict
                                     if not is_yes and not is_no and len(lines) == 1:
                                         if last_line_upper == 'YES' or last_line_upper == 'SAFE':
                                             is_yes = True
@@ -1867,6 +1896,24 @@ def create_app(agents, agent_pool, config=None):
                                         elif last_line_upper == 'NO' or last_line_upper == 'UNSAFE':
                                             is_no = True
                                             justification = last_line
+                                    
+                                    # Fallback 2: LLM may add text after verdict — find whichever [YES]/[NO] appears LAST
+                                    if not is_yes and not is_no:
+                                        upper_text = clean_text.upper()
+                                        yes_pos = upper_text.rfind('[YES]')
+                                        no_pos = upper_text.rfind('[NO]')
+                                        if yes_pos > no_pos:
+                                            is_yes = True
+                                        elif no_pos > yes_pos:
+                                            is_no = True
+                                        if is_yes or is_no:
+                                            # Extract justification from the matching line
+                                            for line in lines:
+                                                lc = re.sub(r'(\*\*|__)', '', line).strip().upper()
+                                                if (is_yes and '[YES]' in lc) or (is_no and '[NO]' in lc):
+                                                    just_text = lc.replace('[YES]', '', 1).replace('[NO]', '', 1).strip()
+                                                    justification = re.sub(r'^(Reason|Justification|Verdict|Tips)[:\s-]*', '', just_text, flags=re.IGNORECASE).strip()
+                                                    break
                                     
                                     if is_yes or is_no:
                                         if auto_apply:

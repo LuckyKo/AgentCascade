@@ -117,41 +117,33 @@ class AgentInstanceLogger:
         self.data["history"].append(formatted_msg)
         self._append_line(formatted_msg)
 
-    def insert_compression_marker(self, summary_msg: Any, active_count: int):
+    def insert_compression_marker(self, summary_msg: Any, insert_pos: int):
         """Insert a compression summary marker into the cumulative log at the
-        correct position, calculated arithmetically from the tail.
-
-        Unlike ``update_history`` (which uses content-matching to locate the
-        insertion point), this method computes the position using the number
-        of *active* messages that survived the destructive compression in the
-        AgentPool.  This eliminates ambiguity when two or more messages share
-        identical content — the content-matching approach can match an earlier
-        duplicate, placing the new summary *before* a previous one.
+        exact position used by the AgentPool.
 
         Args:
             summary_msg: The compression summary message (USER role with
                          ``<context_summary>`` tags).
-            active_count: Number of messages that survived compression
-                          (i.e. ``len(pool_history) - 2`` for SYSTEM + SUMMARY
-                          + active, or the exact tail count the Pool provides).
+            insert_pos: The exact index where the summary was inserted in the
+                        pool — use this directly rather than deriving from
+                        tail-counting (the log may have extra tail messages
+                        not yet synced to the pool).
         """
         formatted = self._format_message(summary_msg)
         log_history = self.data["history"]
-
-        # Insertion point: the summary belongs right before the active tail.
-        # log_history = [SYSTEM, ...old_msgs..., *active_tail]
-        #                                       ^-- insert here
-        insert_pos = max(0, len(log_history) - active_count)
 
         # Safety: Never insert before the SYSTEM message (index 0)
         if insert_pos == 0 and log_history and log_history[0].get('role') == 'system':
             insert_pos = 1
 
+        # Clamp to valid range
+        insert_pos = min(insert_pos, len(log_history))
+
         log_history.insert(insert_pos, formatted)
 
         logger.info(
             f"Logger [{self.instance_name}]: Inserted compression marker at "
-            f"index {insert_pos} (tail={active_count}, log_len={len(log_history)})."
+            f"index {insert_pos} (log_len={len(log_history)})."
         )
 
         # Rewrite the entire file since we inserted in the middle

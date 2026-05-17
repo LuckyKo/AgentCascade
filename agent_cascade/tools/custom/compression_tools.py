@@ -260,12 +260,18 @@ class CompressContext(BaseTool):
             if kwargs.get('messages'):
                 active_msgs = kwargs['messages']
                 compressed_pool_history = self.agent_pool.get_conversation(agent_name)
-                
+
                 if compressed_pool_history:
-                    # Rebuild: use the Pool's compressed state as the new active list.
-                    # This guarantees the same boundary/summary as the Pool.
+                    # Use slice_history_for_llm to get the working set (summary + new messages)
+                    # rather than the full cumulative pool — this is what actually frees context.
+                    if hasattr(self.agent_pool, 'slice_history_for_llm'):
+                        working_set = self.agent_pool.slice_history_for_llm(compressed_pool_history)
+                    else:
+                        working_set = compressed_pool_history
+
+                    # Rebuild: use the sliced working set as the new active list.
                     new_active = []
-                    for msg in compressed_pool_history:
+                    for msg in working_set:
                         if isinstance(active_msgs[0] if active_msgs else None, dict):
                             # Pool stores dicts — use directly
                             if isinstance(msg, dict):
@@ -278,7 +284,7 @@ class CompressContext(BaseTool):
                                 new_active.append(Message(**{k: v for k, v in msg.items() if k in ('role', 'content', 'name', 'function_call', 'reasoning_content')}))
                             else:
                                 new_active.append(msg)
-                    
+
                     # Mutate directly so the caller's reference is updated
                     active_msgs.clear()
                     active_msgs.extend(new_active)

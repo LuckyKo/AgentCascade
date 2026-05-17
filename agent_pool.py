@@ -817,13 +817,12 @@ rules:
         self.instance_summaries[agent_name] = summary
         
         # 3. Notify the logger that a compression event happened.
-        #    Use dedicated arithmetic insertion (tail-counting) to ensure the 
-        #    log marker matches the memory boundary precisely.
+        #    Pass insert_pos directly so the log inserts at the exact same index as the pool.
+        #    The log may have more tail messages (tool calls/results) that aren't in the pool yet,
+        #    so deriving insert_pos from active_count + len(log) would be off.
         if agent_name in self.instance_loggers:
-            # active_count = messages that were NOT summarized (everything after the NEW summary)
-            active_count = len(history) - insert_pos - 1
             self.instance_loggers[agent_name].insert_compression_marker(
-                summary_msg, active_count
+                summary_msg, insert_pos
             )
             
         logger.info(f"Cumulative compression: Inserted summary after {num_to_remove} messages for agent '{agent_name}'. Full history preserved in memory.")

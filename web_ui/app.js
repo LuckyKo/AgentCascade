@@ -60,6 +60,9 @@ let reconnectTimer = null;
 let lastRenderedCount = Infinity;
 let lastLastContent = null;
 
+// Sticky auto-scroll: locked at bottom by default, unlocks when user scrolls up
+let isAutoScrollLocked = true;
+
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
 const messagesEl = $('#messages');
@@ -79,6 +82,14 @@ const mainTabPanels = document.querySelector('.main-tab-panels');
 
 // New CWrite-style DOM refs
 const btnToggleSettings = $('#btn-toggle-settings');
+
+// Sticky auto-scroll: unlock when user scrolls up, re-lock when they scroll to bottom
+if (messagesEl) {
+  messagesEl.addEventListener('scroll', () => {
+    const distFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+    isAutoScrollLocked = (distFromBottom <= 50);
+  });
+}
 const sidePanel = $('#side-panel');
 const statusWords = $('#status-words');
 const statusTokens = $('#status-tokens');
@@ -1037,8 +1048,15 @@ function renderMessages() {
   }
   lastLastContent = lastContent;
 
-  if (wasAtBottom) {
+  // Sticky auto-scroll: only scroll to bottom if locked (user hasn't scrolled up)
+  if (isAutoScrollLocked) {
+    isAutoScrollLocked = false; // Unlock on each tick so user can scroll freely
     scrollToBottom();
+  }
+
+  // Re-lock if user scrolls back to bottom between ticks
+  if (wasAtBottom && !isAutoScrollLocked) {
+    isAutoScrollLocked = true;
   }
 
   // Update main activity bar
@@ -1259,12 +1277,27 @@ function setInnerHtmlWithState(el, html) {
   const details = el.querySelectorAll('details');
   const states = Array.from(details).map(d => d.open);
 
+  // Save code block scroll positions before replacing content (Bug 2 fix)
+  const codeScrollPositions = [];
+  const codeBlocks = el.querySelectorAll('pre:not(.mermaid-container)');
+  codeBlocks.forEach(cb => {
+    codeScrollPositions.push({ element: cb, scrollTop: cb.scrollTop });
+  });
+
   el.innerHTML = html;
 
   const newDetails = el.querySelectorAll('details');
   newDetails.forEach((d, i) => {
     if (i < states.length) {
       d.open = states[i];
+    }
+  });
+
+  // Restore code block scroll positions
+  const newCodeBlocks = el.querySelectorAll('pre:not(.mermaid-container)');
+  newCodeBlocks.forEach((cb, i) => {
+    if (i < codeScrollPositions.length) {
+      cb.scrollTop = codeScrollPositions[i].scrollTop;
     }
   });
 }

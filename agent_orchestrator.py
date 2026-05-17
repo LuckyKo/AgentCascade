@@ -760,7 +760,10 @@ class OrchestratorAgent(Assistant):
         elif not kwargs.get('agent_instance_name'):
             # Only log the last message for the main orchestrator session.
             # Use update_history to avoid duplicates if api_server.py already logged it during a retry.
-            logger_inst.update_history([messages[-1]])
+            # Skip if compression ran last turn — the log is already in sync via
+            # insert_compression_marker + individual log_message calls.
+            if not getattr(self, '_compress_context_ran_this_turn', False):
+                logger_inst.update_history([messages[-1]])
 
         # --- Check for manual commands ---
         last_msg = messages[-1] if messages else None
@@ -878,13 +881,16 @@ class OrchestratorAgent(Assistant):
                 
             # Inject warning if needed (only for the LLM call, doesn't affect saved history)
             self._inject_compression_warning(llm_messages)
-            
+
             # BUG-7 fix: If forceful compression ran, llm_messages was compressed in-place
             # but `messages` (the canonical history) still holds the old un-compressed state.
             # Re-sync `messages` from the Pool to prevent divergence.
+            # NOTE: cumulative compression INSERTS a summary marker (pool grows), so we check
+            # the flag rather than comparing lengths. `messages` stays as full cumulative history;
+            # `llm_messages` is synced to the sliced working set by the compression tool itself.
             if getattr(self, '_compress_context_ran_this_turn', False):
                 compressed = self.agent_pool.get_conversation(self.session_name)
-                if compressed and len(compressed) < len(messages):
+                if compressed:
                     messages.clear()
                     messages.extend(compressed)
             
@@ -1263,6 +1269,14 @@ class OrchestratorAgent(Assistant):
                         
                         if self.agent_pool.has_messages(instance):
                             continue # Loop back to drain_queue
+                    
+                    # Post-generation queue drain: If the agent finished its work but there
+                    # are queued messages waiting, loop back instead of breaking out.
+                    # This prevents injected messages from sitting idle after the agent goes idle.
+                    if self.agent_pool.has_messages(instance):
+                        logger.info(f"Queued messages detected for {instance} after turn completion. Looping back to process them.")
+                        continue # Loop back to drain_queue at the top of the while loop
+                    
                     break
     
             # No final update_history needed: all messages are logged individually
