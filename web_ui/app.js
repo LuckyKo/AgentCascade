@@ -1141,7 +1141,7 @@ function createMessageEl(msg, index) {
   if (msg.role === 'user') {
     nameSpan.textContent = 'You';
   } else if (msg.role === 'function') {
-    nameSpan.textContent = `✅ ${msg.name || 'Tool Result'}`;
+    nameSpan.textContent = msg.name || 'Tool Result';
   } else {
     nameSpan.textContent = msg.name || 'Assistant';
   }
@@ -1372,8 +1372,34 @@ function renderToolCall(msg) {
   `;
 }
 
+function isToolFailure(msg) {
+  if (msg.role !== 'function') return false;
+  // Fast path: use the backend-provided tool_success flag.
+  // This avoids any string scanning entirely for modern messages.
+  if (typeof msg.tool_success === 'boolean') {
+    return !msg.tool_success;
+  }
+  // Fallback for older log entries that lack the field:
+  // Only check the first NON-EMPTY line of content — error markers always appear at the start.
+  let firstLine = '';
+  for (const line of (msg.content || '').split('\n')) {
+    const stripped = line.trim();
+    if (stripped) { firstLine = stripped.toLowerCase(); break; }
+  }
+  return firstLine.startsWith('error:') || 
+         firstLine.startsWith('failed:') || 
+         firstLine.startsWith('invalid:') ||
+         firstLine.startsWith('permission denied:') ||
+         firstLine.includes('rejected by user:') ||
+         firstLine.includes('an error occurred') ||
+         firstLine.includes('does not exist') ||
+         firstLine.includes('failed to');
+}
+
 function renderToolResult(msg) {
   const content = msg.content || '';
+  const isFail = isToolFailure(msg);
+  const icon = isFail ? '❌' : '📋';
   const shouldTruncate = settingTruncateTools ? settingTruncateTools.checked : true;
   const truncated = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
 
@@ -1386,7 +1412,7 @@ function renderToolResult(msg) {
 
   return `
     <details class="tool-result">
-      <summary>📋 Result from <strong>${escapeHtml(msg.name || 'tool')}</strong>${shouldTruncate && content.length > 2000 ? ` <span class="truncation-hint">(${content.length.toLocaleString()} chars)</span>` : ''}</summary>
+      <summary>${icon} Result from <strong>${escapeHtml(msg.name || 'tool')}</strong>${shouldTruncate && content.length > 2000 ? ` <span class="truncation-hint">(${content.length.toLocaleString()} chars)</span>` : ''}</summary>
       ${contentHtml}
     </details>
   `;
@@ -2027,8 +2053,9 @@ function createSubMsgEl(msg, index, instanceName, isGenerating) {
   const label = document.createElement('div');
   label.className = 'sub-msg-label';
   label.style = "margin-bottom: 0;";
+  
   label.textContent = msg.role === 'user' ? '📤 Task' :
-    msg.role === 'function' ? `📋 ${msg.name || 'result'}` :
+    msg.role === 'function' ? `${msg.name || 'result'}` :
       msg.name || 'Agent';
 
   header.appendChild(label);
@@ -2326,8 +2353,10 @@ function updateContextBar(barEl, msgs, overrideTokens, overrideMax) {
   if (!barEl) return;
 
   const tokens = overrideTokens || 0;
-  // Prioritize the UI setting for max context if it's available
-  const maxContext = (settingMaxContext && settingMaxContext.value) ? parseInt(settingMaxContext.value) : (overrideMax || 32768);
+  // Prioritize the per-agent max_tokens from the backend (actual model context limit).
+  // Fall back to the UI setting only if the backend didn't provide a value, then to a hardcoded default.
+  const maxContext = (overrideMax && overrideMax > 0) ? overrideMax :
+                     ((settingMaxContext && settingMaxContext.value) ? parseInt(settingMaxContext.value) : 32768);
 
   const pct = Math.min(100, Math.max(0, (tokens / maxContext) * 100));
   barEl.style.width = pct + '%';

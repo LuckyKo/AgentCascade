@@ -34,7 +34,7 @@ class APIEndpoint:
     model_type: str = "qwenvl_oai"     # "qwenvl_oai", "openai", etc.
     enabled: bool = True               # Toggle on/off without deleting
     max_retries: int = 2               # Per-endpoint retry count before moving to next
-    concurrency_limit: int = 0         # 0 = unlimited, 1+ = max parallel requests for this server
+    concurrency_limit: int = -1        # -1 = unlimited, 0 = sequential delegation, 1+ = max parallel requests
     max_input_tokens: int = 0          # 0 = unlimited/auto, 1+ = specific limit for this model
 
     def __post_init__(self):
@@ -169,6 +169,18 @@ class APIRouter:
         """Get the endpoint ID list for a specific agent type."""
         return self.agent_priorities.get(agent_type, [])
 
+    def get_concurrency_limit(self, agent_type: str) -> int:
+        """
+        Returns the concurrency_limit for the highest-priority enabled endpoint 
+        of the given agent type. Returns -1 if unlimited (default).
+        """
+        with self._lock:
+            for eid in self.agent_priorities.get(agent_type, []):
+                ep = self.endpoints.get(eid)
+                if ep and ep.enabled:
+                    return ep.concurrency_limit
+        return -1 # Default fallback is unlimited
+
     # ── LLM Config Resolution ────────────────────────────────────────────
 
     def get_llm_config(self, agent_type: str) -> dict:
@@ -269,10 +281,12 @@ class APIRouter:
             # We manage semaphores per api_base because different models 
             # on the same server share the same hardware (e.g. LM Studio).
             sem = None
-            if concurrency_limit > 0:
+            if concurrency_limit >= 0:
+                # 0 means sequential delegation AND sequential requests (Semaphore of 1)
+                sem_size = max(1, concurrency_limit)
                 with self._sem_lock:
-                    if endpoint_base not in self._semaphores or self._semaphores[endpoint_base][1] != concurrency_limit:
-                        self._semaphores[endpoint_base] = (threading.Semaphore(concurrency_limit), concurrency_limit)
+                    if endpoint_base not in self._semaphores or self._semaphores[endpoint_base][1] != sem_size:
+                        self._semaphores[endpoint_base] = (threading.Semaphore(sem_size), sem_size)
                     sem = self._semaphores[endpoint_base][0]
 
             def execute_with_sem(current_agent_name=None):

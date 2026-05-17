@@ -284,6 +284,13 @@ def serialize_message(msg, index=None):
     for key in list(d.keys()):
         if d[key] is None:
             del d[key]
+    
+    # Extract tool_success from extra before stripping — frontend needs it for isToolFailure()
+    if 'extra' in d and isinstance(d['extra'], dict):
+        ts = d['extra'].get('tool_success')
+        if ts is not None:
+            d['tool_success'] = bool(ts)
+    
     d.pop('extra', None)
     
     # UI Performance: Store in cache if the input is a persistent history dict.

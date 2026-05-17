@@ -149,7 +149,12 @@ class AgentPool:
         self.message_queues[target].append(text)
 
     def drain_queue(self, target: str) -> List[str]:
-        """Pop and return all pending messages for a specific agent."""
+        """Pop and return all pending messages for a specific agent.
+        
+        Deduplicates across the targeted queue and the legacy global queue
+        so that if the same message text exists in both, it is only returned once.
+        Preserves insertion order (first occurrence wins).
+        """
         msgs = []
         # Drain targeted queue
         if target in self.message_queues and self.message_queues[target]:
@@ -157,7 +162,12 @@ class AgentPool:
             self.message_queues[target].clear()
         # Also drain any legacy global queue messages (backward compat)
         if self.async_message_queue:
-            msgs.extend(self.async_message_queue)
+            # Deduplicate: only extend with messages not already in msgs
+            seen = set(msgs)
+            for m in self.async_message_queue:
+                if m not in seen:
+                    msgs.append(m)
+                    seen.add(m)
             self.async_message_queue.clear()
         return msgs
 

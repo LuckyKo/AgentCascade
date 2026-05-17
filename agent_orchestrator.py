@@ -241,15 +241,20 @@ class ParallelAgentManager:
     def __init__(self, agent_pool: AgentPool, max_workers: int = 10):
         self.agent_pool = agent_pool
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-        self.active_tasks = {} # instance_name -> (Future, owner_session)
+        self.active_tasks = {} # instance_name -> (Future, owner_session, agent_class)
     
     def has_active_tasks(self, session_name: str) -> bool:
         """Check if there are any active parallel tasks owned by the given session."""
-        return any(owner == session_name for _, owner in self.active_tasks.values())
+        return any(owner == session_name for _, owner, _ in self.active_tasks.values())
+
+    def count_active_tasks_by_class(self, agent_class: str) -> int:
+        """Count how many active parallel tasks are running for a given agent class."""
+        return sum(1 for _, _, a_class in self.active_tasks.values() if a_class == agent_class)
 
     def submit_task(self, orchestrator, tool_name: str, tool_args: dict, current_response: List[Message], manager_history: List[Message]) -> str:
         """Submit a sub-agent stream to the background pool and return immediately."""
         instance_name = tool_args.get('instance_name', 'unknown')
+        agent_class = tool_args.get('agent_class', 'unknown')
         
         # We need a safe copy of the history to prevent thread mutation issues
         # (Though _stream_sub_agent_call itself makes copies, passing references 
@@ -872,10 +877,13 @@ class OrchestratorAgent(Assistant):
             pending = self.agent_pool.drain_queue(self.session_name)
             if pending:
                 for async_msg_text in pending:
+                    if not async_msg_text.strip():
+                        continue  # Skip empty messages
                     async_msg = Message(role=USER, content=async_msg_text)
                     messages.append(async_msg)
                     llm_messages.append(async_msg)
                     response.append(async_msg)
+                    logger_inst.log_message(async_msg)  # Log to JSONL file
                     logger.info(f"Injected async user message into {self.session_name}: {async_msg_text}")
                 yield response  # Update UI with the injected message
                 
@@ -1033,10 +1041,33 @@ class OrchestratorAgent(Assistant):
                                 parsed_args = {}
 
                         if isinstance(parsed_args, dict) and parsed_args.get('parallel_launch') is True:
-                            # ── Parallel background execution ──
-                            tool_result = self.agent_pool.parallel_manager.submit_task(
-                                self, tool_name, parsed_args, response, messages
-                            )
+                            # ── Check Concurrency Limits ──
+                            agent_class = parsed_args.get('agent_class')
+                            is_parallel_allowed = True
+                            
+                            if agent_class and hasattr(self.agent_pool, 'api_router'):
+                                limit = self.agent_pool.api_router.get_concurrency_limit(agent_class)
+                                if limit == 0:
+                                    # User explicitly sets 0 to mean sequential delegation
+                                    is_parallel_allowed = False
+                                    logger.info(f"Forcing sequential launch for {agent_class} (concurrency_limit=0)")
+                                elif limit > 0:
+                                    # Count how many active parallel tasks are using this same agent class
+                                    active_count = self.agent_pool.parallel_manager.count_active_tasks_by_class(agent_class)
+                                    if active_count >= limit:
+                                        is_parallel_allowed = False
+                                        logger.info(f"Forcing sequential launch for {agent_class} (limit {limit} reached, active {active_count})")
+                            
+                            if is_parallel_allowed:
+                                # ── Parallel background execution ──
+                                tool_result = self.agent_pool.parallel_manager.submit_task(
+                                    self, tool_name, parsed_args, response, messages
+                                )
+                            else:
+                                # Fallback to sequential if limit reached or 0
+                                tool_result = yield from self._stream_sub_agent_call(
+                                    tool_name, tool_args, response, messages
+                                )
                         else:
                             # ── Synchronous streaming execution ──
                             tool_result = yield from self._stream_sub_agent_call(
@@ -1190,14 +1221,20 @@ class OrchestratorAgent(Assistant):
                 # --- Post-execution success detection ---
                 # Many tools return an error message as a string instead of raising an exception.
                 if _tool_success and isinstance(tool_result, str):
-                    lower_res = tool_result.lower().strip()
+                    # Only check the first non-empty line — error markers always appear at the start.
+                    first_line = ''
+                    for line in tool_result.split('\n'):
+                        stripped = line.strip()
+                        if stripped:
+                            first_line = stripped.lower()
+                            break
                     error_indicators = [
                         'error:', 'rejected by user:', 'failed:', 'invalid:', 
                         'permission denied:', 'an error occurred', 'does not exist'
                     ]
-                    if any(lower_res.startswith(ind) for ind in error_indicators) or 'failed to' in lower_res:
+                    if any(first_line.startswith(ind) for ind in error_indicators) or 'failed to' in first_line:
                         _tool_success = False
-                        _tool_error = tool_result[:500] # Capture the start of the error message
+                        _tool_error = tool_result[:500]  # Capture the start of the error message
                 
                 # Telemetry: record tool call end
                 try:
@@ -1219,7 +1256,8 @@ class OrchestratorAgent(Assistant):
                     content=tool_result,
                     extra={
                         'function_id': out.extra.get('function_id', '1')
-                        if out.extra else '1'
+                        if out.extra else '1',
+                        'tool_success': _tool_success,  # Pass to frontend so isToolFailure() can use it directly
                     },
                 )
                 messages.append(fn_msg)
@@ -1233,10 +1271,13 @@ class OrchestratorAgent(Assistant):
                 urgent_msgs = self.agent_pool.drain_queue(instance)
                 if urgent_msgs:
                     for async_msg_text in urgent_msgs:
+                        if not async_msg_text.strip():
+                            continue  # Skip empty messages
                         async_msg = Message(role=USER, content=async_msg_text)
                         messages.append(async_msg)
                         llm_messages.append(async_msg)
                         response.append(async_msg)
+                        logger_inst.log_message(async_msg)  # Log to JSONL file
                         logger.info(f"Injected urgent async user message mid-tool-loop into {instance}: {async_msg_text}")
                     yield response
                     break  # CRITICAL: Stop executing the rest of the batched tools!
@@ -1548,8 +1589,11 @@ class OrchestratorAgent(Assistant):
                             # --- ASYNC MESSAGE INJECTION (per-agent routed) ---
                             hook_pending = self.agent_pool.drain_queue(instance_name)
                             for async_msg_text in hook_pending:
+                                if not async_msg_text.strip():
+                                    continue  # Skip empty messages
                                 async_msg = Message(role=USER, content=async_msg_text)
                                 messages.append(async_msg)
+                                logger_inst.log_message(async_msg)  # Log to JSONL file
                                 logger.info(f"Injected async user message into sub-agent {instance_name} via LLM hook: {async_msg_text}")
 
                             self._inject_compression_warning_for_agent(self_agent, instance_name, messages)
