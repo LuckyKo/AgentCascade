@@ -109,7 +109,7 @@ TOOL_METADATA = {
         }
     },
     'view_image': {
-        'description': 'View an image file in the workspace. Returns the image for the model to see.',
+        'description': 'View an image file in the workspace. Returns the image for the model to see. Supports PNG, JPG, GIF, WEBP, SVG (auto-converted to PNG), and BMP formats.',
         'parameters': {
             'path': 'Path to the image file relative to workspace directory'
         }

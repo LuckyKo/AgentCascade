@@ -1,7 +1,35 @@
 from pathlib import Path
+import tempfile
+import os
+import atexit
+import sys
 from agent_cascade.tools.base import BaseTool
 from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_READ_FILE_MAX_LINES, DEFAULT_TOOL_RESULT_MAX_CHARS
 from agent_cascade.prompts.dna import TOOL_METADATA
+
+# --- Module-level cairosvg DLL state (Windows only) --------------------------- #
+_cairosvg_dll_handles: list = []          # handles returned by os.add_dll_directory()
+_cairosvg_setup_done: bool = False        # ensures DLL setup runs exactly once
+
+
+def _cleanup_cairosvg_dll_handles():
+    """Close all DLL directory handles registered for cairosvg atexit."""
+    for handle in _cairosvg_dll_handles:
+        try:
+            handle.close()
+        except Exception:
+            pass
+    _cairosvg_dll_handles.clear()
+
+atexit.register(_cleanup_cairosvg_dll_handles)
+
+_gtk_common_paths = [
+    os.environ.get("GTK_LIBS", ""),
+    os.environ.get("CAIROCFFI_DLL_DIRECTORIES", ""),
+    r"C:\Program Files\GTK3-Runtime Win64\bin",
+    r"D:\Program Files\GTK3-Runtime Win64\bin",
+    r"C:\Program Files (x86)\GTK3-Runtime Win64\bin",
+]
 
 
 class ReadFile(BaseTool):
@@ -199,11 +227,83 @@ class ViewImage(BaseTool):
             super().__init__()
         self.agent_pool = kwargs.get('agent_pool')
 
+    # ------------------------------------------------------------------ #
+    #  SVG → PNG conversion helpers                                       #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _setup_cairosvg_dll_dirs():
+        """On Windows, register DLL directories so cairosvg's native libs can load.
+        
+        Runs exactly once (guarded by the module-level _cairosvg_setup_done flag).
+        All os.add_dll_directory() handles are stored and closed atexit.
+        """
+        global _cairosvg_setup_done
+        if _cairosvg_setup_done or sys.platform != "win32":
+            return
+
+        for p in _gtk_common_paths:
+            if not isinstance(p, str):
+                continue
+            p = p.strip()
+            if not p or not os.path.isdir(p):
+                continue
+            try:
+                handle = os.add_dll_directory(p)
+                _cairosvg_dll_handles.append(handle)
+            except OSError:
+                pass  # already registered
+
+        _cairosvg_setup_done = True
+
+    @staticmethod
+    def _convert_svg_to_png(svg_path: Path) -> Path:
+        """
+        Convert an SVG file to PNG using cairosvg.
+
+        Returns a Path pointing to the temp PNG file. Cleaned up by the caller
+        after serving.
+        """
+        # Ensure DLL dirs are registered (Windows-only, no-op on Linux/macOS)
+        ViewImage._setup_cairosvg_dll_dirs()
+
+        try:
+            import cairosvg
+        except ImportError:
+            raise ImportError(
+                "cairosvg is required for SVG viewing. Install it with: pip install cairosvg"
+            )
+        except OSError as exc:
+            # Cairosvg may fail on Windows if GTK3 runtime is missing
+            raise OSError(
+                f"cairosvg native library error: {exc}. "
+                "On Windows you may need GTK3 runtime. "
+                "Install from: https://github.com/tschoonj/GTK3-Runtime-for-Windows/releases "
+                "or set the GTK_LIBS environment variable."
+            )
+
+        # Read SVG, convert to PNG bytes
+        svg_bytes = svg_path.read_bytes()
+        png_data = cairosvg.svg2png(bytestring=svg_bytes)
+
+        # Write to a temp file so the existing image-serving pipeline can use it
+        tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='svg_view_')
+        os.close(tmp_fd)
+        with open(tmp_png_path, "wb") as f:
+            f.write(png_data)
+
+        return Path(tmp_png_path)
+
+    # ------------------------------------------------------------------ #
+    #  Main call()                                                        #
+    # ------------------------------------------------------------------ #
+
     def call(self, params: str, **kwargs):
         from agent_cascade.llm.schema import ContentItem
         params = self._verify_json_format_args(params)
         path = params['path']
 
+        temp_png: Path | None = None  # track temp file for cleanup
         try:
             if hasattr(self, 'agent_pool') and self.agent_pool:
                 resolved = self.agent_pool.operation_manager._resolve_path(path, mode="ro")
@@ -220,14 +320,29 @@ class ViewImage(BaseTool):
             if not resolved.exists():
                 return f"Image not found: {path}"
 
-            file_url = resolved.as_uri()
+            # SVG files need conversion to PNG (PIL/Pillow can't read SVG natively)
+            if resolved.suffix.lower() == '.svg':
+                temp_png = self._convert_svg_to_png(resolved)
+                file_url = temp_png.as_uri()
+            else:
+                file_url = resolved.as_uri()
 
             return [
                 ContentItem(image=file_url),
                 ContentItem(text=f"Viewing image: {path}")
             ]
+        except (ValueError, TypeError) as e:
+            # SVG parse errors from cairosvg come through as ValueError/TypeError
+            return f"SVG parse error in '{path}': {e}"
         except Exception as e:
             return f"Error viewing image: {str(e)}"
+        finally:
+            # Clean up the temp PNG file after serving (best-effort)
+            if temp_png and os.path.exists(temp_png):
+                try:
+                    os.remove(temp_png)
+                except OSError:
+                    pass  # non-critical cleanup failure
 
 
 class WriteFile(BaseTool):
