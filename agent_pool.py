@@ -519,8 +519,10 @@ rules:
         messages = []
         metadata = {}
         
-        # Try as file path first
+        # Try as file path first (resolve relative paths against workspace_dir)
         potential_path = Path(log_input)
+        if not potential_path.is_absolute():
+            potential_path = self.workspace_dir / potential_path
         if potential_path.exists() and potential_path.is_file():
             try:
                 with open(potential_path, 'r', encoding='utf-8') as f:
@@ -629,8 +631,14 @@ rules:
             # slice_history_for_llm will handle the working set during execution.
             pass
 
-        # Restore to pool
-        self.instance_conversations[instance_name] = cleaned_messages
+        # Restore to pool — convert raw dicts from JSONL into Message objects
+        restored_messages = []
+        for msg_dict in cleaned_messages:
+            try:
+                restored_messages.append(Message(**msg_dict))
+            except Exception as e:
+                logger.warning(f"Failed to convert loaded message to Message object: {e}")
+        self.instance_conversations[instance_name] = restored_messages
         self.instance_classes[instance_name] = agent_class
         
         # Proactively clear any existing logger for this instance so get_logger creates a fresh one

@@ -375,7 +375,15 @@ class OperationManager:
             except re.error as e:
                 return f"ERROR: Invalid regex pattern '{pattern}': {str(e)}. Please provide a valid Python regular expression."
 
+            start_time = time.time()
+            timeout = 30.0  # seconds
+            was_timed_out = False
+            hit_result_limit = False
+            file_count = 0
             for file_path in resolved.rglob(include):
+                if time.time() - start_time > timeout:
+                    was_timed_out = True
+                    break
                 if file_path.is_file():
                     try:
                         content = file_path.read_text(encoding='utf-8', errors='ignore')
@@ -387,18 +395,34 @@ class OperationManager:
                                 except ValueError:
                                     rel_path = file_path.name # Fallback
                                 results.append(f"{rel_path}:{line_num}: {line.strip()}")
-                        if len(results) > 5000: # Safety limit to prevent OOM
+                            # Periodic timeout check inside line loop to prevent single huge files from bypassing it
+                            if len(results) % 500 == 0 and time.time() - start_time > timeout:
+                                was_timed_out = True
+                                break
+                        if was_timed_out:
                             break
-                    except:
+                        file_count += 1  # Count only successfully processed files
+                        if len(results) > 5000: # Safety limit to prevent OOM
+                            hit_result_limit = True
+                            break
+                    except Exception:
                         continue
 
             if not results:
+                if was_timed_out:
+                    return f"Search timed out after {int(timeout)}s before finding any matches for '{pattern}'. Narrow your pattern or scope."
                 return f"No matches found for pattern '{pattern}' in {path}/**/{include}"
 
             summary = f"Found {len(results)} matches for '{pattern}'"
             output_text = '\n'.join(results)
             
-            if char_limit != -1 and len(output_text) > char_limit:
+            if was_timed_out:
+                summary += f" [TIMED OUT after {int(timeout)}s]"
+                output_text += f"\n\n[TOOL RESPONSE TIMED OUT — Searched {file_count} files before exceeding {int(timeout)} second limit. Narrow your pattern or scope to a specific directory.]"
+            elif hit_result_limit:
+                summary += " [TRUNCATED at 5000 results]"
+
+            if char_limit != -1 and len(output_text) > char_limit and not hit_result_limit:
                 # Save full result to spill file
                 log_dir = self.base_dir / 'logs'
                 log_dir.mkdir(parents=True, exist_ok=True)
