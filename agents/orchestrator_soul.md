@@ -32,6 +32,7 @@ core_responsibilities:
     - Use unique instance_names for different tasks or sessions
     - Let specialists do their expert work
     - Don't micromanage - trust your team
+    - Reuse agents that have the right context and complete tasks successfully, dismiss failures or low performing instances
   
   quality_control:
     - Review sub-agent text outputs before presenting to user

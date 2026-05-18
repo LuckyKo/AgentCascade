@@ -780,6 +780,10 @@ function handleServerMessage(data) {
       // Full state: force complete re-render (session load, reset, edit, delete, etc.)
       lastRenderedCount = Infinity;
       lastLastContent = null;
+      
+      // Invalidate sub-agent panel caches so edits/deletes trigger re-renders
+      mainTabPanels.querySelectorAll('.sub-agent-messages').forEach(p => { p.dataset.contentKey = ''; });
+      
       renderMessages();
       renderSubAgents();
       updateControls();
@@ -1545,9 +1549,9 @@ function startEdit(index, selectedText = '', proportion = 0, instanceName = null
   textarea.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && e.ctrlKey) {
       e.preventDefault();
-      finishEdit(index, textarea.value);
+      finishEdit(index, textarea.value, instanceName);
     } else if (e.key === 'Escape') {
-      cancelEdit(index);
+      cancelEdit(index, instanceName);
     }
   });
 
@@ -3209,6 +3213,11 @@ function renderAgentApiAssignments() {
   if (!agentTypes.includes('coder') && !agentTypes.includes('coder_agent')) {
     agentTypes.push('coder');
     typeToName['coder'] = 'Coder';
+  }
+  // Ensure compression agent is always in the list so users can assign API endpoints to it
+  if (!agentTypes.includes('compression agent')) {
+    agentTypes.push('compression agent');
+    typeToName['compression agent'] = 'Compression Agent';
   }
 
   if (endpoints.length === 0) {

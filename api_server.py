@@ -1731,6 +1731,12 @@ def create_app(agents, agent_pool, config=None):
                         # 1. Rollback sub-agents to the start of the last turn
                         if session.get('last_turn_snapshots'):
                             agent_pool.rollback_to_snapshots(session['last_turn_snapshots'], soft=True, reason="User retry")
+                            
+                            # Sync sub_agent_state so build_state() sees the rolled-back histories
+                            # (sub_agent_state[name]['messages'] is a deep copy and won't reflect truncation)
+                            for name in session['last_turn_snapshots']:
+                                if name != session['session_name'] and name in agent_pool.sub_agent_state:
+                                    agent_pool.sub_agent_state[name]['messages'] = list(agent_pool.instance_conversations.get(name, []))
                         
                         # 2. Rollback the main orchestrator log to match the shortened history
                         # This now points to the state before the user message we just popped.
@@ -2112,27 +2118,47 @@ def create_app(agents, agent_pool, config=None):
                             and not session['generating']
                             and 0 <= idx < len(history)):
                         msg = history[idx]
-                        if isinstance(msg, dict):
-                            # If this is a compression marker, ensure tags are preserved
-                            if COMPRESSION_MARKER in str(msg.get(CONTENT, "")) or "<context_summary>" in str(msg.get(CONTENT, "")):
-                                if COMPRESSION_MARKER in content or "<context_summary>" in content:
-                                    msg[CONTENT] = content
-                                else:
-                                    msg[CONTENT] = f"{COMPRESSION_MARKER}\n\n<context_summary>\n{content}\n</context_summary>"
-                                
-                                # Sync the summary tracker
-                                match = _CONTEXT_SUMMARY_RE.search(msg[CONTENT])
-                                if match and agent_pool:
-                                    agent_pool.instance_summaries[target_name] = match.group(1).strip()
+                        
+                        # Get current content regardless of message type (dict or Message object)
+                        old_content = msg.get(CONTENT, "") if isinstance(msg, dict) else getattr(msg, 'content', "")
+                        new_parsed_content = _parse_multimodal_content(content)
+                        
+                        # If this is a compression marker, ensure tags are preserved
+                        is_compression_msg = COMPRESSION_MARKER in str(old_content) or "<context_summary>" in str(old_content)
+                        if is_compression_msg:
+                            if COMPRESSION_MARKER in content or "<context_summary>" in content:
+                                new_parsed_content = content
                             else:
-                                msg[CONTENT] = _parse_multimodal_content(content)
-                                
+                                new_parsed_content = f"{COMPRESSION_MARKER}\n\n<context_summary>\n{content}\n</context_summary>"
+                            
+                            # Sync the summary tracker
+                            match = _CONTEXT_SUMMARY_RE.search(new_parsed_content)
+                            if match and agent_pool:
+                                agent_pool.instance_summaries[target_name] = match.group(1).strip()
+                        
+                        # Apply edit — handle both dict and Message object types
+                        if isinstance(msg, dict):
+                            msg[CONTENT] = new_parsed_content
                             if '_ui_cache' in msg:
                                 del msg['_ui_cache']
+                        elif hasattr(msg, 'content'):
+                            # Pydantic Message object or dataclass — set content directly
+                            msg.content = new_parsed_content
                         
                         if agent_pool:
                             logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
                             logger_inst.reset_history(history, rewrite=True)
+                            
+                            # Sync sub_agent_state so build_state() sees the edit
+                            # (sub_agent_state[name]['messages'] may be a separate reference and won't
+                            #  reflect in-place edits to instance_conversations)
+                            if target_name != session['session_name'] and target_name in agent_pool.sub_agent_state:
+                                agent_pool.sub_agent_state[target_name]['messages'] = list(history)
+                            
+                            # Also sync main session back to pool so next generation doesn't
+                            # overwrite the edit (line 1180 does copy.deepcopy from pool)
+                            if target_name == session['session_name']:
+                                agent_pool.instance_conversations[target_name] = list(history)
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'delete_messages':
@@ -2153,6 +2179,15 @@ def create_app(agents, agent_pool, config=None):
                     if agent_pool:
                         logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
                         logger_inst.reset_history(history, rewrite=True)
+                        
+                        # Sync sub_agent_state so build_state() sees the deletion
+                        if target_name != session['session_name'] and target_name in agent_pool.sub_agent_state:
+                            agent_pool.sub_agent_state[target_name]['messages'] = list(history)
+                        
+                        # Also sync main session back to pool so next generation doesn't
+                        # re-deep-copy the un-deleted version (line 1180 does copy.deepcopy from pool)
+                        if target_name == session['session_name']:
+                            agent_pool.instance_conversations[target_name] = list(history)
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'select_agent':

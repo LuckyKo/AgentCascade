@@ -21,18 +21,17 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] implement "branch" button on main chat message bubbles, branching an agent history from that point into a new session.
 [ ] implement rate limits for each API endpoint to avoid spamming and getting locked out.
 [ ] add console logging to server.
+[ ] show agent tabs for security advisor and compression agent when they work.
+[ ] warn agents about message limit at 90%
+[ ] Add an UI appearance option to only show the active message que of the agent (from last summary on) -  this should keep the performance in check when chat bloats over long durations.
 
 # BUGS:
 
 - context usage bar is out of sync often, we should try to hand it the values calculated by base.py (the ones showing in console as: "2026-05-18 04:02:03,042 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 44875, Available tokens: 85994")
 - security advisor still fails with ambiguous result, even though the output seems totally fine according to our formatting rules. needs a full outcome parsing path audit or further debugging. 
-- there seems to be a mismatch between the context slice of the llm active message que and the log file (the index where last context summary was inserted). after server restart i'm loading a different context usage than before. -- not sure if its consistent... we have to keep a watch tho
-- web_ui issues with steaming: sometimes we dont complete writing the last part of the content in a bubble before popping a new one
-- second use of "reasoning_content" tags breaks the system, both the web_ui (doesn't support multiple tag usage and starts writing back into the first thinking block) and our parsing logic, stopping the agents and messing up the toll call flow.
-- delete_file tool is unusually slow, check that logic.
 - save bubble edit doesn't actually save new edit.
-- compression agent didn't switch APIs? Needs a check, it doesnt happen often
-- need timeout protection on grep. wild searches can scan for hours, we should time it out in 30s
-- cache miss on return to caller agent (after a short task). somthing changes in the stack at start, needs fix
+- need better timeout protection on code interpreter, we are still having issues with it getting stuck. watchdog sometimes kills container but fails to return the error back to agent.
+- security advisor launched in parallel, should be sequential only. there is the cause for a lot of ambiguous responses most likely.
+
 
 # EOF
