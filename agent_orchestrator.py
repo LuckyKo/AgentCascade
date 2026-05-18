@@ -188,6 +188,10 @@ CALL_AGENT_SCHEMA = {
                 'type': 'boolean',
                 'description': 'Set to true to run the agent asynchronously in the background. Defaults to false (sequential).'
             },
+            'log_file': {
+                'type': 'string',
+                'description': 'Path to a JSONL log file to restore the agent session from before starting. Useful for resuming old sessions. If provided and the instance_name does not already exist in the pool, the session will be loaded from this log file.'
+            },
         },
         'required': ['agent_class', 'instance_name', 'task'],
     },
@@ -984,7 +988,8 @@ class OrchestratorAgent(Assistant):
 
                 m = copy.deepcopy(msg)
                 if m.get('reasoning_content'):
-                    reasoning = f"<think>\n{m['reasoning_content']}\n</think>\n"
+                    reasoning_clean = re.sub(r"\s*<(think|thought)>.*?<\/\1>", "", m["reasoning_content"], flags=re.IGNORECASE | re.DOTALL)
+                    reasoning = f"<think>\n{reasoning_clean}\n</think>\n"
                     old_content = m.get(CONTENT)
                     if old_content is None:
                         m[CONTENT] = reasoning
@@ -1405,7 +1410,14 @@ class OrchestratorAgent(Assistant):
 
         if self.agent_pool.stopped:
             return f"Operation cancelled by user."
-            
+        
+        # If log_file is provided and instance doesn't exist yet, restore session from log
+        log_file = args.get('log_file')
+        if log_file and instance_name not in self.agent_pool.instance_conversations:
+            load_result = self.agent_pool.load_session_from_log(log_file, target_instance=instance_name)
+            if load_result.startswith("Error"):
+                return f"Failed to restore session from log '{log_file}': {load_result}"
+        
         # Prepare sub-agent logger
         logger_inst = self.agent_pool.get_logger(
             instance_name, 

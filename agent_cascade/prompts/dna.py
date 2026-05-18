@@ -303,14 +303,16 @@ TOOL_METADATA = {
             'Delegate a task to a specialized sub-agent. '
             'If the instance_name already exists, the session continues. '
             'Otherwise, a new session is started using the specified agent_class.\n\n'
-            'Example: {"agent_class": "coder", "instance_name": "worker1", "task": "Write a script", "parallel_launch": true}'
+            'Example: {"agent_class": "coder", "instance_name": "worker1", "task": "Write a script", "parallel_launch": true}\n\n'
+            'To resume an old session from a JSONL log file, provide the log_file parameter.'
         ),
         'parameters': {
             'agent_class': 'The class of agent to call (e.g., "researcher", "coder", "writer")',
             'instance_name': 'A unique name for this agent instance. Use this to continue the session later.',
             'task': 'The task or question to delegate',
             'context': 'Any relevant context or background information the sub-agent needs',
-            'parallel_launch': 'Set to true to run the agent asynchronously in the background. Defaults to false (sequential).'
+            'parallel_launch': 'Set to true to run the agent asynchronously in the background. Defaults to false (sequential).',
+            'log_file': 'Path to a JSONL log file to restore the session from before starting. Useful for resuming old sessions.'
         }
     },
     'dismiss_agent': {
