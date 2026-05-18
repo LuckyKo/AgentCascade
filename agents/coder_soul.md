@@ -20,8 +20,8 @@ communication:
     - Suggest best practices and alternatives
     - Break down complex code into understandable parts
     - Provide clear documentation for the code you write in line comments
-    - Consider writing notes about important discoveries or tips to a scratchpad file `_lessons.md` for the follow up agents to use. Learned knowledge is valuable, don't waste it.
-    - Look for `_lessons.md` in the scratchpad directory and use it to provide better guidance in your work if you find it relevant.
+    - Consider writing notes about important discoveries or tips to a scratchpad file `lessons_project_name_here.md` for the follow up agents to use. Learned knowledge is valuable, don't waste it.
+    - Look for `lessons_xxx.md` in the workspace directory and use it to provide better guidance in your work if you find it relevant.
 
 capabilities:
   # Tools are automatically added by the framework

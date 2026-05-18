@@ -25,6 +25,7 @@ import sys
 import time
 import traceback
 import urllib.parse
+from collections import OrderedDict
 from io import BytesIO
 from typing import Any, List, Literal, Optional, Tuple, Union
 
@@ -91,7 +92,11 @@ def print_traceback(is_error: bool = True):
         logger.warning(tb)
 
 
-CHINESE_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
+from agent_cascade.utils.thinking_block import (
+    _THINK_BLOCK_RE, _THINK_BLOCK_UNCLOSED_RE,
+    _THINK_BLOCK_BRACKET_RE, _MARKDOWN_CODE_RE, _TRIPLE_QUOTE_RE,
+    _JSON_STRING_RE, CHINESE_CHAR_RE, _IMAGE_DATA_RE as IMAGE_REGEX
+)
 
 
 def has_chinese_chars(data: Any) -> bool:
@@ -333,6 +338,13 @@ def repair_invalid_json(text: str) -> str:
 def json_loads(text: str) -> dict:
     import json5
     original_text = text.strip()
+    
+    # 0. Strip thinking blocks first to avoid them interfering with parsing 
+    # if they contain {} markers or quotes
+    if any(tag in original_text.lower() for tag in ['<think', '<thought', '[think', '[thought']):
+        original_text = _THINK_BLOCK_RE.sub('', original_text)
+        original_text = _THINK_BLOCK_BRACKET_RE.sub('', original_text)
+        original_text = _THINK_BLOCK_UNCLOSED_RE.sub('', original_text).strip()
 
     # 1. Try parsing as-is (handles most cases including those with backticks inside)
     try:
@@ -343,8 +355,7 @@ def json_loads(text: str) -> dict:
     # 2. Try stripping markdown code blocks (handles cases where the whole response is wrapped)
     text = original_text
     if '```' in text:
-        import re
-        match = re.search(r'```(?:[a-zA-Z0-9]*\n)?(.*?)```', text, re.DOTALL)
+        match = _MARKDOWN_CODE_RE.search(text)
         if match:
             text = match.group(1).strip()
         else:
@@ -369,7 +380,11 @@ def json_loads(text: str) -> dict:
         if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
             json_str = text[start_idx:end_idx+1]
             repaired = repair_invalid_json(json_str)
-            return json5.loads(repaired)
+            # Use repaired string if extraction alone wasn't enough
+            try:
+                return json5.loads(json_str)
+            except Exception:
+                return json5.loads(repaired)
     except Exception:
         pass
 
@@ -698,8 +713,6 @@ def rm_default_system(messages: List[Message]) -> List[Message]:
     else:
         return messages
 
-IMAGE_REGEX = re.compile(r'!\[(.*?)\]\(data:image/[^;]+;base64,[a-zA-Z0-9+/=]+\)')
-
 
 def get_message_stats(msg: Union[Message, dict]) -> dict:
     """Return tokens and words for a message with consistency.
@@ -734,9 +747,25 @@ def get_message_stats(msg: Union[Message, dict]) -> dict:
 
 
 def get_history_stats(messages: List[Union[Message, dict]]) -> dict:
-    """Calculate total tokens and words in a message list with caching."""
+    """Calculate total tokens and words in a message list with caching.
+    
+    Caching strategy:
+    - Dict messages: cache _tokens/_words directly on the dict (mutates in place)
+    - Message objects: use an LRU content-based cache keyed by (role, md5_hash_of_content)
+      to avoid re-tokenizing identical messages across calls. Cache is bounded to prevent memory leaks.
+    """
     if not messages:
         return {'tokens': 0, 'words': 0}
+    
+    # Module-level LRU cache for Message object stats (survives across get_history_stats calls)
+    # Uses OrderedDict for O(1) eviction of least-recently-used entries when max size is exceeded
+    if not hasattr(get_history_stats, '_msg_stats'):
+        get_history_stats._msg_stats = OrderedDict()
+        get_history_stats._cache_max_size = 512
+    
+    msg_cache: OrderedDict = get_history_stats._msg_stats
+    cache_max = get_history_stats._cache_max_size
+    
     total_tokens = 0
     total_words = 0
     for m in messages:
@@ -751,7 +780,38 @@ def get_history_stats(messages: List[Union[Message, dict]]) -> dict:
                 total_tokens += stats['tokens']
                 total_words += stats['words']
         else:
-            stats = get_message_stats(m)
+            # Message object — use content-based LRU cache to avoid re-tokenizing
+            role = getattr(m, 'role', '')
+            content = getattr(m, 'content', '')
+            fc = getattr(m, 'function_call', None)
+            
+            # Build a hashable key from the message content using MD5 of the full text
+            # This avoids collisions that occurred with the old truncation-based keys
+            if fc:
+                content_key = ('fc', str(fc))
+            elif isinstance(content, list):
+                text_items = [item.text for item in content if hasattr(item, 'text') and item.text]
+                full_text = ''.join(text_items)
+                content_hash = hashlib.md5(full_text.encode('utf-8', errors='replace')).hexdigest()[:16]
+                content_key = ('multi', content_hash)
+            else:
+                full_text = str(content)
+                content_hash = hashlib.md5(full_text.encode('utf-8', errors='replace')).hexdigest()[:16]
+                content_key = ('text', content_hash)
+            
+            cache_key = (role, str(content_key))
+            
+            # Check Message object LRU cache — move to end on hit (most recently used)
+            if cache_key in msg_cache:
+                stats = msg_cache[cache_key]
+                msg_cache.move_to_end(cache_key)
+            else:
+                stats = get_message_stats(m)
+                # Evict oldest entry if at capacity
+                if len(msg_cache) >= cache_max:
+                    msg_cache.popitem(last=False)
+                msg_cache[cache_key] = stats
+            
             total_tokens += stats['tokens']
             total_words += stats['words']
     return {'tokens': total_tokens, 'words': total_words}

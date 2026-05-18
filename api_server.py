@@ -51,10 +51,19 @@ from agent_cascade.utils.utils import extract_text_from_message, get_message_sta
 from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_BASELINE_TEMPLATE, COMPRESSION_MARKER
 from agent_cascade.llm.base import _truncate_input_messages_roughly
 
+from agent_cascade.utils.thinking_block import (
+    _THINK_BLOCK_RE, _THINK_BLOCK_UNCLOSED_RE, _THINK_BLOCK_BRACKET_RE,
+    _THINK_SEARCH_RE, _TOOL_TRUNCATED_RE, _CONTEXT_SUMMARY_RE,
+    _MARKDOWN_BOLD_RE, _JUSTIFICATION_PREFIX_RE, _IMAGE_DATA_RE as _IMAGE_DATA_PATTERN,
+    strip_thinking_blocks
+)
+
 try:
     from agent_cascade.agents.user_agent import PENDING_USER_INPUT
 except ImportError:
     PENDING_USER_INPUT = 'PENDING_USER_INPUT'
+
+# Pre-compiled regexes moved to agent_cascade.utils.thinking_block
 
 
 def _parse_multimodal_content(text):
@@ -62,10 +71,9 @@ def _parse_multimodal_content(text):
     Parse markdown images ![alt](data:...) and return a list of content items.
     If no images are found, returns the original text.
     """
-    pattern = r'!\[([^\]]*)\]\((data:image/[^;]+;base64,[a-zA-Z0-9+/=]+)\)'
     parts = []
     last_end = 0
-    for match in re.finditer(pattern, text):
+    for match in _IMAGE_DATA_PATTERN.finditer(text):
         start, end = match.span()
         if start > last_end:
             parts.append({'text': text[last_end:start]})
@@ -122,8 +130,7 @@ def detect_loop(messages: List[dict]) -> Optional[Tuple[str, int]]:
         else:
             text_feature = content or reasoning
             
-        import re
-        text_feature = re.sub(r'\[TOOL RESPONSE TRUNCATED.*?\]', '[TOOL RESPONSE TRUNCATED]', text_feature, flags=re.DOTALL)
+        text_feature = _TOOL_TRUNCATED_RE.sub('[TOOL RESPONSE TRUNCATED]', text_feature)
             
         fc = m.get('function_call')
         if fc:
@@ -285,6 +292,12 @@ def serialize_message(msg, index=None):
         if d[key] is None:
             del d[key]
     
+    # FIX3 (internal cache keys leak): Remove _tokens/_words injected by get_history_stats
+    # so they don't serialize to the frontend.
+    d.pop('_tokens', None)
+    d.pop('_words', None)
+    d.pop('_ui_cache', None)
+    
     # Extract tool_success from extra before stripping — frontend needs it for isToolFailure()
     if 'extra' in d and isinstance(d['extra'], dict):
         ts = d['extra'].get('tool_success')
@@ -384,7 +397,7 @@ def create_app(agents, agent_pool, config=None):
                 content = msg.get(CONTENT, '')
                 if isinstance(content, str) and "<context_summary>" in content:
                     import re
-                    match = re.search(r"<context_summary>[\s\n]*(.*?)[\s\n]*</context_summary>", content, re.DOTALL)
+                    match = _CONTEXT_SUMMARY_RE.search(content)
                     if match:
                         agent_pool.instance_summaries[name] = match.group(1).strip()
                     break
@@ -474,29 +487,73 @@ def create_app(agents, agent_pool, config=None):
         if agent_pool and hasattr(agent_pool, 'sub_agent_state'):
             for name, state in agent_pool.sub_agent_state.items():
                 msgs = state.get('messages', [])
-                msg_count = len(msgs)
-                agent_class = state.get('agent_name', name)
                 
-                # Get max tokens for this agent class
+                # Extract the actual agent class from agent_name.
+                # agent_name is stored as "instance_name (AgentClass)" by the orchestrator,
+                # e.g. "worker1 (Coder)". We need just "Coder" to look up the agent template.
+                raw_agent_name = state.get('agent_name', name)
+                if ' (' in raw_agent_name and raw_agent_name.endswith(')'):
+                    agent_class = raw_agent_name.split(' (')[-1].rstrip(')')
+                else:
+                    agent_class = raw_agent_name
+                
+                # Get max tokens for this sub-agent's own model/endpoint.
+                # Try the agent template first, then fall back to querying the API Router
+                # directly by agent type (handles cases where the template wasn't loaded).
                 agent_template = agent_pool.get_agent(agent_class)
-                max_tokens = get_agent_max_tokens(agent_template) if agent_template else 58000
+                if agent_template:
+                    max_tokens = get_agent_max_tokens(agent_template)
+                elif hasattr(agent_pool, 'api_router') and agent_pool.api_router:
+                    # Query the router directly using the agent class as the type key
+                    agent_type = agent_class.lower()
+                    router_limit = agent_pool.api_router.get_effective_max_tokens(agent_type)
+                    max_tokens = router_limit if router_limit > 0 else DEFAULT_MAX_INPUT_TOKENS
+                else:
+                    max_tokens = DEFAULT_MAX_INPUT_TOKENS
                 
-                # FIX2: Only re-tokenize when the sub-agent's message list actually grows.
+                # FIX1 (sub-agent index mismatch): Always compute from the sliced/active set.
+                # slice_history_for_llm can reduce the message count during compression,
+                # so we track active_count (len of sliced history) instead of len(msgs).
+                # This ensures all indexing into active_msgs is consistent.
+                active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
+                active_count = len(active_msgs)
+                
+                # Incremental token counting for sub-agents.
                 # During streaming, sub-agent histories are mostly static — they only change
                 # when a new message arrives from that sub-agent (rare during main agent ticks).
                 cache_key = '_sa_stats_' + name
-                last_count = session.get(cache_key + '_count', -1)
-                if msg_count > last_count:
-                    # New message(s) added — compute full stats via tiktoken
-                    active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
+                last_active_count = session.get(cache_key + '_count', -1)
+                
+                if active_count > last_active_count:
+                    # New message(s) added — compute stats incrementally
+                    if cache_key in session and last_active_count >= 0:
+                        # Incremental update: only tokenize the new messages (from last_active_count onward)
+                        cached_stats = session.get(cache_key, {'tokens': 0, 'words': 0})
+                        new_msgs = active_msgs[last_active_count:] if len(active_msgs) > last_active_count else []
+                        if new_msgs:
+                            new_stats = get_history_stats(new_msgs)
+                            stats = {
+                                'tokens': cached_stats['tokens'] + new_stats['tokens'],
+                                'words': cached_stats['words'] + new_stats['words']
+                            }
+                        else:
+                            stats = cached_stats.copy()
+                    else:
+                        # First access or cache missing — compute full stats
+                        stats = get_history_stats(active_msgs)
+                    
+                    session[cache_key + '_count'] = active_count
+                elif active_count < last_active_count:
+                    # FIX2 (history shrank due to compression): Recompute from scratch.
+                    # slice_history_for_llm may have dropped older messages after a context_summary,
+                    # so the cached stats would overcount tokens if we reused them.
                     stats = get_history_stats(active_msgs)
-                    session[cache_key + '_count'] = msg_count
+                    session[cache_key + '_count'] = active_count
                 elif cache_key in session:
-                    # Same messages AND cache exists — use cached stats (avoids tiktoken.encode per tick)
+                    # Same active count AND cache exists — use cached stats (avoids tiktoken.encode per tick)
                     stats = session.get(cache_key, {'tokens': 0, 'words': 0}).copy()
                 else:
                     # First access or cache missing — compute stats to populate the cache
-                    active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
                     stats = get_history_stats(active_msgs)
                 
                 # Dynamically extract summary from messages if missing from tracker (e.g. after restart)
@@ -509,7 +566,7 @@ def create_app(agents, agent_pool, config=None):
                         if role == USER and isinstance(content, str) and (COMPRESSION_MARKER in content or "<context_summary>" in content):
                             import re
                             # Use the standardized XML-style tag match
-                            match = re.search(r"<context_summary>[\s\n]*(.*?)[\s\n]*</context_summary>", content, re.DOTALL)
+                            match = _CONTEXT_SUMMARY_RE.search(content)
                             if match:
                                 summary = match.group(1).strip()
                                 break
@@ -569,7 +626,41 @@ def create_app(agents, agent_pool, config=None):
         
         # Calculate tokens for the active 'working set' (after compression)
         active_h = agent_pool.slice_history_for_llm(session['history']) if agent_pool else session['history']
-        h_stats = get_history_stats(active_h)
+        
+        # FIX3: Cache main history stats at session level to avoid re-tokenizing on every build_state() call
+        hist_count = len(active_h)
+        cached_hist_count = session.get('_cached_hist_stats_count', -1)
+        if hist_count > cached_hist_count:
+            # History grew — compute incrementally (only new messages)
+            if cached_hist_count >= 0 and cached_hist_count < len(active_h):
+                cached_h_stats = session.get('_cached_hist_stats', {'tokens': 0, 'words': 0})
+                new_msgs = active_h[cached_hist_count:]
+                new_stats = get_history_stats(new_msgs)
+                h_stats = {
+                    'tokens': cached_h_stats['tokens'] + new_stats['tokens'],
+                    'words': cached_h_stats['words'] + new_stats['words']
+                }
+            else:
+                # First access or cache missing — compute full stats
+                h_stats = get_history_stats(active_h)
+            session['_cached_hist_stats'] = h_stats.copy()
+            session['_cached_hist_stats_count'] = hist_count
+        elif hist_count < cached_hist_count:
+            # FIX2 (history shrank due to compression): Recompute from scratch.
+            # slice_history_for_llm may have dropped older messages after a context_summary,
+            # so the cached stats would overcount tokens if we reused them.
+            h_stats = get_history_stats(active_h)
+            session['_cached_hist_stats'] = h_stats.copy()
+            session['_cached_hist_stats_count'] = hist_count
+        elif '_cached_hist_stats' in session:
+            # Same messages — use cached stats
+            h_stats = session['_cached_hist_stats'].copy()
+        else:
+            # First access — compute and cache
+            h_stats = get_history_stats(active_h)
+            session['_cached_hist_stats'] = h_stats.copy()
+            session['_cached_hist_stats_count'] = hist_count
+        
         r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
         
         total_tokens = h_stats['tokens'] + r_stats['tokens']
@@ -584,7 +675,7 @@ def create_app(agents, agent_pool, config=None):
             if isinstance(content, str) and COMPRESSION_MARKER in content:
                 import re
                 # Only match content INSIDE the tags, allowing optional newlines/whitespace
-                match = re.search(r"<context_summary>[\s\n]*(.*?)[\s\n]*</context_summary>", content, re.DOTALL)
+                match = _CONTEXT_SUMMARY_RE.search(content)
                 if match:
                     current_summary = match.group(1).strip()
                 break
@@ -644,13 +735,23 @@ def create_app(agents, agent_pool, config=None):
         max_tokens = get_agent_max_tokens(orch_agent)
         
         if cached_h_stats is None:
-            if max_tokens > 0:
+            # Try session-level cache first (avoids full re-tokenization)
+            hist_count = len(active_h)
+            cached_hist_count = session.get('_cached_hist_stats_count', -1)
+            if hist_count <= cached_hist_count and '_cached_hist_stats' in session:
+                h_stats = session['_cached_hist_stats'].copy()
+            elif max_tokens > 0:
                 msg_objs = [Message(**m) if isinstance(m, dict) else copy.deepcopy(m) for m in active_h]
                 try:
                     active_h = _truncate_input_messages_roughly(msg_objs, max_tokens, agent_name="Orchestrator")
                 except Exception as e:
                     logger.error(f"Failed to truncate orchestrator messages for stream stats: {e}")
-            h_stats = get_history_stats(active_h)
+                h_stats = get_history_stats(active_h)
+                # Update session cache with the result
+                session['_cached_hist_stats'] = h_stats.copy()
+                session['_cached_hist_stats_count'] = len(active_h)
+            else:
+                h_stats = get_history_stats(active_h)
         else:
             h_stats = cached_h_stats
             
@@ -1147,6 +1248,13 @@ def create_app(agents, agent_pool, config=None):
             # FIX1: Reset cached response stats so next generation starts fresh
             session.pop('_last_resp_len_stats', None)
             session.pop('_cached_r_stats', None)
+            # FIX3: Invalidate history stats caches — messages may have been added/removed during run
+            session.pop('_cached_hist_stats', None)
+            session.pop('_cached_hist_stats_count', None)
+            # FIX2: Invalidate sub-agent stats caches — their histories may have changed
+            for key in list(session.keys()):
+                if key.startswith('_sa_stats_'):
+                    session.pop(key, None)
             if agent_pool:
                 agent_pool.stopped = False
             if has_llm and old_cfg:
@@ -1765,12 +1873,13 @@ def create_app(agents, agent_pool, config=None):
                             loop = asyncio.get_running_loop()
                             def _security_check():
                                 try:
-                                    import platform, re, json, copy
-                                    
+                                    import platform
+                                    import json
+                                    import copy
+
                                     if not agent_pool.get_agent('security_advisor'):
                                         agent_pool.load_agent('security_advisor')
                                     sec_agent = agent_pool.get_agent('security_advisor')
-
                                     workspace_info = f"Main workspace: {agent_pool.operation_manager.base_dir}\n"
                                     if agent_pool.operation_manager.extra_work_folders_ro:
                                         extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_ro]
@@ -1814,20 +1923,31 @@ def create_app(agents, agent_pool, config=None):
                                         reasoning = msg.get('reasoning_content', '') if isinstance(msg, dict) else getattr(msg, 'reasoning_content', '')
                                         fc = msg.get('function_call', None) if isinstance(msg, dict) else getattr(msg, 'function_call', None)
                                         
+                                        # Normalize content and reasoning to string for regex safety
+                                        if isinstance(content, list):
+                                            content_str = " ".join([str(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')) for item in content])
+                                        else:
+                                            content_str = str(content)
+                                            
+                                        if isinstance(reasoning, list):
+                                            reasoning_str = " ".join([str(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')) for item in reasoning])
+                                        else:
+                                            reasoning_str = str(reasoning)
+
                                         if role == 'assistant':
                                             # Deduplicate: if content already contains the reasoning, don't add it twice
-                                            clean_content = content
-                                            if reasoning:
+                                            clean_content = content_str
+                                            if reasoning_str:
                                                 # Check if content starts with a thinking block that matches reasoning
-                                                think_match = re.search(r'^\s*<(think|thought)>([\s\S]*?)(</think>|$)', content, re.IGNORECASE)
+                                                think_match = _THINK_SEARCH_RE.search(content_str)
                                                 if think_match:
                                                     embedded_thought = think_match.group(2).strip()
                                                     # If they are very similar, we consider it a duplicate
-                                                    if reasoning.strip() in embedded_thought or embedded_thought in reasoning.strip():
-                                                        # Remove the embedded thinking block from display_response part
-                                                        clean_content = (content[:think_match.start()] + content[think_match.end():]).strip()
+                                                    if reasoning_str.strip() in embedded_thought or embedded_thought in reasoning_str.strip():
+                                                        # Remove ALL embedded thinking blocks from display_response part
+                                                        clean_content = _THINK_BLOCK_RE.sub('', content_str).strip()
                                                 
-                                                display_response += f"<think>\n{reasoning.strip()}\n</think>\n\n"
+                                                display_response += f"<think>\n{reasoning_str.strip()}\n</think>\n\n"
                                             
                                             if fc:
                                                 fname = fc.get('name', '') if isinstance(fc, dict) else getattr(fc, 'name', '')
@@ -1837,15 +1957,17 @@ def create_app(agents, agent_pool, config=None):
                                                 display_response += f"{clean_content}\n\n"
                                                 
                                             # For parsing, we always want the content WITHOUT any thinking blocks
-                                            if content:
-                                                if '<think' in content.lower() or '<thought' in content.lower():
-                                                    # Only strip if it's at the very beginning to avoid stripping markers inside file content
-                                                    parsing_response = re.sub(r'^\s*<(think|thought)>.*?(</\1>|$)', '', content, count=1, flags=re.IGNORECASE | re.DOTALL).strip()
+                                            if content_str:
+                                                if '<think' in content_str.lower() or '<thought' in content_str.lower():
+                                                    # Strip ALL thinking blocks (not just one) — multiple blocks break parsing
+                                                    parsing_response = _THINK_BLOCK_RE.sub('', content_str).strip()
+                                                    # Also handle unclosed tags at end of string
+                                                    parsing_response = _THINK_BLOCK_UNCLOSED_RE.sub('', parsing_response).strip()
                                                 else:
-                                                    parsing_response = content.strip()
+                                                    parsing_response = content_str.strip()
                                         elif role == 'function':
                                             fname = msg.get('name', '') if isinstance(msg, dict) else getattr(msg, 'name', '')
-                                            display_response += f"*(Result from {fname} - {len(str(content))} chars)*\n\n"
+                                            display_response += f"*(Result from {fname} - {len(str(content_str))} chars)*\n\n"
 
                                     # Use the unstripped content for verdict detection to be safe, 
                                     # but use stripped content for the display if needed.
@@ -1853,13 +1975,13 @@ def create_app(agents, agent_pool, config=None):
                                     
                                     parsing_text = raw_parsing_text
                                     if '<think' in parsing_text.lower() or '<thought' in parsing_text.lower():
-                                        parsing_text = re.sub(r'^\s*<(think|thought)>.*?</\1>', '', parsing_text, count=1, flags=re.IGNORECASE | re.DOTALL)
+                                        parsing_text = _THINK_BLOCK_RE.sub('', parsing_text)
                                     if '[think' in parsing_text.lower() or '[thought' in parsing_text.lower():
-                                        parsing_text = re.sub(r'^\s*\[(THINK|THOUGHT)\].*?\[/\1\]', '', parsing_text, count=1, flags=re.IGNORECASE | re.DOTALL)
+                                        parsing_text = _THINK_BLOCK_BRACKET_RE.sub('', parsing_text)
                                     
                                     # Only strip unclosed blocks at the very end of the string if they are at the START of the remaining text
                                     if '<think' in parsing_text.lower() or '<thought' in parsing_text.lower():
-                                        parsing_text = re.sub(r'^\s*<(think|thought)>[^<]*$', '', parsing_text, flags=re.IGNORECASE | re.DOTALL)
+                                        parsing_text = _THINK_BLOCK_RE.sub('', parsing_text)
                                     
                                     parsing_response = parsing_text.strip()
                                     
@@ -1867,9 +1989,9 @@ def create_app(agents, agent_pool, config=None):
                                     # This handles both <think> tags and [THINK] tags
                                     clean_text = raw_parsing_text
                                     if '<think' in clean_text.lower() or '<thought' in clean_text.lower():
-                                        clean_text = re.sub(r'^\s*<(think|thought)>.*?(</\1>|$)', '', clean_text, count=1, flags=re.IGNORECASE | re.DOTALL)
+                                        clean_text = _THINK_BLOCK_RE.sub('', clean_text)
                                     if '[think' in clean_text.lower() or '[thought' in clean_text.lower():
-                                        clean_text = re.sub(r'^\s*\[(THINK|THOUGHT)\].*?(\[/\1\]|$)', '', clean_text, count=1, flags=re.IGNORECASE | re.DOTALL).strip()
+                                        clean_text = _THINK_BLOCK_BRACKET_RE.sub('', clean_text).strip()
                                     clean_text = clean_text.strip()
                                     
                                     check_text = clean_text.upper()
@@ -1879,7 +2001,7 @@ def create_app(agents, agent_pool, config=None):
                                     last_line = lines[-1] if lines else ""
                                     
                                     # Remove markdown bolding if present (e.g. **[YES]**)
-                                    last_line_clean = re.sub(r'(\*\*|__)', '', last_line).strip()
+                                    last_line_clean = _MARKDOWN_BOLD_RE.sub('', last_line).strip()
                                     last_line_upper = last_line_clean.upper()
                                     
                                     is_yes = last_line_upper.startswith('[YES]')
@@ -1893,7 +2015,7 @@ def create_app(agents, agent_pool, config=None):
                                         
                                     if is_yes or is_no:
                                         # Strip "Reason:", "Justification:", etc.
-                                        justification = re.sub(r'^(Reason|Justification|Verdict|Tips)[:\s-]*', '', justification, flags=re.IGNORECASE).strip()
+                                        justification = _JUSTIFICATION_PREFIX_RE.sub('', justification).strip()
                                     
                                     # Fallback 1: if no [YES]/[NO] on last line, check if the entire response is JUST the verdict
                                     if not is_yes and not is_no and len(lines) == 1:
@@ -1916,10 +2038,10 @@ def create_app(agents, agent_pool, config=None):
                                         if is_yes or is_no:
                                             # Extract justification from the matching line
                                             for line in lines:
-                                                lc = re.sub(r'(\*\*|__)', '', line).strip().upper()
+                                                lc = _MARKDOWN_BOLD_RE.sub('', line).strip().upper()
                                                 if (is_yes and '[YES]' in lc) or (is_no and '[NO]' in lc):
                                                     just_text = lc.replace('[YES]', '', 1).replace('[NO]', '', 1).strip()
-                                                    justification = re.sub(r'^(Reason|Justification|Verdict|Tips)[:\s-]*', '', just_text, flags=re.IGNORECASE).strip()
+                                                    justification = _JUSTIFICATION_PREFIX_RE.sub('', just_text).strip()
                                                     break
                                     
                                     if is_yes or is_no:
@@ -1999,7 +2121,7 @@ def create_app(agents, agent_pool, config=None):
                                     msg[CONTENT] = f"{COMPRESSION_MARKER}\n\n<context_summary>\n{content}\n</context_summary>"
                                 
                                 # Sync the summary tracker
-                                match = re.search(r"<context_summary>[\s\n]*(.*?)[\s\n]*</context_summary>", msg[CONTENT], re.DOTALL)
+                                match = _CONTEXT_SUMMARY_RE.search(msg[CONTENT])
                                 if match and agent_pool:
                                     agent_pool.instance_summaries[target_name] = match.group(1).strip()
                             else:

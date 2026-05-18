@@ -1,0 +1,26 @@
+
+2026-05-18 11:16:13,810 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 65151, Available tokens: 83213
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\api_server.py", line 959, in run_agent_thread
+    for partial in agent_runner.run(working_history, **llm_safe_cfg):
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\agent.py", line 130, in run
+    for rsp in self._run(messages=new_messages, **kwargs):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_orchestrator.py", line 1011, in _run
+    if m.get('reasoning_content'):
+       ^
+NameError: name 'm' is not defined
+2026-05-18 11:18:02,094 - agent_logger.py - 376 - INFO - Soft rollback of 2 messages for Maine recorded in log.
+2026-05-18 11:18:02,400 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 65151, Available tokens: 83213
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\api_server.py", line 959, in run_agent_thread
+    for partial in agent_runner.run(working_history, **llm_safe_cfg):
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\agent.py", line 130, in run
+    for rsp in self._run(messages=new_messages, **kwargs):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_orchestrator.py", line 1011, in _run
+    if m.get('reasoning_content'):
+       ^
+NameError: name 'm' is not defined

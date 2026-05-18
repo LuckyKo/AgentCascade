@@ -17,11 +17,10 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] Add an Overseer agent that periodically checks on the heath of the system, reads logs and telemetry, check if running agents got stuck in undetectable loops or migrated goals towards something that the user never asked for, suggests fixes and improvements into a suggestion box. Main agent will pull from the suggestion box during idle times when user is AFK to self improve the agents or the framework during our daily operation - do the whole DNA A/B testing thing. Overseeer agent will always get its full working que compressed when it finishes and save it into the suggestion box (no chat messages) - should be persistent across sessions. We'll set the interval at which it activates, it will silently interrupt running agents when it activates and resume them like it never happens when its done (unless it decides to kill an agent), or work in parallel using a different API endpoint. - big task, will do it after we stabilize the framework
 [ ] Improve Activity bar when not streaming in tokens: show if we are in a process (compression/security audit etc) or waiting for a tool to respond. also make it catch the streamed token earlier so we don't need to do any complicated recalculation, make it a simple FIFO list of words.
 [ ] move tool output spillover dir to \logs\spillover
-[x] change call_agent tool so it's able to restart an old agent by loading its json log.
 [ ] unify the chat and subagent tabs (merge best of both). same for other logic inside - there should be no difference between orchestrator and other subagents, its only a call tree.
 [ ] implement "branch" button on main chat message bubbles, branching an agent history from that point into a new session.
 [ ] implement rate limits for each API endpoint to avoid spamming and getting locked out.
-
+[ ] add console logging to server.
 
 # BUGS:
 
@@ -34,5 +33,6 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - save bubble edit doesn't actually save new edit.
 - compression agent didn't switch APIs? Needs a check, it doesnt happen often
 - need timeout protection on grep. wild searches can scan for hours, we should time it out in 30s
+- cache miss on return to caller agent (after a short task). somthing changes in the stack at start, needs fix
 
 # EOF

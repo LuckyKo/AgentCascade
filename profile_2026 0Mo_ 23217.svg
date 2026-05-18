@@ -1,0 +1,491 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="634" onload="init(evt)" viewBox="0 0 1200 634" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:monospace; font-size:12px }
+#title { text-anchor:middle; font-size:17px; }
+#matched { text-anchor:end; }
+#search { text-anchor:end; opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 12;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = true;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames, known_font_width;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    known_font_width = get_monospace_width(frames);
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+            svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            update_text_for_elements(frames.children);
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad;
+            matchedtxt.attributes.x.value = svgWidth - xpad;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function get_monospace_width(frames) {
+    // Given the id="frames" element, return the width of text characters if
+    // this is a monospace font, otherwise return 0.
+    text = find_child(frames.children[0], "text");
+    originalContent = text.textContent;
+    text.textContent = "!";
+    bangWidth = text.getComputedTextLength();
+    text.textContent = "W";
+    wWidth = text.getComputedTextLength();
+    text.textContent = originalContent;
+    if (bangWidth === wWidth) {
+        return bangWidth;
+    } else {
+        return 0;
+    }
+}
+function update_text_for_elements(elements) {
+    // In order to render quickly in the browser, you want to do one pass of
+    // reading attributes, and one pass of mutating attributes. See
+    // https://web.dev/avoid-large-complex-layouts-and-layout-thrashing/ for details.
+
+    // Fall back to inefficient calculation, if we're variable-width font.
+    // TODO This should be optimized somehow too.
+    if (known_font_width === 0) {
+        for (var i = 0; i < elements.length; i++) {
+            update_text(elements[i]);
+        }
+        return;
+    }
+
+    var textElemNewAttributes = [];
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var r = find_child(e, "rect");
+        var t = find_child(e, "text");
+        var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+        var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+        var newX = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+        // Smaller than this size won't fit anything
+        if (w < 2 * known_font_width) {
+            textElemNewAttributes.push([newX, ""]);
+            continue;
+        }
+
+        // Fit in full text width
+        if (txt.length * known_font_width < w) {
+            textElemNewAttributes.push([newX, txt]);
+            continue;
+        }
+
+        var substringLength = Math.floor(w / known_font_width) - 2;
+        if (truncate_text_right) {
+            // Truncate the right side of the text.
+            textElemNewAttributes.push([newX, txt.substring(0, substringLength) + ".."]);
+            continue;
+        } else {
+            // Truncate the left side of the text.
+            textElemNewAttributes.push([newX, ".." + txt.substring(txt.length - substringLength, txt.length)]);
+            continue;
+        }
+    }
+
+    console.assert(textElemNewAttributes.length === elements.length, "Resize failed, please file a bug at https://github.com/jonhoo/inferno/");
+
+    // Now that we know new textContent, set it all in one go so we don't refresh a bazillion times.
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var values = textElemNewAttributes[i];
+        var t = find_child(e, "text");
+        t.attributes.x.value = values[0];
+        t.textContent = values[1];
+    }
+}
+
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    var to_update_text = [];
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                to_update_text.push(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                to_update_text.push(e);
+            }
+        }
+    }
+    update_text_for_elements(to_update_text);
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+    }
+    update_text_for_elements(el);
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="634" fill="url(#background)"/><text id="title" fill="rgb(0,0,0)" x="50.0000%" y="24.00">py-spy record -d 180 -o profile_2026 0Mo_ 23217.svg --pid 24484</text><text id="details" fill="rgb(0,0,0)" x="10" y="40.00"> </text><text id="unzoom" class="hide" fill="rgb(0,0,0)" x="10" y="24.00">Reset Zoom</text><text id="search" fill="rgb(0,0,0)" x="1190" y="24.00">Search</text><text id="matched" fill="rgb(0,0,0)" x="1190" y="623.00"> </text><svg id="frames" x="10" width="1180" total_samples="6442"><g><title>_poll (asyncio\windows_events.py:774) (191 samples, 2.96%)</title><rect x="0.3415%" y="212" width="2.9649%" height="15" fill="rgb(227,0,7)" fg:x="22" fg:w="191"/><text x="0.5915%" y="222.50">_po..</text></g><g><title>select (asyncio\windows_events.py:445) (210 samples, 3.26%)</title><rect x="0.1708%" y="196" width="3.2599%" height="15" fill="rgb(217,0,24)" fg:x="11" fg:w="210"/><text x="0.4208%" y="206.50">sel..</text></g><g><title>_run_once (asyncio\base_events.py:1948) (212 samples, 3.29%)</title><rect x="0.1552%" y="180" width="3.2909%" height="15" fill="rgb(221,193,54)" fg:x="10" fg:w="212"/><text x="0.4052%" y="190.50">_ru..</text></g><g><title>sleep (asyncio\tasks.py:661) (8 samples, 0.12%)</title><rect x="3.9739%" y="228" width="0.1242%" height="15" fill="rgb(248,212,6)" fg:x="256" fg:w="8"/><text x="4.2239%" y="238.50"></text></g><g><title>call_later (asyncio\base_events.py:761) (8 samples, 0.12%)</title><rect x="3.9739%" y="244" width="0.1242%" height="15" fill="rgb(208,68,35)" fg:x="256" fg:w="8"/><text x="4.2239%" y="254.50"></text></g><g><title>_approval_loop (api_server.py:1240) (14 samples, 0.22%)</title><rect x="3.9118%" y="212" width="0.2173%" height="15" fill="rgb(232,128,0)" fg:x="252" fg:w="14"/><text x="4.1618%" y="222.50"></text></g><g><title>recv (asyncio\windows_events.py:487) (11 samples, 0.17%)</title><rect x="4.3930%" y="228" width="0.1708%" height="15" fill="rgb(207,160,47)" fg:x="283" fg:w="11"/><text x="4.6430%" y="238.50"></text></g><g><title>_loop_self_reading (asyncio\proactor_events.py:804) (20 samples, 0.31%)</title><rect x="4.3310%" y="212" width="0.3105%" height="15" fill="rgb(228,23,34)" fg:x="279" fg:w="20"/><text x="4.5810%" y="222.50"></text></g><g><title>_loop_writing (asyncio\proactor_events.py:402) (12 samples, 0.19%)</title><rect x="4.6569%" y="212" width="0.1863%" height="15" fill="rgb(218,30,26)" fg:x="300" fg:w="12"/><text x="4.9069%" y="222.50"></text></g><g><title>send (asyncio\windows_events.py:542) (12 samples, 0.19%)</title><rect x="4.6569%" y="228" width="0.1863%" height="15" fill="rgb(220,122,19)" fg:x="300" fg:w="12"/><text x="4.9069%" y="238.50"></text></g><g><title>get (asyncio\queues.py:158) (7 samples, 0.11%)</title><rect x="5.3244%" y="228" width="0.1087%" height="15" fill="rgb(250,228,42)" fg:x="343" fg:w="7"/><text x="5.5744%" y="238.50"></text></g><g><title>_sender_loop (api_server.py:1228) (40 samples, 0.62%)</title><rect x="4.8432%" y="212" width="0.6209%" height="15" fill="rgb(240,193,28)" fg:x="312" fg:w="40"/><text x="5.0932%" y="222.50"></text></g><g><title>encode (json\encoder.py:200) (553 samples, 8.58%)</title><rect x="5.4952%" y="260" width="8.5843%" height="15" fill="rgb(216,20,37)" fg:x="354" fg:w="553"/><text x="5.7452%" y="270.50">encode (json..</text></g><g><title>iterencode (json\encoder.py:258) (548 samples, 8.51%)</title><rect x="5.5728%" y="276" width="8.5067%" height="15" fill="rgb(206,188,39)" fg:x="359" fg:w="548"/><text x="5.8228%" y="286.50">iterencode (..</text></g><g><title>broadcast (api_server.py:741) (557 samples, 8.65%)</title><rect x="5.4797%" y="228" width="8.6464%" height="15" fill="rgb(217,207,13)" fg:x="353" fg:w="557"/><text x="5.7297%" y="238.50">broadcast (a..</text></g><g><title>dumps (json\__init__.py:238) (556 samples, 8.63%)</title><rect x="5.4952%" y="244" width="8.6309%" height="15" fill="rgb(231,73,38)" fg:x="354" fg:w="556"/><text x="5.7452%" y="254.50">dumps (json\..</text></g><g><title>send (websockets\legacy\protocol.py:631) (75 samples, 1.16%)</title><rect x="14.3899%" y="308" width="1.1642%" height="15" fill="rgb(225,20,46)" fg:x="927" fg:w="75"/><text x="14.6399%" y="318.50"></text></g><g><title>prepare_data (websockets\legacy\framing.py:167) (71 samples, 1.10%)</title><rect x="14.4520%" y="324" width="1.1021%" height="15" fill="rgb(210,31,41)" fg:x="931" fg:w="71"/><text x="14.7020%" y="334.50"></text></g><g><title>encode (websockets\extensions\permessage_deflate.py:185) (2,041 samples, 31.68%)</title><rect x="15.8181%" y="388" width="31.6827%" height="15" fill="rgb(221,200,47)" fg:x="1019" fg:w="2041"/><text x="16.0681%" y="398.50">encode (websockets\extensions\permessage_deflate.py..</text></g><g><title>serialize (websockets\frames.py:299) (2,052 samples, 31.85%)</title><rect x="15.8025%" y="372" width="31.8535%" height="15" fill="rgb(226,26,5)" fg:x="1018" fg:w="2052"/><text x="16.0525%" y="382.50">serialize (websockets\frames.py:299)</text></g><g><title>send (asyncio\windows_events.py:542) (29 samples, 0.45%)</title><rect x="47.8733%" y="404" width="0.4502%" height="15" fill="rgb(249,33,26)" fg:x="3084" fg:w="29"/><text x="48.1233%" y="414.50"></text></g><g><title>_loop_writing (asyncio\proactor_events.py:402) (41 samples, 0.64%)</title><rect x="47.7802%" y="388" width="0.6364%" height="15" fill="rgb(235,183,28)" fg:x="3078" fg:w="41"/><text x="48.0302%" y="398.50"></text></g><g><title>write (asyncio\proactor_events.py:366) (49 samples, 0.76%)</title><rect x="47.7491%" y="372" width="0.7606%" height="15" fill="rgb(221,5,38)" fg:x="3076" fg:w="49"/><text x="47.9991%" y="382.50"></text></g><g><title>write_frame (websockets\legacy\protocol.py:1190) (2,123 samples, 32.96%)</title><rect x="15.5697%" y="324" width="32.9556%" height="15" fill="rgb(247,18,42)" fg:x="1003" fg:w="2123"/><text x="15.8197%" y="334.50">write_frame (websockets\legacy\protocol.py:1190)</text></g><g><title>write_frame_sync (websockets\legacy\protocol.py:1161) (2,116 samples, 32.85%)</title><rect x="15.6784%" y="340" width="32.8469%" height="15" fill="rgb(241,131,45)" fg:x="1010" fg:w="2116"/><text x="15.9284%" y="350.50">write_frame_sync (websockets\legacy\protocol.py:1161)</text></g><g><title>write (websockets\legacy\framing.py:147) (2,115 samples, 32.83%)</title><rect x="15.6939%" y="356" width="32.8314%" height="15" fill="rgb(249,31,29)" fg:x="1011" fg:w="2115"/><text x="15.9439%" y="366.50">write (websockets\legacy\framing.py:147)</text></g><g><title>asgi_send (uvicorn\protocols\websockets\websockets_impl.py:332) (2,210 samples, 34.31%)</title><rect x="14.2968%" y="292" width="34.3061%" height="15" fill="rgb(225,111,53)" fg:x="921" fg:w="2210"/><text x="14.5468%" y="302.50">asgi_send (uvicorn\protocols\websockets\websockets_impl...</text></g><g><title>send (websockets\legacy\protocol.py:632) (2,129 samples, 33.05%)</title><rect x="15.5542%" y="308" width="33.0487%" height="15" fill="rgb(238,160,17)" fg:x="1002" fg:w="2129"/><text x="15.8042%" y="318.50">send (websockets\legacy\protocol.py:632)</text></g><g><title>_sender_loop (api_server.py:1229) (2,780 samples, 43.15%)</title><rect x="5.4641%" y="212" width="43.1543%" height="15" fill="rgb(214,148,48)" fg:x="352" fg:w="2780"/><text x="5.7141%" y="222.50">_sender_loop (api_server.py:1229)</text></g><g><title>broadcast (api_server.py:745) (2,219 samples, 34.45%)</title><rect x="14.1726%" y="228" width="34.4458%" height="15" fill="rgb(232,36,49)" fg:x="913" fg:w="2219"/><text x="14.4226%" y="238.50">broadcast (api_server.py:745)</text></g><g><title>send_text (starlette\websockets.py:165) (2,217 samples, 34.41%)</title><rect x="14.2037%" y="244" width="34.4148%" height="15" fill="rgb(209,103,24)" fg:x="915" fg:w="2217"/><text x="14.4537%" y="254.50">send_text (starlette\websockets.py:165)</text></g><g><title>send (starlette\websockets.py:85) (2,216 samples, 34.40%)</title><rect x="14.2192%" y="260" width="34.3993%" height="15" fill="rgb(229,88,8)" fg:x="916" fg:w="2216"/><text x="14.4692%" y="270.50">send (starlette\websockets.py:85)</text></g><g><title>sender (starlette\_exception_handler.py:39) (2,215 samples, 34.38%)</title><rect x="14.2347%" y="276" width="34.3837%" height="15" fill="rgb(213,181,19)" fg:x="917" fg:w="2215"/><text x="14.4847%" y="286.50">sender (starlette\_exception_handler.py:39)</text></g><g><title>callback (asyncio\tasks.py:942) (15 samples, 0.23%)</title><rect x="48.6650%" y="212" width="0.2328%" height="15" fill="rgb(254,191,54)" fg:x="3135" fg:w="15"/><text x="48.9150%" y="222.50"></text></g><g><title>sleep (asyncio\tasks.py:661) (9 samples, 0.14%)</title><rect x="49.0220%" y="260" width="0.1397%" height="15" fill="rgb(241,83,37)" fg:x="3158" fg:w="9"/><text x="49.2720%" y="270.50"></text></g><g><title>call_later (asyncio\base_events.py:761) (9 samples, 0.14%)</title><rect x="49.0220%" y="276" width="0.1397%" height="15" fill="rgb(233,36,39)" fg:x="3158" fg:w="9"/><text x="49.2720%" y="286.50"></text></g><g><title>main_loop (uvicorn\server.py:229) (24 samples, 0.37%)</title><rect x="48.9289%" y="244" width="0.3726%" height="15" fill="rgb(226,3,54)" fg:x="3152" fg:w="24"/><text x="49.1789%" y="254.50"></text></g><g><title>_run_once (asyncio\base_events.py:1986) (2,956 samples, 45.89%)</title><rect x="3.5548%" y="180" width="45.8864%" height="15" fill="rgb(245,192,40)" fg:x="229" fg:w="2956"/><text x="3.8048%" y="190.50">_run_once (asyncio\base_events.py:1986)</text></g><g><title>_run (asyncio\events.py:88) (2,956 samples, 45.89%)</title><rect x="3.5548%" y="196" width="45.8864%" height="15" fill="rgb(238,167,29)" fg:x="229" fg:w="2956"/><text x="3.8048%" y="206.50">_run (asyncio\events.py:88)</text></g><g><title>serve (uvicorn\server.py:70) (34 samples, 0.53%)</title><rect x="48.9134%" y="212" width="0.5278%" height="15" fill="rgb(232,182,51)" fg:x="3151" fg:w="34"/><text x="49.1634%" y="222.50"></text></g><g><title>_serve (uvicorn\server.py:88) (34 samples, 0.53%)</title><rect x="48.9134%" y="228" width="0.5278%" height="15" fill="rgb(231,60,39)" fg:x="3151" fg:w="34"/><text x="49.1634%" y="238.50"></text></g><g><title>main_loop (uvicorn\server.py:230) (9 samples, 0.14%)</title><rect x="49.3015%" y="244" width="0.1397%" height="15" fill="rgb(208,69,12)" fg:x="3176" fg:w="9"/><text x="49.5515%" y="254.50"></text></g><g><title>run_forever (asyncio\base_events.py:641) (3,188 samples, 49.49%)</title><rect x="0.0000%" y="164" width="49.4877%" height="15" fill="rgb(235,93,37)" fg:x="0" fg:w="3188"/><text x="0.2500%" y="174.50">run_forever (asyncio\base_events.py:641)</text></g><g><title>&lt;module&gt; (start_api_server.py:261) (3,189 samples, 49.50%)</title><rect x="0.0000%" y="68" width="49.5033%" height="15" fill="rgb(213,116,39)" fg:x="0" fg:w="3189"/><text x="0.2500%" y="78.50">&lt;module&gt; (start_api_server.py:261)</text></g><g><title>run (uvicorn\server.py:66) (3,189 samples, 49.50%)</title><rect x="0.0000%" y="84" width="49.5033%" height="15" fill="rgb(222,207,29)" fg:x="0" fg:w="3189"/><text x="0.2500%" y="94.50">run (uvicorn\server.py:66)</text></g><g><title>run (asyncio\runners.py:194) (3,189 samples, 49.50%)</title><rect x="0.0000%" y="100" width="49.5033%" height="15" fill="rgb(206,96,30)" fg:x="0" fg:w="3189"/><text x="0.2500%" y="110.50">run (asyncio\runners.py:194)</text></g><g><title>run (asyncio\runners.py:118) (3,189 samples, 49.50%)</title><rect x="0.0000%" y="116" width="49.5033%" height="15" fill="rgb(218,138,4)" fg:x="0" fg:w="3189"/><text x="0.2500%" y="126.50">run (asyncio\runners.py:118)</text></g><g><title>run_until_complete (asyncio\base_events.py:674) (3,189 samples, 49.50%)</title><rect x="0.0000%" y="132" width="49.5033%" height="15" fill="rgb(250,191,14)" fg:x="0" fg:w="3189"/><text x="0.2500%" y="142.50">run_until_complete (asyncio\base_events.py:674)</text></g><g><title>run_forever (asyncio\windows_events.py:322) (3,189 samples, 49.50%)</title><rect x="0.0000%" y="148" width="49.5033%" height="15" fill="rgb(239,60,40)" fg:x="0" fg:w="3189"/><text x="0.2500%" y="158.50">run_forever (asyncio\windows_events.py:322)</text></g><g><title>read_text (pathlib.py:1027) (7 samples, 0.11%)</title><rect x="49.7051%" y="276" width="0.1087%" height="15" fill="rgb(206,27,48)" fg:x="3202" fg:w="7"/><text x="49.9551%" y="286.50"></text></g><g><title>grep (operation_manager.py:374) (61 samples, 0.95%)</title><rect x="49.7051%" y="260" width="0.9469%" height="15" fill="rgb(225,35,8)" fg:x="3202" fg:w="61"/><text x="49.9551%" y="270.50"></text></g><g><title>read_text (pathlib.py:1028) (54 samples, 0.84%)</title><rect x="49.8137%" y="276" width="0.8382%" height="15" fill="rgb(250,213,24)" fg:x="3209" fg:w="54"/><text x="50.0637%" y="286.50"></text></g><g><title>decode (&lt;frozen codecs&gt;:322) (26 samples, 0.40%)</title><rect x="50.2484%" y="292" width="0.4036%" height="15" fill="rgb(247,123,22)" fg:x="3237" fg:w="26"/><text x="50.4984%" y="302.50"></text></g><g><title>_run (agent_orchestrator.py:1144) (106 samples, 1.65%)</title><rect x="49.5654%" y="196" width="1.6455%" height="15" fill="rgb(231,138,38)" fg:x="3193" fg:w="106"/><text x="49.8154%" y="206.50"></text></g><g><title>_call_tool (agent_cascade\agents\fncall_agent.py:127) (106 samples, 1.65%)</title><rect x="49.5654%" y="212" width="1.6455%" height="15" fill="rgb(231,145,46)" fg:x="3193" fg:w="106"/><text x="49.8154%" y="222.50"></text></g><g><title>_call_tool (agent_cascade\agent.py:241) (106 samples, 1.65%)</title><rect x="49.5654%" y="228" width="1.6455%" height="15" fill="rgb(251,118,11)" fg:x="3193" fg:w="106"/><text x="49.8154%" y="238.50"></text></g><g><title>call (agent_cascade\tools\custom\file_ops.py:475) (106 samples, 1.65%)</title><rect x="49.5654%" y="244" width="1.6455%" height="15" fill="rgb(217,147,25)" fg:x="3193" fg:w="106"/><text x="49.8154%" y="254.50"></text></g><g><title>grep (operation_manager.py:377) (28 samples, 0.43%)</title><rect x="50.7762%" y="260" width="0.4346%" height="15" fill="rgb(247,81,37)" fg:x="3271" fg:w="28"/><text x="51.0262%" y="270.50"></text></g><g><title>tokenize (agent_cascade\utils\tokenization_qwen.py:175) (18 samples, 0.28%)</title><rect x="51.2263%" y="276" width="0.2794%" height="15" fill="rgb(209,12,38)" fg:x="3300" fg:w="18"/><text x="51.4763%" y="286.50"></text></g><g><title>encode (tiktoken\core.py:124) (18 samples, 0.28%)</title><rect x="51.2263%" y="292" width="0.2794%" height="15" fill="rgb(227,1,9)" fg:x="3300" fg:w="18"/><text x="51.4763%" y="302.50"></text></g><g><title>_run (agent_orchestrator.py:1212) (23 samples, 0.36%)</title><rect x="51.2108%" y="196" width="0.3570%" height="15" fill="rgb(248,47,43)" fg:x="3299" fg:w="23"/><text x="51.4608%" y="206.50"></text></g><g><title>_truncate_tool_result (agent_orchestrator.py:457) (23 samples, 0.36%)</title><rect x="51.2108%" y="212" width="0.3570%" height="15" fill="rgb(221,10,30)" fg:x="3299" fg:w="23"/><text x="51.4608%" y="222.50"></text></g><g><title>_count_message_tokens (agent_orchestrator.py:386) (22 samples, 0.34%)</title><rect x="51.2263%" y="228" width="0.3415%" height="15" fill="rgb(210,229,1)" fg:x="3300" fg:w="22"/><text x="51.4763%" y="238.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:246) (22 samples, 0.34%)</title><rect x="51.2263%" y="244" width="0.3415%" height="15" fill="rgb(222,148,37)" fg:x="3300" fg:w="22"/><text x="51.4763%" y="254.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:219) (22 samples, 0.34%)</title><rect x="51.2263%" y="260" width="0.3415%" height="15" fill="rgb(234,67,33)" fg:x="3300" fg:w="22"/><text x="51.4763%" y="270.50"></text></g><g><title>tokenize (agent_cascade\utils\tokenization_qwen.py:175) (21 samples, 0.33%)</title><rect x="51.6299%" y="308" width="0.3260%" height="15" fill="rgb(247,98,35)" fg:x="3326" fg:w="21"/><text x="51.8799%" y="318.50"></text></g><g><title>encode (tiktoken\core.py:124) (21 samples, 0.33%)</title><rect x="51.6299%" y="324" width="0.3260%" height="15" fill="rgb(247,138,52)" fg:x="3326" fg:w="21"/><text x="51.8799%" y="334.50"></text></g><g><title>_run (agent_orchestrator.py:891) (28 samples, 0.43%)</title><rect x="51.6144%" y="196" width="0.4346%" height="15" fill="rgb(213,79,30)" fg:x="3325" fg:w="28"/><text x="51.8644%" y="206.50"></text></g><g><title>_inject_compression_warning (agent_orchestrator.py:570) (28 samples, 0.43%)</title><rect x="51.6144%" y="212" width="0.4346%" height="15" fill="rgb(246,177,23)" fg:x="3325" fg:w="28"/><text x="51.8644%" y="222.50"></text></g><g><title>_inject_compression_warning_for_agent (agent_orchestrator.py:576) (28 samples, 0.43%)</title><rect x="51.6144%" y="228" width="0.4346%" height="15" fill="rgb(230,62,27)" fg:x="3325" fg:w="28"/><text x="51.8644%" y="238.50"></text></g><g><title>_get_history_tokens (agent_orchestrator.py:392) (28 samples, 0.43%)</title><rect x="51.6144%" y="244" width="0.4346%" height="15" fill="rgb(216,154,8)" fg:x="3325" fg:w="28"/><text x="51.8644%" y="254.50"></text></g><g><title>_count_message_tokens (agent_orchestrator.py:386) (27 samples, 0.42%)</title><rect x="51.6299%" y="260" width="0.4191%" height="15" fill="rgb(244,35,45)" fg:x="3326" fg:w="27"/><text x="51.8799%" y="270.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:246) (27 samples, 0.42%)</title><rect x="51.6299%" y="276" width="0.4191%" height="15" fill="rgb(251,115,12)" fg:x="3326" fg:w="27"/><text x="51.8799%" y="286.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:219) (27 samples, 0.42%)</title><rect x="51.6299%" y="292" width="0.4191%" height="15" fill="rgb(240,54,50)" fg:x="3326" fg:w="27"/><text x="51.8799%" y="302.50"></text></g><g><title>tokenize (agent_cascade\utils\tokenization_qwen.py:175) (13 samples, 0.20%)</title><rect x="52.1111%" y="276" width="0.2018%" height="15" fill="rgb(233,84,52)" fg:x="3357" fg:w="13"/><text x="52.3611%" y="286.50"></text></g><g><title>encode (tiktoken\core.py:124) (13 samples, 0.20%)</title><rect x="52.1111%" y="292" width="0.2018%" height="15" fill="rgb(207,117,47)" fg:x="3357" fg:w="13"/><text x="52.3611%" y="302.50"></text></g><g><title>_run (agent_orchestrator.py:928) (17 samples, 0.26%)</title><rect x="52.0646%" y="196" width="0.2639%" height="15" fill="rgb(249,43,39)" fg:x="3354" fg:w="17"/><text x="52.3146%" y="206.50"></text></g><g><title>&lt;genexpr&gt; (agent_orchestrator.py:928) (17 samples, 0.26%)</title><rect x="52.0646%" y="212" width="0.2639%" height="15" fill="rgb(209,38,44)" fg:x="3354" fg:w="17"/><text x="52.3146%" y="222.50"></text></g><g><title>_count_message_tokens (agent_orchestrator.py:386) (14 samples, 0.22%)</title><rect x="52.1111%" y="228" width="0.2173%" height="15" fill="rgb(236,212,23)" fg:x="3357" fg:w="14"/><text x="52.3611%" y="238.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:246) (14 samples, 0.22%)</title><rect x="52.1111%" y="244" width="0.2173%" height="15" fill="rgb(242,79,21)" fg:x="3357" fg:w="14"/><text x="52.3611%" y="254.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:219) (14 samples, 0.22%)</title><rect x="52.1111%" y="260" width="0.2173%" height="15" fill="rgb(211,96,35)" fg:x="3357" fg:w="14"/><text x="52.3611%" y="270.50"></text></g><g><title>tokenize (agent_cascade\utils\tokenization_qwen.py:175) (15 samples, 0.23%)</title><rect x="52.3440%" y="308" width="0.2328%" height="15" fill="rgb(253,215,40)" fg:x="3372" fg:w="15"/><text x="52.5940%" y="318.50"></text></g><g><title>encode (tiktoken\core.py:124) (15 samples, 0.23%)</title><rect x="52.3440%" y="324" width="0.2328%" height="15" fill="rgb(211,81,21)" fg:x="3372" fg:w="15"/><text x="52.5940%" y="334.50"></text></g><g><title>hooked_call_llm (agent_orchestrator.py:1599) (17 samples, 0.26%)</title><rect x="52.3285%" y="212" width="0.2639%" height="15" fill="rgb(208,190,38)" fg:x="3371" fg:w="17"/><text x="52.5785%" y="222.50"></text></g><g><title>_inject_compression_warning_for_agent (agent_orchestrator.py:576) (17 samples, 0.26%)</title><rect x="52.3285%" y="228" width="0.2639%" height="15" fill="rgb(235,213,38)" fg:x="3371" fg:w="17"/><text x="52.5785%" y="238.50"></text></g><g><title>_get_history_tokens (agent_orchestrator.py:392) (17 samples, 0.26%)</title><rect x="52.3285%" y="244" width="0.2639%" height="15" fill="rgb(237,122,38)" fg:x="3371" fg:w="17"/><text x="52.5785%" y="254.50"></text></g><g><title>_count_message_tokens (agent_orchestrator.py:386) (16 samples, 0.25%)</title><rect x="52.3440%" y="260" width="0.2484%" height="15" fill="rgb(244,218,35)" fg:x="3372" fg:w="16"/><text x="52.5940%" y="270.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:246) (16 samples, 0.25%)</title><rect x="52.3440%" y="276" width="0.2484%" height="15" fill="rgb(240,68,47)" fg:x="3372" fg:w="16"/><text x="52.5940%" y="286.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:219) (16 samples, 0.25%)</title><rect x="52.3440%" y="292" width="0.2484%" height="15" fill="rgb(210,16,53)" fg:x="3372" fg:w="16"/><text x="52.5940%" y="302.50"></text></g><g><title>tokenize (agent_cascade\utils\tokenization_qwen.py:175) (17 samples, 0.26%)</title><rect x="52.6545%" y="388" width="0.2639%" height="15" fill="rgb(235,124,12)" fg:x="3392" fg:w="17"/><text x="52.9045%" y="398.50"></text></g><g><title>encode (tiktoken\core.py:124) (16 samples, 0.25%)</title><rect x="52.6700%" y="404" width="0.2484%" height="15" fill="rgb(224,169,11)" fg:x="3393" fg:w="16"/><text x="52.9200%" y="414.50"></text></g><g><title>call_with_fallback (api_router.py:344) (23 samples, 0.36%)</title><rect x="52.5924%" y="244" width="0.3570%" height="15" fill="rgb(250,166,2)" fg:x="3388" fg:w="23"/><text x="52.8424%" y="254.50"></text></g><g><title>execute_with_sem (api_router.py:310) (23 samples, 0.36%)</title><rect x="52.5924%" y="260" width="0.3570%" height="15" fill="rgb(242,216,29)" fg:x="3388" fg:w="23"/><text x="52.8424%" y="270.50"></text></g><g><title>_execute_llm (agent_orchestrator.py:348) (23 samples, 0.36%)</title><rect x="52.5924%" y="276" width="0.3570%" height="15" fill="rgb(230,116,27)" fg:x="3388" fg:w="23"/><text x="52.8424%" y="286.50"></text></g><g><title>chat (agent_cascade\llm\base.py:208) (23 samples, 0.36%)</title><rect x="52.5924%" y="292" width="0.3570%" height="15" fill="rgb(228,99,48)" fg:x="3388" fg:w="23"/><text x="52.8424%" y="302.50"></text></g><g><title>_truncate_input_messages_roughly (agent_cascade\llm\base.py:811) (21 samples, 0.33%)</title><rect x="52.6234%" y="308" width="0.3260%" height="15" fill="rgb(253,11,6)" fg:x="3390" fg:w="21"/><text x="52.8734%" y="318.50"></text></g><g><title>_count_tokens (agent_cascade\llm\base.py:667) (21 samples, 0.33%)</title><rect x="52.6234%" y="324" width="0.3260%" height="15" fill="rgb(247,143,39)" fg:x="3390" fg:w="21"/><text x="52.8734%" y="334.50"></text></g><g><title>get_message_stats (agent_cascade\utils\utils.py:731) (19 samples, 0.29%)</title><rect x="52.6545%" y="340" width="0.2949%" height="15" fill="rgb(236,97,10)" fg:x="3392" fg:w="19"/><text x="52.9045%" y="350.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:246) (19 samples, 0.29%)</title><rect x="52.6545%" y="356" width="0.2949%" height="15" fill="rgb(233,208,19)" fg:x="3392" fg:w="19"/><text x="52.9045%" y="366.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:219) (19 samples, 0.29%)</title><rect x="52.6545%" y="372" width="0.2949%" height="15" fill="rgb(216,164,2)" fg:x="3392" fg:w="19"/><text x="52.9045%" y="382.50"></text></g><g><title>_chat_complete_create (agent_cascade\llm\oai.py:98) (246 samples, 3.82%)</title><rect x="53.0115%" y="356" width="3.8187%" height="15" fill="rgb(220,129,5)" fg:x="3415" fg:w="246"/><text x="53.2615%" y="366.50">_cha..</text></g><g><title>__init__ (openai\_client.py:166) (246 samples, 3.82%)</title><rect x="53.0115%" y="372" width="3.8187%" height="15" fill="rgb(242,17,10)" fg:x="3415" fg:w="246"/><text x="53.2615%" y="382.50">__in..</text></g><g><title>__init__ (openai\_base_client.py:864) (246 samples, 3.82%)</title><rect x="53.0115%" y="388" width="3.8187%" height="15" fill="rgb(242,107,0)" fg:x="3415" fg:w="246"/><text x="53.2615%" y="398.50">__in..</text></g><g><title>__init__ (openai\_base_client.py:794) (246 samples, 3.82%)</title><rect x="53.0115%" y="404" width="3.8187%" height="15" fill="rgb(251,28,31)" fg:x="3415" fg:w="246"/><text x="53.2615%" y="414.50">__in..</text></g><g><title>__init__ (httpx\_client.py:688) (246 samples, 3.82%)</title><rect x="53.0115%" y="420" width="3.8187%" height="15" fill="rgb(233,223,10)" fg:x="3415" fg:w="246"/><text x="53.2615%" y="430.50">__in..</text></g><g><title>_init_transport (httpx\_client.py:731) (246 samples, 3.82%)</title><rect x="53.0115%" y="436" width="3.8187%" height="15" fill="rgb(215,21,27)" fg:x="3415" fg:w="246"/><text x="53.2615%" y="446.50">_ini..</text></g><g><title>__init__ (httpx\_transports\default.py:153) (246 samples, 3.82%)</title><rect x="53.0115%" y="452" width="3.8187%" height="15" fill="rgb(232,23,21)" fg:x="3415" fg:w="246"/><text x="53.2615%" y="462.50">__in..</text></g><g><title>create_ssl_context (httpx\_config.py:40) (246 samples, 3.82%)</title><rect x="53.0115%" y="468" width="3.8187%" height="15" fill="rgb(244,5,23)" fg:x="3415" fg:w="246"/><text x="53.2615%" y="478.50">crea..</text></g><g><title>create_default_context (ssl.py:707) (246 samples, 3.82%)</title><rect x="53.0115%" y="484" width="3.8187%" height="15" fill="rgb(226,81,46)" fg:x="3415" fg:w="246"/><text x="53.2615%" y="494.50">crea..</text></g><g><title>_call_llm (agent_orchestrator.py:357) (288 samples, 4.47%)</title><rect x="52.5924%" y="228" width="4.4707%" height="15" fill="rgb(247,70,30)" fg:x="3388" fg:w="288"/><text x="52.8424%" y="238.50">_call..</text></g><g><title>call_with_fallback (api_router.py:363) (265 samples, 4.11%)</title><rect x="52.9494%" y="244" width="4.1136%" height="15" fill="rgb(212,68,19)" fg:x="3411" fg:w="265"/><text x="53.1994%" y="254.50">call..</text></g><g><title>sem_generator_wrapper (api_router.py:315) (265 samples, 4.11%)</title><rect x="52.9494%" y="260" width="4.1136%" height="15" fill="rgb(240,187,13)" fg:x="3411" fg:w="265"/><text x="53.1994%" y="270.50">sem_..</text></g><g><title>_convert_messages_iterator_to_target_type (agent_cascade\llm\base.py:425) (265 samples, 4.11%)</title><rect x="52.9494%" y="276" width="4.1136%" height="15" fill="rgb(223,113,26)" fg:x="3411" fg:w="265"/><text x="53.1994%" y="286.50">_con..</text></g><g><title>_format_and_cache (agent_cascade\llm\base.py:303) (265 samples, 4.11%)</title><rect x="52.9494%" y="292" width="4.1136%" height="15" fill="rgb(206,192,2)" fg:x="3411" fg:w="265"/><text x="53.1994%" y="302.50">_for..</text></g><g><title>_postprocess_messages_iterator (agent_cascade\llm\base.py:409) (265 samples, 4.11%)</title><rect x="52.9494%" y="308" width="4.1136%" height="15" fill="rgb(241,108,4)" fg:x="3411" fg:w="265"/><text x="53.1994%" y="318.50">_pos..</text></g><g><title>retry_model_service_iterator (agent_cascade\llm\base.py:869) (265 samples, 4.11%)</title><rect x="52.9494%" y="324" width="4.1136%" height="15" fill="rgb(247,173,49)" fg:x="3411" fg:w="265"/><text x="53.1994%" y="334.50">retr..</text></g><g><title>_chat_stream (agent_cascade\llm\oai.py:260) (261 samples, 4.05%)</title><rect x="53.0115%" y="340" width="4.0515%" height="15" fill="rgb(224,114,35)" fg:x="3415" fg:w="261"/><text x="53.2615%" y="350.50">_cha..</text></g><g><title>_chat_complete_create (agent_cascade\llm\oai.py:99) (15 samples, 0.23%)</title><rect x="56.8302%" y="356" width="0.2328%" height="15" fill="rgb(245,159,27)" fg:x="3661" fg:w="15"/><text x="57.0802%" y="366.50"></text></g><g><title>wrapper (openai\_utils\_utils.py:286) (15 samples, 0.23%)</title><rect x="56.8302%" y="372" width="0.2328%" height="15" fill="rgb(245,172,44)" fg:x="3661" fg:w="15"/><text x="57.0802%" y="382.50"></text></g><g><title>create (openai\resources\chat\completions\completions.py:1194) (14 samples, 0.22%)</title><rect x="56.8457%" y="388" width="0.2173%" height="15" fill="rgb(236,23,11)" fg:x="3662" fg:w="14"/><text x="57.0957%" y="398.50"></text></g><g><title>maybe_transform (openai\_utils\_transform.py:88) (14 samples, 0.22%)</title><rect x="56.8457%" y="404" width="0.2173%" height="15" fill="rgb(205,117,38)" fg:x="3662" fg:w="14"/><text x="57.0957%" y="414.50"></text></g><g><title>transform (openai\_utils\_transform.py:111) (14 samples, 0.22%)</title><rect x="56.8457%" y="420" width="0.2173%" height="15" fill="rgb(237,72,25)" fg:x="3662" fg:w="14"/><text x="57.0957%" y="430.50"></text></g><g><title>_transform_recursive (openai\_utils\_transform.py:180) (14 samples, 0.22%)</title><rect x="56.8457%" y="436" width="0.2173%" height="15" fill="rgb(244,70,9)" fg:x="3662" fg:w="14"/><text x="57.0957%" y="446.50"></text></g><g><title>_transform_typeddict (openai\_utils\_transform.py:280) (14 samples, 0.22%)</title><rect x="56.8457%" y="452" width="0.2173%" height="15" fill="rgb(217,125,39)" fg:x="3662" fg:w="14"/><text x="57.0957%" y="462.50"></text></g><g><title>_transform_recursive (openai\_utils\_transform.py:209) (14 samples, 0.22%)</title><rect x="56.8457%" y="468" width="0.2173%" height="15" fill="rgb(235,36,10)" fg:x="3662" fg:w="14"/><text x="57.0957%" y="478.50"></text></g><g><title>_transform_recursive (openai\_utils\_transform.py:217) (13 samples, 0.20%)</title><rect x="56.8612%" y="484" width="0.2018%" height="15" fill="rgb(251,123,47)" fg:x="3663" fg:w="13"/><text x="57.1112%" y="494.50"></text></g><g><title>_transform_recursive (openai\_utils\_transform.py:180) (12 samples, 0.19%)</title><rect x="56.8767%" y="500" width="0.1863%" height="15" fill="rgb(221,13,13)" fg:x="3664" fg:w="12"/><text x="57.1267%" y="510.50"></text></g><g><title>_transform_typeddict (openai\_utils\_transform.py:280) (11 samples, 0.17%)</title><rect x="56.8923%" y="516" width="0.1708%" height="15" fill="rgb(238,131,9)" fg:x="3665" fg:w="11"/><text x="57.1423%" y="526.50"></text></g><g><title>_receive_event (httpcore\_sync\http11.py:213) (25 samples, 0.39%)</title><rect x="57.2183%" y="532" width="0.3881%" height="15" fill="rgb(211,50,8)" fg:x="3686" fg:w="25"/><text x="57.4683%" y="542.50"></text></g><g><title>helper (contextlib.py:301) (13 samples, 0.20%)</title><rect x="57.4045%" y="548" width="0.2018%" height="15" fill="rgb(245,182,24)" fg:x="3698" fg:w="13"/><text x="57.6545%" y="558.50"></text></g><g><title>next_event (h11\_connection.py:478) (7 samples, 0.11%)</title><rect x="57.6374%" y="548" width="0.1087%" height="15" fill="rgb(242,14,37)" fg:x="3713" fg:w="7"/><text x="57.8874%" y="558.50"></text></g><g><title>__call__ (h11\_readers.py:177) (12 samples, 0.19%)</title><rect x="57.8081%" y="580" width="0.1863%" height="15" fill="rgb(246,228,12)" fg:x="3724" fg:w="12"/><text x="58.0581%" y="590.50"></text></g><g><title>validate (h11\_util.py:87) (12 samples, 0.19%)</title><rect x="57.9944%" y="596" width="0.1863%" height="15" fill="rgb(213,55,15)" fg:x="3736" fg:w="12"/><text x="58.2444%" y="606.50"></text></g><g><title>__call__ (h11\_readers.py:180) (16 samples, 0.25%)</title><rect x="57.9944%" y="580" width="0.2484%" height="15" fill="rgb(209,9,3)" fg:x="3736" fg:w="16"/><text x="58.2444%" y="590.50"></text></g><g><title>__init__ (h11\_events.py:302) (7 samples, 0.11%)</title><rect x="58.5067%" y="596" width="0.1087%" height="15" fill="rgb(230,59,30)" fg:x="3769" fg:w="7"/><text x="58.7567%" y="606.50"></text></g><g><title>_extract_next_receive_event (h11\_connection.py:423) (56 samples, 0.87%)</title><rect x="57.7616%" y="564" width="0.8693%" height="15" fill="rgb(209,121,21)" fg:x="3721" fg:w="56"/><text x="58.0116%" y="574.50"></text></g><g><title>__call__ (h11\_readers.py:204) (12 samples, 0.19%)</title><rect x="58.4446%" y="580" width="0.1863%" height="15" fill="rgb(220,109,13)" fg:x="3765" fg:w="12"/><text x="58.6946%" y="590.50"></text></g><g><title>next_event (h11\_connection.py:481) (59 samples, 0.92%)</title><rect x="57.7460%" y="548" width="0.9159%" height="15" fill="rgb(232,18,1)" fg:x="3720" fg:w="59"/><text x="57.9960%" y="558.50"></text></g><g><title>next_event (h11\_connection.py:482) (12 samples, 0.19%)</title><rect x="58.6619%" y="548" width="0.1863%" height="15" fill="rgb(215,41,42)" fg:x="3779" fg:w="12"/><text x="58.9119%" y="558.50"></text></g><g><title>_process_event (h11\_connection.py:284) (12 samples, 0.19%)</title><rect x="58.9568%" y="564" width="0.1863%" height="15" fill="rgb(224,123,36)" fg:x="3798" fg:w="12"/><text x="59.2068%" y="574.50"></text></g><g><title>_receive_event (httpcore\_sync\http11.py:214) (101 samples, 1.57%)</title><rect x="57.6063%" y="532" width="1.5678%" height="15" fill="rgb(240,125,3)" fg:x="3711" fg:w="101"/><text x="57.8563%" y="542.50"></text></g><g><title>next_event (h11\_connection.py:483) (21 samples, 0.33%)</title><rect x="58.8482%" y="548" width="0.3260%" height="15" fill="rgb(205,98,50)" fg:x="3791" fg:w="21"/><text x="59.0982%" y="558.50"></text></g><g><title>read (httpcore\_backends\sync.py:126) (12 samples, 0.19%)</title><rect x="59.2052%" y="548" width="0.1863%" height="15" fill="rgb(205,185,37)" fg:x="3814" fg:w="12"/><text x="59.4552%" y="558.50"></text></g><g><title>read (httpcore\_backends\sync.py:127) (12 samples, 0.19%)</title><rect x="59.3915%" y="548" width="0.1863%" height="15" fill="rgb(238,207,15)" fg:x="3826" fg:w="12"/><text x="59.6415%" y="558.50"></text></g><g><title>_receive_event (httpcore\_sync\http11.py:217) (55 samples, 0.85%)</title><rect x="59.1742%" y="532" width="0.8538%" height="15" fill="rgb(213,199,42)" fg:x="3812" fg:w="55"/><text x="59.4242%" y="542.50"></text></g><g><title>read (httpcore\_backends\sync.py:128) (29 samples, 0.45%)</title><rect x="59.5778%" y="548" width="0.4502%" height="15" fill="rgb(235,201,11)" fg:x="3838" fg:w="29"/><text x="59.8278%" y="558.50"></text></g><g><title>_receive_response_body (httpcore\_sync\http11.py:203) (188 samples, 2.92%)</title><rect x="57.1872%" y="516" width="2.9183%" height="15" fill="rgb(207,46,11)" fg:x="3684" fg:w="188"/><text x="57.4372%" y="526.50">_r..</text></g><g><title>iter_raw (httpx\_models.py:951) (193 samples, 3.00%)</title><rect x="57.1406%" y="436" width="2.9960%" height="15" fill="rgb(241,35,35)" fg:x="3681" fg:w="193"/><text x="57.3906%" y="446.50">ite..</text></g><g><title>__iter__ (httpx\_client.py:153) (193 samples, 3.00%)</title><rect x="57.1406%" y="452" width="2.9960%" height="15" fill="rgb(243,32,47)" fg:x="3681" fg:w="193"/><text x="57.3906%" y="462.50">__i..</text></g><g><title>__iter__ (httpx\_transports\default.py:127) (193 samples, 3.00%)</title><rect x="57.1406%" y="468" width="2.9960%" height="15" fill="rgb(247,202,23)" fg:x="3681" fg:w="193"/><text x="57.3906%" y="478.50">__i..</text></g><g><title>__iter__ (httpcore\_sync\connection_pool.py:403) (193 samples, 3.00%)</title><rect x="57.1406%" y="484" width="2.9960%" height="15" fill="rgb(219,102,11)" fg:x="3681" fg:w="193"/><text x="57.3906%" y="494.50">__i..</text></g><g><title>__iter__ (httpcore\_sync\http11.py:334) (193 samples, 3.00%)</title><rect x="57.1406%" y="500" width="2.9960%" height="15" fill="rgb(243,110,44)" fg:x="3681" fg:w="193"/><text x="57.3906%" y="510.50">__i..</text></g><g><title>_iter_chunks (openai\_streaming.py:293) (198 samples, 3.07%)</title><rect x="57.1096%" y="404" width="3.0736%" height="15" fill="rgb(222,74,54)" fg:x="3679" fg:w="198"/><text x="57.3596%" y="414.50">_it..</text></g><g><title>iter_bytes (httpx\_models.py:897) (196 samples, 3.04%)</title><rect x="57.1406%" y="420" width="3.0425%" height="15" fill="rgb(216,99,12)" fg:x="3681" fg:w="196"/><text x="57.3906%" y="430.50">ite..</text></g><g><title>iter_bytes (openai\_streaming.py:282) (202 samples, 3.14%)</title><rect x="57.1096%" y="388" width="3.1357%" height="15" fill="rgb(226,22,26)" fg:x="3679" fg:w="202"/><text x="57.3596%" y="398.50">ite..</text></g><g><title>__stream__ (openai\_streaming.py:59) (215 samples, 3.34%)</title><rect x="57.1096%" y="356" width="3.3375%" height="15" fill="rgb(217,163,10)" fg:x="3679" fg:w="215"/><text x="57.3596%" y="366.50">__s..</text></g><g><title>_iter_events (openai\_streaming.py:50) (215 samples, 3.34%)</title><rect x="57.1096%" y="372" width="3.3375%" height="15" fill="rgb(213,25,53)" fg:x="3679" fg:w="215"/><text x="57.3596%" y="382.50">_it..</text></g><g><title>iter_bytes (openai\_streaming.py:286) (11 samples, 0.17%)</title><rect x="60.2763%" y="388" width="0.1708%" height="15" fill="rgb(252,105,26)" fg:x="3883" fg:w="11"/><text x="60.5263%" y="398.50"></text></g><g><title>decode (json\decoder.py:337) (13 samples, 0.20%)</title><rect x="60.5092%" y="404" width="0.2018%" height="15" fill="rgb(220,39,43)" fg:x="3898" fg:w="13"/><text x="60.7592%" y="414.50"></text></g><g><title>raw_decode (json\decoder.py:353) (9 samples, 0.14%)</title><rect x="60.5713%" y="420" width="0.1397%" height="15" fill="rgb(229,68,48)" fg:x="3902" fg:w="9"/><text x="60.8213%" y="430.50"></text></g><g><title>__stream__ (openai\_streaming.py:83) (18 samples, 0.28%)</title><rect x="60.4471%" y="356" width="0.2794%" height="15" fill="rgb(252,8,32)" fg:x="3894" fg:w="18"/><text x="60.6971%" y="366.50"></text></g><g><title>json (openai\_streaming.py:261) (17 samples, 0.26%)</title><rect x="60.4626%" y="372" width="0.2639%" height="15" fill="rgb(223,20,43)" fg:x="3895" fg:w="17"/><text x="60.7126%" y="382.50"></text></g><g><title>loads (json\__init__.py:346) (16 samples, 0.25%)</title><rect x="60.4781%" y="388" width="0.2484%" height="15" fill="rgb(229,81,49)" fg:x="3896" fg:w="16"/><text x="60.7281%" y="398.50"></text></g><g><title>__stream__ (openai\_streaming.py:84) (7 samples, 0.11%)</title><rect x="60.7265%" y="356" width="0.1087%" height="15" fill="rgb(236,28,36)" fg:x="3912" fg:w="7"/><text x="60.9765%" y="366.50"></text></g><g><title>_process_response_data (openai\_base_client.py:624) (11 samples, 0.17%)</title><rect x="60.8507%" y="372" width="0.1708%" height="15" fill="rgb(249,185,26)" fg:x="3920" fg:w="11"/><text x="61.1007%" y="382.50"></text></g><g><title>construct (openai\_models.py:218) (12 samples, 0.19%)</title><rect x="61.3785%" y="404" width="0.1863%" height="15" fill="rgb(249,174,33)" fg:x="3954" fg:w="12"/><text x="61.6285%" y="414.50"></text></g><g><title>__instancecheck__ (typing_extensions.py:738) (11 samples, 0.17%)</title><rect x="61.3940%" y="420" width="0.1708%" height="15" fill="rgb(233,201,37)" fg:x="3955" fg:w="11"/><text x="61.6440%" y="430.50"></text></g><g><title>construct_type (openai\_models.py:527) (9 samples, 0.14%)</title><rect x="61.8597%" y="436" width="0.1397%" height="15" fill="rgb(221,78,26)" fg:x="3985" fg:w="9"/><text x="62.1097%" y="446.50"></text></g><g><title>validate_type (openai\_models.py:749) (9 samples, 0.14%)</title><rect x="61.8597%" y="452" width="0.1397%" height="15" fill="rgb(250,127,30)" fg:x="3985" fg:w="9"/><text x="62.1097%" y="462.50"></text></g><g><title>_validate_non_model_type (openai\_models.py:796) (8 samples, 0.12%)</title><rect x="61.8752%" y="468" width="0.1242%" height="15" fill="rgb(230,49,44)" fg:x="3986" fg:w="8"/><text x="62.1252%" y="478.50"></text></g><g><title>construct (openai\_models.py:232) (10 samples, 0.16%)</title><rect x="62.6358%" y="516" width="0.1552%" height="15" fill="rgb(229,67,23)" fg:x="4035" fg:w="10"/><text x="62.8858%" y="526.50"></text></g><g><title>_construct_field (openai\_models.py:423) (10 samples, 0.16%)</title><rect x="62.6358%" y="532" width="0.1552%" height="15" fill="rgb(249,83,47)" fg:x="4035" fg:w="10"/><text x="62.8858%" y="542.50"></text></g><g><title>construct_type (openai\_models.py:527) (9 samples, 0.14%)</title><rect x="62.6514%" y="548" width="0.1397%" height="15" fill="rgb(215,43,3)" fg:x="4036" fg:w="9"/><text x="62.9014%" y="558.50"></text></g><g><title>validate_type (openai\_models.py:749) (9 samples, 0.14%)</title><rect x="62.6514%" y="564" width="0.1397%" height="15" fill="rgb(238,154,13)" fg:x="4036" fg:w="9"/><text x="62.9014%" y="574.50"></text></g><g><title>_validate_non_model_type (openai\_models.py:796) (9 samples, 0.14%)</title><rect x="62.6514%" y="580" width="0.1397%" height="15" fill="rgb(219,56,2)" fg:x="4036" fg:w="9"/><text x="62.9014%" y="590.50"></text></g><g><title>construct (openai\_models.py:232) (34 samples, 0.53%)</title><rect x="62.4030%" y="468" width="0.5278%" height="15" fill="rgb(233,0,4)" fg:x="4020" fg:w="34"/><text x="62.6530%" y="478.50"></text></g><g><title>_construct_field (openai\_models.py:423) (31 samples, 0.48%)</title><rect x="62.4495%" y="484" width="0.4812%" height="15" fill="rgb(235,30,7)" fg:x="4023" fg:w="31"/><text x="62.6995%" y="494.50"></text></g><g><title>construct_type (openai\_models.py:579) (26 samples, 0.40%)</title><rect x="62.5272%" y="500" width="0.4036%" height="15" fill="rgb(250,79,13)" fg:x="4028" fg:w="26"/><text x="62.7772%" y="510.50"></text></g><g><title>construct (openai\_models.py:232) (87 samples, 1.35%)</title><rect x="61.5958%" y="404" width="1.3505%" height="15" fill="rgb(211,146,34)" fg:x="3968" fg:w="87"/><text x="61.8458%" y="414.50"></text></g><g><title>_construct_field (openai\_models.py:423) (85 samples, 1.32%)</title><rect x="61.6268%" y="420" width="1.3195%" height="15" fill="rgb(228,22,38)" fg:x="3970" fg:w="85"/><text x="61.8768%" y="430.50"></text></g><g><title>construct_type (openai\_models.py:588) (57 samples, 0.88%)</title><rect x="62.0615%" y="436" width="0.8848%" height="15" fill="rgb(235,168,5)" fg:x="3998" fg:w="57"/><text x="62.3115%" y="446.50"></text></g><g><title>construct_type (openai\_models.py:579) (45 samples, 0.70%)</title><rect x="62.2477%" y="452" width="0.6985%" height="15" fill="rgb(221,155,16)" fg:x="4010" fg:w="45"/><text x="62.4977%" y="462.50"></text></g><g><title>__iter__ (openai\_streaming.py:46) (382 samples, 5.93%)</title><rect x="57.1096%" y="340" width="5.9298%" height="15" fill="rgb(215,215,53)" fg:x="3679" fg:w="382"/><text x="57.3596%" y="350.50">__iter__..</text></g><g><title>__stream__ (openai\_streaming.py:98) (142 samples, 2.20%)</title><rect x="60.8351%" y="356" width="2.2043%" height="15" fill="rgb(223,4,10)" fg:x="3919" fg:w="142"/><text x="61.0851%" y="366.50">_..</text></g><g><title>_process_response_data (openai\_base_client.py:630) (130 samples, 2.02%)</title><rect x="61.0214%" y="372" width="2.0180%" height="15" fill="rgb(234,103,6)" fg:x="3931" fg:w="130"/><text x="61.2714%" y="382.50">_..</text></g><g><title>construct_type (openai\_models.py:579) (114 samples, 1.77%)</title><rect x="61.2698%" y="388" width="1.7696%" height="15" fill="rgb(227,97,0)" fg:x="3947" fg:w="114"/><text x="61.5198%" y="398.50"></text></g><g><title>_chat_stream (agent_cascade\llm\oai.py:279) (384 samples, 5.96%)</title><rect x="57.0941%" y="324" width="5.9609%" height="15" fill="rgb(234,150,53)" fg:x="3678" fg:w="384"/><text x="57.3441%" y="334.50">_chat_st..</text></g><g><title>_postprocess_messages_iterator (agent_cascade\llm\base.py:409) (399 samples, 6.19%)</title><rect x="57.0785%" y="292" width="6.1937%" height="15" fill="rgb(228,201,54)" fg:x="3677" fg:w="399"/><text x="57.3285%" y="302.50">_postpro..</text></g><g><title>retry_model_service_iterator (agent_cascade\llm\base.py:869) (399 samples, 6.19%)</title><rect x="57.0785%" y="308" width="6.1937%" height="15" fill="rgb(222,22,37)" fg:x="3677" fg:w="399"/><text x="57.3285%" y="318.50">retry_mo..</text></g><g><title>_chat_stream (agent_cascade\llm\oai.py:338) (11 samples, 0.17%)</title><rect x="63.1015%" y="324" width="0.1708%" height="15" fill="rgb(237,53,32)" fg:x="4065" fg:w="11"/><text x="63.3515%" y="334.50"></text></g><g><title>__init__ (agent_cascade\llm\schema.py:150) (8 samples, 0.12%)</title><rect x="63.1481%" y="340" width="0.1242%" height="15" fill="rgb(233,25,53)" fg:x="4068" fg:w="8"/><text x="63.3981%" y="350.50"></text></g><g><title>_postprocess_messages (agent_cascade\llm\base.py:392) (8 samples, 0.12%)</title><rect x="63.2723%" y="324" width="0.1242%" height="15" fill="rgb(210,40,34)" fg:x="4076" fg:w="8"/><text x="63.5223%" y="334.50"></text></g><g><title>deepcopy (copy.py:143) (7 samples, 0.11%)</title><rect x="63.5517%" y="484" width="0.1087%" height="15" fill="rgb(241,220,44)" fg:x="4094" fg:w="7"/><text x="63.8017%" y="494.50"></text></g><g><title>deepcopy (copy.py:143) (13 samples, 0.20%)</title><rect x="63.4741%" y="388" width="0.2018%" height="15" fill="rgb(235,28,35)" fg:x="4089" fg:w="13"/><text x="63.7241%" y="398.50"></text></g><g><title>__deepcopy__ (pydantic\main.py:805) (13 samples, 0.20%)</title><rect x="63.4741%" y="404" width="0.2018%" height="15" fill="rgb(210,56,17)" fg:x="4089" fg:w="13"/><text x="63.7241%" y="414.50"></text></g><g><title>deepcopy (copy.py:136) (12 samples, 0.19%)</title><rect x="63.4896%" y="420" width="0.1863%" height="15" fill="rgb(224,130,29)" fg:x="4090" fg:w="12"/><text x="63.7396%" y="430.50"></text></g><g><title>_deepcopy_dict (copy.py:221) (11 samples, 0.17%)</title><rect x="63.5051%" y="436" width="0.1708%" height="15" fill="rgb(235,212,8)" fg:x="4091" fg:w="11"/><text x="63.7551%" y="446.50"></text></g><g><title>deepcopy (copy.py:136) (9 samples, 0.14%)</title><rect x="63.5362%" y="452" width="0.1397%" height="15" fill="rgb(223,33,50)" fg:x="4093" fg:w="9"/><text x="63.7862%" y="462.50"></text></g><g><title>_deepcopy_list (copy.py:196) (9 samples, 0.14%)</title><rect x="63.5362%" y="468" width="0.1397%" height="15" fill="rgb(219,149,13)" fg:x="4093" fg:w="9"/><text x="63.7862%" y="478.50"></text></g><g><title>_postprocess_stop_words (agent_cascade\llm\base.py:587) (18 samples, 0.28%)</title><rect x="63.4120%" y="340" width="0.2794%" height="15" fill="rgb(250,156,29)" fg:x="4085" fg:w="18"/><text x="63.6620%" y="350.50"></text></g><g><title>deepcopy (copy.py:136) (16 samples, 0.25%)</title><rect x="63.4430%" y="356" width="0.2484%" height="15" fill="rgb(216,193,19)" fg:x="4087" fg:w="16"/><text x="63.6930%" y="366.50"></text></g><g><title>_deepcopy_list (copy.py:196) (14 samples, 0.22%)</title><rect x="63.4741%" y="372" width="0.2173%" height="15" fill="rgb(216,135,14)" fg:x="4089" fg:w="14"/><text x="63.7241%" y="382.50"></text></g><g><title>_postprocess_stop_words (agent_cascade\llm\base.py:597) (12 samples, 0.19%)</title><rect x="63.7069%" y="340" width="0.1863%" height="15" fill="rgb(241,47,5)" fg:x="4104" fg:w="12"/><text x="63.9569%" y="350.50"></text></g><g><title>get_type_and_value (agent_cascade\llm\schema.py:117) (11 samples, 0.17%)</title><rect x="63.7224%" y="356" width="0.1708%" height="15" fill="rgb(233,42,35)" fg:x="4105" fg:w="11"/><text x="63.9724%" y="366.50"></text></g><g><title>model_dump (agent_cascade\llm\schema.py:48) (8 samples, 0.12%)</title><rect x="63.7690%" y="372" width="0.1242%" height="15" fill="rgb(231,13,6)" fg:x="4108" fg:w="8"/><text x="64.0190%" y="382.50"></text></g><g><title>model_dump (pydantic\main.py:390) (7 samples, 0.11%)</title><rect x="63.7845%" y="388" width="0.1087%" height="15" fill="rgb(207,181,40)" fg:x="4109" fg:w="7"/><text x="64.0345%" y="398.50"></text></g><g><title>_format_and_cache (agent_cascade\llm\base.py:303) (448 samples, 6.95%)</title><rect x="57.0785%" y="276" width="6.9544%" height="15" fill="rgb(254,173,49)" fg:x="3677" fg:w="448"/><text x="57.3285%" y="286.50">_format_a..</text></g><g><title>_postprocess_messages_iterator (agent_cascade\llm\base.py:410) (49 samples, 0.76%)</title><rect x="63.2723%" y="292" width="0.7606%" height="15" fill="rgb(221,1,38)" fg:x="4076" fg:w="49"/><text x="63.5223%" y="302.50"></text></g><g><title>_postprocess_messages (agent_cascade\llm\function_calling.py:92) (49 samples, 0.76%)</title><rect x="63.2723%" y="308" width="0.7606%" height="15" fill="rgb(206,124,46)" fg:x="4076" fg:w="49"/><text x="63.5223%" y="318.50"></text></g><g><title>_postprocess_messages (agent_cascade\llm\base.py:399) (40 samples, 0.62%)</title><rect x="63.4120%" y="324" width="0.6209%" height="15" fill="rgb(249,21,11)" fg:x="4085" fg:w="40"/><text x="63.6620%" y="334.50"></text></g><g><title>format_as_text_message (agent_cascade\utils\utils.py:503) (8 samples, 0.12%)</title><rect x="64.1571%" y="308" width="0.1242%" height="15" fill="rgb(222,201,40)" fg:x="4133" fg:w="8"/><text x="64.4071%" y="318.50"></text></g><g><title>_run (agent_orchestrator.py:936) (773 samples, 12.00%)</title><rect x="52.3285%" y="196" width="11.9994%" height="15" fill="rgb(235,61,29)" fg:x="3371" fg:w="773"/><text x="52.5785%" y="206.50">_run (agent_orches..</text></g><g><title>hooked_call_llm (agent_orchestrator.py:1604) (756 samples, 11.74%)</title><rect x="52.5924%" y="212" width="11.7355%" height="15" fill="rgb(219,207,3)" fg:x="3388" fg:w="756"/><text x="52.8424%" y="222.50">hooked_call_llm (..</text></g><g><title>reconstruct (api_router.py:368) (468 samples, 7.26%)</title><rect x="57.0630%" y="228" width="7.2648%" height="15" fill="rgb(222,56,46)" fg:x="3676" fg:w="468"/><text x="57.3130%" y="238.50">reconstruc..</text></g><g><title>sem_generator_wrapper (api_router.py:315) (468 samples, 7.26%)</title><rect x="57.0630%" y="244" width="7.2648%" height="15" fill="rgb(239,76,54)" fg:x="3676" fg:w="468"/><text x="57.3130%" y="254.50">sem_genera..</text></g><g><title>_convert_messages_iterator_to_target_type (agent_cascade\llm\base.py:425) (468 samples, 7.26%)</title><rect x="57.0630%" y="260" width="7.2648%" height="15" fill="rgb(231,124,27)" fg:x="3676" fg:w="468"/><text x="57.3130%" y="270.50">_convert_m..</text></g><g><title>_format_and_cache (agent_cascade\llm\base.py:306) (19 samples, 0.29%)</title><rect x="64.0329%" y="276" width="0.2949%" height="15" fill="rgb(249,195,6)" fg:x="4125" fg:w="19"/><text x="64.2829%" y="286.50"></text></g><g><title>_format_as_text_messages (agent_cascade\llm\base.py:582) (12 samples, 0.19%)</title><rect x="64.1416%" y="292" width="0.1863%" height="15" fill="rgb(237,174,47)" fg:x="4132" fg:w="12"/><text x="64.3916%" y="302.50"></text></g><g><title>run (agent_cascade\agent.py:129) (958 samples, 14.87%)</title><rect x="49.5033%" y="180" width="14.8712%" height="15" fill="rgb(206,201,31)" fg:x="3189" fg:w="958"/><text x="49.7533%" y="190.50">run (agent_cascade\agen..</text></g><g><title>run (agent_cascade\agent.py:131) (19 samples, 0.29%)</title><rect x="64.3744%" y="180" width="0.2949%" height="15" fill="rgb(231,57,52)" fg:x="4147" fg:w="19"/><text x="64.6244%" y="190.50"></text></g><g><title>_stream_sub_agent_call (agent_orchestrator.py:1645) (988 samples, 15.34%)</title><rect x="49.5033%" y="164" width="15.3369%" height="15" fill="rgb(248,177,22)" fg:x="3189" fg:w="988"/><text x="49.7533%" y="174.50">_stream_sub_agent_call ..</text></g><g><title>run (agent_cascade\agent.py:134) (10 samples, 0.16%)</title><rect x="64.6849%" y="180" width="0.1552%" height="15" fill="rgb(215,211,37)" fg:x="4167" fg:w="10"/><text x="64.9349%" y="190.50"></text></g><g><title>detect_loop (agent_orchestrator.py:106) (8 samples, 0.12%)</title><rect x="64.9333%" y="180" width="0.1242%" height="15" fill="rgb(241,128,51)" fg:x="4183" fg:w="8"/><text x="65.1833%" y="190.50"></text></g><g><title>get_feature (agent_orchestrator.py:62) (83 samples, 1.29%)</title><rect x="65.1661%" y="196" width="1.2884%" height="15" fill="rgb(227,165,31)" fg:x="4198" fg:w="83"/><text x="65.4161%" y="206.50"></text></g><g><title>model_dump (agent_cascade\llm\schema.py:48) (76 samples, 1.18%)</title><rect x="65.2748%" y="212" width="1.1798%" height="15" fill="rgb(228,167,24)" fg:x="4205" fg:w="76"/><text x="65.5248%" y="222.50"></text></g><g><title>model_dump (pydantic\main.py:390) (68 samples, 1.06%)</title><rect x="65.3989%" y="228" width="1.0556%" height="15" fill="rgb(228,143,12)" fg:x="4213" fg:w="68"/><text x="65.6489%" y="238.50"></text></g><g><title>get_feature (agent_orchestrator.py:84) (14 samples, 0.22%)</title><rect x="66.5942%" y="196" width="0.2173%" height="15" fill="rgb(249,149,8)" fg:x="4290" fg:w="14"/><text x="66.8442%" y="206.50"></text></g><g><title>get_feature (agent_orchestrator.py:89) (47 samples, 0.73%)</title><rect x="66.9202%" y="196" width="0.7296%" height="15" fill="rgb(243,35,44)" fg:x="4311" fg:w="47"/><text x="67.1702%" y="206.50"></text></g><g><title>sub (re\__init__.py:186) (44 samples, 0.68%)</title><rect x="66.9668%" y="212" width="0.6830%" height="15" fill="rgb(246,89,9)" fg:x="4314" fg:w="44"/><text x="67.2168%" y="222.50"></text></g><g><title>detect_loop (agent_orchestrator.py:108) (189 samples, 2.93%)</title><rect x="65.0574%" y="180" width="2.9339%" height="15" fill="rgb(233,213,13)" fg:x="4191" fg:w="189"/><text x="65.3074%" y="190.50">de..</text></g><g><title>get_feature (agent_orchestrator.py:99) (15 samples, 0.23%)</title><rect x="67.7585%" y="196" width="0.2328%" height="15" fill="rgb(233,141,41)" fg:x="4365" fg:w="15"/><text x="68.0085%" y="206.50"></text></g><g><title>detect_loop (agent_orchestrator.py:122) (22 samples, 0.34%)</title><rect x="68.0534%" y="180" width="0.3415%" height="15" fill="rgb(239,167,4)" fg:x="4384" fg:w="22"/><text x="68.3034%" y="190.50"></text></g><g><title>detect_loop (agent_orchestrator.py:124) (28 samples, 0.43%)</title><rect x="68.4104%" y="180" width="0.4346%" height="15" fill="rgb(209,217,16)" fg:x="4407" fg:w="28"/><text x="68.6604%" y="190.50"></text></g><g><title>detect_loop (agent_orchestrator.py:125) (52 samples, 0.81%)</title><rect x="68.8451%" y="180" width="0.8072%" height="15" fill="rgb(219,88,35)" fg:x="4435" fg:w="52"/><text x="69.0951%" y="190.50"></text></g><g><title>_stream_sub_agent_call (agent_orchestrator.py:1653) (312 samples, 4.84%)</title><rect x="64.8401%" y="164" width="4.8432%" height="15" fill="rgb(220,193,23)" fg:x="4177" fg:w="312"/><text x="65.0901%" y="174.50">_strea..</text></g><g><title>_run (agent_orchestrator.py:1073) (1,303 samples, 20.23%)</title><rect x="49.5033%" y="148" width="20.2266%" height="15" fill="rgb(230,90,52)" fg:x="3189" fg:w="1303"/><text x="49.7533%" y="158.50">_run (agent_orchestrator.py:1073)</text></g><g><title>_run (agent_orchestrator.py:1212) (11 samples, 0.17%)</title><rect x="69.7299%" y="148" width="0.1708%" height="15" fill="rgb(252,106,19)" fg:x="4492" fg:w="11"/><text x="69.9799%" y="158.50"></text></g><g><title>_truncate_tool_result (agent_orchestrator.py:457) (11 samples, 0.17%)</title><rect x="69.7299%" y="164" width="0.1708%" height="15" fill="rgb(206,74,20)" fg:x="4492" fg:w="11"/><text x="69.9799%" y="174.50"></text></g><g><title>_run (agent_orchestrator.py:891) (8 samples, 0.12%)</title><rect x="69.9007%" y="148" width="0.1242%" height="15" fill="rgb(230,138,44)" fg:x="4503" fg:w="8"/><text x="70.1507%" y="158.50"></text></g><g><title>_inject_compression_warning (agent_orchestrator.py:570) (8 samples, 0.12%)</title><rect x="69.9007%" y="164" width="0.1242%" height="15" fill="rgb(235,182,43)" fg:x="4503" fg:w="8"/><text x="70.1507%" y="174.50"></text></g><g><title>_inject_compression_warning_for_agent (agent_orchestrator.py:576) (8 samples, 0.12%)</title><rect x="69.9007%" y="180" width="0.1242%" height="15" fill="rgb(242,16,51)" fg:x="4503" fg:w="8"/><text x="70.1507%" y="190.50"></text></g><g><title>_get_history_tokens (agent_orchestrator.py:392) (8 samples, 0.12%)</title><rect x="69.9007%" y="196" width="0.1242%" height="15" fill="rgb(248,9,4)" fg:x="4503" fg:w="8"/><text x="70.1507%" y="206.50"></text></g><g><title>_count_message_tokens (agent_orchestrator.py:386) (8 samples, 0.12%)</title><rect x="69.9007%" y="212" width="0.1242%" height="15" fill="rgb(210,31,22)" fg:x="4503" fg:w="8"/><text x="70.1507%" y="222.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:246) (8 samples, 0.12%)</title><rect x="69.9007%" y="228" width="0.1242%" height="15" fill="rgb(239,54,39)" fg:x="4503" fg:w="8"/><text x="70.1507%" y="238.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:219) (8 samples, 0.12%)</title><rect x="69.9007%" y="244" width="0.1242%" height="15" fill="rgb(230,99,41)" fg:x="4503" fg:w="8"/><text x="70.1507%" y="254.50"></text></g><g><title>_run (agent_orchestrator.py:928) (7 samples, 0.11%)</title><rect x="70.0248%" y="148" width="0.1087%" height="15" fill="rgb(253,106,12)" fg:x="4511" fg:w="7"/><text x="70.2748%" y="158.50"></text></g><g><title>&lt;genexpr&gt; (agent_orchestrator.py:928) (7 samples, 0.11%)</title><rect x="70.0248%" y="164" width="0.1087%" height="15" fill="rgb(213,46,41)" fg:x="4511" fg:w="7"/><text x="70.2748%" y="174.50"></text></g><g><title>_count_message_tokens (agent_orchestrator.py:386) (7 samples, 0.11%)</title><rect x="70.0248%" y="180" width="0.1087%" height="15" fill="rgb(215,133,35)" fg:x="4511" fg:w="7"/><text x="70.2748%" y="190.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:246) (7 samples, 0.11%)</title><rect x="70.0248%" y="196" width="0.1087%" height="15" fill="rgb(213,28,5)" fg:x="4511" fg:w="7"/><text x="70.2748%" y="206.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:219) (7 samples, 0.11%)</title><rect x="70.0248%" y="212" width="0.1087%" height="15" fill="rgb(215,77,49)" fg:x="4511" fg:w="7"/><text x="70.2748%" y="222.50"></text></g><g><title>call_with_fallback (api_router.py:344) (10 samples, 0.16%)</title><rect x="70.1335%" y="180" width="0.1552%" height="15" fill="rgb(248,100,22)" fg:x="4518" fg:w="10"/><text x="70.3835%" y="190.50"></text></g><g><title>execute_with_sem (api_router.py:310) (10 samples, 0.16%)</title><rect x="70.1335%" y="196" width="0.1552%" height="15" fill="rgb(208,67,9)" fg:x="4518" fg:w="10"/><text x="70.3835%" y="206.50"></text></g><g><title>_execute_llm (agent_orchestrator.py:348) (10 samples, 0.16%)</title><rect x="70.1335%" y="212" width="0.1552%" height="15" fill="rgb(219,133,21)" fg:x="4518" fg:w="10"/><text x="70.3835%" y="222.50"></text></g><g><title>chat (agent_cascade\llm\base.py:208) (10 samples, 0.16%)</title><rect x="70.1335%" y="228" width="0.1552%" height="15" fill="rgb(246,46,29)" fg:x="4518" fg:w="10"/><text x="70.3835%" y="238.50"></text></g><g><title>_truncate_input_messages_roughly (agent_cascade\llm\base.py:811) (9 samples, 0.14%)</title><rect x="70.1490%" y="244" width="0.1397%" height="15" fill="rgb(246,185,52)" fg:x="4519" fg:w="9"/><text x="70.3990%" y="254.50"></text></g><g><title>_count_tokens (agent_cascade\llm\base.py:667) (9 samples, 0.14%)</title><rect x="70.1490%" y="260" width="0.1397%" height="15" fill="rgb(252,136,11)" fg:x="4519" fg:w="9"/><text x="70.3990%" y="270.50"></text></g><g><title>get_message_stats (agent_cascade\utils\utils.py:731) (7 samples, 0.11%)</title><rect x="70.1801%" y="276" width="0.1087%" height="15" fill="rgb(219,138,53)" fg:x="4521" fg:w="7"/><text x="70.4301%" y="286.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:246) (7 samples, 0.11%)</title><rect x="70.1801%" y="292" width="0.1087%" height="15" fill="rgb(211,51,23)" fg:x="4521" fg:w="7"/><text x="70.4301%" y="302.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:219) (7 samples, 0.11%)</title><rect x="70.1801%" y="308" width="0.1087%" height="15" fill="rgb(247,221,28)" fg:x="4521" fg:w="7"/><text x="70.4301%" y="318.50"></text></g><g><title>__init__ (httpx\_transports\default.py:153) (40 samples, 0.62%)</title><rect x="70.2887%" y="388" width="0.6209%" height="15" fill="rgb(251,222,45)" fg:x="4528" fg:w="40"/><text x="70.5387%" y="398.50"></text></g><g><title>create_ssl_context (httpx\_config.py:40) (40 samples, 0.62%)</title><rect x="70.2887%" y="404" width="0.6209%" height="15" fill="rgb(217,162,53)" fg:x="4528" fg:w="40"/><text x="70.5387%" y="414.50"></text></g><g><title>create_default_context (ssl.py:707) (39 samples, 0.61%)</title><rect x="70.3043%" y="420" width="0.6054%" height="15" fill="rgb(229,93,14)" fg:x="4529" fg:w="39"/><text x="70.5543%" y="430.50"></text></g><g><title>_chat_complete_create (agent_cascade\llm\oai.py:98) (41 samples, 0.64%)</title><rect x="70.2887%" y="292" width="0.6364%" height="15" fill="rgb(209,67,49)" fg:x="4528" fg:w="41"/><text x="70.5387%" y="302.50"></text></g><g><title>__init__ (openai\_client.py:166) (41 samples, 0.64%)</title><rect x="70.2887%" y="308" width="0.6364%" height="15" fill="rgb(213,87,29)" fg:x="4528" fg:w="41"/><text x="70.5387%" y="318.50"></text></g><g><title>__init__ (openai\_base_client.py:864) (41 samples, 0.64%)</title><rect x="70.2887%" y="324" width="0.6364%" height="15" fill="rgb(205,151,52)" fg:x="4528" fg:w="41"/><text x="70.5387%" y="334.50"></text></g><g><title>__init__ (openai\_base_client.py:794) (41 samples, 0.64%)</title><rect x="70.2887%" y="340" width="0.6364%" height="15" fill="rgb(253,215,39)" fg:x="4528" fg:w="41"/><text x="70.5387%" y="350.50"></text></g><g><title>__init__ (httpx\_client.py:688) (41 samples, 0.64%)</title><rect x="70.2887%" y="356" width="0.6364%" height="15" fill="rgb(221,220,41)" fg:x="4528" fg:w="41"/><text x="70.5387%" y="366.50"></text></g><g><title>_init_transport (httpx\_client.py:731) (41 samples, 0.64%)</title><rect x="70.2887%" y="372" width="0.6364%" height="15" fill="rgb(218,133,21)" fg:x="4528" fg:w="41"/><text x="70.5387%" y="382.50"></text></g><g><title>_call_llm (agent_orchestrator.py:357) (52 samples, 0.81%)</title><rect x="70.1335%" y="164" width="0.8072%" height="15" fill="rgb(221,193,43)" fg:x="4518" fg:w="52"/><text x="70.3835%" y="174.50"></text></g><g><title>call_with_fallback (api_router.py:363) (42 samples, 0.65%)</title><rect x="70.2887%" y="180" width="0.6520%" height="15" fill="rgb(240,128,52)" fg:x="4528" fg:w="42"/><text x="70.5387%" y="190.50"></text></g><g><title>sem_generator_wrapper (api_router.py:315) (42 samples, 0.65%)</title><rect x="70.2887%" y="196" width="0.6520%" height="15" fill="rgb(253,114,12)" fg:x="4528" fg:w="42"/><text x="70.5387%" y="206.50"></text></g><g><title>_convert_messages_iterator_to_target_type (agent_cascade\llm\base.py:425) (42 samples, 0.65%)</title><rect x="70.2887%" y="212" width="0.6520%" height="15" fill="rgb(215,223,47)" fg:x="4528" fg:w="42"/><text x="70.5387%" y="222.50"></text></g><g><title>_format_and_cache (agent_cascade\llm\base.py:303) (42 samples, 0.65%)</title><rect x="70.2887%" y="228" width="0.6520%" height="15" fill="rgb(248,225,23)" fg:x="4528" fg:w="42"/><text x="70.5387%" y="238.50"></text></g><g><title>_postprocess_messages_iterator (agent_cascade\llm\base.py:409) (42 samples, 0.65%)</title><rect x="70.2887%" y="244" width="0.6520%" height="15" fill="rgb(250,108,0)" fg:x="4528" fg:w="42"/><text x="70.5387%" y="254.50"></text></g><g><title>retry_model_service_iterator (agent_cascade\llm\base.py:869) (42 samples, 0.65%)</title><rect x="70.2887%" y="260" width="0.6520%" height="15" fill="rgb(228,208,7)" fg:x="4528" fg:w="42"/><text x="70.5387%" y="270.50"></text></g><g><title>_chat_stream (agent_cascade\llm\oai.py:260) (42 samples, 0.65%)</title><rect x="70.2887%" y="276" width="0.6520%" height="15" fill="rgb(244,45,10)" fg:x="4528" fg:w="42"/><text x="70.5387%" y="286.50"></text></g><g><title>run (agent_cascade\agent.py:129) (1,383 samples, 21.47%)</title><rect x="49.5033%" y="132" width="21.4685%" height="15" fill="rgb(207,125,25)" fg:x="3189" fg:w="1383"/><text x="49.7533%" y="142.50">run (agent_cascade\agent.py:129)</text></g><g><title>_run (agent_orchestrator.py:936) (54 samples, 0.84%)</title><rect x="70.1335%" y="148" width="0.8382%" height="15" fill="rgb(210,195,18)" fg:x="4518" fg:w="54"/><text x="70.3835%" y="158.50"></text></g><g><title>run_agent_thread (api_server.py:913) (1,393 samples, 21.62%)</title><rect x="49.5033%" y="116" width="21.6237%" height="15" fill="rgb(249,80,12)" fg:x="3189" fg:w="1393"/><text x="49.7533%" y="126.50">run_agent_thread (api_server.py:91..</text></g><g><title>run (agent_cascade\agent.py:136) (10 samples, 0.16%)</title><rect x="70.9717%" y="132" width="0.1552%" height="15" fill="rgb(221,65,9)" fg:x="4572" fg:w="10"/><text x="71.2217%" y="142.50"></text></g><g><title>slice_history_for_llm (agent_pool.py:470) (15 samples, 0.23%)</title><rect x="71.5306%" y="148" width="0.2328%" height="15" fill="rgb(235,49,36)" fg:x="4608" fg:w="15"/><text x="71.7806%" y="158.50"></text></g><g><title>slice_history_for_llm (agent_pool.py:471) (19 samples, 0.29%)</title><rect x="71.7634%" y="148" width="0.2949%" height="15" fill="rgb(225,32,20)" fg:x="4623" fg:w="19"/><text x="72.0134%" y="158.50"></text></g><g><title>get_sub_agent_state (api_server.py:517) (41 samples, 0.64%)</title><rect x="71.4374%" y="132" width="0.6364%" height="15" fill="rgb(215,141,46)" fg:x="4602" fg:w="41"/><text x="71.6874%" y="142.50"></text></g><g><title>get_history_stats (agent_cascade\utils\utils.py:773) (14 samples, 0.22%)</title><rect x="72.2602%" y="148" width="0.2173%" height="15" fill="rgb(250,160,47)" fg:x="4655" fg:w="14"/><text x="72.5102%" y="158.50"></text></g><g><title>model_dump (pydantic\main.py:390) (36 samples, 0.56%)</title><rect x="73.7504%" y="196" width="0.5588%" height="15" fill="rgb(216,222,40)" fg:x="4751" fg:w="36"/><text x="74.0004%" y="206.50"></text></g><g><title>get_history_stats (agent_cascade\utils\utils.py:781) (110 samples, 1.71%)</title><rect x="72.6172%" y="148" width="1.7075%" height="15" fill="rgb(234,217,39)" fg:x="4678" fg:w="110"/><text x="72.8672%" y="158.50"></text></g><g><title>__str__ (agent_cascade\llm\schema.py:66) (106 samples, 1.65%)</title><rect x="72.6793%" y="164" width="1.6455%" height="15" fill="rgb(207,178,40)" fg:x="4682" fg:w="106"/><text x="72.9293%" y="174.50"></text></g><g><title>model_dump (agent_cascade\llm\schema.py:48) (49 samples, 0.76%)</title><rect x="73.5641%" y="180" width="0.7606%" height="15" fill="rgb(221,136,13)" fg:x="4739" fg:w="49"/><text x="73.8141%" y="190.50"></text></g><g><title>get_history_stats (agent_cascade\utils\utils.py:789) (24 samples, 0.37%)</title><rect x="74.4334%" y="148" width="0.3726%" height="15" fill="rgb(249,199,10)" fg:x="4795" fg:w="24"/><text x="74.6834%" y="158.50"></text></g><g><title>get_history_stats (agent_cascade\utils\utils.py:791) (118 samples, 1.83%)</title><rect x="74.8060%" y="148" width="1.8317%" height="15" fill="rgb(249,222,13)" fg:x="4819" fg:w="118"/><text x="75.0560%" y="158.50">g..</text></g><g><title>get_history_stats (agent_cascade\utils\utils.py:794) (26 samples, 0.40%)</title><rect x="76.6377%" y="148" width="0.4036%" height="15" fill="rgb(244,185,38)" fg:x="4937" fg:w="26"/><text x="76.8877%" y="158.50"></text></g><g><title>get_history_stats (agent_cascade\utils\utils.py:795) (12 samples, 0.19%)</title><rect x="77.0413%" y="148" width="0.1863%" height="15" fill="rgb(236,202,9)" fg:x="4963" fg:w="12"/><text x="77.2913%" y="158.50"></text></g><g><title>tokenize (agent_cascade\utils\tokenization_qwen.py:175) (23 samples, 0.36%)</title><rect x="77.3983%" y="212" width="0.3570%" height="15" fill="rgb(250,229,37)" fg:x="4986" fg:w="23"/><text x="77.6483%" y="222.50"></text></g><g><title>encode (tiktoken\core.py:124) (21 samples, 0.33%)</title><rect x="77.4294%" y="228" width="0.3260%" height="15" fill="rgb(206,174,23)" fg:x="4988" fg:w="21"/><text x="77.6794%" y="238.50"></text></g><g><title>get_message_stats (agent_cascade\utils\utils.py:720) (26 samples, 0.40%)</title><rect x="77.3983%" y="164" width="0.4036%" height="15" fill="rgb(211,33,43)" fg:x="4986" fg:w="26"/><text x="77.6483%" y="174.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:246) (26 samples, 0.40%)</title><rect x="77.3983%" y="180" width="0.4036%" height="15" fill="rgb(245,58,50)" fg:x="4986" fg:w="26"/><text x="77.6483%" y="190.50"></text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:219) (26 samples, 0.40%)</title><rect x="77.3983%" y="196" width="0.4036%" height="15" fill="rgb(244,68,36)" fg:x="4986" fg:w="26"/><text x="77.6483%" y="206.50"></text></g><g><title>tokenize (agent_cascade\utils\tokenization_qwen.py:175) (711 samples, 11.04%)</title><rect x="78.0658%" y="212" width="11.0369%" height="15" fill="rgb(232,229,15)" fg:x="5029" fg:w="711"/><text x="78.3158%" y="222.50">tokenize (agent_..</text></g><g><title>encode (tiktoken\core.py:124) (707 samples, 10.97%)</title><rect x="78.1279%" y="228" width="10.9749%" height="15" fill="rgb(254,30,23)" fg:x="5033" fg:w="707"/><text x="78.3779%" y="238.50">encode (tiktoken..</text></g><g><title>get_message_stats (agent_cascade\utils\utils.py:731) (792 samples, 12.29%)</title><rect x="77.8951%" y="164" width="12.2943%" height="15" fill="rgb(235,160,14)" fg:x="5018" fg:w="792"/><text x="78.1451%" y="174.50">get_message_stats ..</text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:246) (791 samples, 12.28%)</title><rect x="77.9106%" y="180" width="12.2788%" height="15" fill="rgb(212,155,44)" fg:x="5019" fg:w="791"/><text x="78.1606%" y="190.50">count_tokens (agen..</text></g><g><title>count_tokens (agent_cascade\utils\tokenization_qwen.py:219) (791 samples, 12.28%)</title><rect x="77.9106%" y="196" width="12.2788%" height="15" fill="rgb(226,2,50)" fg:x="5019" fg:w="791"/><text x="78.1606%" y="206.50">count_tokens (agen..</text></g><g><title>tokenize (agent_cascade\utils\tokenization_qwen.py:176) (70 samples, 1.09%)</title><rect x="89.1028%" y="212" width="1.0866%" height="15" fill="rgb(234,177,6)" fg:x="5740" fg:w="70"/><text x="89.3528%" y="222.50"></text></g><g><title>get_history_stats (agent_cascade\utils\utils.py:797) (850 samples, 13.19%)</title><rect x="77.2276%" y="148" width="13.1947%" height="15" fill="rgb(217,24,9)" fg:x="4975" fg:w="850"/><text x="77.4776%" y="158.50">get_history_stats (a..</text></g><g><title>get_message_stats (agent_cascade\utils\utils.py:732) (15 samples, 0.23%)</title><rect x="90.1894%" y="164" width="0.2328%" height="15" fill="rgb(220,13,46)" fg:x="5810" fg:w="15"/><text x="90.4394%" y="174.50"></text></g><g><title>get_history_stats (agent_cascade\utils\utils.py:800) (12 samples, 0.19%)</title><rect x="90.4843%" y="148" width="0.1863%" height="15" fill="rgb(239,221,27)" fg:x="5829" fg:w="12"/><text x="90.7343%" y="158.50"></text></g><g><title>get_sub_agent_state (api_server.py:518) (1,205 samples, 18.71%)</title><rect x="72.0739%" y="132" width="18.7054%" height="15" fill="rgb(222,198,25)" fg:x="4643" fg:w="1205"/><text x="72.3239%" y="142.50">get_sub_agent_state (api_serv..</text></g><g><title>get_history_stats (agent_cascade\utils\utils.py:801) (7 samples, 0.11%)</title><rect x="90.6706%" y="148" width="0.1087%" height="15" fill="rgb(211,99,13)" fg:x="5841" fg:w="7"/><text x="90.9206%" y="158.50"></text></g><g><title>get_sub_agent_state (api_server.py:524) (31 samples, 0.48%)</title><rect x="90.8258%" y="132" width="0.4812%" height="15" fill="rgb(232,111,31)" fg:x="5851" fg:w="31"/><text x="91.0758%" y="142.50"></text></g><g><title>get_sub_agent_state (api_server.py:525) (18 samples, 0.28%)</title><rect x="91.3070%" y="132" width="0.2794%" height="15" fill="rgb(245,82,37)" fg:x="5882" fg:w="18"/><text x="91.5570%" y="142.50"></text></g><g><title>serialize_message (api_server.py:233) (258 samples, 4.00%)</title><rect x="92.0366%" y="148" width="4.0050%" height="15" fill="rgb(227,149,46)" fg:x="5929" fg:w="258"/><text x="92.2866%" y="158.50">seri..</text></g><g><title>model_dump (agent_cascade\llm\schema.py:48) (244 samples, 3.79%)</title><rect x="92.2540%" y="164" width="3.7876%" height="15" fill="rgb(218,36,50)" fg:x="5943" fg:w="244"/><text x="92.5040%" y="174.50">mode..</text></g><g><title>model_dump (pydantic\main.py:390) (205 samples, 3.18%)</title><rect x="92.8594%" y="180" width="3.1822%" height="15" fill="rgb(226,80,48)" fg:x="5982" fg:w="205"/><text x="93.1094%" y="190.50">mod..</text></g><g><title>serialize_message (api_server.py:284) (25 samples, 0.39%)</title><rect x="96.5694%" y="148" width="0.3881%" height="15" fill="rgb(238,224,15)" fg:x="6221" fg:w="25"/><text x="96.8194%" y="158.50"></text></g><g><title>serialize_message (api_server.py:285) (9 samples, 0.14%)</title><rect x="96.9575%" y="148" width="0.1397%" height="15" fill="rgb(241,136,10)" fg:x="6246" fg:w="9"/><text x="97.2075%" y="158.50"></text></g><g><title>serialize_message (api_server.py:300) (8 samples, 0.12%)</title><rect x="97.3145%" y="148" width="0.1242%" height="15" fill="rgb(208,32,45)" fg:x="6269" fg:w="8"/><text x="97.5645%" y="158.50"></text></g><g><title>get_sub_agent_state (api_server.py:541) (392 samples, 6.09%)</title><rect x="91.6020%" y="132" width="6.0851%" height="15" fill="rgb(207,135,9)" fg:x="5901" fg:w="392"/><text x="91.8520%" y="142.50">get_sub_..</text></g><g><title>serialize_message (api_server.py:304) (13 samples, 0.20%)</title><rect x="97.4853%" y="148" width="0.2018%" height="15" fill="rgb(206,86,44)" fg:x="6280" fg:w="13"/><text x="97.7353%" y="158.50"></text></g><g><title>run_agent_thread (api_server.py:944) (1,699 samples, 26.37%)</title><rect x="71.3443%" y="116" width="26.3738%" height="15" fill="rgb(245,177,15)" fg:x="4596" fg:w="1699"/><text x="71.5943%" y="126.50">run_agent_thread (api_server.py:944)</text></g><g><title>slice_history_for_llm (agent_pool.py:470) (10 samples, 0.16%)</title><rect x="97.9199%" y="148" width="0.1552%" height="15" fill="rgb(206,64,50)" fg:x="6308" fg:w="10"/><text x="98.1699%" y="158.50"></text></g><g><title>slice_history_for_llm (agent_pool.py:471) (12 samples, 0.19%)</title><rect x="98.0751%" y="148" width="0.1863%" height="15" fill="rgb(234,36,40)" fg:x="6318" fg:w="12"/><text x="98.3251%" y="158.50"></text></g><g><title>build_stream_update (api_server.py:686) (36 samples, 0.56%)</title><rect x="97.8112%" y="132" width="0.5588%" height="15" fill="rgb(213,64,8)" fg:x="6301" fg:w="36"/><text x="98.0612%" y="142.50"></text></g><g><title>slice_history_for_llm (agent_pool.py:472) (7 samples, 0.11%)</title><rect x="98.2614%" y="148" width="0.1087%" height="15" fill="rgb(210,75,36)" fg:x="6330" fg:w="7"/><text x="98.5114%" y="158.50"></text></g><g><title>run_agent_thread (api_server.py:954) (57 samples, 0.88%)</title><rect x="97.7491%" y="116" width="0.8848%" height="15" fill="rgb(229,88,21)" fg:x="6297" fg:w="57"/><text x="97.9991%" y="126.50"></text></g><g><title>__init__ (concurrent\futures\_base.py:330) (7 samples, 0.11%)</title><rect x="98.7426%" y="148" width="0.1087%" height="15" fill="rgb(252,204,47)" fg:x="6361" fg:w="7"/><text x="98.9926%" y="158.50"></text></g><g><title>run_coroutine_threadsafe (asyncio\tasks.py:938) (10 samples, 0.16%)</title><rect x="98.7116%" y="132" width="0.1552%" height="15" fill="rgb(208,77,27)" fg:x="6359" fg:w="10"/><text x="98.9616%" y="142.50"></text></g><g><title>run_agent_thread (api_server.py:958) (67 samples, 1.04%)</title><rect x="98.6495%" y="116" width="1.0400%" height="15" fill="rgb(221,76,26)" fg:x="6355" fg:w="67"/><text x="98.8995%" y="126.50"></text></g><g><title>run_coroutine_threadsafe (asyncio\tasks.py:950) (53 samples, 0.82%)</title><rect x="98.8668%" y="132" width="0.8227%" height="15" fill="rgb(225,139,18)" fg:x="6369" fg:w="53"/><text x="99.1168%" y="142.50"></text></g><g><title>call_soon_threadsafe (asyncio\base_events.py:846) (50 samples, 0.78%)</title><rect x="98.9134%" y="148" width="0.7762%" height="15" fill="rgb(230,137,11)" fg:x="6372" fg:w="50"/><text x="99.1634%" y="158.50"></text></g><g><title>_write_to_self (asyncio\proactor_events.py:831) (50 samples, 0.78%)</title><rect x="98.9134%" y="164" width="0.7762%" height="15" fill="rgb(212,28,1)" fg:x="6372" fg:w="50"/><text x="99.1634%" y="174.50"></text></g><g><title>all (6,442 samples, 100%)</title><rect x="0.0000%" y="52" width="100.0000%" height="15" fill="rgb(248,164,17)" fg:x="0" fg:w="6442"/><text x="0.2500%" y="62.50"></text></g><g><title>_bootstrap (threading.py:1032) (3,253 samples, 50.50%)</title><rect x="49.5033%" y="68" width="50.4967%" height="15" fill="rgb(222,171,42)" fg:x="3189" fg:w="3253"/><text x="49.7533%" y="78.50">_bootstrap (threading.py:1032)</text></g><g><title>_bootstrap_inner (threading.py:1075) (3,253 samples, 50.50%)</title><rect x="49.5033%" y="84" width="50.4967%" height="15" fill="rgb(243,84,45)" fg:x="3189" fg:w="3253"/><text x="49.7533%" y="94.50">_bootstrap_inner (threading.py:1075)</text></g><g><title>run (threading.py:1012) (3,253 samples, 50.50%)</title><rect x="49.5033%" y="100" width="50.4967%" height="15" fill="rgb(252,49,23)" fg:x="3189" fg:w="3253"/><text x="49.7533%" y="110.50">run (threading.py:1012)</text></g><g><title>run_agent_thread (api_server.py:965) (19 samples, 0.29%)</title><rect x="99.7051%" y="116" width="0.2949%" height="15" fill="rgb(215,19,7)" fg:x="6423" fg:w="19"/><text x="99.9551%" y="126.50"></text></g></svg></svg>

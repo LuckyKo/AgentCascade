@@ -1,0 +1,9 @@
+2026-05-17 09:21:16,666 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 2079, Available tokens: 83235
+2026-05-17 09:21:20,023 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 11471, Available tokens: 83235
+2026-05-17 09:22:21,202 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 12235, Available tokens: 83235
+2026-05-17 09:22:38,942 - agent_logger.py - 144 - INFO - Logger [Maine]: Inserted compression marker at index 20 (log_len=25).
+2026-05-17 09:22:38,944 - agent_logger.py - 283 - INFO - Rewrote agent log N:\work\WD\AgentWorkspace\logs\Orchestrator_Maine_20260517_091950.jsonl with 25 messages.
+2026-05-17 09:22:38,947 - agent_pool.py - 828 - INFO - Cumulative compression: Inserted summary after 20 messages for agent 'Maine'. Full history preserved in memory.
+2026-05-17 09:22:38,955 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 1303, Available tokens: 85994
+2026-05-17 09:22:46,333 - agent_logger.py - 236 - INFO - Logger [Maine]: Surgically inserting 1 messages into log at index 22.
+2026-05-17 09:22:46,334 - agent_logger.py - 283 - INFO - Rewrote agent log N:\work\WD\AgentWorkspace\logs\Orchestrator_Maine_20260517_091950.jsonl with 28 messages.

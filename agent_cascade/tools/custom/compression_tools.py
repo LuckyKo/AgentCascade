@@ -4,6 +4,8 @@ from typing import List, Union
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA, COMPRESSION_PROMPT
 from agent_cascade.llm.schema import SYSTEM, USER, Message
+from agent_cascade.utils.thinking_block import strip_thinking_blocks
+from agent_cascade.utils.utils import extract_text_from_message
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +79,6 @@ class CompressContext(BaseTool):
         #    assigned API Router settings (similar to the Security Advisor fix).
         summary = ""
         try:
-            from agent_cascade.utils.utils import extract_text_from_message
-            import re
-            
             final_msgs = []
             for partial in comp_agent.run(history, agent_instance_name='compression_agent'):
                 final_msgs = partial
@@ -92,11 +91,8 @@ class CompressContext(BaseTool):
                     if role == 'assistant':
                         content = extract_text_from_message(msg_obj, add_upload_info=False)
                         
-                        # Cleanup thinking blocks
-                        content = re.sub(r'<(think|thought)>.*?</\1>', '', content, flags=re.IGNORECASE | re.DOTALL)
-                        content = re.sub(r'\[(THINK|THOUGHT)\].*?\[/\1\]', '', content, flags=re.IGNORECASE | re.DOTALL)
-                        
-                        summary = content.strip()
+                        # Cleanup thinking blocks using shared utility
+                        summary = strip_thinking_blocks(content)
                         break
                 
                 # Strip conversational filler prefixes

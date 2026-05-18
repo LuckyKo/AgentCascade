@@ -20,7 +20,28 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
+import copy
+import hashlib
+import json
+import logging
+import os
+import random
+import re
+import threading
+import time
+import traceback
+from collections import deque
+from datetime import datetime
+from typing import (
+    Any, Dict, Iterator, List, Optional, Tuple, Union,
+)
+
 from agent_cascade.agents import Assistant
+from agent_cascade.agent import strip_thinking_blocks
+from agent_cascade.utils.thinking_block import (
+    _THINK_BLOCK_RE, _THINK_BLOCK_UNCLOSED_RE, _THINK_BLOCK_BRACKET_RE,
+    _TOOL_TRUNCATED_RE, _IMAGE_DATA_RE, _GEMMA_THOUGHT_RE,
+)
 from agent_cascade.log import logger
 from agent_cascade.llm.schema import (
     ASSISTANT, CONTENT, FUNCTION, IMAGE, ROLE, SYSTEM, USER, Message,
@@ -85,14 +106,15 @@ def detect_loop(messages: List[Union[dict, Message]]) -> Optional[Tuple[str, int
         else:
             text_feature = content or reasoning
             
-        import re
-        text_feature = re.sub(r'\[TOOL RESPONSE TRUNCATED.*?\]', '[TOOL RESPONSE TRUNCATED]', text_feature, flags=re.DOTALL)
+        text_feature = _TOOL_TRUNCATED_RE.sub('[TOOL RESPONSE TRUNCATED]', text_feature)
             
         fc = m.get('function_call')
         if fc:
             # Handle both dict and object function calls
             name = fc.get('name') if isinstance(fc, dict) else getattr(fc, 'name', '')
             args = fc.get('arguments') if isinstance(fc, dict) else getattr(fc, 'arguments', '')
+            # Strip thinking tags from args for comparison consistency
+            args = strip_thinking_blocks(args)
             return f"{role}:{name}:{args}"
         
         # For plain messages, use first 3000 chars of content to distinguish long reasoning
@@ -380,13 +402,12 @@ class OrchestratorAgent(Assistant):
             msg_obj = msg
             
         text = extract_text_from_message(msg_obj, add_upload_info=True)
-        import re
         image_tokens = 0
         def repl(match):
             nonlocal image_tokens
             image_tokens += 255
             return f"[Image: {match.group(1)}]"
-        text = re.sub(r'!\[(.*?)\]\(data:image/[^;]+;base64,[a-zA-Z0-9+/=]+\)', repl, text)
+        text = _IMAGE_DATA_RE.sub(repl, text)
         return qwen_count(text) + image_tokens
 
     def _get_history_tokens(self, messages: List[Message]) -> int:
@@ -532,7 +553,7 @@ class OrchestratorAgent(Assistant):
         # Save full result to spill file
         log_dir = Path('workspace/logs')
         log_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_tool = tool_name.replace('/', '_').replace('\\', '_')
         safe_instance = instance_name.replace('/', '_').replace('\\', '_')
         spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}.txt"
@@ -979,24 +1000,48 @@ class OrchestratorAgent(Assistant):
                 if not msg.get('reasoning_content') and isinstance(content, str) and '<|channel>thought' in content.lower():
                     # Only strip if it's at the very beginning of the content to avoid stripping 
                     # markers inside file content or tutorial text.
-                    import re
-                    gemma_pattern = r"^\s*<\|channel>thought\n?([\s\S]*?)\n?<channel\|>"
-                    match = re.search(gemma_pattern, content, re.IGNORECASE)
+                    match = _GEMMA_THOUGHT_RE.search(content)
                     if match:
                         msg['reasoning_content'] = match.group(1).strip()
-                        msg[CONTENT] = re.sub(gemma_pattern, "", content, count=1, flags=re.IGNORECASE).strip()
+                        msg[CONTENT] = _GEMMA_THOUGHT_RE.sub("", content, count=1).strip()
 
                 m = copy.deepcopy(msg)
-                if m.get('reasoning_content'):
-                    reasoning_clean = re.sub(r"\s*<(think|thought)>.*?<\/\1>", "", m["reasoning_content"], flags=re.IGNORECASE | re.DOTALL)
+                # Strip thinking blocks from reasoning_content to prevent tag pollution in history
+                if m.get('reasoning_content') and isinstance(m['reasoning_content'], str):
+                    m['reasoning_content'] = strip_thinking_blocks(m['reasoning_content'])
+                
+                # FIX: In newer AgentCascade, tool calls should NOT have reasoning injected 
+                # into 'content' if it's already in 'reasoning_content' and there's a tool call,
+                # as the UI/orchestrator handles the combined display and it confuses history trackers.
+                reasoning_content = m.get('reasoning_content')
+                if reasoning_content:
+                    if isinstance(reasoning_content, list):
+                        # Convert list of ContentItem to string for regex cleanup
+                        reasoning_str = " ".join([str(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')) for item in reasoning_content])
+                    else:
+                        reasoning_str = str(reasoning_content)
+
+                    reasoning_clean = _THINK_BLOCK_RE.sub("", reasoning_str)
                     reasoning = f"<think>\n{reasoning_clean}\n</think>\n"
                     old_content = m.get(CONTENT)
-                    if old_content is None:
-                        m[CONTENT] = reasoning
-                    elif isinstance(old_content, list):
-                        m[CONTENT] = [ContentItem(text=reasoning)] + old_content
-                    else:
-                        m[CONTENT] = reasoning + str(old_content)
+                    
+                    # Only inject if there's NO function call (standard message)
+                    if not m.get('function_call'):
+                        if old_content is None:
+                            m[CONTENT] = reasoning
+                        elif isinstance(old_content, list):
+                            m[CONTENT] = [ContentItem(text=reasoning)] + old_content
+                        else:
+                            m[CONTENT] = reasoning + str(old_content)
+                
+                # Clean thinking blocks from function call arguments in history to prevent UI/parsing issues
+                if m.get('function_call'):
+                    fc = m['function_call']
+                    if isinstance(fc, dict) and fc.get('arguments'):
+                        fc['arguments'] = strip_thinking_blocks(fc['arguments'])
+                    elif hasattr(fc, 'arguments'):
+                        fc.arguments = strip_thinking_blocks(fc.arguments)
+                        
                 history_output.append(m)
 
             response.extend(output)
