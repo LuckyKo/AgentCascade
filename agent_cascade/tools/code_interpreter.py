@@ -40,6 +40,15 @@ from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.utils.utils import append_signal_handler, extract_code, has_chinese_chars, print_traceback
 
 
+# --- Timeout Configuration ---
+# Per-execution timeout: max seconds a single code cell can run before being killed.
+# Can be overridden by env var or tool config.
+CODE_EXECUTION_TIMEOUT = int(os.getenv('M6_CODE_INTERPRETER_EXEC_TIMEOUT', '120'))
+
+# Container watchdog timeout: if the kernel becomes completely unresponsive
+# for this many seconds, kill and restart the container.
+CONTAINER_WATCHDOG_TIMEOUT = int(os.getenv('M6_CODE_INTERPRETER_WATCHDOG_TIMEOUT', '300'))
+
 LAUNCH_KERNEL_PY = """
 from ipykernel import kernelapp as app
 app.launch_new_instance()
@@ -52,8 +61,16 @@ DOCKER_IMAGE_FILE = str(Path(__file__).absolute().parent / 'resource' / 'code_in
 _KERNEL_CLIENTS: dict = {}
 _DOCKER_CONTAINERS: Dict[str, str] = {}
 
+# Track last activity per kernel for watchdog
+_KERNEL_ACTIVITY: Dict[str, float] = {}
+
 
 def _kill_kernels_and_containers(_sig_num=None, _frame=None):
+    # Stop the watchdog thread first
+    if '_WATCHDOG_THREAD' in globals() and _WATCHDOG_THREAD.is_alive():
+        _WATCHDOG_TERMINATE.set()
+        _WATCHDOG_THREAD.join(timeout=5)
+
     for v in _KERNEL_CLIENTS.values():
         v.shutdown()
     for k in list(_KERNEL_CLIENTS.keys()):
@@ -68,6 +85,8 @@ def _kill_kernels_and_containers(_sig_num=None, _frame=None):
     for k in list(_DOCKER_CONTAINERS.keys()):
         del _DOCKER_CONTAINERS[k]
 
+    _KERNEL_ACTIVITY.clear()
+
 
 # Make sure all containers are terminated even if killed abnormally:
 # If not running in the main thread, (for example run in streamlit)
@@ -76,6 +95,81 @@ if threading.current_thread() is threading.main_thread():
     atexit.register(_kill_kernels_and_containers)
     append_signal_handler(signal.SIGTERM, _kill_kernels_and_containers)
     append_signal_handler(signal.SIGINT, _kill_kernels_and_containers)
+
+# --- Watchdog Thread: Monitors kernel responsiveness ---
+_WATCHDOG_TERMINATE = threading.Event()
+
+def _kernel_watchdog():
+    """Background thread that kills unresponsive kernels.
+    
+    Checks every 5 seconds if any kernel has been inactive for more than
+    CONTAINER_WATCHDOG_TIMEOUT. If so, it stops and removes the container,
+    cleans up the client, and logs a warning.
+    """
+    while not _WATCHDOG_TERMINATE.is_set():
+        _WATCHDOG_TERMINATE.wait(timeout=5)
+        now = time.time()
+        stale_kernels = []
+        for kernel_id, last_active in list(_KERNEL_ACTIVITY.items()):
+            if now - last_active > CONTAINER_WATCHDOG_TIMEOUT:
+                stale_kernels.append(kernel_id)
+        
+        for kernel_id in stale_kernels:
+            logger.warning(
+                f"Code interpreter watchdog: Kernel {kernel_id} inactive for "
+                f"{CONTAINER_WATCHDOG_TIMEOUT}s. Killing container."
+            )
+            # Kill the kernel client
+            if kernel_id in _KERNEL_CLIENTS:
+                try:
+                    _KERNEL_CLIENTS[kernel_id].shutdown()
+                except Exception:
+                    pass
+                del _KERNEL_CLIENTS[kernel_id]
+            
+            # Kill the container — always remove from tracking even if docker fails
+            if kernel_id in _DOCKER_CONTAINERS:
+                container_id = _DOCKER_CONTAINERS[kernel_id]
+                try:
+                    subprocess.run(
+                        ['docker', 'stop', container_id], timeout=10,
+                        capture_output=True, encoding='utf-8', errors='replace'
+                    )
+                    subprocess.run(
+                        ['docker', 'rm', container_id], timeout=10,
+                        capture_output=True, encoding='utf-8', errors='replace'
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to clean up stale container {container_id}: {e}")
+                finally:
+                    # Always remove from tracking even if docker stop/rm fails
+                    del _DOCKER_CONTAINERS[kernel_id]
+            
+            # Clean up connection files and launch script
+            work_dir_base = os.path.join(
+                os.getenv('M6_CODE_INTERPRETER_WORK_DIR', '.'), ''
+            )
+            for suffix in ['_host.json', '_container.json']:
+                conn_file = os.path.join(work_dir_base, f'kernel_connection_file_{kernel_id}{suffix}')
+                try:
+                    if os.path.exists(conn_file):
+                        os.remove(conn_file)
+                except OSError as e:
+                    logger.warning(f"Failed to remove connection file {conn_file}: {e}")
+            
+            launch_script = os.path.join(work_dir_base, f'launch_kernel_{kernel_id}.py')
+            try:
+                if os.path.exists(launch_script):
+                    os.remove(launch_script)
+            except OSError as e:
+                logger.warning(f"Failed to remove launch script {launch_script}: {e}")
+            
+            if kernel_id in _KERNEL_ACTIVITY:
+                del _KERNEL_ACTIVITY[kernel_id]
+
+_WATCHDOG_THREAD = threading.Thread(target=_kernel_watchdog, daemon=True, name='code-interpreter-watchdog')
+_WATCHDOG_THREAD.start()
+logger.info(f"Code interpreter watchdog started (timeout={CONTAINER_WATCHDOG_TIMEOUT}s)")
 
 
 @register_tool('code_interpreter')
@@ -112,7 +206,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 fmt = 'Enclose the code within triple backticks (`) at the beginning and end of the code.'
         return fmt
 
-    def call(self, params: Union[str, dict], files: List[str] = None, timeout: Optional[int] = 30, **kwargs) -> str:
+    def call(self, params: Union[str, dict], files: List[str] = None, timeout: Optional[int] = None, **kwargs) -> str:
         from agent_cascade.utils.utils import json_loads
         super().call(params=params, files=files)  # copy remote files to work_dir
 
@@ -133,6 +227,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
         if not code.strip():
             return ''
 
+        # Use configured timeout: explicit param > config > default
+        exec_timeout = timeout
+        if exec_timeout is None:
+            exec_timeout = self.cfg.get('execution_timeout', CODE_EXECUTION_TIMEOUT)
+
         kernel_id: str = f'{self.instance_id}_{os.getpid()}'
         if kernel_id in _KERNEL_CLIENTS:
             kc = _KERNEL_CLIENTS[kernel_id]
@@ -143,12 +242,12 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 container_font_path = f'{self.container_work_dir}/{os.path.basename(ALIB_FONT_FILE)}'
                 start_code = start_code.replace('{{M6_FONT_PATH}}', repr(container_font_path)[1:-1])
                 start_code += '\n%xmode Minimal'
-            logger.info(self._execute_code(kc, start_code))
+            logger.info(self._execute_code(kc, start_code, timeout=exec_timeout))
             _KERNEL_CLIENTS[kernel_id] = kc
             _DOCKER_CONTAINERS[kernel_id] = container_id
 
-        if timeout:
-            code = f'_M6CountdownTimer.start({timeout})\n{code}'
+        if exec_timeout:
+            code = f'_M6CountdownTimer.start({exec_timeout})\n{code}'
 
         fixed_code = []
         for line in code.split('\n'):
@@ -157,10 +256,42 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 fixed_code.append('plt.rcParams["font.family"] = _m6_font_prop.get_name()')
         fixed_code = '\n'.join(fixed_code)
         fixed_code += '\n\n'  # Prevent code not executing in notebook due to no line breaks at the end
-        result = self._execute_code(kc, fixed_code)
+        
+        try:
+            result = self._execute_code(kc, fixed_code, timeout=exec_timeout)
+        except TimeoutError as e:
+            # On timeout, attempt to interrupt the kernel to recover it
+            logger.warning(f"Code interpreter execution timed out ({exec_timeout}s), attempting kernel interrupt...")
+            try:
+                kc.interrupt()
+                # Retry loop: wait for kernel to become idle after interrupt (3 × 0.5s)
+                interrupted = False
+                for _ in range(3):
+                    time.sleep(0.5)
+                    try:
+                        msg = kc.get_iopub_msg(timeout=1)
+                        if msg['msg_type'] == 'status' and msg['content'].get('execution_state') == 'idle':
+                            interrupted = True
+                            break
+                    except queue.Empty:
+                        continue
+                    except Exception:
+                        break
+                
+                if not interrupted:
+                    logger.warning("Kernel did not return to idle after interrupt — may need restart")
+            except Exception as interrupt_err:
+                logger.warning(f"Kernel interrupt failed: {interrupt_err}")
+            
+            # Update activity timestamp so watchdog doesn't double-kill
+            _KERNEL_ACTIVITY[kernel_id] = time.time()
+            
+            if exec_timeout and isinstance(e, TimeoutError):
+                return f'Timeout: Code execution exceeded the {exec_timeout}-second time limit. Please optimize your code or break it into smaller steps.'
+            raise
 
-        if timeout:
-            self._execute_code(kc, '_M6CountdownTimer.cancel()')
+        if exec_timeout:
+            self._execute_code(kc, '_M6CountdownTimer.cancel()', timeout=10)
 
         if not result.strip():
             return 'Finished execution.'
@@ -206,7 +337,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Recycle the jupyter subprocess and Docker container:
         k: str = f'{self.instance_id}_{os.getpid()}'
         if k in _KERNEL_CLIENTS:
-            _KERNEL_CLIENTS[k].shutdown()
+            try:
+                _KERNEL_CLIENTS[k].shutdown()
+            except Exception:
+                pass
             del _KERNEL_CLIENTS[k]
         if k in _DOCKER_CONTAINERS:
             container_id = _DOCKER_CONTAINERS[k]
@@ -215,7 +349,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 subprocess.run(['docker', 'rm', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
             except Exception:
                 pass
-            del _DOCKER_CONTAINERS[k]
+            finally:
+                del _DOCKER_CONTAINERS[k]
 
     def _build_docker_image(self):
         """Build Docker image from Dockerfile if not exists"""
@@ -358,7 +493,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         time.sleep(2)
 
-        # start local jupter client
+        # start local jupyter client
         from jupyter_client import BlockingKernelClient
 
         kc = BlockingKernelClient(connection_file=host_connection_file)
@@ -385,21 +520,55 @@ class CodeInterpreter(BaseToolWithFileAccess):
                         errors='replace'
                     )
                     raise RuntimeError(f'Kernel failed to start: {e}\nContainer logs:\n{logs.stdout}\n{logs.stderr}')
+
+        # Initialize activity tracking for watchdog
+        _KERNEL_ACTIVITY[kernel_id] = time.time()
         
         return kc, container_id
 
-    def _execute_code(self, kc, code: str) -> str:
+    def _execute_code(self, kc, code: str, timeout: Optional[int] = None) -> str:
+        """Execute code in the Jupyter kernel with a message-level timeout.
+        
+        Args:
+            kc: The kernel client connection.
+            code: Python code to execute.
+            timeout: Maximum seconds to wait for each IOPub message (default: CODE_EXECUTION_TIMEOUT).
+                    Set to None to disable timeout (not recommended).
+        
+        Returns:
+            Formatted string with stdout, stderr, execution results, and images.
+        
+        Raises:
+            TimeoutError: If code execution exceeds the time limit.
+        """
+        if timeout is None:
+            timeout = CODE_EXECUTION_TIMEOUT
+
         kc.wait_for_ready()
         kc.execute(code)
         result = ''
         image_idx = 0
+        
+        # OVERALL wall-clock budget: prevents runaway execution when the kernel
+        # keeps producing output (e.g. rglob scanning thousands of files). Each
+        # individual message still has a per-message timeout to catch kernel hangs.
+        start_time = time.time()
+        per_message_timeout = min(10, timeout)  # use 10s per-message, or the overall budget if smaller
+
         while True:
+            # Check overall wall-clock budget at the top of each iteration
+            if time.time() - start_time > timeout:
+                text = f'Timeout: Code execution exceeded the {timeout}-second time limit.'
+                finished = True
+                break
+            
             text = ''
             image = ''
             finished = False
             msg_type = 'error'
             try:
-                msg = kc.get_iopub_msg()
+                # Per-message timeout catches kernel hangs (no output at all)
+                msg = kc.get_iopub_msg(timeout=per_message_timeout)
                 msg_type = msg['msg_type']
                 if msg_type == 'status':
                     if msg['content'].get('execution_state') == 'idle':
@@ -425,14 +594,20 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 elif msg_type == 'error':
                     text = _escape_ansi('\n'.join(msg['content']['traceback']))
                     if 'M6_CODE_INTERPRETER_TIMEOUT' in text:
-                        text = 'Timeout: Code execution exceeded the time limit.'
+                        text = f'Timeout: Code execution exceeded the {timeout}-second time limit.'
             except queue.Empty:
-                text = 'Timeout: Code execution exceeded the time limit.'
+                # This is raised by get_iopub_msg() when timeout expires
+                text = f'Timeout: Code execution exceeded the {timeout}-second time limit.'
                 finished = True
             except Exception:
                 text = 'The code interpreter encountered an unexpected error.'
                 print_traceback()
                 finished = True
+            
+            # Update kernel activity timestamp for watchdog
+            kernel_id = f'{self.instance_id}_{os.getpid()}'
+            _KERNEL_ACTIVITY[kernel_id] = time.time()
+
             if text:
                 result += f'\n\n{msg_type}:\n\n```\n{text}\n```'
             if image:
