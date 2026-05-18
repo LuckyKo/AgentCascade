@@ -35,7 +35,10 @@ class FileManager:
     def _resolve_path(self, path: str) -> Path:
         """Resolve a path to be within the base directory (security)."""
         # Prevent path traversal attacks
-        resolved = (self.base_dir / path).resolve()
+        if Path(path).is_absolute():
+            resolved = Path(path).resolve()
+        else:
+            resolved = (self.base_dir / path).resolve()
         if not str(resolved).startswith(str(self.base_dir.resolve())):
             raise ValueError(f"Path '{path}' is outside the allowed directory")
         return resolved

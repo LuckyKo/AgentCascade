@@ -95,7 +95,10 @@ class ReadFile(BaseTool):
             else:
                 # Fallback if no agent_pool
                 base_dir = Path(DEFAULT_WORKSPACE)
-                resolved = (base_dir / path).resolve()
+                if Path(path).is_absolute():
+                    resolved = Path(path).resolve()
+                else:
+                    resolved = (base_dir / path).resolve()
                 if not str(resolved).startswith(str(base_dir.resolve())):
                      return f"Path '{path}' is outside the allowed directory"
 
@@ -207,7 +210,10 @@ class ViewImage(BaseTool):
             else:
                 # Fallback if no agent_pool
                 base_dir = Path(DEFAULT_WORKSPACE)
-                resolved = (base_dir / path).resolve()
+                if Path(path).is_absolute():
+                    resolved = Path(path).resolve()
+                else:
+                    resolved = (base_dir / path).resolve()
                 if not str(resolved).startswith(str(base_dir.resolve())):
                      return f"Path '{path}' is outside the allowed directory"
 

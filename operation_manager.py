@@ -261,8 +261,15 @@ class OperationManager:
             clean_path = clean_path[len('workspace/'):]
         elif clean_path == '/workspace' or clean_path == 'workspace':
             clean_path = '.'
-            
-        resolved = (self.base_dir / clean_path).resolve()
+        
+        # If the path is already absolute (e.g., an agent passing 
+        # "N:\work\WD\AgentCascade" to access an extra work folder), use it directly
+        # instead of joining with base_dir — on Windows, Path(base) / abs_path
+        # replaces base entirely, which can cause security check mismatches.
+        if Path(clean_path).is_absolute():
+            resolved = Path(clean_path).resolve()
+        else:
+            resolved = (self.base_dir / clean_path).resolve()
         
         # 1. Base directory is always RW (and thus RO)
         if str(resolved).startswith(str(self.base_dir)):
