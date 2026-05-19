@@ -730,6 +730,7 @@ function handleServerMessage(data) {
       if (data.total_words !== undefined) state.totalWords = data.total_words;
       if (data.max_tokens !== undefined) state.maxTokens = data.max_tokens;
       if (data.summary !== undefined) state.summary = data.summary;
+      if (data.instance_halted !== undefined) state.instance_halted = data.instance_halted;
 
       // Telemetry: update panel with session telemetry from server
       if (data.telemetry) {
@@ -1913,6 +1914,7 @@ function renderSubAgentPanel(panel, agentData, name) {
       </div>
       <div class="activity-text">Idle</div>
       <div class="activity-queued" style="display:none;">⚡ Queued</div>
+      <button class="btn btn-secondary btn-sm pause-btn" title="Pause/Resume this agent" style="margin-left: 4px; padding: 2px 8px; font-size: 11px;">⏸ Pause</button>
       <button class="btn btn-danger btn-sm terminate-btn" style="margin-left: auto; display: none; padding: 2px 8px; font-size: 11px;">Terminate</button>
     `;
     panel.appendChild(activityBar);
@@ -1923,46 +1925,35 @@ function renderSubAgentPanel(panel, agentData, name) {
       switchMainTab('chat');
     };
 
-    // Input Area
-    const inputArea = document.createElement('div');
-    inputArea.className = 'input-area';
-    inputArea.innerHTML = `
-      <div class="input-wrapper">
-        <textarea placeholder="Message ${name}..." rows="1"></textarea>
-        <div class="sub-input-btns" style="display: flex; gap: 4px; align-items: center;">
-          <button class="btn btn-secondary sub-continue-btn" title="Continue (Ctrl+Shift+Enter)" style="padding: 6px 8px; font-size: 12px;">⏩</button>
-          <button class="btn btn-primary send-btn" title="Send (Enter)">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-              <path d="M2 21l21-9L2 3v7l15 2-15 2z" />
-            </svg>
-          </button>
-        </div>
-      </div>
-    `;
-    const textarea = inputArea.querySelector('textarea');
-    const sendBtn = inputArea.querySelector('.send-btn');
-    const contBtn = inputArea.querySelector('.sub-continue-btn');
-
-    textarea.addEventListener('input', () => autoResize(textarea));
-    textarea.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage(textarea);
-      } else if (e.key === 'Enter' && e.shiftKey && e.ctrlKey) {
-        e.preventDefault();
-        continueMessage();
-      }
+    // Pause/Resume toggle for this sub-agent
+    const pauseBtn = activityBar.querySelector('.pause-btn');
+    pauseBtn.addEventListener('click', async () => {
+      try {
+        if (pauseBtn.textContent.includes('Pause')) {
+          const resp = await fetch(`/api/halt/${encodeURIComponent(name)}`, { method: 'POST' });
+          if (resp.ok) pauseBtn.textContent = '▶️ Resume';
+        } else {
+          const resp = await fetch(`/api/resume/${encodeURIComponent(name)}`, { method: 'POST' });
+          if (resp.ok) pauseBtn.textContent = '⏸ Pause';
+        }
+      } catch(e) { console.error('Pause/Resume failed:', e); }
     });
-    sendBtn.onclick = () => sendMessage(textarea);
-    if (contBtn) contBtn.onclick = () => continueMessage();
-    
-    // Insert input area BEFORE activity bar
-    panel.insertBefore(inputArea, activityBar);
+
+    // Insert activity bar only (no per-panel input area — uses shared bottom bar)
   }
 
   const activityBar = panel.querySelector('.sub-agent-activity-bar');
   const scrollContainer = panel.querySelector('.sub-agent-messages');
   const terminateBtn = activityBar.querySelector('.terminate-btn');
+  const pauseBtn = activityBar.querySelector('.pause-btn');
+  
+  // Sync pause button to server-side halted state
+  if (agentData.is_halted && !pauseBtn.textContent.includes('Resume')) {
+    pauseBtn.textContent = '▶️ Resume';
+  } else if (!agentData.is_halted && !pauseBtn.textContent.includes('Pause')) {
+    pauseBtn.textContent = '⏸ Pause';
+  }
+  
   const activityText = activityBar.querySelector('.activity-text');
   const queuedEl = activityBar.querySelector('.activity-queued');
 
@@ -2299,7 +2290,7 @@ function updateControls() {
     resetBtn.disabled = false;
     document.body.classList.remove('is-generating');
   }
-  stopBtn.style.display = state.generating ? 'inline-flex' : 'none';
+  stopBtn.style.opacity = state.generating ? '1' : '0.4';
   sendBtn.disabled = !state.connected;
   continueBtn.disabled = state.generating || state.messages.length === 0;
   const refreshBtn = document.getElementById('refreshBtn');
@@ -2308,7 +2299,16 @@ function updateControls() {
   if (refreshBtn) refreshBtn.disabled = state.generating;
   if (mainRB) mainRB.disabled = retryDisabled;
 
-  statusText.textContent = state.generating ? 'Generating...' : '';
+  statusText.textContent = state.generating ? 'Generating...' : (state.instance_halted ? '⏸ Paused' : '');
+  
+  // Sync pause button to server-side halted state
+  if (pauseBtn) {
+    const wasPaused = pauseBtn.textContent === '▶️ Resume';
+    const nowHalted = !!state.instance_halted;
+    if (nowHalted && !wasPaused) { pauseBtn.textContent = '▶️ Resume'; }
+    else if (!nowHalted && wasPaused) { pauseBtn.textContent = '⏸ Pause'; }
+  }
+  
   chatInput.placeholder = state.generating
     ? 'Inject a message into the active agent...'
     : 'Send a message...';
@@ -2720,6 +2720,29 @@ chatInput.addEventListener('keydown', (e) => {
 
 sendBtn.addEventListener('click', sendMessage);
 stopBtn.addEventListener('click', () => send({ type: 'stop' }));
+
+// Generic pause/resume toggle button factory — works for any agent instance
+function createPauseButton(btn, instanceSource) {
+  // instanceSource: a function returning the instance name (e.g. () => sessionNameInput.value)
+  if (!btn || typeof instanceSource !== 'function') return;
+  
+  btn.addEventListener('click', async () => {
+    const sessionName = instanceSource();
+    try {
+      if (btn.textContent.includes('Pause')) {
+        const resp = await fetch(`/api/halt/${encodeURIComponent(sessionName)}`, { method: 'POST' });
+        if (resp.ok) btn.textContent = '▶️ Resume';
+      } else {
+        const resp = await fetch(`/api/resume/${encodeURIComponent(sessionName)}`, { method: 'POST' });
+        if (resp.ok) btn.textContent = '⏸ Pause';
+      }
+    } catch(e) { console.error('Pause/Resume failed:', e); }
+  });
+}
+
+// Main chat pause button
+if (pauseBtn) createPauseButton(pauseBtn, () => document.getElementById('sessionName')?.value || 'Maine');
+
 const onRetryClick = () => {
   lastRenderedCount = Infinity;
   retryGeneration();

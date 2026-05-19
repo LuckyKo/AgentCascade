@@ -567,7 +567,7 @@ def create_app(agents, agent_pool, config=None):
                         role = msg.get(ROLE)
                         content = msg.get(CONTENT, '')
                         # Specifically target USER messages for context boundaries
-                        if role == USER and isinstance(content, str) and (COMPRESSION_MARKER in content or "<context_summary>" in content):
+                        if role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                             import re
                             # Use the standardized XML-style tag match
                             match = _CONTEXT_SUMMARY_RE.search(content)
@@ -596,6 +596,7 @@ def create_app(agents, agent_pool, config=None):
                     'summary': summary,
                     'has_queued_messages': agent_pool.has_messages(name),
                     'is_waiting': agent_pool.api_router.is_waiting(name) if hasattr(agent_pool, 'api_router') else False,
+                    'is_halted': agent_pool.is_halted(name) if hasattr(agent_pool, 'is_halted') else False,
                 }
         return result
 
@@ -676,7 +677,7 @@ def create_app(agents, agent_pool, config=None):
         current_summary = session.get('summary', '')
         for msg in reversed(session['history']):
             content = msg.get(CONTENT, '')
-            if isinstance(content, str) and COMPRESSION_MARKER in content:
+            if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                 import re
                 # Only match content INSIDE the tags, allowing optional newlines/whitespace
                 match = _CONTEXT_SUMMARY_RE.search(content)
@@ -1230,7 +1231,7 @@ def create_app(agents, agent_pool, config=None):
                     from agent_cascade.prompts.dna import COMPRESSION_MARKER
                     for m in tfm[:5]:
                         content = m.get(CONTENT, '') if isinstance(m, dict) else getattr(m, 'content', '')
-                        if isinstance(content, str) and COMPRESSION_MARKER in content:
+                        if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                             is_slice = True
                             break
                     
@@ -1405,7 +1406,8 @@ def create_app(agents, agent_pool, config=None):
             "generating": session['generating'],
             "active_agent": session['session_name'],
             "agents": agent_pool.list_agents() if agent_pool else [],
-            "active_stack": get_active_stack()
+            "active_stack": get_active_stack(),
+            "instance_halted": agent_pool.is_halted(session.get('session_name', '')) if (agent_pool and hasattr(agent_pool, 'is_halted')) else False,
         }
 
     # ── REST endpoints ────────────────────────────────────────────────────
@@ -1450,6 +1452,30 @@ def create_app(agents, agent_pool, config=None):
             result = agent_pool.operation_manager.user_reject(request_id, reason)
             return {"status": "ok", "result": result}
         return {"status": "error", "message": "No operation manager"}
+
+    @app.post("/api/halt/{instance_name}")
+    async def api_halt_instance(instance_name: str):
+        """Halt a specific agent instance (pauses it until resumed)."""
+        if agent_pool and hasattr(agent_pool, 'halt_instance'):
+            agent_pool.halt_instance(instance_name)
+            return {"status": "ok", "message": f"Instance {instance_name} halted"}
+        return {"status": "error", "message": "Agent pool not available"}
+
+    @app.post("/api/resume/{instance_name}")
+    async def api_resume_instance(instance_name: str):
+        """Resume a previously halted agent instance."""
+        if agent_pool and hasattr(agent_pool, 'resume_instance'):
+            agent_pool.resume_instance(instance_name)
+            return {"status": "ok", "message": f"Instance {instance_name} resumed"}
+        return {"status": "error", "message": "Agent pool not available"}
+
+    @app.post("/api/resume_all")
+    async def api_resume_all():
+        """Resume all halted agent instances."""
+        if agent_pool and hasattr(agent_pool, 'resume_all_instances'):
+            agent_pool.resume_all_instances()
+            return {"status": "ok", "message": "All instances resumed"}
+        return {"status": "error", "message": "Agent pool not available"}
 
     @app.get("/api/sessions")
     async def api_list_sessions():
@@ -2170,7 +2196,7 @@ def create_app(agents, agent_pool, config=None):
                         new_parsed_content = _parse_multimodal_content(content)
                         
                         # If this is a compression marker, ensure tags are preserved
-                        is_compression_msg = COMPRESSION_MARKER in str(old_content) or "<context_summary>" in str(old_content)
+                        is_compression_msg = str(old_content).startswith(COMPRESSION_MARKER)
                         if is_compression_msg:
                             if COMPRESSION_MARKER in content or "<context_summary>" in content:
                                 new_parsed_content = content

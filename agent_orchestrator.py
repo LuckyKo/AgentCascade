@@ -590,12 +590,16 @@ class OrchestratorAgent(Assistant):
         
         return truncated + notice
 
-    def _inject_compression_warning(self, messages: List[Message]):
-        """Legacy helper for the orchestrator itself."""
-        self._inject_compression_warning_for_agent(self, self.session_name, messages)
+    def _inject_compression_warning(self, messages: List[Message]) -> bool:
+        """Legacy helper for the orchestrator itself. Returns True if forced compression ran."""
+        return self._inject_compression_warning_for_agent(self, self.session_name, messages)
 
-    def _inject_compression_warning_for_agent(self, agent, instance_name: str, messages: List[Message]):
-        """Inject a warning or force compression if context is getting full for any agent."""
+    def _inject_compression_warning_for_agent(self, agent, instance_name: str, messages: List[Message]) -> bool:
+        """Inject a warning or force compression if context is getting full for any agent.
+        
+        Returns True if forced compression was triggered (caller should halt current turn).
+        Returns False otherwise (safe to continue with LLM call).
+        """
         max_tokens = self._get_max_tokens()
 
         current_tokens = self._get_history_tokens(messages)
@@ -608,8 +612,13 @@ class OrchestratorAgent(Assistant):
             # a stale deep-copied llm_messages that still has all old messages.
             if getattr(self, '_compress_context_ran_this_turn', False):
                 logger.debug(f"Skipping forceful compression for {instance_name} — already ran this turn.")
-                return
-            logger.info(f"Context usage at {usage_pct:.1f}% for {instance_name} - Triggering FORCEFUL compression.")
+                return True  # Still signal halt — something already compressed this turn
+            
+            # Halt all other agents before compressing so no new content is added during compression.
+            # The agent being compressed (instance_name) and the compression agent itself are exempt.
+            self.agent_pool.halt_all_instances(except_instances=[instance_name, 'compression_agent'])
+            
+            logger.info(f"Context usage at {usage_pct:.1f}% for {instance_name} - Halting other agents and triggering FORCEFUL compression.")
             compress_tool = agent.function_map.get('compress_context')
             if compress_tool:
                 # Programmatically call the tool's internal compression logic
@@ -663,7 +672,10 @@ class OrchestratorAgent(Assistant):
                         )
                         if not has_notification:
                             last_msg.content.append(ContentItem(text=notification))
-            return
+            # Resume all halted agents after compression completes
+            self.agent_pool.resume_all_instances()
+            
+            return True  # Signal caller to halt current turn
 
         # 2. Warning Threshold (> 85%)
         if usage_pct > 85.0:
@@ -691,6 +703,8 @@ class OrchestratorAgent(Assistant):
                     )
                     if not has_notification:
                         last_msg.content.append(ContentItem(text=warning))
+
+        return False  # No forced compression, safe to continue with LLM call
 
 
     @property
@@ -893,6 +907,11 @@ class OrchestratorAgent(Assistant):
                 logger.info(f"Agent {self.name} stopped by user.")
                 yield response
                 break
+            
+            # Check per-instance halt — agent is paused (e.g. during forced compression or manual pause)
+            if self.agent_pool.is_halted(self.session_name):
+                yield response
+                continue  # Skip this turn, will resume when halted flag is cleared
                 
             num_llm_calls_available -= 1
     
@@ -912,10 +931,35 @@ class OrchestratorAgent(Assistant):
                     logger.info(f"Injected async user message into {self.session_name}: {async_msg_text}")
                 yield response  # Update UI with the injected message
                 
-            # Inject warning if needed (only for the LLM call, doesn't affect saved history)
-            self._inject_compression_warning(llm_messages)
+            # Inject warning or force compression (only for the LLM call, doesn't affect saved history)
+            forced_compression_ran = self._inject_compression_warning(llm_messages)
 
-            # BUG-7 fix: If forceful compression ran, llm_messages was compressed in-place
+            # If forced compression ran, halt this turn — don't proceed with the LLM call.
+            # The agent must not add more content on top of a just-compressed context in the same turn;
+            # otherwise we risk still being over 95% after compression + new LLM output.
+            # Re-sync both `messages` and `llm_messages` from the compressed pool state before continuing.
+            # Use slice_history_for_llm to get the actual working set (not full cumulative history),
+            # otherwise token count stays >95% and we'd loop forever compressing the same full history.
+            if forced_compression_ran:
+                # Restore the turn budget — we didn't actually make an LLM call this turn,
+                # and we don't want to penalize the agent for compression consuming a turn.
+                num_llm_calls_available += 1
+                
+                compressed = self.agent_pool.get_conversation(self.session_name)
+                if compressed:
+                    # messages stays as canonical full history (used by loop detection, etc.)
+                    messages.clear()
+                    messages.extend(compressed)
+                    # llm_messages gets the sliced working set — what actually goes to the LLM
+                    sliced = self.agent_pool.slice_history_for_llm(compressed) if hasattr(self.agent_pool, 'slice_history_for_llm') else compressed
+                    llm_messages.clear()
+                    llm_messages.extend(copy.deepcopy(sliced))
+                yield response
+                # Reset flag so BUG-7 block below doesn't redundantly re-sync every iteration
+                self._compress_context_ran_this_turn = False
+                continue
+
+            # BUG-7 fix: If compress_context ran via LLM tool call, llm_messages was compressed in-place
             # but `messages` (the canonical history) still holds the old un-compressed state.
             # Re-sync `messages` from the Pool to prevent divergence.
             # NOTE: cumulative compression INSERTS a summary marker (pool grows), so we check
@@ -962,6 +1006,10 @@ class OrchestratorAgent(Assistant):
                 if self.agent_pool.stopped:
                     logger.info(f"Agent {self.name} stopped during LLM stream.")
                     break
+                # Check per-instance halt — pause takes effect mid-stream
+                if self.agent_pool.is_halted(self.session_name):
+                    logger.info(f"Agent {self.name} halted during LLM stream.")
+                    break
                 # Telemetry: record first token time
                 if not _llm_first_token_recorded and output:
                     try:
@@ -987,6 +1035,11 @@ class OrchestratorAgent(Assistant):
             if self.agent_pool.stopped:
                 yield response
                 break
+            
+            # Check per-instance halt after LLM turn — pause takes effect between turns
+            if self.agent_pool.is_halted(self.session_name):
+                yield response
+                continue  # Don't process this turn's output, wait for resume
 
             # Process the FINAL output of this LLM turn
             output = turn_output
@@ -1267,6 +1320,12 @@ class OrchestratorAgent(Assistant):
                 # Track that compress_context ran this turn to prevent _inject_compression_warning from triggering a second one
                 if tool_name == 'compress_context':
                     self._compress_context_ran_this_turn = True
+                    # Sync llm_messages from the pool immediately so subsequent operations 
+                    # in this turn see the compressed state (prevents desync).
+                    compressed_conv = self.agent_pool.get_conversation(self.session_name)
+                    if compressed_conv:
+                        llm_messages.clear()
+                        llm_messages.extend(copy.deepcopy(compressed_conv))
                 
                 # --- Post-execution success detection ---
                 # Many tools return an error message as a string instead of raising an exception.
@@ -1653,7 +1712,17 @@ class OrchestratorAgent(Assistant):
                                 logger_inst.log_message(async_msg)  # Log to JSONL file
                                 logger.info(f"Injected async user message into sub-agent {instance_name} via LLM hook: {async_msg_text}")
 
-                            self._inject_compression_warning_for_agent(self_agent, instance_name, messages)
+                            hook_forced = self._inject_compression_warning_for_agent(self_agent, instance_name, messages)
+                            
+                            # If forced compression ran, halt this LLM call — don't proceed.
+                            if hook_forced:
+                                logger.info(f"Forced compression for sub-agent {instance_name} — halting LLM call.")
+                                # Sync messages from pool so the sub-agent's next iteration sees compressed state
+                                compressed = self.agent_pool.get_conversation(instance_name)
+                                if compressed:
+                                    messages.clear()
+                                    messages.extend(compressed)
+                                return
                             
                             # --- CALL LLM WITH AUTO-CONTINUE ---
                             # We wrap the generator to detect truncation (finish_reason='length')
@@ -1661,6 +1730,10 @@ class OrchestratorAgent(Assistant):
                             for output in self_agent._original_call_llm(messages, **kwargs_llm):
                                 if self.agent_pool.stopped:
                                     logger_inst.info(f"Sub-agent {instance_name} LLM call interrupted by stop flag.")
+                                    break
+                                # Check per-instance halt — pause takes effect mid-stream
+                                if self.agent_pool.is_halted(instance_name):
+                                    logger_inst.info(f"Sub-agent {instance_name} halted during LLM stream.")
                                     break
                                 last_output = output
                                 yield output

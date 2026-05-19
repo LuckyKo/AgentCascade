@@ -78,6 +78,16 @@ class AgentPool:
         # for proper cross-thread memory barriers (GIL alone does NOT guarantee
         # visibility ordering for plain bool attributes).
         self._stopped_event = threading.Event()
+        
+        # Per-instance halt flags — used during forced compression to halt specific agents
+        # while allowing the compression agent itself to run.
+        # Key = instance_name, Value = bool (True = halted)
+        self._instance_halted: Dict[str, bool] = {}
+        
+        # Track which instances were halted by forced compression specifically,
+        # so resume_all_instances only clears those (not manual halts from /api/halt).
+        self._compression_halted: set = set()
+        
         self.terminated_instances = set()
         
         # Per-agent message queues for routed async injection
@@ -109,6 +119,44 @@ class AgentPool:
             self._stopped_event.set()
         else:
             self._stopped_event.clear()
+
+    # ── Per-instance halt for forced compression ──────────────────────────
+    def is_halted(self, instance_name: str) -> bool:
+        """Check if a specific agent instance has been halted (e.g. during forced compression)."""
+        return self._instance_halted.get(instance_name, False)
+
+    def halt_instance(self, instance_name: str):
+        """Halt a specific agent instance while allowing others to continue."""
+        self._instance_halted[instance_name] = True
+
+    def resume_instance(self, instance_name: str):
+        """Resume a previously halted agent instance."""
+        self._instance_halted[instance_name] = False
+
+    def halt_all_instances(self, except_instance: str = None, except_instances: List[str] = None):
+        """Halt all active instances except the given one(s) (used before forced compression)."""
+        # Build set of exceptions
+        skip = set()
+        if except_instance:
+            skip.add(except_instance)
+        if except_instances:
+            skip.update(except_instances)
+        
+        # Get all known instance names from message_queues, active_stack, and conversations
+        all_instances = set(self.message_queues.keys()) | set(self.active_stack) | set(self.instance_conversations.keys())
+        for inst in all_instances:
+            if inst not in skip:
+                was_already_halted = self._instance_halted.get(inst, False)
+                self.halt_instance(inst)
+                # Only track instances that weren't already halted — preserves manual halts
+                if not was_already_halted:
+                    self._compression_halted.add(inst)
+
+    def resume_all_instances(self):
+        """Resume only the instances that were halted by forced compression (not manual halts)."""
+        for inst in self._compression_halted:
+            self.resume_instance(inst)
+        self._compression_halted.clear()
 
     def discover_instances(self):
         """Scan the logs directory and reload existing instances."""
@@ -472,7 +520,7 @@ rules:
     def slice_history_for_llm(self, history: List[Union[dict, Message]]) -> List[Union[dict, Message]]:
         """
         Extract the 'working set' from a full conversation history.
-        Preserves the first SYSTEM message and slices from the latest <context_summary> onwards.
+        Preserves the first SYSTEM message and slices from the latest compression marker onwards.
         """
         if not history:
             return []
@@ -482,7 +530,7 @@ rules:
             msg = history[i]
             role = msg.get(ROLE) if isinstance(msg, dict) else getattr(msg, 'role', '')
             content = msg.get(CONTENT, '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-            if role == USER and isinstance(content, str) and "<context_summary>" in content:
+            if role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                 latest_summary_idx = i
                 break
                 
@@ -617,7 +665,7 @@ rules:
         latest_summary_idx = -1
         for i in range(len(cleaned_messages) - 1, -1, -1):
             msg = cleaned_messages[i]
-            if msg.get(ROLE) == USER and isinstance(msg.get(CONTENT, ''), str) and COMPRESSION_MARKER in msg.get(CONTENT, ''):
+            if msg.get(ROLE) == USER and isinstance(msg.get(CONTENT, ''), str) and msg.get(CONTENT, '').startswith(COMPRESSION_MARKER):
                 latest_summary_idx = i
                 break
                 
@@ -706,7 +754,7 @@ rules:
         i = 0
         while i < len(messages):
             msg = messages[i]
-            if isinstance(msg, dict) and COMPRESSION_MARKER in str(msg.get(CONTENT, "")):
+            if isinstance(msg, dict) and str(msg.get(CONTENT, "")).startswith(COMPRESSION_MARKER):
                 num_after = len(messages) - 1 - i
                 if num_after > 0:
                     for length in range(num_after, 0, -1):
@@ -779,12 +827,25 @@ rules:
         for i in range(len(history) - 1, -1, -1):
             msg = history[i]
             content = msg.get('content', '') if isinstance(history[i], dict) else getattr(history[i], 'content', '')
-            if isinstance(content, str) and ("--- CONTEXT COMPRESSED" in content or "<context_summary>" in content):
+            if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                 latest_summary_idx = i
                 break
                 
         active_start_idx = latest_summary_idx + 1 if latest_summary_idx != -1 else start_idx
         messages_to_compress = history[active_start_idx:]
+        
+        # DEBUG: verify last summary content in pool
+        _pool_last_summary_preview = ""
+        _pool_post_summary_preview = ""
+        if latest_summary_idx != -1:
+            _sm = history[latest_summary_idx]
+            _sc = _sm.get('content', '') if isinstance(_sm, dict) else getattr(_sm, 'content', '')
+            _pool_last_summary_preview = str(_sc)[:300]
+            # Also preview the message right AFTER the summary (first active message)
+            if latest_summary_idx + 1 < len(history):
+                _pm = history[latest_summary_idx + 1]
+                _pc = _pm.get('content', '') if isinstance(_pm, dict) else getattr(_pm, 'content', '')
+                _pool_post_summary_preview = str(_pc)[:300]
         
         from agent_cascade.utils.tokenization_qwen import count_tokens
         
@@ -828,6 +889,11 @@ rules:
         # Ensure we remove at least 1 message if possible
         num_to_remove = max(1, num_to_remove)
         
+        # Safety clamp: don't compress more messages than exist in the active set.
+        # This can happen if compression_tools passes an inflated num_to_summarize
+        # (e.g., when there are already compressed summaries in the history).
+        num_to_remove = min(num_to_remove, len(messages_to_compress))
+        
         # The compression summary marker itself acts as a safe starting point 
         # for the active context, so we don't need to scan for non-FUNCTION roles.
         # This ensures the exact fraction requested by the user is respected.
@@ -850,7 +916,7 @@ rules:
         #    The boundary is right after the summarized messages (active_start_idx + num_to_remove).
         #    We do NOT pop the summarized messages to provide full visibility in the UI.
         #    The slice_history_for_llm method handles actual LLM truncation by scanning
-        #    for the latest <context_summary> tag.
+        #    for the COMPRESSION_MARKER.
         insert_pos = active_start_idx + num_to_remove
         history.insert(insert_pos, summary_msg)
         
@@ -858,14 +924,21 @@ rules:
         self.instance_summaries[agent_name] = summary
         
         # 3. Notify the logger that a compression event happened.
-        #    Pass insert_pos directly so the log inserts at the exact same index as the pool.
-        #    The log may have more tail messages (tool calls/results) that aren't in the pool yet,
-        #    so deriving insert_pos from active_count + len(log) would be off.
+        #    Pass tail_count (number of messages AFTER the summary marker in the pool)
+        #    so the logger can compute insert_pos = len(log_history) - tail_count.
+        #    This avoids problems from pool/log divergence: the log may have extra
+        #    incrementally-logged messages that shift absolute positions, but the
+        #    number of tail messages is stable and comparable.
+        tail_count = len(messages_to_compress) - num_to_remove
+        logger.info(f"[COMPRESSION DEBUG] Agent={agent_name}, pool_summary_idx={latest_summary_idx}, active_start={active_start_idx}, active_set={len(messages_to_compress)}, num_to_remove={num_to_remove}, insert_pos={insert_pos}, tail={tail_count}")
+        logger.info(f"[COMPRESSION DEBUG] Pool summary preview: {_pool_last_summary_preview[:100]}")
+        logger.info(f"[COMPRESSION DEBUG] Pool post-summary preview: {_pool_post_summary_preview[:100]}")
+        
         if agent_name in self.instance_loggers:
             self.instance_loggers[agent_name].insert_compression_marker(
-                summary_msg, insert_pos
+                summary_msg, tail_count
             )
-            
+        
         logger.info(f"Cumulative compression: Inserted summary after {num_to_remove} messages for agent '{agent_name}'. Full history preserved in memory.")
     
     def get_agent_info(self, agent_name: str) -> Optional[dict]:
