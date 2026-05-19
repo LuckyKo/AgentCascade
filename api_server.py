@@ -1458,6 +1458,7 @@ def create_app(agents, agent_pool, config=None):
         """Halt a specific agent instance (pauses it until resumed)."""
         if agent_pool and hasattr(agent_pool, 'halt_instance'):
             agent_pool.halt_instance(instance_name)
+            await broadcast({'type': 'state', **build_state()})
             return {"status": "ok", "message": f"Instance {instance_name} halted"}
         return {"status": "error", "message": "Agent pool not available"}
 
@@ -1466,6 +1467,7 @@ def create_app(agents, agent_pool, config=None):
         """Resume a previously halted agent instance."""
         if agent_pool and hasattr(agent_pool, 'resume_instance'):
             agent_pool.resume_instance(instance_name)
+            await broadcast({'type': 'state', **build_state()})
             return {"status": "ok", "message": f"Instance {instance_name} resumed"}
         return {"status": "error", "message": "Agent pool not available"}
 
@@ -1474,6 +1476,7 @@ def create_app(agents, agent_pool, config=None):
         """Resume all halted agent instances."""
         if agent_pool and hasattr(agent_pool, 'resume_all_instances'):
             agent_pool.resume_all_instances()
+            await broadcast({'type': 'state', **build_state()})
             return {"status": "ok", "message": "All instances resumed"}
         return {"status": "error", "message": "Agent pool not available"}
 

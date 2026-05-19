@@ -566,6 +566,8 @@ rules:
         self.active_stack.clear()
         self.last_tool_args.clear()
         self.terminated_instances.clear()
+        self._instance_halted.clear()
+        self._compression_halted.clear()
         logger.info("AgentPool reset — all instances and loggers cleared.")
     
     def load_session_from_log(self, log_input: str, target_instance: Optional[str] = None) -> str:

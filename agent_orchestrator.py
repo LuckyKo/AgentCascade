@@ -615,8 +615,9 @@ class OrchestratorAgent(Assistant):
                 return True  # Still signal halt — something already compressed this turn
             
             # Halt all other agents before compressing so no new content is added during compression.
-            # The agent being compressed (instance_name) and the compression agent itself are exempt.
-            self.agent_pool.halt_all_instances(except_instances=[instance_name, 'compression_agent'])
+            # The agent being compressed (instance_name), the compression agent, and the main orchestrator are exempt.
+            exempt = [instance_name, 'compression_agent', self.session_name]
+            self.agent_pool.halt_all_instances(except_instances=exempt)
             
             logger.info(f"Context usage at {usage_pct:.1f}% for {instance_name} - Halting other agents and triggering FORCEFUL compression.")
             compress_tool = agent.function_map.get('compress_context')
@@ -911,6 +912,7 @@ class OrchestratorAgent(Assistant):
             # Check per-instance halt — agent is paused (e.g. during forced compression or manual pause)
             if self.agent_pool.is_halted(self.session_name):
                 yield response
+                import time; time.sleep(0.5)  # Wait for resume signal, avoid tight loop
                 continue  # Skip this turn, will resume when halted flag is cleared
                 
             num_llm_calls_available -= 1
@@ -1759,6 +1761,8 @@ class OrchestratorAgent(Assistant):
                                 except Exception:
                                     pass
                                 # Recursive call to continue the same LLM turn
+                                if self.agent_pool.is_halted(instance_name):
+                                    return  # Agent was halted during truncation — stop
                                 yield from hooked_call_llm(self_agent, messages, **kwargs_llm)
 
                         import types
@@ -1777,6 +1781,12 @@ class OrchestratorAgent(Assistant):
                             logger.info(f"Sub-agent {instance_name} interrupted by user stop signal.")
                             yield current_response
                             break
+                        
+                        # Check per-instance halt — pause takes effect between sub-agent turns
+                        if self.agent_pool.is_halted(instance_name):
+                            logger.info(f"Sub-agent {instance_name} halted by user pause.")
+                            yield current_response
+                            continue
                         
                         # --- SUB-AGENT LOOP DETECTION ---
                         # Check the full history of the sub-agent to detect loops across turns
