@@ -1729,11 +1729,11 @@ class OrchestratorAgent(Assistant):
                             last_output = []
                             for output in self_agent._original_call_llm(messages, **kwargs_llm):
                                 if self.agent_pool.stopped:
-                                    logger_inst.info(f"Sub-agent {instance_name} LLM call interrupted by stop flag.")
+                                    logger.info(f"Sub-agent {instance_name} LLM call interrupted by stop flag.")
                                     break
                                 # Check per-instance halt — pause takes effect mid-stream
                                 if self.agent_pool.is_halted(instance_name):
-                                    logger_inst.info(f"Sub-agent {instance_name} halted during LLM stream.")
+                                    logger.info(f"Sub-agent {instance_name} halted during LLM stream.")
                                     break
                                 last_output = output
                                 yield output
