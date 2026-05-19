@@ -67,4 +67,7 @@ agent-cascade-docs/website/_pagefind/
 agent-cascade-docs/website/*.tsbuildinfo
   
 # Temporary directory  
-temp/ 
+temp/
+
+# Logs
+logs/ 
