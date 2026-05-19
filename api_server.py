@@ -632,6 +632,13 @@ def create_app(agents, agent_pool, config=None):
         # Calculate tokens for the active 'working set' (after compression)
         active_h = agent_pool.slice_history_for_llm(session['history']) if agent_pool else session['history']
         
+        # When show_active_only mode is enabled, only send the active working set to the frontend
+        ui_cfg = session.get('generate_cfg', {})
+        show_active_only = ui_cfg.get('show_active_only', False)
+        display_msgs = list(active_h) if show_active_only else msgs
+        if responses:
+            display_msgs = display_msgs + list(responses)
+        
         # FIX3: Cache main history stats at session level to avoid re-tokenizing on every build_state() call
         hist_count = len(active_h)
         cached_hist_count = session.get('_cached_hist_stats_count', -1)
@@ -689,7 +696,7 @@ def create_app(agents, agent_pool, config=None):
             agent_pool.instance_summaries[session['session_name']] = current_summary
 
         return {
-            'messages': [serialize_message(m, i) for i, m in enumerate(msgs)],
+            'messages': [serialize_message(m, i) for i, m in enumerate(display_msgs)],
             'sub_agents': get_sub_agent_state(),
             'active_stack': get_active_stack(),
             'approvals': get_approvals(),
@@ -731,10 +738,14 @@ def create_app(agents, agent_pool, config=None):
         history_count = len(session['history'])
 
         # Only serialize the changing response messages (history is already on the client)
-        response_msgs = [serialize_message(m, history_count + i) for i, m in enumerate(responses)] if responses else []
-
-        # Stats: use cached h_stats when available to skip O(n) history iteration each tick
         active_h = agent_pool.slice_history_for_llm(session['history']) if agent_pool else session['history']
+
+        # When show_active_only, only send the active window + new responses
+        ui_cfg = session.get('generate_cfg', {})
+        show_active_only = ui_cfg.get('show_active_only', False)
+        history_count = len(active_h) if show_active_only else history_count
+
+        response_msgs = [serialize_message(m, history_count + i) for i, m in enumerate(responses)] if responses else []
         
         orch_agent = get_agent()
         max_tokens = get_agent_max_tokens(orch_agent)
@@ -1020,8 +1031,9 @@ def create_app(agents, agent_pool, config=None):
 
                             # UI expects history count to match current_history
                             delta = build_stream_update(responses, cached_h_stats=cached_h_stats, sub_agents=sub_agents_cache, telemetry=_telem_payload)
-                            # Override history_count in delta for consistency with current_history
-                            delta['history_count'] = len(current_history)
+                            # Override history_count in delta for consistency (unless show_active_only is enabled)
+                            if not ui_cfg.get('show_active_only', False):
+                                delta['history_count'] = len(current_history)
                             
                             asyncio.run_coroutine_threadsafe(
                                 send_queue.put({'type': 'stream_update', **delta}), loop
@@ -1260,7 +1272,8 @@ def create_app(agents, agent_pool, config=None):
                 pass
 
             final = build_state(generating=False)
-            asyncio.run_coroutine_threadsafe(send_queue.put({'type': 'done', **final}), loop)
+            halted = agent_pool.is_halted(session['session_name']) if (agent_pool and hasattr(agent_pool, 'is_halted')) else False
+            asyncio.run_coroutine_threadsafe(send_queue.put({'type': 'done', **final, 'instance_halted': halted}), loop)
 
         except Exception as e:
             traceback.print_exc()
@@ -1458,7 +1471,6 @@ def create_app(agents, agent_pool, config=None):
         """Halt a specific agent instance (pauses it until resumed)."""
         if agent_pool and hasattr(agent_pool, 'halt_instance'):
             agent_pool.halt_instance(instance_name)
-            await broadcast({'type': 'state', **build_state()})
             return {"status": "ok", "message": f"Instance {instance_name} halted"}
         return {"status": "error", "message": "Agent pool not available"}
 
@@ -1467,7 +1479,6 @@ def create_app(agents, agent_pool, config=None):
         """Resume a previously halted agent instance."""
         if agent_pool and hasattr(agent_pool, 'resume_instance'):
             agent_pool.resume_instance(instance_name)
-            await broadcast({'type': 'state', **build_state()})
             return {"status": "ok", "message": f"Instance {instance_name} resumed"}
         return {"status": "error", "message": "Agent pool not available"}
 
@@ -1476,7 +1487,6 @@ def create_app(agents, agent_pool, config=None):
         """Resume all halted agent instances."""
         if agent_pool and hasattr(agent_pool, 'resume_all_instances'):
             agent_pool.resume_all_instances()
-            await broadcast({'type': 'state', **build_state()})
             return {"status": "ok", "message": "All instances resumed"}
         return {"status": "error", "message": "Agent pool not available"}
 
@@ -1995,16 +2005,19 @@ def create_app(agents, agent_pool, config=None):
                                         llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
                                         
                                         final_msgs = []
+                                        sec_first_broadcast = True
                                         for partial in sec_agent.run(history, agent_instance_name='security_advisor', **llm_safe_cfg):
                                             final_msgs = partial
                                             # Update sub_agent_state with current message history during streaming
                                             agent_pool.sub_agent_state[sec_state_key]['messages'] = list(history) + list(final_msgs) if isinstance(final_msgs, list) else [history[0]] + list(final_msgs)
                                             agent_pool.instance_conversations[sec_state_key] = list(agent_pool.sub_agent_state[sec_state_key]['messages'])
-                                            # Broadcast state update so the tab shows live messages
-                                            asyncio.run_coroutine_threadsafe(
-                                                send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
-                                                loop
-                                            )
+                                            # Only broadcast at start and end of security check (not every token)
+                                            if sec_first_broadcast:
+                                                asyncio.run_coroutine_threadsafe(
+                                                    send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
+                                                    loop
+                                                )
+                                                sec_first_broadcast = False
 
                                     display_response = ""
                                     parsing_response = ""
@@ -2171,10 +2184,11 @@ def create_app(agents, agent_pool, config=None):
                                         )
                                 finally:
                                     # Always clean up security advisor state when done
-                                    if sec_state_key in agent_pool.sub_agent_state:
-                                        agent_pool.sub_agent_state[sec_state_key]['active'] = False
-                                        if sec_state_key in agent_pool.active_stack:
-                                            agent_pool.active_stack.remove(sec_state_key)
+                                    sec_key = locals().get('sec_state_key')
+                                    if sec_key and sec_key in agent_pool.sub_agent_state:
+                                        agent_pool.sub_agent_state[sec_key]['active'] = False
+                                        if sec_key in agent_pool.active_stack:
+                                            agent_pool.active_stack.remove(sec_key)
                             
                             threading.Thread(target=_security_check, daemon=True).start()
 

@@ -117,20 +117,21 @@ class AgentInstanceLogger:
         self.data["history"].append(formatted_msg)
         self._append_line(formatted_msg)
 
-    def insert_compression_marker(self, summary_msg: Any, insert_pos: int):
+    def insert_compression_marker(self, summary_msg: Any, tail_count: int):
         """Insert a compression summary marker into the cumulative log at the
-        exact position used by the AgentPool.
+        correct position — calculated as an offset from the end of the log.
 
         Args:
             summary_msg: The compression summary message (USER role with
                          ``<context_summary>`` tags).
-            insert_pos: The exact index where the summary was inserted in the
-                        pool — use this directly rather than deriving from
-                        tail-counting (the log may have extra tail messages
-                        not yet synced to the pool).
+            tail_count: Number of tail messages that should appear after the
+                        summary marker in both pool and log.
         """
         formatted = self._format_message(summary_msg)
         log_history = self.data["history"]
+
+        # --- Derive insertion point from offset-from-end ---
+        insert_pos = len(log_history) - tail_count
 
         # Safety: Never insert before the SYSTEM message (index 0)
         if insert_pos == 0 and log_history and log_history[0].get('role') == 'system':
@@ -139,11 +140,31 @@ class AgentInstanceLogger:
         # Clamp to valid range
         insert_pos = min(insert_pos, len(log_history))
 
+        # DEBUG: verify last summary in log matches pool by scanning for COMPRESSION_MARKER
+        from agent_cascade.prompts.dna import COMPRESSION_MARKER
+        _log_last_summary_idx = -1
+        _log_last_summary_preview = ""
+        _log_post_summary_preview = ""
+        for i in range(len(log_history) - 1, -1, -1):
+            _lc = log_history[i].get('content', '')
+            if isinstance(_lc, str) and _lc.startswith(COMPRESSION_MARKER):
+                _log_last_summary_idx = i
+                _log_last_summary_preview = str(_lc)[:300]
+                # Also preview the message right AFTER the summary
+                if i + 1 < len(log_history):
+                    _pc = log_history[i + 1].get('content', '')
+                    _log_post_summary_preview = str(_pc)[:300]
+                break
+
         log_history.insert(insert_pos, formatted)
 
         logger.info(
             f"Logger [{self.instance_name}]: Inserted compression marker at "
-            f"index {insert_pos} (log_len={len(log_history)})."
+            f"index {insert_pos} (log_len={len(log_history)}, tail_count={tail_count}). "
+            f"[DEBUG log_summary_idx={_log_last_summary_idx}, summary_preview={_log_last_summary_preview[:100]}]"
+        )
+        logger.info(
+            f"Logger [{self.instance_name}]: [DEBUG post-summary preview={_log_post_summary_preview[:100]}]"
         )
 
         # Rewrite the entire file since we inserted in the middle

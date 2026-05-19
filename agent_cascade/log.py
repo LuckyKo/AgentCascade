@@ -14,6 +14,7 @@
 
 import logging
 import os
+from pathlib import Path
 
 
 def setup_logger(level=None):
@@ -30,7 +31,24 @@ def setup_logger(level=None):
 
     _logger = logging.getLogger('agent_cascade_logger')
     _logger.setLevel(level)
-    _logger.addHandler(handler)
+    
+    # Only add handlers once (prevent duplicates on restart/reload)
+    if not _logger.handlers:
+        _logger.addHandler(handler)
+
+        # File handler — console log to logs/console.log (RotatingFileHandler with max 10MB per file, 5 backups)
+        log_dir = Path(__file__).resolve().parent.parent / 'logs'
+        log_dir.mkdir(parents=True, exist_ok=True)
+        from logging.handlers import RotatingFileHandler
+        file_handler = RotatingFileHandler(
+            log_dir / 'console.log', 
+            maxBytes=10 * 1024 * 1024,  # 10MB per file
+            backupCount=5,
+            encoding='utf-8'
+        )
+        file_handler.setFormatter(formatter)
+        _logger.addHandler(file_handler)
+
     return _logger
 
 

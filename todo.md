@@ -20,21 +20,18 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] unify the chat and subagent tabs (merge best of both). same for other logic inside - there should be no difference between orchestrator and other subagents, its only a call tree.
 [ ] implement "branch" button on main chat message bubbles, branching an agent history from that point into a new session.
 [ ] implement rate limits for each API endpoint to avoid spamming and getting locked out.
-[ ] add console logging to server.
+[x] add console logging to server - need expansion, doesnt cover all errors
 [ ] show agent tabs for security advisor and compression agent when they work.
 [ ] warn agents about message limit at 90%
-[ ] Add an UI appearance option to only show the active message que of the agent (from last summary on) -  this should keep the performance in check when chat bloats over long durations.
+[✓] Add an UI appearance option to only show the active message que of the agent (from last summary on) -  this should keep the performance in check when chat bloats over long duration.
+[ ] Add argument to edit_file tool to use exact/heuristic match mode of old content (can solve issues with tricky bits of code that are hard to hit, default on exact match)
 
 # BUGS:
 
-- compression fails with "ERROR: Conversation history too short to safely compress (need at least 3 messages)." when there are plenty of messages to compress.
-- force compression fails to trigger
 - need better timeout protection on code interpreter, we are still having issues with it getting stuck. watchdog sometimes kills container but fails to return the error back to agent.
-- sec advisor enters a loop and gets fed the same prompt over and over on Auto Ask mode.
 - sec adviser soul that gets loaded is not the one we define in Security_advisor_soul.md
-- security advisor launched in parallel, should be sequential only. there is the cause for a lot of ambiguous responses most likely. - fix needs to be verified
-- tools using think tags in the content will crash our parser and brick the API POST messages. why do we need to do that reasoning trimming anyway? only if a message starts with a thinking tag we should worry about it.
-- context usage bar is out of sync often, we should try to hand it the values calculated by base.py (the ones showing in console as: "2026-05-18 04:02:03,042 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 44875, Available tokens: 85994")
-
+- security advisor gets spammed with new calls from a single request (Auto-Ask ON)
+- streaming does not fill message bubble in full sometimes before popping the next bubble.
+- retry duplicates the user message in logger
 
 # EOF

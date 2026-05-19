@@ -2,7 +2,7 @@ import json
 import logging
 from typing import List, Union
 from agent_cascade.tools.base import BaseTool, register_tool
-from agent_cascade.prompts.dna import TOOL_METADATA, COMPRESSION_PROMPT
+from agent_cascade.prompts.dna import TOOL_METADATA, COMPRESSION_PROMPT, COMPRESSION_MARKER
 from agent_cascade.llm.schema import SYSTEM, USER, Message
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
 from agent_cascade.utils.utils import extract_text_from_message
@@ -173,7 +173,7 @@ class CompressContext(BaseTool):
         for i in range(len(history) - 1, -1, -1):
             msg = history[i]
             content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-            if isinstance(content, str) and ("--- CONTEXT COMPRESSED" in content or "<context_summary>" in content):
+            if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                 latest_summary_idx = i
                 break
         
@@ -185,23 +185,25 @@ class CompressContext(BaseTool):
         if not active_set:
             return "ERROR: No active messages to compress."
 
-        if len(active_set) < 3:
-            return "Context is already optimally compressed; deferring further compression until more messages accumulate."
-
-        # 2. Calculate how many messages to DISCARD from the active set.
-        #    We now use a token-aware calculation to ensure the fraction
-        #    requested corresponds to actual context space reclaimed.
+        # 2. Calculate token counts for the active set (needed for both the rejection guard
+        #    and the discard calculation).
         from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
         from agent_cascade.utils.utils import extract_text_from_message
         
         total_tokens = 0
         token_counts = []
         for msg in active_set:
-            # Simple token estimation for better accuracy than message count
             content = extract_text_from_message(msg if isinstance(msg, Message) else Message(**msg), add_upload_info=True)
             tokens = qwen_count(content)
             token_counts.append(tokens)
             total_tokens += tokens
+        
+        # Token-aware guard: even with few messages (<3), they could be very large.
+        # Only reject if the active set is genuinely small in both message count AND token count.
+        if len(active_set) < 3 and total_tokens < 200:
+            return "Context is already optimally compressed; deferring further compression until more messages accumulate."
+        
+        # Calculate how many messages to DISCARD from the active set.
             
         target_tokens = int(total_tokens * fraction)
         
@@ -223,16 +225,19 @@ class CompressContext(BaseTool):
         num_to_discard = max(0, min(num_to_discard, len(active_set) - 2))
 
         # 3. Determine the messages to be sent to the Compression Agent for summarization.
-        #    To optimize context usage, we surgically send only the messages being 
+        #    To optimize context usage, we surgically send only the messages being
         #    compressed plus the latest summary as the starting boundary.
         if latest_summary_idx != -1:
             # Part A: The latest summary (context boundary).
             # Part B: The new messages from the active set being discarded.
             target_messages = history[latest_summary_idx : latest_summary_idx + 1 + num_to_discard]
             
-            # num_to_summarize remains the contiguous count from start_idx 
-            # to be replaced by the new summary in the authoritative history.
-            num_to_summarize = (latest_summary_idx - start_idx + 1) + num_to_discard
+            # num_to_summarize is the number of active messages to compress.
+            # _apply_context_compression independently finds the latest summary marker
+            # and inserts the new one at active_start_idx + num_to_remove, so we only
+            # need to tell it how many active messages to skip over — NOT the total
+            # count from start_idx (which would include already-compressed history).
+            num_to_summarize = num_to_discard
         else:
             # First compression: just send the messages we are about to compress.
             num_to_summarize = num_to_discard

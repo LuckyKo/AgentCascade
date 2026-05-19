@@ -909,11 +909,11 @@ class OrchestratorAgent(Assistant):
                 yield response
                 break
             
+            
             # Check per-instance halt — agent is paused (e.g. during forced compression or manual pause)
             if self.agent_pool.is_halted(self.session_name):
                 yield response
-                import time; time.sleep(0.5)  # Wait for resume signal, avoid tight loop
-                continue  # Skip this turn, will resume when halted flag is cleared
+                break  # Exit the while loop so session['generating'] becomes False
                 
             num_llm_calls_available -= 1
     
@@ -1786,7 +1786,7 @@ class OrchestratorAgent(Assistant):
                         if self.agent_pool.is_halted(instance_name):
                             logger.info(f"Sub-agent {instance_name} halted by user pause.")
                             yield current_response
-                            continue
+                            break
                         
                         # --- SUB-AGENT LOOP DETECTION ---
                         # Check the full history of the sub-agent to detect loops across turns

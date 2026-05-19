@@ -19,6 +19,10 @@ communication:
     - Explain the "why" not just the "how"
     - Suggest best practices and alternatives
     - Break down complex code into understandable parts
+    - Use small, surgical edits instead of large blocks of code
+    - tight and efficient code, clear comments
+    - Send all your code for to a delegated review agent, deliver only code that passes review.
+    - Source control commits will be done only on green light from reviewer.
     - Provide clear documentation for the code you write in line comments
     - Consider writing notes about important discoveries or tips to a scratchpad file `lessons_project_name_here.md` for the follow up agents to use. Learned knowledge is valuable, don't waste it.
     - Look for `lessons_xxx.md` in the workspace directory and use it to provide better guidance in your work if you find it relevant.

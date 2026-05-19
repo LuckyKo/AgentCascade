@@ -393,6 +393,7 @@ function saveSettings() {
 
   if ($('#setting-max-turns')) s['max-turns'] = $('#setting-max-turns').value;
   if ($('#setting-auto-continue')) s['auto-continue'] = $('#setting-auto-continue').checked;
+  if ($('#setting-show-active-only')) s['show-active-only'] = $('#setting-show-active-only').checked;
   if ($('#setting-tool-result-max-chars')) s['tool-result-max-chars'] = $('#setting-tool-result-max-chars').value;
   if (settingVisionEnabled) s['vision-enabled'] = settingVisionEnabled.checked;
   if (afkToggle) s['afk-enabled'] = afkToggle.checked;
@@ -475,6 +476,7 @@ function loadSettings() {
     if (s['vision-enabled'] !== undefined) $('#setting-vision-enabled').checked = s['vision-enabled'];
     if (s['max-turns'] !== undefined) $('#setting-max-turns').value = s['max-turns'];
     if (s['auto-continue'] !== undefined) $('#setting-auto-continue').checked = s['auto-continue'];
+    if (s['show-active-only'] !== undefined) $('#setting-show-active-only').checked = s['show-active-only'];
     if (s['tool-result-max-chars'] !== undefined) {
       $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
       $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
@@ -730,7 +732,7 @@ function handleServerMessage(data) {
       if (data.total_words !== undefined) state.totalWords = data.total_words;
       if (data.max_tokens !== undefined) state.maxTokens = data.max_tokens;
       if (data.summary !== undefined) state.summary = data.summary;
-      if (data.instance_halted !== undefined) state.instance_halted = data.instance_halted;
+      if (data.instance_halted !== undefined) { state.instance_halted = data.instance_halted; state._serverHaltConfirmed = true; }
 
       // Telemetry: update panel with session telemetry from server
       if (data.telemetry) {
@@ -2301,12 +2303,13 @@ function updateControls() {
 
   statusText.textContent = state.generating ? 'Generating...' : (state.instance_halted ? '⏸ Paused' : '');
   
-  // Sync pause button to server-side halted state
-  if (pauseBtn) {
+  // Sync pause button to server-side halted state (only when server explicitly confirms)
+  if (pauseBtn && state._serverHaltConfirmed) {
     const wasPaused = pauseBtn.textContent === '▶️ Resume';
     const nowHalted = !!state.instance_halted;
     if (nowHalted && !wasPaused) { pauseBtn.textContent = '▶️ Resume'; }
     else if (!nowHalted && wasPaused) { pauseBtn.textContent = '⏸ Pause'; }
+    state._serverHaltConfirmed = false;  // consume the confirmation
   }
   
   chatInput.placeholder = state.generating
@@ -2731,10 +2734,10 @@ function createPauseButton(btn, instanceSource) {
     try {
       if (btn.textContent.includes('Pause')) {
         const resp = await fetch(`/api/halt/${encodeURIComponent(sessionName)}`, { method: 'POST' });
-        if (resp.ok) btn.textContent = '▶️ Resume';
+        if (resp.ok) { btn.textContent = '▶️ Resume'; state.instance_halted = true; }
       } else {
         const resp = await fetch(`/api/resume/${encodeURIComponent(sessionName)}`, { method: 'POST' });
-        if (resp.ok) btn.textContent = '⏸ Pause';
+        if (resp.ok) { btn.textContent = '⏸ Pause'; state.instance_halted = false; }
       }
     } catch(e) { console.error('Pause/Resume failed:', e); }
   });
@@ -2802,6 +2805,7 @@ function getGenerateCfg() {
   if ($('#setting-max-turns')) cfg.max_turns = parseInt($('#setting-max-turns').value) || 50;
   if ($('#setting-max-parallel')) cfg.max_parallel_agents = parseInt($('#setting-max-parallel').value) || 3;
   if ($('#setting-auto-continue')) cfg.auto_continue = $('#setting-auto-continue').checked;
+  if ($('#setting-show-active-only')) cfg.show_active_only = $('#setting-show-active-only').checked;
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
   if ($('#setting-max-rollbacks')) cfg.max_auto_rollbacks = parseInt($('#setting-max-rollbacks').value);
