@@ -14,6 +14,8 @@ import os
 import requests
 from pathlib import Path
 
+from agent_cascade.log import logger
+
 # ── Workspace Detection ──────────────────────────────────────────────────────
 # Detect if we should use a sibling 'AgentWorkspace' instead of the local folder
 PROJECT_ROOT = Path(__file__).parent.absolute()
@@ -24,11 +26,11 @@ if not WORKSPACE_DIR:
     if sibling_ws.exists():
         WORKSPACE_DIR = str(sibling_ws)
         os.environ['QWEN_AGENT_DEFAULT_WORKSPACE'] = WORKSPACE_DIR
-        print(f"[INIT] Detected sibling workspace: {WORKSPACE_DIR}")
+        logger.info("[INIT] Detected sibling workspace: %s", WORKSPACE_DIR)
     else:
         WORKSPACE_DIR = str(PROJECT_ROOT / 'workspace')
         os.environ['QWEN_AGENT_DEFAULT_WORKSPACE'] = WORKSPACE_DIR
-        print(f"[INIT] Using local workspace: {WORKSPACE_DIR}")
+        logger.info("[INIT] Using local workspace: %s", WORKSPACE_DIR)
 
 from bs4 import BeautifulSoup
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -130,8 +132,8 @@ DEFAULT_TOOLS = {
 
 def initialize_agents():
     """Set up agents, pool, and config. Returns (all_agents, agent_pool, chatbot_config)."""
-    print("Initializing Agent Orchestrator (API Server)...")
-    print("=" * 50)
+    logger.info("Initializing Agent Orchestrator (API Server)...")
+    logger.info("=" * 50)
 
     agent_pool = AgentPool(llm_cfg, 'agents', workspace_dir=WORKSPACE_DIR)
 
@@ -189,8 +191,8 @@ def initialize_agents():
             if sub_agent:
                 all_agents.append(sub_agent)
 
-    print(f"[OK] Available agents: {[a.name for a in all_agents]}")
-    print("=" * 50)
+    logger.info("[OK] Available agents: %s", [a.name for a in all_agents])
+    logger.info("=" * 50)
 
     chatbot_config = {
         'session_name': 'Maine',
@@ -214,7 +216,7 @@ if __name__ == '__main__':
                 if msg:
                     target = 'Maine'  # Default to orchestrator
                     agent_pool.enqueue_message(target, msg)
-                    print(f"\n[QUEUED] '{msg}' → {target} (will be injected on next turn)")
+                    logger.info("\n[QUEUED] '%s' → %s (will be injected on next turn)", msg, target)
             except Exception:
                 break
     threading.Thread(target=async_input_listener, daemon=True).start()
@@ -226,25 +228,25 @@ if __name__ == '__main__':
     app = create_app(all_agents, agent_pool, chatbot_config)
 
     port = 8765
-    print(f"\n[OK] API Server ready!")
-    print(f"    -> Open http://127.0.0.1:{port} in your browser")
-    print(f"    -> WebSocket at ws://127.0.0.1:{port}/ws/chat")
-    print(f"    -> REST API at http://127.0.0.1:{port}/api/")
-    print(f"\n[TIP] Type in this terminal to inject messages into the active agent.")
-    print("=" * 50)
+    logger.info("\n[OK] API Server ready!")
+    logger.info("    -> Open http://127.0.0.1:%d in your browser", port)
+    logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", port)
+    logger.info("    -> REST API at http://127.0.0.1:%d/api/", port)
+    logger.info("\n[TIP] Type in this terminal to inject messages into the active agent.")
+    logger.info("=" * 50)
 
     import signal
     import os
 
     def handle_shutdown(signum, frame):
-        print("\n[INFO] Initiating graceful shutdown...")
+        logger.info("\n[INFO] Initiating graceful shutdown...")
         agent_pool.stopped = True
         if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
             try:
                 agent_pool.operation_manager.cleanup_backups()
             except Exception:
                 pass
-        print("[INFO] Terminated.")
+        logger.info("[INFO] Terminated.")
         os._exit(0)
 
     signal.signal(signal.SIGINT, handle_shutdown)

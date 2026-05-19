@@ -1889,9 +1889,9 @@ def create_app(agents, agent_pool, config=None):
                                     for agent_inst in agents:
                                         if tool.name not in agent_inst.function_map:
                                             agent_inst.function_map[tool.name] = tool
-                                print(f"[MCP] Eagerly loaded {len(mcp_tools)} tools.")
+                                logger.info("[MCP] Eagerly loaded %d tools.", len(mcp_tools))
                             except Exception as e:
-                                print(f"[MCP] Eager initialization failed: {e}")
+                                logger.warning("[MCP] Eager initialization failed: %s", e)
                         if 'work_access_folders_ro' in ui_cfg or 'work_access_folders_rw' in ui_cfg or 'work_access_folders' in ui_cfg:
                             if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
                                 ro = ui_cfg.get('work_access_folders_ro', [])
@@ -2435,5 +2435,5 @@ if __name__ == "__main__":
     
     app = create_app(agents=[orch_agent], agent_pool=agent_pool)
     
-    print(f"Starting AgentCascade API Server on {args.host}:{args.port}")
+    logger.info("Starting AgentCascade API Server on %s:%d", args.host, args.port)
     uvicorn.run(app, host=args.host, port=args.port)

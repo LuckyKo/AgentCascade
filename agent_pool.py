@@ -370,9 +370,9 @@ class AgentPool:
             agent_name = soul_file.name.replace('_soul.md', '')
             try:
                 self.load_agent(agent_name)
-                print(f"[OK] Loaded agent: {agent_name}")
+                logger.info("[OK] Loaded agent: %s", agent_name)
             except Exception as e:
-                print(f"[ERROR] Failed to load agent {agent_name}: {e}")
+                logger.error("[ERROR] Failed to load agent %s: %s", agent_name, e)
     
     def _create_example_agent(self):
         """Create an example sub-agent."""

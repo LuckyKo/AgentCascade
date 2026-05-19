@@ -18,6 +18,7 @@ import json
 import os
 import requests
 from pathlib import Path
+from agent_cascade.log import logger
 
 # ── Workspace Detection ──────────────────────────────────────────────────────
 # Detect if we should use a sibling 'AgentWorkspace' instead of the local folder
@@ -29,11 +30,11 @@ if not WORKSPACE_DIR:
     if sibling_ws.exists():
         WORKSPACE_DIR = str(sibling_ws)
         os.environ['QWEN_AGENT_DEFAULT_WORKSPACE'] = WORKSPACE_DIR
-        print(f"[INIT] Detected sibling workspace: {WORKSPACE_DIR}")
+        logger.info(f"[INIT] Detected sibling workspace: {WORKSPACE_DIR}")
     else:
         WORKSPACE_DIR = str(PROJECT_ROOT / 'workspace')
         os.environ['QWEN_AGENT_DEFAULT_WORKSPACE'] = WORKSPACE_DIR
-        print(f"[INIT] Using local workspace: {WORKSPACE_DIR}")
+        logger.info(f"[INIT] Using local workspace: {WORKSPACE_DIR}")
 
 from bs4 import BeautifulSoup
 from agent_cascade.gui import WebUI
@@ -143,8 +144,8 @@ ALL_BUILTIN_TOOLS = [
 
 
 if __name__ == '__main__':
-    print("Initializing Agent Orchestrator...")
-    print("=" * 50)
+    logger.info("Initializing Agent Orchestrator...")
+    logger.info("=" * 50)
 
     # Create agent pool (auto-loads all agents from /agents directory)
     agent_pool = AgentPool(llm_cfg, 'agents', workspace_dir=WORKSPACE_DIR)
@@ -252,8 +253,8 @@ if __name__ == '__main__':
             if sub_agent:
                 all_agents.append(sub_agent)
 
-    print(f"[OK] Available agents: {[a.name for a in all_agents]}")
-    print("=" * 50)
+    logger.info(f"[OK] Available agents: {[a.name for a in all_agents]}")
+    logger.info("=" * 50)
 
     # Configure UI - now the orchestrator is one of the agents!
     chatbot_config = {
@@ -270,8 +271,8 @@ if __name__ == '__main__':
 
     # Launch WebUI with orchestrator as the main agent
     # Users can also switch between agents via the dropdown
-    print("\n[OK] Orchestrator ready! Launching WebUI...")
-    print("Open your browser to http://127.0.0.1:7860")
+    logger.info("\n[OK] Orchestrator ready! Launching WebUI...")
+    logger.info("Open your browser to http://127.0.0.1:7860")
     
     # Set up background thread for async terminal messages
     import threading
@@ -284,26 +285,26 @@ if __name__ == '__main__':
                     # Route to orchestrator session by default
                     target = orchestrator.session_name if hasattr(orchestrator, 'session_name') else 'Maine'
                     agent_pool.enqueue_message(target, msg)
-                    print(f"\n[QUEUED] '{msg}' → {target} (will be injected on its next turn)")
+                    logger.info(f"\n[QUEUED] '{msg}' → {target} (will be injected on its next turn)")
             except Exception:
                 break
     threading.Thread(target=async_input_listener, daemon=True).start()
     
-    print("\n[TIP] You can type messages in this terminal at ANY TIME to seamlessly inject them into the active agent's thought process without clicking Stop in the WebUI!")
-    print("=" * 50)
+    logger.info("\n[TIP] You can type messages in this terminal at ANY TIME to seamlessly inject them into the active agent's thought process without clicking Stop in the WebUI!")
+    logger.info("=" * 50)
 
     import signal
     import os
 
     def handle_shutdown(signum, frame):
-        print("\n[INFO] Initiating graceful shutdown...")
+        logger.info("\n[INFO] Initiating graceful shutdown...")
         agent_pool.stopped = True
         if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
             try:
                 agent_pool.operation_manager.cleanup_backups()
             except Exception:
                 pass
-        print("[INFO] Terminated.")
+        logger.info("[INFO] Terminated.")
         os._exit(0)
 
     signal.signal(signal.SIGINT, handle_shutdown)

@@ -14,12 +14,14 @@ import re
 import uuid
 import threading
 import time
+import difflib
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
-from agent_cascade.settings import DEFAULT_WORKSPACE
+from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_HEURISTIC_MATCH_THRESHOLD
+from agent_cascade.log import logger
 
 
 class OperationType(Enum):
@@ -108,7 +110,7 @@ class OperationManager:
             else:
                 shutil.rmtree(backup_base)
         except Exception as e:
-            print(f"Failed to clean up backups: {e}")
+            logger.warning("Failed to clean up backups: %s", e)
 
     def set_extra_work_folders(self, folders_ro: List[str], folders_rw: List[str]):
         """Set extra directories that the agents can access."""
@@ -120,7 +122,7 @@ class OperationManager:
                 p = Path(folder.strip()).resolve()
                 self.extra_work_folders_ro.append(p)
             except Exception as e:
-                print(f"Failed to resolve extra RO work folder {folder}: {e}")
+                logger.warning("Failed to resolve extra RO work folder %s: %s", folder, e)
 
         self.extra_work_folders_rw = []
         for folder in folders_rw:
@@ -130,9 +132,9 @@ class OperationManager:
                 p = Path(folder.strip()).resolve()
                 self.extra_work_folders_rw.append(p)
             except Exception as e:
-                print(f"Failed to resolve extra RW work folder {folder}: {e}")
+                logger.warning("Failed to resolve extra RW work folder %s: %s", folder, e)
         
-        print(f"[Workspace] Tiered folders updated: RO={len(self.extra_work_folders_ro)}, RW={len(self.extra_work_folders_rw)}")
+        logger.info("[Workspace] Tiered folders updated: RO=%d, RW=%d", len(self.extra_work_folders_ro), len(self.extra_work_folders_rw))
 
     # ─── Auto-Approval for Agent-Owned Files ──────────────────────────────
 
@@ -502,7 +504,8 @@ class OperationManager:
 
     def edit_file(self, path: str, agent_name: str,
                   old_content: str,
-                  new_content: str) -> str:
+                  new_content: str,
+                  match_mode: str = 'exact') -> str:
         """Edit a file surgically — auto-approved for agent-owned files."""
         try:
             resolved = self._resolve_path(path, mode="rw")
@@ -514,14 +517,214 @@ class OperationManager:
             return f"File not found for surgical edit: {path}"
         
         file_content = resolved.read_text(encoding='utf-8')
-        count = file_content.count(old_content)
-        if count == 0:
-            return f"ERROR: Pattern not found in {path}. The 'old_content' string must exactly match the existing file content character-for-character, including whitespace and indentation."
-        if count > 1:
-            return f"ERROR: Pattern found {count} times in {path}. The 'old_content' block must be unique. Please include more surrounding lines in 'old_content' to make it unique."
+        actual_old_content = old_content
+        match_ratio = 1.0
 
-        description = f"Surgical edit to: {path}"
-        tool_args = {'path': path, 'old_content': old_content, 'new_content': new_content}
+        if match_mode == 'exact':
+            count = file_content.count(old_content)
+            if count == 0:
+                return f"ERROR: Pattern not found in {path}. The 'old_content' string must exactly match the existing file content character-for-character, including whitespace and indentation."
+            if count > 1:
+                return f"ERROR: Pattern found {count} times in {path}. The 'old_content' block must be unique. Please include more surrounding lines in 'old_content' to make it unique."
+        elif match_mode == 'heuristic':
+            ext = Path(path).suffix.lower()
+            
+            def remove_comments_keep_layout(content: str, file_ext: str) -> str:
+                is_python_style = file_ext in ['.py', '.sh', '.yaml', '.yml', '.toml', '.ini', '.properties', '.dockerfile', '.conf']
+                is_c_style = file_ext in ['.c', '.cpp', '.h', '.hpp', '.java', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs', '.cs', '.php', '.css', '.swift', '.kt', '.scala']
+                is_html_style = file_ext in ['.html', '.htm', '.xml', '.svg', '.xhtml']
+                is_sql_style = file_ext in ['.sql']
+
+                # No known comment syntax — skip the char-level scan entirely
+                if not (is_python_style or is_c_style or is_html_style or is_sql_style):
+                    return content
+
+                chars = list(content)
+                n = len(chars)
+                i = 0
+                in_string = None
+
+                while i < n:
+                    if in_string:
+                        if chars[i] == '\\' and i + 1 < n:
+                            i += 2
+                            continue
+                        if chars[i] == in_string:
+                            in_string = None
+                        elif len(in_string) == 3 and chars[i:i+3] == list(in_string):
+                            in_string = None
+                            i += 2
+                        i += 1
+                        continue
+
+                    if chars[i] in ['"', "'"]:
+                        in_string = chars[i]
+                        if is_python_style and i + 2 < n and chars[i+1] == in_string and chars[i+2] == in_string:
+                            in_string = in_string * 3
+                            i += 3
+                            continue
+                        i += 1
+                        continue
+                    elif is_c_style and chars[i] == '`':
+                        in_string = '`'
+                        i += 1
+                        continue
+
+                    if is_python_style and chars[i] == '#':
+                        while i < n and chars[i] not in ['\n', '\r']:
+                            chars[i] = ' '
+                            i += 1
+                        continue
+
+                    if is_c_style and chars[i] == '/' and i + 1 < n and chars[i+1] == '/':
+                        while i < n and chars[i] not in ['\n', '\r']:
+                            chars[i] = ' '
+                            i += 1
+                        continue
+
+                    if (is_c_style or is_sql_style) and chars[i] == '/' and i + 1 < n and chars[i+1] == '*':
+                        chars[i] = ' '
+                        chars[i+1] = ' '
+                        i += 2
+                        while i < n:
+                            if chars[i] == '*' and i + 1 < n and chars[i+1] == '/':
+                                chars[i] = ' '
+                                chars[i+1] = ' '
+                                i += 2
+                                break
+                            if chars[i] not in ['\n', '\r']:
+                                chars[i] = ' '
+                            i += 1
+                        continue
+
+                    if is_sql_style and chars[i] == '-' and i + 1 < n and chars[i+1] == '-':
+                        while i < n and chars[i] not in ['\n', '\r']:
+                            chars[i] = ' '
+                            i += 1
+                        continue
+
+                    if is_html_style and chars[i] == '<' and i + 3 < n and chars[i+1] == '!' and chars[i+2] == '-' and chars[i+3] == '-':
+                        chars[i] = ' '
+                        chars[i+1] = ' '
+                        chars[i+2] = ' '
+                        chars[i+3] = ' '
+                        i += 4
+                        while i < n:
+                            if chars[i] == '-' and i + 2 < n and chars[i+1] == '-' and chars[i+2] == '>':
+                                chars[i] = ' '
+                                chars[i+1] = ' '
+                                chars[i+2] = ' '
+                                i += 3
+                                break
+                            if chars[i] not in ['\n', '\r']:
+                                chars[i] = ' '
+                            i += 1
+                        continue
+
+                    i += 1
+
+                return "".join(chars)
+
+            clean_file_content = remove_comments_keep_layout(file_content, ext)
+            clean_old_content = remove_comments_keep_layout(old_content, ext)
+
+            file_lines = file_content.splitlines(keepends=True)
+            clean_file_lines = clean_file_content.splitlines(keepends=True)
+            clean_old_lines = clean_old_content.splitlines(keepends=True)
+            
+            # Map normalized clean content
+            file_line_info = []
+            for idx, line in enumerate(clean_file_lines):
+                norm = "".join(line.split())
+                if norm:
+                    file_line_info.append((idx, norm))
+                    
+            old_line_info = []
+            for line in clean_old_lines:
+                norm = "".join(line.split())
+                if norm:
+                    old_line_info.append(norm)
+            
+            if not old_line_info:
+                return "ERROR: The 'old_content' contains only whitespace and/or comments. Heuristic match mode requires at least some non-whitespace actual content to match."
+            
+            # Map normalized line to its indices in the filtered file list
+            file_line_map = {}
+            for list_idx, (orig_idx, norm) in enumerate(file_line_info):
+                if norm not in file_line_map:
+                    file_line_map[norm] = []
+                file_line_map[norm].append(list_idx)
+            
+            candidates = set()
+            n_old_non_empty = len(old_line_info)
+            n_file_non_empty = len(file_line_info)
+            
+            for old_idx, norm in enumerate(old_line_info):
+                if norm and norm in file_line_map:
+                    if len(file_line_map[norm]) <= 20:
+                        for list_idx in file_line_map[norm]:
+                            start_list_idx = list_idx - old_idx
+                            if 0 <= start_list_idx <= n_file_non_empty - n_old_non_empty:
+                                candidates.add(start_list_idx)
+            
+            if len(candidates) > 100:
+                return f"ERROR: Heuristic pattern is too ambiguous (found {len(candidates)} candidate locations). Please include more unique surrounding lines of context."
+            
+            norm_old_joined = "".join(old_line_info)
+            threshold = DEFAULT_HEURISTIC_MATCH_THRESHOLD
+            matches = []
+            
+            for start_list_idx in candidates:
+                best_ratio = 0.0
+                best_match_info = None
+                
+                # Check window sizes in file_line_info close to n_old_non_empty
+                for size in range(max(1, n_old_non_empty - 2), min(n_file_non_empty - start_list_idx + 1, n_old_non_empty + 3)):
+                    candidate_slice = file_line_info[start_list_idx : start_list_idx + size]
+                    candidate_norms = [item[1] for item in candidate_slice]
+                    norm_candidate_joined = "".join(candidate_norms)
+                    
+                    ratio = difflib.SequenceMatcher(None, norm_old_joined, norm_candidate_joined).ratio()
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_match_info = {
+                            'start_list_idx': start_list_idx,
+                            'end_list_idx': start_list_idx + size,
+                            'ratio': ratio
+                        }
+                
+                if best_match_info and best_ratio >= threshold:
+                    matches.append(best_match_info)
+            
+            if len(matches) == 0:
+                return f"ERROR: Heuristic pattern not found in {path} (threshold={threshold:.0%})."
+            if len(matches) > 1:
+                return f"ERROR: Heuristic pattern found {len(matches)} times in {path} above the similarity threshold. The pattern must be unique."
+            
+            # Map back to the original file lines range
+            unique_match = matches[0]
+            orig_start_idx = file_line_info[unique_match['start_list_idx']][0]
+            orig_end_idx = file_line_info[unique_match['end_list_idx'] - 1][0]
+            
+            actual_old_content = "".join(file_lines[orig_start_idx : orig_end_idx + 1])
+            match_ratio = unique_match['ratio']
+            
+            last_matched_line = file_lines[orig_end_idx]
+            has_trailing_newline = last_matched_line.endswith('\n') or last_matched_line.endswith('\r')
+            if has_trailing_newline:
+                if new_content and not (new_content.endswith('\n') or new_content.endswith('\r')):
+                    if last_matched_line.endswith('\r\n'):
+                        ending = '\r\n'
+                    elif last_matched_line.endswith('\n'):
+                        ending = '\n'
+                    else:
+                        ending = '\r'
+                    new_content = new_content + ending
+        else:
+            return f"ERROR: Invalid match_mode '{match_mode}'."
+
+        description = f"Surgical edit to: {path} (mode: {match_mode})"
+        tool_args = {'path': path, 'old_content': old_content, 'new_content': new_content, 'match_mode': match_mode}
 
         if not self._is_auto_approved(path, agent_name):
             approved, reason = self.request_user_approval(
@@ -550,12 +753,14 @@ class OperationManager:
                 backup_path_str = str(backup_path)
 
             file_content = resolved.read_text(encoding='utf-8')
-            new_file_content = file_content.replace(old_content, new_content, 1)
+            new_file_content = file_content.replace(actual_old_content, new_content, 1)
             resolved.write_text(new_file_content, encoding='utf-8')
             
             self.file_ownership[str(resolved)] = agent_name
             
             res_msg = f"APPROVED: Edited {path}"
+            if match_mode == 'heuristic':
+                res_msg += f" (Heuristic match similarity: {match_ratio:.1%}). Please check the file to ensure the insertion was applied correctly."
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
             if backup_path_str:
