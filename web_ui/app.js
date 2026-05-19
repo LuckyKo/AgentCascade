@@ -711,7 +711,16 @@ function handleServerMessage(data) {
     case 'state':
     case 'done':
       // Full state update
+      // When paused mid-stream, preserve the last streamed message in case it wasn't committed yet
+      const partialContent = (state.generating && data.instance_halted && state.messages.length > 0) ? String(state.messages[state.messages.length - 1].content || '') : null;
       state.messages = data.messages || [];
+      // Only restore if server didn't already include it (or a superset of it)
+      if (partialContent) {
+        const lastServerContent = String(state.messages[state.messages.length - 1]?.content || '');
+        if (!lastServerContent.startsWith(partialContent)) {
+          state.messages.push({ role: 'assistant', content: partialContent });
+        }
+      }
       state.subAgents = data.sub_agents || {};
       state.activeStack = data.active_stack || [];
       state.generating = data.generating ?? false;
@@ -807,6 +816,9 @@ function handleServerMessage(data) {
       break;
 
     case 'stream_update': {
+      // Don't process stale stream updates after halt
+      if (state.instance_halted) break;
+
       // Lightweight streaming delta — only response messages + sub-agents
       const historyCount = data.history_count || 0;
       const responseMsgs = data.response_messages || [];
