@@ -1,39 +1,12 @@
-2026-05-18 19:48:16,336 - code_interpreter.py - 661 - INFO - Docker is available and running
+
+2026-05-18 23:47:06,944 - code_interpreter.py - 661 - INFO - Docker is available and running
 [OK] Available agents: ['Orchestrator', 'Coder', 'Compression Agent', 'Generalist', 'Researcher', 'Reviewer', 'Security Advisor', 'Writer']
 ==================================================
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\start_api_server.py", line 223, in <module>
+    from api_server import create_app
+  File "n:\work\WD\AgentCascade\api_server.py", line 2118
+    except Exception as e:
+SyntaxError: expected 'except' or 'finally' block
 
-[OK] API Server ready!
-    -> Open http://127.0.0.1:8765 in your browser
-    -> WebSocket at ws://127.0.0.1:8765/ws/chat
-    -> REST API at http://127.0.0.1:8765/api/
-
-[TIP] Type in this terminal to inject messages into the active agent.
-==================================================
-2026-05-18 19:48:17,577 - api_server.py - 532 - INFO - [AUTO-RESUME] auto_continue is disabled, skipping auto-resume after restart.
-[Workspace] Tiered folders updated: RO=1, RW=3
-2026-05-18 19:48:25,406 - agent_logger.py - 283 - INFO - Rewrote agent log N:\work\WD\AgentWorkspace\logs\Orchestrator_Maine_20260518_194816.jsonl with 2051 messages.
-2026-05-18 19:48:28,938 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 75228, Available tokens: 83213
-[APIRouter] Endpoint 'qwopus3.6-27b-v1-preview' @ http://localhost:1234/v1 attempt 1/3: <!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Error</title>
-</head>
-<body>
-<pre>Internal Server Error</pre>
-</body>
-</html>
-2026-05-18 19:48:32,102 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 75228, Available tokens: 83213
-[APIRouter] Endpoint 'qwopus3.6-27b-v1-preview' @ http://localhost:1234/v1 attempt 2/3: <!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Error</title>
-</head>
-<body>
-<pre>Internal Server Error</pre>
-</body>
-</html>
-
-[INFO] Initiating graceful shutdown...
-[INFO] Terminated.
+n:\work\WD\AgentCascade>

@@ -474,6 +474,10 @@ def create_app(agents, agent_pool, config=None):
     ws_connections: Set[WebSocket] = set()
     send_queue: asyncio.Queue = asyncio.Queue()
 
+    # Lock for session state accessed across threads (asyncio loop + agent thread).
+    # Protects: session['generating'], session['stop_requested'], session['history'] mutations.
+    session_lock = threading.Lock()
+
 
 
     def get_agent():
@@ -740,32 +744,43 @@ def create_app(agents, agent_pool, config=None):
             cached_hist_count = session.get('_cached_hist_stats_count', -1)
             if hist_count <= cached_hist_count and '_cached_hist_stats' in session:
                 h_stats = session['_cached_hist_stats'].copy()
-            elif max_tokens > 0:
-                msg_objs = [Message(**m) if isinstance(m, dict) else copy.deepcopy(m) for m in active_h]
-                try:
-                    active_h = _truncate_input_messages_roughly(msg_objs, max_tokens, agent_name="Orchestrator")
-                except Exception as e:
-                    logger.error(f"Failed to truncate orchestrator messages for stream stats: {e}")
+            else:
+                # Use the raw active history just like build_state, matching base.py's "ALL tokens"
                 h_stats = get_history_stats(active_h)
-                # Update session cache with the result
                 session['_cached_hist_stats'] = h_stats.copy()
                 session['_cached_hist_stats_count'] = len(active_h)
-            else:
-                h_stats = get_history_stats(active_h)
         else:
             h_stats = cached_h_stats
             
-        # FIX1: Only recompute response stats when new messages are added, not during streaming growth
+        # FIX1: Only recompute full response stats when new messages are added, not during streaming growth.
+        # But we do estimate the tokens of the growing message to keep the UI responsive!
         resp_len_stats = len(responses) if responses else 0
         if resp_len_stats > session.get('_last_resp_len_stats', 0):
             # New message(s) added — compute full stats via tiktoken
             r_stats = get_history_stats(responses)
+            session['_last_resp_len_stats'] = resp_len_stats
+            # We cache the stats of ALL PREVIOUS messages, excluding the current growing one
+            prev_responses = responses[:-1] if len(responses) > 1 else []
+            session['_cached_r_stats'] = get_history_stats(prev_responses)
         else:
-            # Same messages, just growing text — use cached stats (avoids tiktoken.encode)
-            r_stats = session.get('_cached_r_stats', {'tokens': 0, 'words': 0}).copy()
-        # Cache for next tick
-        session['_last_resp_len_stats'] = resp_len_stats
-        session['_cached_r_stats'] = r_stats
+            # Same messages, just growing text — use cached stats + quick estimate for the last message
+            cached_r_stats = session.get('_cached_r_stats', {'tokens': 0, 'words': 0})
+            if responses:
+                last_msg = responses[-1]
+                content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
+                if isinstance(content, list):
+                    content = " ".join([str(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')) for item in content])
+                else:
+                    content = str(content)
+                # Simple word/token estimation (approx 4 chars per token)
+                est_words = len(content.split())
+                est_tokens = len(content) // 4
+                r_stats = {
+                    'tokens': cached_r_stats['tokens'] + est_tokens,
+                    'words': cached_r_stats['words'] + est_words
+                }
+            else:
+                r_stats = cached_r_stats.copy()
 
         return {
             'history_count': history_count,
@@ -782,17 +797,22 @@ def create_app(agents, agent_pool, config=None):
         }
 
     async def broadcast(data):
-        """Send JSON to all connected WebSocket clients."""
+        """Send JSON to all connected WebSocket clients.
+        
+        Uses a snapshot (frozenset) of ws_connections to avoid RuntimeError
+        from set-size-changed-during-iteration when a client disconnects
+        mid-broadcast.
+        """
         nonlocal ws_connections
         text = json.dumps(data, ensure_ascii=False, default=str)
-        dead = set()
-        for conn in ws_connections:
+        # Snapshot the set so concurrent add/discard from other coroutines
+        # (e.g. a new client connecting) won't raise RuntimeError.
+        snapshot = frozenset(ws_connections)
+        for conn in snapshot:
             try:
                 await conn.send_text(text)
             except Exception:
-                dead.add(conn)
-        if dead:
-            ws_connections = ws_connections - dead
+                ws_connections.discard(conn)
 
     # ── Agent execution thread ────────────────────────────────────────────
 
@@ -802,7 +822,8 @@ def create_app(agents, agent_pool, config=None):
         Pushes state updates onto the async send_queue.
         """
         try:
-            session['generating'] = True
+            with session_lock:
+                session['generating'] = True
             if agent_pool:
                 agent_pool.stopped = False
                 if hasattr(agent_pool, 'active_stack'):
@@ -1176,26 +1197,27 @@ def create_app(agents, agent_pool, config=None):
 
             # If we retried or rolled back, or if a tool like compress_context mutated the pool,
             # we MUST sync session['history'] from the authoritative pool state.
-            if agent_pool and session['session_name'] in agent_pool.instance_conversations:
-                session['history'] = copy.deepcopy(agent_pool.instance_conversations[session['session_name']])
-            else:
-                session['history'] = current_history
+            with session_lock:
+                if agent_pool and session['session_name'] in agent_pool.instance_conversations:
+                    session['history'] = copy.deepcopy(agent_pool.instance_conversations[session['session_name']])
+                else:
+                    session['history'] = current_history
 
-            if responses:
-                for r in responses:
-                    c = r.get(CONTENT) if isinstance(r, dict) else getattr(r, 'content', '')
-                    if c == PENDING_USER_INPUT:
-                        continue
-                    if isinstance(r, dict):
-                        session['history'].append(r)
-                    elif hasattr(r, 'model_dump'):
-                        session['history'].append(r.model_dump())
-                    else:
-                        session['history'].append({ROLE: str(getattr(r, 'role', '')), CONTENT: str(getattr(r, 'content', ''))})
+                if responses:
+                    for r in responses:
+                        c = r.get(CONTENT) if isinstance(r, dict) else getattr(r, 'content', '')
+                        if c == PENDING_USER_INPUT:
+                            continue
+                        if isinstance(r, dict):
+                            session['history'].append(r)
+                        elif hasattr(r, 'model_dump'):
+                            session['history'].append(r.model_dump())
+                        else:
+                            session['history'].append({ROLE: str(getattr(r, 'role', '')), CONTENT: str(getattr(r, 'content', ''))})
 
-            if agent_pool:
-                # CRITICAL: Sync back to pool so tools like CompressionTool see the current history
-                agent_pool.instance_conversations[session['session_name']] = session['history']
+                if agent_pool:
+                    # CRITICAL: Sync back to pool so tools like CompressionTool see the current history
+                    agent_pool.instance_conversations[session['session_name']] = session['history']
 
             if hasattr(agent_runner, 'turn_final_messages') and agent_runner.turn_final_messages:
                 tfm = agent_runner.turn_final_messages
@@ -1243,8 +1265,9 @@ def create_app(agents, agent_pool, config=None):
             traceback.print_exc()
             asyncio.run_coroutine_threadsafe(send_queue.put({'type': 'error', 'message': str(e)}), loop)
         finally:
-            session['generating'] = False
-            session['stop_requested'] = False
+            with session_lock:
+                session['generating'] = False
+                session['stop_requested'] = False
             # FIX1: Reset cached response stats so next generation starts fresh
             session.pop('_last_resp_len_stats', None)
             session.pop('_cached_r_stats', None)
@@ -1667,10 +1690,12 @@ def create_app(agents, agent_pool, config=None):
 
                     # Add user message to history (parsed for multimodal items)
                     parsed_content = _parse_multimodal_content(text)
-                    session['history'].append({ROLE: USER, CONTENT: parsed_content})
+                    with session_lock:
+                        session['history'].append({ROLE: USER, CONTENT: parsed_content})
 
                     # Start agent generation
-                    session['stop_requested'] = False
+                    with session_lock:
+                        session['stop_requested'] = False
                     if agent_pool:
                         agent_pool.stopped = False
                         # Sync history to pool so tools can see it
@@ -1692,7 +1717,8 @@ def create_app(agents, agent_pool, config=None):
                     await broadcast({'type': 'state', **build_state(generating=True)})
 
                 elif msg_type == 'stop':
-                    session['stop_requested'] = True
+                    with session_lock:
+                        session['stop_requested'] = True
                     if agent_pool:
                         agent_pool.stopped = True
 
@@ -1762,10 +1788,11 @@ def create_app(agents, agent_pool, config=None):
                     if 'generate_cfg' in data:
                         session['generate_cfg'] = data['generate_cfg']
 
-                    session['stop_requested'] = False
+                    with session_lock:
+                        session['stop_requested'] = False
+                        session['generation_id'] += 1
                     if agent_pool:
                         agent_pool.stopped = False
-                    session['generation_id'] += 1
                     gen_id = session['generation_id']
                     agent_runner = get_agent()
                     history_copy = copy.deepcopy(session['history'])
@@ -1780,11 +1807,12 @@ def create_app(agents, agent_pool, config=None):
                     await broadcast({'type': 'state', **build_state(generating=True)})
 
                 elif msg_type == 'reset':
-                    session['history'] = []
+                    with session_lock:
+                        session['history'] = []
+                        session['generating'] = False
+                        session['stop_requested'] = False
+                        session['generation_id'] += 1
                     _save_session_history()
-                    session['generating'] = False
-                    session['stop_requested'] = False
-                    session['generation_id'] += 1
                     if agent_pool:
                         agent_pool.stopped = True
                         agent_pool.reset()
@@ -1870,6 +1898,9 @@ def create_app(agents, agent_pool, config=None):
                         agent_pool.operation_manager.user_reject(rid, reason)
 
                 elif msg_type == 'ask_security':
+                    if not hasattr(app, 'security_check_lock'):
+                        app.security_check_lock = threading.Lock()
+                        
                     rid = data.get('request_id')
                     auto_apply = data.get('auto_apply', False)
                     if rid and agent_pool:
@@ -1883,46 +1914,73 @@ def create_app(agents, agent_pool, config=None):
                                     import json
                                     import copy
 
-                                    if not agent_pool.get_agent('security_advisor'):
-                                        agent_pool.load_agent('security_advisor')
-                                    sec_agent = agent_pool.get_agent('security_advisor')
-                                    workspace_info = f"Main workspace: {agent_pool.operation_manager.base_dir}\n"
-                                    if agent_pool.operation_manager.extra_work_folders_ro:
-                                        extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_ro]
-                                        workspace_info += f"Additional RO folders: {', '.join(extra)}\n"
-                                    if agent_pool.operation_manager.extra_work_folders_rw:
-                                        extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_rw]
-                                        workspace_info += f"Additional RW folders: {', '.join(extra)}\n"
+                                    with app.security_check_lock:
+                                        if not agent_pool.get_agent('security_advisor'):
+                                            agent_pool.load_agent('security_advisor')
+                                        sec_agent = agent_pool.get_agent('security_advisor')
+                                        workspace_info = f"Main workspace: {agent_pool.operation_manager.base_dir}\n"
+                                        if agent_pool.operation_manager.extra_work_folders_ro:
+                                            extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_ro]
+                                            workspace_info += f"Additional RO folders: {', '.join(extra)}\n"
+                                        if agent_pool.operation_manager.extra_work_folders_rw:
+                                            extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_rw]
+                                            workspace_info += f"Additional RW folders: {', '.join(extra)}\n"
+                                            
+                                        prompt = SECURITY_ADVISOR_PROMPT.format(
+                                            tool_name=ap.get('tool_name', 'unknown'),
+                                            description=ap.get('description', ''),
+                                            arguments=json.dumps(ap.get('tool_args', {})),
+                                            os_info=f"{platform.system()} {platform.release()}",
+                                            workspace_info=workspace_info
+                                        )
                                         
-                                    prompt = SECURITY_ADVISOR_PROMPT.format(
-                                        tool_name=ap.get('tool_name', 'unknown'),
-                                        description=ap.get('description', ''),
-                                        arguments=json.dumps(ap.get('tool_args', {})),
-                                        os_info=f"{platform.system()} {platform.release()}",
-                                        workspace_info=workspace_info
-                                    )
-                                    
-                                    history = [{'role': 'user', 'content': prompt}]
-                                    
-                                    NON_LLM_KEYS = (
-                                        'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
-                                        'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-                                        'read_file_limit', 'grep_char_limit', 'shell_char_limit', 'code_char_limit',
-                                        'disabled_tools',
-                                        # Exclude endpoint-identifying keys to let the agent use its own assigned API Router config
-                                        'model', 'model_server', 'api_base', 'base_url', 'api_key', 'model_type'
-                                    )
-                                    ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
-                                    llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
-                                    
-                                    final_msgs = []
-                                    for partial in sec_agent.run(history, agent_instance_name='security_advisor', **llm_safe_cfg):
-                                        final_msgs = partial
+                                        history = [
+                                            {'role': USER, 'content': prompt},
+                                        ]
                                         
+                                        # Register security advisor in sub_agent_state so it shows a tab
+                                        sec_state_key = 'security_advisor'
+                                        agent_pool.sub_agent_state[sec_state_key] = {
+                                            'active': True,
+                                            'agent_name': f"Security Advisor (security_advisor)",
+                                            'messages': list(history),
+                                        }
+                                        agent_pool.instance_conversations[sec_state_key] = list(history)
+                                        if sec_state_key not in agent_pool.active_stack:
+                                            agent_pool.active_stack.append(sec_state_key)
+                                        # Broadcast initial state so the tab appears immediately
+                                        asyncio.run_coroutine_threadsafe(
+                                            send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
+                                            loop
+                                        )
+                                        
+                                        NON_LLM_KEYS = (
+                                            'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
+                                            'max_turns', 'mcpServers', 'work_access_folders', 'seed',
+                                            'read_file_limit', 'grep_char_limit', 'shell_char_limit', 'code_char_limit',
+                                            'disabled_tools',
+                                            # Exclude endpoint-identifying keys to let the agent use its own assigned API Router config
+                                            'model', 'model_server', 'api_base', 'base_url', 'api_key', 'model_type'
+                                        )
+                                        ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
+                                        llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
+                                        
+                                        final_msgs = []
+                                        for partial in sec_agent.run(history, agent_instance_name='security_advisor', **llm_safe_cfg):
+                                            final_msgs = partial
+                                            # Update sub_agent_state with current message history during streaming
+                                            agent_pool.sub_agent_state[sec_state_key]['messages'] = list(history) + list(final_msgs) if isinstance(final_msgs, list) else [history[0]] + list(final_msgs)
+                                            agent_pool.instance_conversations[sec_state_key] = list(agent_pool.sub_agent_state[sec_state_key]['messages'])
+                                            # Broadcast state update so the tab shows live messages
+                                            asyncio.run_coroutine_threadsafe(
+                                                send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
+                                                loop
+                                            )
+
                                     display_response = ""
                                     parsing_response = ""
-                                    
-                                    new_msgs = final_msgs[1:]
+
+                                    new_msgs = final_msgs
                                     for msg in new_msgs:
                                         role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
                                         content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
@@ -1950,8 +2008,8 @@ def create_app(agents, agent_pool, config=None):
                                                     embedded_thought = think_match.group(2).strip()
                                                     # If they are very similar, we consider it a duplicate
                                                     if reasoning_str.strip() in embedded_thought or embedded_thought in reasoning_str.strip():
-                                                        # Remove ALL embedded thinking blocks from display_response part
-                                                        clean_content = _THINK_BLOCK_RE.sub('', content_str).strip()
+                                                        # Remove embedded thinking block from display_response part (only if at the start)
+                                                        clean_content = strip_thinking_blocks(content_str).strip()
                                                 
                                                 display_response += f"<think>\n{reasoning_str.strip()}\n</think>\n\n"
                                             
@@ -1962,38 +2020,20 @@ def create_app(agents, agent_pool, config=None):
                                             if clean_content:
                                                 display_response += f"{clean_content}\n\n"
                                                 
-                                            # For parsing, we always want the content WITHOUT any thinking blocks
+                                            # For parsing, we always want the content WITHOUT any thinking blocks at the start
                                             if content_str:
-                                                if '<think' in content_str.lower() or '<thought' in content_str.lower():
-                                                    # Strip ALL thinking blocks (not just one) — multiple blocks break parsing
-                                                    parsing_response = _THINK_BLOCK_RE.sub('', content_str).strip()
-                                                    # Also handle unclosed tags at end of string
-                                                    parsing_response = _THINK_BLOCK_UNCLOSED_RE.sub('', parsing_response).strip()
-                                                else:
-                                                    parsing_response = content_str.strip()
+                                                parsing_response = strip_thinking_blocks(content_str).strip()
+                                                
                                         elif role == 'function':
-                                            fname = msg.get('name', '') if isinstance(msg, dict) else getattr(msg, 'name', '')
                                             display_response += f"*(Result from {fname} - {len(str(content_str))} chars)*\n\n"
 
-                                    # Use the unstripped content for verdict detection to be safe, 
-                                    # but use stripped content for the display if needed.
-                                    raw_parsing_text = parsing_response
-                                    
-                                    parsing_text = raw_parsing_text
-                                    if '<think' in parsing_text.lower() or '<thought' in parsing_text.lower():
-                                        parsing_text = _THINK_BLOCK_RE.sub('', parsing_text)
-                                    if '[think' in parsing_text.lower() or '[thought' in parsing_text.lower():
-                                        parsing_text = _THINK_BLOCK_BRACKET_RE.sub('', parsing_text)
-                                    
-                                    # Only strip unclosed blocks at the very end of the string if they are at the START of the remaining text
-                                    if '<think' in parsing_text.lower() or '<thought' in parsing_text.lower():
-                                        parsing_text = _THINK_BLOCK_RE.sub('', parsing_text)
+                                    parsing_text = parsing_response
                                     
                                     parsing_response = parsing_text.strip()
                                     
                                     # 1. Clean the text: Remove reasoning blocks completely to avoid false positives in "thinking"
                                     # This handles both <think> tags and [THINK] tags
-                                    clean_text = raw_parsing_text
+                                    clean_text = parsing_response
                                     if '<think' in clean_text.lower() or '<thought' in clean_text.lower():
                                         clean_text = _THINK_BLOCK_RE.sub('', clean_text)
                                     if '[think' in clean_text.lower() or '[thought' in clean_text.lower():
@@ -2071,7 +2111,7 @@ def create_app(agents, agent_pool, config=None):
                                                     'reason': justification if is_no else ""
                                                 }),
                                                 loop
-                                            )
+                                                )
                                     else:
                                         if auto_apply:
                                             # Strict enforcement: Invalid format = Automatic NO (Safety)
@@ -2100,6 +2140,12 @@ def create_app(agents, agent_pool, config=None):
                                             send_queue.put({'type': 'security_response', 'request_id': rid, 'response': f"Error during security check: {e}"}),
                                             loop
                                         )
+                                finally:
+                                    # Always clean up security advisor state when done
+                                    if sec_state_key in agent_pool.sub_agent_state:
+                                        agent_pool.sub_agent_state[sec_state_key]['active'] = False
+                                        if sec_state_key in agent_pool.active_stack:
+                                            agent_pool.active_stack.remove(sec_state_key)
                             
                             threading.Thread(target=_security_check, daemon=True).start()
 

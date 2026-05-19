@@ -62,7 +62,10 @@ class CompressContext(BaseTool):
         
         comp_agent = self.agent_pool.get_agent('compression_agent')
         
-        # 2. Format the messages for the summary prompt
+        # Register compression agent in sub_agent_state so it shows a tab
+        comp_state_key = 'compression_agent'
+        
+        # 2. Format the messages for the summary prompt (moved before init so history is available)
         history_text = ""
         for msg in target_messages:
             role = msg.get('role', 'unknown').upper() if isinstance(msg, dict) else getattr(msg, 'role', 'unknown').upper()
@@ -70,10 +73,22 @@ class CompressContext(BaseTool):
             if isinstance(content, list):
                 content = " ".join([str(item.get('text', '') or '') if isinstance(item, dict) else str(getattr(item, 'text', None) or item) for item in content])
             history_text += f"{role}: {content}\n\n"
-            
+
         summary_prompt = COMPRESSION_PROMPT.format(history_text=history_text)
-        history = [{'role': USER, 'content': summary_prompt}]
+        history = [
+            {'role': SYSTEM, 'content': 'You are a context compression specialist. Your job is to summarize older conversation history to free up context space while preserving key information like decisions, facts, task state, and progress.'},
+            {'role': USER, 'content': summary_prompt},
+        ]
         
+        self.agent_pool.sub_agent_state[comp_state_key] = {
+            'active': True,
+            'agent_name': f"Compression Agent (compression_agent)",
+            'messages': list(history),
+        }
+        if comp_state_key not in self.agent_pool.active_stack:
+            self.agent_pool.active_stack.append(comp_state_key)
+        self.agent_pool.instance_conversations[comp_state_key] = list(history)
+
         # 3. Run the compression agent
         #    We do NOT pass any LLM config overrides here, allowing the agent to follow its 
         #    assigned API Router settings (similar to the Security Advisor fix).
@@ -82,6 +97,9 @@ class CompressContext(BaseTool):
             final_msgs = []
             for partial in comp_agent.run(history, agent_instance_name='compression_agent'):
                 final_msgs = partial
+                # Update sub_agent_state with current message history during streaming
+                self.agent_pool.sub_agent_state[comp_state_key]['messages'] = list(history) + (list(final_msgs) if isinstance(final_msgs, list) else [final_msgs])
+                self.agent_pool.instance_conversations[comp_state_key] = list(self.agent_pool.sub_agent_state[comp_state_key]['messages'])
             
             if final_msgs:
                 # The agent might have multiple assistant messages if it called tools (unlikely for compression)
@@ -108,6 +126,12 @@ class CompressContext(BaseTool):
         except Exception as e:
             logger.error(f"Failed to generate summary via compression_agent: {e}")
             return f"ERROR: Exception occurred while generating summary: {e}"
+        finally:
+            # Always clean up compression agent state when done
+            if comp_state_key in self.agent_pool.sub_agent_state:
+                self.agent_pool.sub_agent_state[comp_state_key]['active'] = False
+                if comp_state_key in self.agent_pool.active_stack:
+                    self.agent_pool.active_stack.remove(comp_state_key)
 
     def call(self, params: str, **kwargs) -> str:
         params = self._verify_json_format_args(params)
@@ -144,17 +168,12 @@ class CompressContext(BaseTool):
         if first_role == SYSTEM:
             start_idx = 1
             
-        messages_to_compress = history[start_idx:]
-        
-        if len(messages_to_compress) < 3:
-            return "ERROR: Conversation history too short to safely compress (need at least 3 messages)."
-            
         # 1. Identify the 'active set' of messages (those not yet summarized)
         latest_summary_idx = -1
         for i in range(len(history) - 1, -1, -1):
             msg = history[i]
             content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-            if isinstance(content, str) and "--- CONTEXT COMPRESSED" in content:
+            if isinstance(content, str) and ("--- CONTEXT COMPRESSED" in content or "<context_summary>" in content):
                 latest_summary_idx = i
                 break
         
@@ -165,6 +184,9 @@ class CompressContext(BaseTool):
             
         if not active_set:
             return "ERROR: No active messages to compress."
+
+        if len(active_set) < 3:
+            return "Context is already optimally compressed; deferring further compression until more messages accumulate."
 
         # 2. Calculate how many messages to DISCARD from the active set.
         #    We now use a token-aware calculation to ensure the fraction
@@ -214,7 +236,7 @@ class CompressContext(BaseTool):
         else:
             # First compression: just send the messages we are about to compress.
             num_to_summarize = num_to_discard
-            target_messages = messages_to_compress[:num_to_summarize]
+            target_messages = active_set[:num_to_summarize]
         
         # Determine compression mode (default 'auto' = LLM-generated summary)
         mode = params.get('mode', 'auto')

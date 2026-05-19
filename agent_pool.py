@@ -74,8 +74,10 @@ class AgentPool:
         # self.last_tool_args[instance_name][tool_name] = {arg_name: actual_value}
         self.last_tool_args: Dict[str, Dict[str, Dict[str, Any]]] = {}
         
-        # Explicit stop flag for cancellation
-        self.stopped = False
+        # Explicit stop flag for cancellation — backed by threading.Event
+        # for proper cross-thread memory barriers (GIL alone does NOT guarantee
+        # visibility ordering for plain bool attributes).
+        self._stopped_event = threading.Event()
         self.terminated_instances = set()
         
         # Per-agent message queues for routed async injection
@@ -96,6 +98,17 @@ class AgentPool:
         # Auto-load all agents from the agents directory
         self._discover_agents()
 
+    # ── stopped property (Event-backed for cross-thread visibility) ───────
+    @property
+    def stopped(self) -> bool:
+        return self._stopped_event.is_set()
+    
+    @stopped.setter
+    def stopped(self, value: bool):
+        if value:
+            self._stopped_event.set()
+        else:
+            self._stopped_event.clear()
 
     def discover_instances(self):
         """Scan the logs directory and reload existing instances."""
@@ -190,13 +203,13 @@ class AgentPool:
         """Mark an instance for immediate termination. Only triggers global stop if the instance is currently active."""
         self.terminated_instances.add(instance_name)
         if instance_name in self.active_stack:
-            self.stopped = True
+            self._stopped_event.set()
 
     def dismiss_instance(self, instance_name: str):
         """Remove an instance from the pool. If it's active, it will be stopped and cleared upon completion."""
         if instance_name in self.active_stack:
             self.terminated_instances.add(instance_name)
-            self.stopped = True
+            self._stopped_event.set()
         else:
             self.clear_conversation(instance_name)
 
@@ -761,7 +774,17 @@ rules:
             system_msg = history[0]
             start_idx = 1
             
-        messages_to_compress = history[start_idx:]
+        # Find latest summary to only compress the active set
+        latest_summary_idx = -1
+        for i in range(len(history) - 1, -1, -1):
+            msg = history[i]
+            content = msg.get('content', '') if isinstance(history[i], dict) else getattr(history[i], 'content', '')
+            if isinstance(content, str) and ("--- CONTEXT COMPRESSED" in content or "<context_summary>" in content):
+                latest_summary_idx = i
+                break
+                
+        active_start_idx = latest_summary_idx + 1 if latest_summary_idx != -1 else start_idx
+        messages_to_compress = history[active_start_idx:]
         
         from agent_cascade.utils.tokenization_qwen import count_tokens
         
@@ -824,11 +847,11 @@ rules:
         summary_msg = {'role': USER, 'content': str(summary_text)} if is_dict else Message(role=USER, content=str(summary_text))
         
         # 1. CUMULATIVE: Insert summary marker at the boundary position.
-        #    The boundary is right after the summarized messages (start_idx + num_to_remove).
+        #    The boundary is right after the summarized messages (active_start_idx + num_to_remove).
         #    We do NOT pop the summarized messages to provide full visibility in the UI.
         #    The slice_history_for_llm method handles actual LLM truncation by scanning
         #    for the latest <context_summary> tag.
-        insert_pos = start_idx + num_to_remove
+        insert_pos = active_start_idx + num_to_remove
         history.insert(insert_pos, summary_msg)
         
         # 2. Track the active summary

@@ -16,7 +16,10 @@ _THINK_BLOCK_BRACKET_RE = re.compile(r'\s*\[(THINK|THOUGHT)\].*?\[/\1\]', re.IGN
 # Matches the reasoning content at the start of a message
 _THINK_SEARCH_RE = re.compile(r'^\s*<(think|thought)>([\s\S]*?)(</\1>|$)', re.IGNORECASE)
 
-# Matches Gemma-style thinking blocks
+# Matches [THINK]...[/THINK] or [THOUGHT]...[/THOUGHT] blocks at the start of a message
+_BRACKET_SEARCH_RE = re.compile(r'^\s*\[(THINK|THOUGHT)\]([\s\S]*?)(\[/\1\]|$)', re.IGNORECASE)
+
+# Matches Gemma-style thinking blocks at the start of a message
 _GEMMA_THOUGHT_RE = re.compile(r"^\s*<\|channel>thought\n?([\s\S]*?)\n?<channel\|>", re.IGNORECASE)
 
 # Matches [TOOL RESPONSE TRUNCATED...] blocks
@@ -56,12 +59,15 @@ def strip_thinking_blocks(data: Any) -> Any:
         lower_data = data.lower()
         has_tags = False
         if '<think' in lower_data or '<thought' in lower_data:
-            data = _THINK_BLOCK_RE.sub('', data)
-            data = _THINK_BLOCK_UNCLOSED_RE.sub('', data)
+            data = _THINK_SEARCH_RE.sub('', data)
             has_tags = True
         
         if '[think' in lower_data or '[thought' in lower_data:
-            data = _THINK_BLOCK_BRACKET_RE.sub('', data)
+            data = _BRACKET_SEARCH_RE.sub('', data)
+            has_tags = True
+            
+        if '<|channel>thought' in lower_data:
+            data = _GEMMA_THOUGHT_RE.sub('', data)
             has_tags = True
             
         if has_tags:
