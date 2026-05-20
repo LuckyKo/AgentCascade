@@ -34,10 +34,12 @@ from typing import Dict, List, Optional, Union
 
 import json5
 
+import jsonschema
+
 from agent_cascade.log import logger
 from agent_cascade.tools.base import BaseToolWithFileAccess, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.utils.utils import append_signal_handler, extract_code, has_chinese_chars, print_traceback
+from agent_cascade.utils.utils import append_signal_handler, extract_code, has_chinese_chars, json_loads, print_traceback
 
 
 # --- Timeout Configuration ---
@@ -207,17 +209,28 @@ class CodeInterpreter(BaseToolWithFileAccess):
         return fmt
 
     def call(self, params: Union[str, dict], files: List[str] = None, timeout: Optional[int] = None, **kwargs) -> str:
-        from agent_cascade.utils.utils import json_loads
         super().call(params=params, files=files)  # copy remote files to work_dir
 
-        if isinstance(params, dict):
-            code = params.get('code', '')
-        else:
-            try:
-                params_dict = json_loads(params)
-                code = params_dict['code']
-            except Exception:
-                code = extract_code(params)
+        # Validate arguments like all other tools do — this catches empty/None/malformed args early
+        # and also strips thinking block contamination from parameter values.
+        # Strategy: try strict JSON validation first; if it fails, fall back to lenient parsing
+        # to preserve backward compatibility with LLMs that send non-JSON input (e.g., raw code blocks).
+        try:
+            validated_params = self._verify_json_format_args(params)
+            code = validated_params.get('code', '')
+        except (ValueError, jsonschema.ValidationError):  # _verify_json_format_args can raise ValueError or jsonschema.ValidationError on failure
+            # Fallback: try lenient parsing, then extract raw code blocks
+            if isinstance(params, dict):
+                code = params.get('code', '')
+            else:
+                try:
+                    params_dict = json_loads(params)
+                    if isinstance(params_dict, dict):
+                        code = params_dict.get('code', '')
+                    else:
+                        code = extract_code(params)
+                except (ValueError, TypeError):
+                    code = extract_code(params)
 
         # Legacy fallback: strip markdown wrappers only if code was JSON-embedded
         # (XML-extracted code arrives clean and should not be modified)

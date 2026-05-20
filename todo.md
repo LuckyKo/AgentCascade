@@ -21,17 +21,18 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] implement "branch" button on main chat message bubbles, branching an agent history from that point into a new session.
 [ ] implement rate limits for each API endpoint to avoid spamming and getting locked out.
 [x] add console logging to server - need expansion, doesnt cover all errors
-[ ] show agent tabs for security advisor and compression agent when they work.
+[ ] need a memory consolidation task ran periodically - takes all summaries in log and arranges them in a neat continuous package like long term memory -> replaces last summary
 [ ] warn agents about message limit at 90%
-[✓] Add an UI appearance option to only show the active message que of the agent (from last summary on) -  this should keep the performance in check when chat bloats over long duration.
-[ ] Add argument to edit_file tool to use exact/heuristic match mode of old content (can solve issues with tricky bits of code that are hard to hit, default on exact match)
+[x] Add argument to edit_file tool to use exact/heuristic match mode of old content (can solve issues with tricky bits of code that are hard to hit, default on exact match)
 
 # BUGS:
 
-- need better timeout protection on code interpreter, we are still having issues with it getting stuck. watchdog sometimes kills container but fails to return the error back to agent.
-- sec adviser soul that gets loaded is not the one we define in Security_advisor_soul.md
-- security advisor gets spammed with new calls from a single request (Auto-Ask ON)
+- security advisor gets spammed with new calls from a single request (Auto-Ask ON) - HIGH PRIO
+- edit/delete message bubbles broke after we added trim chat history option
 - streaming does not fill message bubble in full sometimes before popping the next bubble.
-- retry duplicates the user message in logger
+- duplicates user entries in logger
+- LOG API POST dump seems broken
+- need better timeout protection on code interpreter, we are still having issues with it getting stuck. watchdog sometimes kills container but fails to return the error back to agent. doesnt start new containers if users stops them.
+- forced context compression inserted summary at tail instead of the required insertion percentage. compressor received 0 messages to work with.
 
 # EOF

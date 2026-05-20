@@ -23,6 +23,13 @@ const ASSISTANT = 'assistant';
 const SYSTEM = 'system';
 const FUNCTION = 'function';
 
+// Pre-compiled regexes for thinking blocks (consistent with backend)
+const _TAG_THINK = 'think';
+const _TAG_THOUGHT = 'thought';
+const _THINK_BLOCK_ANCHORED_RE = new RegExp('^\\s*<(' + _TAG_THINK + '|' + _TAG_THOUGHT + ')>([\\s\\S]*?)(</\\1>|$)', 'i');
+const _THINK_BLOCK_BRACKET_ANCHORED_RE = new RegExp('^\\s*\\[(' + _TAG_THINK.toUpperCase() + '|' + _TAG_THOUGHT.toUpperCase() + ')\\]([\\s\\S]*?)(\\[/\\1\\]|$)', 'i');
+const _GEMMA_THOUGHT_ANCHORED_RE = /^\s*<\|channel>thought([\s\S]*?)(<channel\|>|$)/i;
+
 // ── State ────────────────────────────────────────────────────────────────────
 const state = {
   messages: [],
@@ -1239,14 +1246,14 @@ function createMessageEl(msg, index) {
     let text = msg.content || '';
     
     // Deduplicate: If content starts with a thinking block that matches reasoning_content
-    if (msg.reasoning_content && text.includes('<think>')) {
-        const thinkMatch = text.match(/<think>([\s\S]*?)(<\/think>|$)/i);
+    if (msg.reasoning_content) {
+        const thinkMatch = text.match(_THINK_BLOCK_ANCHORED_RE) || text.match(_THINK_BLOCK_BRACKET_ANCHORED_RE);
         if (thinkMatch) {
-            const embedded = thinkMatch[1].trim();
+            const embedded = thinkMatch[2].trim();
             const reasoning = msg.reasoning_content.trim();
             if (reasoning.includes(embedded) || embedded.includes(reasoning)) {
                 // Remove the redundant block from content
-                text = (text.substring(0, thinkMatch.index) + text.substring(thinkMatch.index + thinkMatch[0].length)).trim();
+                text = text.substring(thinkMatch[0].length).trim();
             }
         }
     }
@@ -1277,13 +1284,13 @@ function updateBubbleContent(bubble, msg) {
     html += renderToolResult(msg);
   } else {
     let text = msg.content || '';
-    if (msg.reasoning_content && text.includes('<think>')) {
-        const thinkMatch = text.match(/<think>([\s\S]*?)(<\/think>|$)/i);
+    if (msg.reasoning_content) {
+        const thinkMatch = text.match(_THINK_BLOCK_ANCHORED_RE) || text.match(_THINK_BLOCK_BRACKET_ANCHORED_RE);
         if (thinkMatch) {
-            const embedded = thinkMatch[1].trim();
+            const embedded = thinkMatch[2].trim();
             const reasoning = msg.reasoning_content.trim();
             if (reasoning.includes(embedded) || embedded.includes(reasoning)) {
-                text = (text.substring(0, thinkMatch.index) + text.substring(thinkMatch.index + thinkMatch[0].length)).trim();
+                text = text.substring(thinkMatch[0].length).trim();
             }
         }
     }
@@ -1335,21 +1342,29 @@ function renderMarkdown(text, allowThinking = true) {
     }
   }
 
-  // Handle <think> tags or Gemma-style thought tags in content
+  // Handle <think> tags or bracket [THINK] tags in content
   let thought = null;
   let isOpen = false;
   let before = '';
   let after = '';
-  let tagLen = 0;
 
-   const thinkMatch = text.match(/^\s*<think>([\s\S]*?)(<\/think>|$)/i);
-   const gemmaMatch = text.match(/^\s*<\|channel>thought([\s\S]*?)(<channel\|>|$)/i);
+  const thinkMatch = text.match(_THINK_BLOCK_ANCHORED_RE);
+  const bracketMatch = !thinkMatch ? text.match(_THINK_BLOCK_BRACKET_ANCHORED_RE) : null;
+  const gemmaMatch = (!thinkMatch && !bracketMatch) ? text.match(_GEMMA_THOUGHT_ANCHORED_RE) : null;
 
   if (thinkMatch) {
-    thought = thinkMatch[1];
-    isOpen = !text.includes('</think>');
-    before = text.substring(0, text.indexOf('<think>'));
-    after = text.includes('</think>') ? text.substring(text.indexOf('</think>') + 8) : '';
+    thought = thinkMatch[2];
+    const tag = thinkMatch[1];
+    isOpen = !text.toLowerCase().includes('</' + tag.toLowerCase() + '>');
+    // Since it's anchored to start, 'before' is just the leading whitespace if any
+    before = text.substring(0, thinkMatch.index);
+    after = text.substring(thinkMatch.index + thinkMatch[0].length);
+  } else if (bracketMatch) {
+    thought = bracketMatch[2];
+    const tag = bracketMatch[1];
+    isOpen = !text.toLowerCase().includes('[/' + tag.toLowerCase() + ']');
+    before = text.substring(0, bracketMatch.index);
+    after = text.substring(bracketMatch.index + bracketMatch[0].length);
   } else if (gemmaMatch) {
     thought = gemmaMatch[1];
     isOpen = !text.toLowerCase().includes('<channel|>');

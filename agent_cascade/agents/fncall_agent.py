@@ -100,10 +100,15 @@ class FnCallAgent(Agent):
                         # Yield everything so far so UI sees "calling tool..." before we block on execution
                         yield response
                         tool_result = self._call_tool(tool_name, tool_args, messages=messages, **kwargs)
+                        # Handle both Message objects and dicts for function_id extraction
+                        if isinstance(out, dict):
+                            extra = out.get('extra', {})
+                        else:
+                            extra = getattr(out, 'extra', None) or {}
                         fn_msg = Message(role=FUNCTION,
                                          name=tool_name,
                                          content=tool_result,
-                                         extra={'function_id': out.extra.get('function_id', '1')})
+                                         extra={'function_id': extra.get('function_id', '1')})
                         messages.append(fn_msg)
                         response.append(fn_msg)
                         yield response

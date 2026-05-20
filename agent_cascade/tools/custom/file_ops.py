@@ -446,6 +446,12 @@ class EditFile(BaseTool):
                 'type': 'string',
                 'description': TOOL_METADATA['edit_file']['parameters']['new_content']
             },
+            'match_mode': {
+                'type': 'string',
+                'enum': ['exact', 'heuristic'],
+                'default': 'exact',
+                'description': TOOL_METADATA['edit_file']['parameters']['match_mode']
+            },
             'justification': {
                 'type': 'string',
                 'description': 'Why you need to edit this file'
@@ -491,6 +497,7 @@ class EditFile(BaseTool):
         path = params_json.get('file_path')
         old_content = params_json.get('old_content')
         new_content = params_json.get('new_content')
+        match_mode = params_json.get('match_mode', 'exact')
         
         # Handle cases where model uses XML tags with old names
         if not old_content and params_json.get('old_string'):
@@ -515,6 +522,7 @@ class EditFile(BaseTool):
             agent_name=self.agent_name,
             old_content=old_content,
             new_content=new_content,
+            match_mode=match_mode,
         )
 
 

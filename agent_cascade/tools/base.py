@@ -140,10 +140,13 @@ class BaseTool(ABC):
         if isinstance(params, str):
             try:
                 if strict_json:
-                    params_json: dict = json.loads(params)
+                    params_json = json.loads(params)
                 else:
-                    params_json: dict = json_loads(params)
-            except json.decoder.JSONDecodeError:
+                    params_json = json_loads(params)
+                # Verify result is a dict (json_loads raises ValueError on parse failure, but could return non-dict JSON)
+                if not isinstance(params_json, dict):
+                    raise ValueError('Parameters must be formatted as a valid JSON! Got non-dict result')
+            except (json.decoder.JSONDecodeError, ValueError):
                 raise ValueError('Parameters must be formatted as a valid JSON!')
         else:
             params_json: dict = params

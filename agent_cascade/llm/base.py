@@ -27,8 +27,8 @@ from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
 from agent_cascade.utils.tokenization_qwen import tokenizer
 from agent_cascade.utils.utils import (extract_text_from_message, format_as_multimodal_message, format_as_text_message,
-                                    get_message_stats, has_chinese_messages, json_dumps_compact, merge_generate_cfgs,
-                                    print_traceback)
+                                    get_message_stats, has_chinese_messages, json_dumps_compact, json_loads,
+                                    merge_generate_cfgs, print_traceback)
 
 LLM_REGISTRY = {}
 
@@ -440,6 +440,38 @@ class BaseChatModel(ABC):
             return self._chat_stream(messages=messages, delta_stream=False, generate_cfg=generate_cfg)
 
     @staticmethod
+    def _sanitize_fn_args(fn_args):
+        """Sanitize function_call arguments to ensure they are a valid JSON string.
+
+        OpenAI spec requires tool_call.arguments to be a JSON string. This method:
+        - Serializes dict arguments to JSON
+        - Validates string arguments (must parse as a JSON object)
+        - Falls back to '{}' for empty/invalid arguments (with a warning)
+
+        Returns a str that is valid JSON representing an object.
+        """
+        if isinstance(fn_args, dict):
+            try:
+                return json.dumps(fn_args, ensure_ascii=False)
+            except (TypeError, ValueError):
+                logger.warning('Tool call arguments dict was not JSON-serializable (%s); defaulting to "{}"', repr(fn_args))
+                return '{}'
+        if not isinstance(fn_args, str) or not fn_args.strip():
+            logger.warning('Tool call arguments were empty/None (type: %s); defaulting to "{}"', type(fn_args).__name__)
+            return '{}'
+        # Validate the string is parseable JSON and represents an object
+        try:
+            parsed = json_loads(fn_args)
+            if isinstance(parsed, dict):
+                return fn_args
+            logger.warning('Tool call arguments parsed but were not a JSON object (got %s); defaulting to "{}". Original: %s',
+                          type(parsed).__name__, repr(fn_args[:200]))
+            return '{}'
+        except (ValueError, TypeError):
+            logger.warning('Tool call arguments were not valid JSON; defaulting to "{}". Original: %s', repr(fn_args[:200]))
+            return '{}'
+
+    @staticmethod
     def _conv_agent_cascade_messages_to_oai(messages: List[Union[Message, Dict]]):
         new_messages = []
         for msg in messages:
@@ -453,11 +485,9 @@ class BaseChatModel(ABC):
                 if msg.get('function_call'):
                     if not new_messages[-1].get('tool_calls'):
                         new_messages[-1]['tool_calls'] = []
-                    # Ensure arguments is a JSON string (OpenAI spec requirement)
-                    fn_args = msg['function_call']['arguments']
-                    if isinstance(fn_args, dict):
-                        import json as _json
-                        fn_args = _json.dumps(fn_args, ensure_ascii=False)
+                    # Sanitize arguments to ensure valid JSON string (OpenAI spec requirement)
+                    fn_args = BaseChatModel._sanitize_fn_args(msg['function_call'].get('arguments', ''))
+
                     new_messages[-1]['tool_calls'].append({
                         'id': msg.get('extra', {}).get('function_id', '1'),
                         'type': 'function',
@@ -538,12 +568,15 @@ class BaseChatModel(ABC):
                     message['content'] += item['content']
 
                 if item.get('function_call'):
+                    # Sanitize arguments to ensure valid JSON string (OpenAI spec requirement)
+                    fc_args = BaseChatModel._sanitize_fn_args(item['function_call'].get('arguments', ''))
+
                     tool_call = {
                         'id': f"{len(message['tool_calls']) + 1}",
                         'type': 'function',
                         'function': {
                             'name': item['function_call']['name'],
-                            'arguments': item['function_call']['arguments']
+                            'arguments': fc_args
                         }
                     }
                     message['tool_calls'].append(tool_call)

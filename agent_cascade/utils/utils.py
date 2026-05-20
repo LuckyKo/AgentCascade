@@ -94,7 +94,8 @@ def print_traceback(is_error: bool = True):
 
 from agent_cascade.utils.thinking_block import (
     _THINK_BLOCK_RE, _THINK_BLOCK_UNCLOSED_RE,
-    _THINK_BLOCK_BRACKET_RE, _MARKDOWN_CODE_RE, _TRIPLE_QUOTE_RE,
+    _THINK_BLOCK_BRACKET_RE,
+    _MARKDOWN_CODE_RE, _TRIPLE_QUOTE_RE,
     _JSON_STRING_RE, CHINESE_CHAR_RE, _IMAGE_DATA_RE as IMAGE_REGEX
 )
 
@@ -335,17 +336,31 @@ def repair_invalid_json(text: str) -> str:
     return repaired
 
 
-def json_loads(text: str) -> dict:
+def json_loads(text: str) -> Union[dict, str]:
     import json5
     original_text = text.strip()
     
-    # 0. Strip thinking blocks first to avoid them interfering with parsing 
-    # if they contain {} markers or quotes
-    if any(tag in original_text.lower() for tag in ['<think', '<thought', '[think', '[thought']):
-        original_text = _THINK_BLOCK_RE.sub('', original_text)
-        original_text = _THINK_BLOCK_BRACKET_RE.sub('', original_text)
-        original_text = _THINK_BLOCK_UNCLOSED_RE.sub('', original_text).strip()
-
+    # 0. Strip thinking blocks first to avoid them interfering with parsing
+    # if they contain {} markers or quotes.
+    # CRITICAL: We only strip from the START using anchored regexes.
+    # We do this iteratively to handle multiple tags.
+    changed = True
+    while changed:
+        changed = False
+        lower_text = original_text.lower()
+        if '<think' in lower_text or '<thought' in lower_text:
+            new_text = _THINK_BLOCK_RE.sub('', original_text, count=1)
+            if new_text != original_text:
+                original_text = new_text
+                changed = True
+        
+        if not changed and ('[think' in lower_text or '[thought' in lower_text):
+            new_text = _THINK_BLOCK_BRACKET_RE.sub('', original_text, count=1)
+            if new_text != original_text:
+                original_text = new_text
+                changed = True
+    
+    original_text = original_text.strip()
     # 1. Try parsing as-is (handles most cases including those with backticks inside)
     try:
         return json5.loads(original_text)

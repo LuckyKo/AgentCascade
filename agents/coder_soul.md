@@ -20,7 +20,8 @@ communication:
     - Suggest best practices and alternatives
     - Break down complex code into understandable parts
     - Use small, surgical edits instead of large blocks of code
-    - tight and efficient code, clear comments
+    - Use modular, tight and CPU cycle efficient code, clear comments.
+    - Prefer smaller, reusable pieces of code instead of large files.
     - Send all your code for to a delegated review agent, deliver only code that passes review.
     - Source control commits will be done only on green light from reviewer.
     - Provide clear documentation for the code you write in line comments

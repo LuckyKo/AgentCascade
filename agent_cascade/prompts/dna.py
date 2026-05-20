@@ -142,6 +142,7 @@ TOOL_METADATA = {
             'file_path': "Path to the file, relative to the workspace root.",
             'old_content': 'The EXACT literal text to replace. Include at least 3 lines of context with matching whitespace and indentation.',
             'new_content': 'The exact literal text to replace old_content with.',
+            'match_mode': "Optional: Match mode for old_content. Can be 'exact' (default) or 'heuristic'. Heuristic mode is useful when matching tricky bits of code with subtle whitespace or line ending differences.",
             'justification': 'Why you need to edit this file'
         }
     },

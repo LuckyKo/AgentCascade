@@ -313,11 +313,7 @@ class CompressContext(BaseTool):
                     active_msgs.extend(new_active)
 
             return (
-                f"Context compressed ({mode} mode): {int(fraction*100)}% of older history for agent '{agent_name}' has been summarized and removed from your context window.\n\n"
-                f"Summary:\n"
-                f"<context_summary>\n"
-                f"{summary}\n"
-                f"</context_summary>"
+                f"Context compressed ({mode} mode): {int(fraction*100)}% of older history for agent '{agent_name}' has been summarized."
             )
         except Exception as e:
             return f"ERROR: Compression failed: {str(e)}"

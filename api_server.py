@@ -2045,7 +2045,7 @@ def create_app(agents, agent_pool, config=None):
                                             clean_content = content_str
                                             if reasoning_str:
                                                 # Check if content starts with a thinking block that matches reasoning
-                                                think_match = _THINK_SEARCH_RE.search(content_str)
+                                                think_match = _THINK_SEARCH_RE.match(content_str)
                                                 if think_match:
                                                     embedded_thought = think_match.group(2).strip()
                                                     # If they are very similar, we consider it a duplicate
@@ -2076,61 +2076,66 @@ def create_app(agents, agent_pool, config=None):
                                     # 1. Clean the text: Remove reasoning blocks completely to avoid false positives in "thinking"
                                     # This handles both <think> tags and [THINK] tags
                                     clean_text = parsing_response
-                                    if '<think' in clean_text.lower() or '<thought' in clean_text.lower():
-                                        clean_text = _THINK_BLOCK_RE.sub('', clean_text)
-                                    if '[think' in clean_text.lower() or '[thought' in clean_text.lower():
-                                        clean_text = _THINK_BLOCK_BRACKET_RE.sub('', clean_text).strip()
-                                    clean_text = clean_text.strip()
-                                    
-                                    check_text = clean_text.upper()
-                                    
-                                    # 2. Simplified Verdict Extraction: Check ONLY the last non-empty line
-                                    lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
-                                    last_line = lines[-1] if lines else ""
-                                    
-                                    # Remove markdown bolding if present (e.g. **[YES]**)
-                                    last_line_clean = _MARKDOWN_BOLD_RE.sub('', last_line).strip()
-                                    last_line_upper = last_line_clean.upper()
-                                    
-                                    is_yes = last_line_upper.startswith('[YES]')
-                                    is_no = last_line_upper.startswith('[NO]')
-                                    
-                                    justification = ""
-                                    if is_yes:
-                                        justification = last_line_clean[5:].strip()
-                                    elif is_no:
-                                        justification = last_line_clean[4:].strip()
+                                    try:
+                                        if '<think' in clean_text.lower() or '<thought' in clean_text.lower():
+                                            clean_text = _THINK_BLOCK_RE.sub('', clean_text)
+                                        if '[think' in clean_text.lower() or '[thought' in clean_text.lower():
+                                            clean_text = _THINK_BLOCK_BRACKET_RE.sub('', clean_text).strip()
+                                        clean_text = clean_text.strip()
                                         
-                                    if is_yes or is_no:
-                                        # Strip "Reason:", "Justification:", etc.
-                                        justification = _JUSTIFICATION_PREFIX_RE.sub('', justification).strip()
-                                    
-                                    # Fallback 1: if no [YES]/[NO] on last line, check if the entire response is JUST the verdict
-                                    if not is_yes and not is_no and len(lines) == 1:
-                                        if last_line_upper == 'YES' or last_line_upper == 'SAFE':
-                                            is_yes = True
-                                            justification = last_line
-                                        elif last_line_upper == 'NO' or last_line_upper == 'UNSAFE':
-                                            is_no = True
-                                            justification = last_line
-                                    
-                                    # Fallback 2: LLM may add text after verdict — find whichever [YES]/[NO] appears LAST
-                                    if not is_yes and not is_no:
-                                        upper_text = clean_text.upper()
-                                        yes_pos = upper_text.rfind('[YES]')
-                                        no_pos = upper_text.rfind('[NO]')
-                                        if yes_pos > no_pos:
-                                            is_yes = True
-                                        elif no_pos > yes_pos:
-                                            is_no = True
+                                        check_text = clean_text.upper()
+                                        
+                                        # 2. Simplified Verdict Extraction: Check ONLY the last non-empty line
+                                        lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
+                                        last_line = lines[-1] if lines else ""
+                                        
+                                        # Remove markdown bolding if present (e.g. **[YES]**)
+                                        last_line_clean = _MARKDOWN_BOLD_RE.sub('', last_line).strip()
+                                        last_line_upper = last_line_clean.upper()
+                                        
+                                        is_yes = last_line_upper.startswith('[YES]')
+                                        is_no = last_line_upper.startswith('[NO]')
+                                        
+                                        justification = ""
+                                        if is_yes:
+                                            justification = last_line_clean[5:].strip()
+                                        elif is_no:
+                                            justification = last_line_clean[4:].strip()
+                                            
                                         if is_yes or is_no:
-                                            # Extract justification from the matching line
-                                            for line in lines:
-                                                lc = _MARKDOWN_BOLD_RE.sub('', line).strip().upper()
-                                                if (is_yes and '[YES]' in lc) or (is_no and '[NO]' in lc):
-                                                    just_text = lc.replace('[YES]', '', 1).replace('[NO]', '', 1).strip()
-                                                    justification = _JUSTIFICATION_PREFIX_RE.sub('', just_text).strip()
-                                                    break
+                                            # Strip "Reason:", "Justification:", etc.
+                                            justification = _JUSTIFICATION_PREFIX_RE.sub('', justification).strip()
+                                        
+                                        # Fallback 1: if no [YES]/[NO] on last line, check if the entire response is JUST the verdict
+                                        if not is_yes and not is_no and len(lines) == 1:
+                                            if last_line_upper == 'YES' or last_line_upper == 'SAFE':
+                                                is_yes = True
+                                                justification = last_line
+                                            elif last_line_upper == 'NO' or last_line_upper == 'UNSAFE':
+                                                is_no = True
+                                                justification = last_line
+                                        
+                                        # Fallback 2: LLM may add text after verdict — find whichever [YES]/[NO] appears LAST
+                                        if not is_yes and not is_no:
+                                            upper_text = clean_text.upper()
+                                            yes_pos = upper_text.rfind('[YES]')
+                                            no_pos = upper_text.rfind('[NO]')
+                                            if yes_pos > no_pos:
+                                                is_yes = True
+                                            elif no_pos > yes_pos:
+                                                is_no = True
+                                            if is_yes or is_no:
+                                                # Extract justification from the matching line
+                                                for line in lines:
+                                                    lc = _MARKDOWN_BOLD_RE.sub('', line).strip().upper()
+                                                    if (is_yes and '[YES]' in lc) or (is_no and '[NO]' in lc):
+                                                        just_text = lc.replace('[YES]', '', 1).replace('[NO]', '', 1).strip()
+                                                        justification = _JUSTIFICATION_PREFIX_RE.sub('', just_text).strip()
+                                                        break
+                                    except Exception as e:
+                                        logger.error(f"Error extracting security verdict from {security_instance}: {e}")
+                                        is_yes = False
+                                        is_no = False
                                     
                                     if is_yes or is_no:
                                         if auto_apply:

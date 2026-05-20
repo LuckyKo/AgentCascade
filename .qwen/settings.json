@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Read(n:\\work\\WD\\AgentWorkspace/**)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Read(n:\\work\\WD\\AgentWorkspace\\logs/**)"
     ]
   },
   "$version": 4

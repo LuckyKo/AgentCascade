@@ -1,12 +1,65 @@
+2026-05-19 23:54:17,530 - agent_orchestrator.py - 1781 - INFO - Sub-agent TelemetryAnalyst interrupted by user stop signal.
+2026-05-19 23:54:34,129 - api_server.py - 1873 - WARNING - Server restart requested via UI
 
-2026-05-18 23:47:06,944 - code_interpreter.py - 661 - INFO - Docker is available and running
+n:\work\WD\AgentCascade>2026-05-19 23:54:37,148 - code_interpreter.py - 172 - INFO - Code interpreter watchdog started (timeout=300s)
+Initializing Agent Orchestrator (API Server)...
+==================================================
+2026-05-19 23:54:38,372 - code_interpreter.py - 661 - INFO - Docker is available and running
+[OK] Loaded agent: coder
+2026-05-19 23:54:38,771 - code_interpreter.py - 661 - INFO - Docker is available and running
+[OK] Loaded agent: compression_agent
+2026-05-19 23:54:39,066 - code_interpreter.py - 661 - INFO - Docker is available and running
+[OK] Loaded agent: generalist
+2026-05-19 23:54:39,360 - code_interpreter.py - 661 - INFO - Docker is available and running
+[OK] Loaded agent: orchestrator
+2026-05-19 23:54:39,623 - code_interpreter.py - 661 - INFO - Docker is available and running
+[OK] Loaded agent: researcher
+2026-05-19 23:54:39,885 - code_interpreter.py - 661 - INFO - Docker is available and running
+[OK] Loaded agent: reviewer
+2026-05-19 23:54:40,157 - code_interpreter.py - 661 - INFO - Docker is available and running
+[OK] Loaded agent: security_advisor
+2026-05-19 23:54:40,429 - code_interpreter.py - 661 - INFO - Docker is available and running
+[OK] Loaded agent: writer
+2026-05-19 23:54:40,688 - code_interpreter.py - 661 - INFO - Docker is available and running
+2026-05-19 23:54:40,940 - code_interpreter.py - 661 - INFO - Docker is available and running
 [OK] Available agents: ['Orchestrator', 'Coder', 'Compression Agent', 'Generalist', 'Researcher', 'Reviewer', 'Security Advisor', 'Writer']
 ==================================================
-Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade\start_api_server.py", line 223, in <module>
-    from api_server import create_app
-  File "n:\work\WD\AgentCascade\api_server.py", line 2118
-    except Exception as e:
-SyntaxError: expected 'except' or 'finally' block
 
-n:\work\WD\AgentCascade>
+[OK] API Server ready!
+    -> Open http://127.0.0.1:8765 in your browser
+    -> WebSocket at ws://127.0.0.1:8765/ws/chat
+    -> REST API at http://127.0.0.1:8765/api/
+
+[TIP] Type in this terminal to inject messages into the active agent.
+==================================================
+[Workspace] Tiered folders updated: RO=1, RW=3
+2026-05-19 23:54:52,151 - agent_pool.py - 571 - INFO - AgentPool reset — all instances and loggers cleared.
+2026-05-19 23:55:54,036 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 35, Available tokens: 83192
+2026-05-19 23:56:19,688 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 1150, Available tokens: 83192
+2026-05-19 23:57:43,749 - agent_orchestrator.py - 622 - INFO - Context usage at 46443.2% for Maine - Halting other agents and triggering FORCEFUL compression.
+2026-05-19 23:57:45,034 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 35, Available tokens: 85994
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\api_server.py", line 992, in run_agent_thread
+    for partial in agent_runner.run(working_history, **llm_safe_cfg):
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\agent.py", line 132, in run
+    if not rsp[i].name and self.name:
+           ^^^^^^^^^^^
+AttributeError: 'dict' object has no attribute 'name'
+2026-05-19 23:58:13,208 - agent_pool.py - 571 - INFO - AgentPool reset — all instances and loggers cleared.
+2026-05-19 23:59:52,587 - agent_pool.py - 571 - INFO - AgentPool reset — all instances and loggers cleared.
+2026-05-20 00:00:01,800 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 21, Available tokens: 83192
+2026-05-20 00:00:08,986 - agent_orchestrator.py - 585 - INFO - Truncated 'read_file' result for Maine: 75178 chars -> 51695 chars. Reason: Individual tool limit (used 30% of context). Spill file: workspace\logs\Maine_read_file_20260520_000008.txt
+2026-05-20 00:00:09,071 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 27065, Available tokens: 83192
+2026-05-20 00:00:39,481 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 27189, Available tokens: 83192
+2026-05-20 00:00:41,851 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 28906, Available tokens: 83192
+2026-05-20 00:00:48,821 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 28989, Available tokens: 83192
+2026-05-20 00:00:53,080 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 29663, Available tokens: 83192
+2026-05-20 00:01:03,844 - agent_orchestrator.py - 1392 - INFO - Injected urgent async user message mid-tool-loop into Maine: last part... who even read s alog in full dude...
+2026-05-20 00:01:03,939 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 30851, Available tokens: 83192
+2026-05-20 00:01:11,598 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 34013, Available tokens: 83192
+2026-05-20 00:01:47,538 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 175, Available tokens: 83349
+2026-05-20 00:01:58,688 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 277, Available tokens: 83349
+2026-05-20 00:02:03,545 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 1613, Available tokens: 83349
+2026-05-20 00:02:07,488 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 2535, Available tokens: 83349
+2026-05-20 00:02:14,210 - base.py - 818 - INFO - Agent [Unknown] - ALL tokens: 3520, Available tokens: 83349

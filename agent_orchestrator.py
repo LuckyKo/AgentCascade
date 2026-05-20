@@ -14,13 +14,7 @@ Backward-compatible re-exports are at the bottom of this file.
 """
 
 import copy
-import json
 import datetime
-import time
-from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
-
-import copy
 import hashlib
 import json
 import logging
@@ -32,15 +26,14 @@ import time
 import traceback
 from collections import deque
 from datetime import datetime
-from typing import (
-    Any, Dict, Iterator, List, Optional, Tuple, Union,
-)
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from agent_cascade.agents import Assistant
-from agent_cascade.agent import strip_thinking_blocks
 from agent_cascade.utils.thinking_block import (
     _THINK_BLOCK_RE, _THINK_BLOCK_UNCLOSED_RE, _THINK_BLOCK_BRACKET_RE,
     _TOOL_TRUNCATED_RE, _IMAGE_DATA_RE, _GEMMA_THOUGHT_RE,
+    strip_thinking_blocks
 )
 from agent_cascade.log import logger
 from agent_cascade.llm.schema import (
@@ -113,8 +106,9 @@ def detect_loop(messages: List[Union[dict, Message]]) -> Optional[Tuple[str, int
             # Handle both dict and object function calls
             name = fc.get('name') if isinstance(fc, dict) else getattr(fc, 'name', '')
             args = fc.get('arguments') if isinstance(fc, dict) else getattr(fc, 'arguments', '')
-            # Strip thinking tags from args for comparison consistency
-            args = strip_thinking_blocks(args)
+            # FIX: We no longer strip thinking tags from args here, as they might be 
+            # legitimate data (e.g. an agent reviewing code that contains tags).
+            # This prevents data corruption.
             return f"{role}:{name}:{args}"
         
         # For plain messages, use first 3000 chars of content to distinguish long reasoning
@@ -876,7 +870,7 @@ class OrchestratorAgent(Assistant):
                                 agent_obj=self,
                                 precomputed_summary=summary # Skip generation
                             )
-                            yield [Message(role=ASSISTANT, content=f"Context compressed successfully.\nResult: {result}")]
+                            yield [Message(role=ASSISTANT, content="Context compressed successfully.")]
                         else:
                             yield [Message(role=ASSISTANT, content=f"Context compression cancelled: {reason}")]
                     else:
@@ -1107,8 +1101,12 @@ class OrchestratorAgent(Assistant):
             is_truncated = False
             for msg in output:
                 logger_inst.log_message(msg)
-                # Detection: finish_reason is often in extra
-                if msg.extra and msg.extra.get('finish_reason') == 'length':
+                # Detection: finish_reason is often in extra (handle both dict and Message objects)
+                if isinstance(msg, dict):
+                    extra = msg.get('extra')
+                else:
+                    extra = getattr(msg, 'extra', None)
+                if extra and extra.get('finish_reason') == 'length':
                     is_truncated = True
             
             # --- AUTO-CONTINUE ON LENGTH LIMIT ---
@@ -1324,10 +1322,14 @@ class OrchestratorAgent(Assistant):
                     self._compress_context_ran_this_turn = True
                     # Sync llm_messages from the pool immediately so subsequent operations 
                     # in this turn see the compressed state (prevents desync).
+                    # Use slice_history_for_llm to get the working set — NOT the full cumulative history.
+                    # compression_tools.py already synced llm_messages via kwargs['messages'], but if
+                    # it didn't (e.g., forced compression path), we need to do it here with slicing.
                     compressed_conv = self.agent_pool.get_conversation(self.session_name)
                     if compressed_conv:
+                        sliced = self.agent_pool.slice_history_for_llm(compressed_conv) if hasattr(self.agent_pool, 'slice_history_for_llm') else compressed_conv
                         llm_messages.clear()
-                        llm_messages.extend(copy.deepcopy(compressed_conv))
+                        llm_messages.extend(copy.deepcopy(sliced))
                 
                 # --- Post-execution success detection ---
                 # Many tools return an error message as a string instead of raising an exception.
@@ -1366,8 +1368,10 @@ class OrchestratorAgent(Assistant):
                     name=tool_name,
                     content=tool_result,
                     extra={
-                        'function_id': out.extra.get('function_id', '1')
-                        if out.extra else '1',
+                        'function_id': (
+                            out.get('extra', {}).get('function_id', '1') if isinstance(out, dict)
+                            else out.extra.get('function_id', '1') if getattr(out, 'extra', None) else '1'
+                        ),
                         'tool_success': _tool_success,  # Pass to frontend so isToolFailure() can use it directly
                     },
                 )
@@ -1743,7 +1747,12 @@ class OrchestratorAgent(Assistant):
                             # Detect truncation
                             is_truncated = False
                             for msg in last_output:
-                                if msg.extra and msg.extra.get('finish_reason') == 'length':
+                                # Handle both Message objects and dicts (after forced compression)
+                                if isinstance(msg, dict):
+                                    extra = msg.get('extra')
+                                else:
+                                    extra = getattr(msg, 'extra', None)
+                                if extra and extra.get('finish_reason') == 'length':
                                     is_truncated = True
                                     break
                             
