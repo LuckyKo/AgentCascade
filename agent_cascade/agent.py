@@ -133,7 +133,7 @@ class Agent(ABC):
                 if isinstance(rsp[i], dict):
                     if not rsp[i].get('name') and self.name:
                         rsp[i]['name'] = self.name
-                else:
+                elif hasattr(rsp[i], 'name'):  # Defensive guard against unexpected message types
                     if not rsp[i].name and self.name:
                         rsp[i].name = self.name
             if _return_message_type == 'message':

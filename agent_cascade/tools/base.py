@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Union
 
 from agent_cascade.llm.schema import ContentItem
 from agent_cascade.settings import DEFAULT_WORKSPACE
+from agent_cascade.utils.thinking_block import strip_thinking_blocks
 from agent_cascade.utils.utils import has_chinese_chars, json_loads, logger, print_traceback, save_url_to_local_work_dir
 
 TOOL_REGISTRY = {}
@@ -136,7 +137,12 @@ class BaseTool(ABC):
         raise NotImplementedError
 
     def _verify_json_format_args(self, params: Union[str, dict], strict_json: bool = False) -> dict:
-        """Verify the parameters of the function call"""
+        """Verify the parameters of the function call
+        
+        Adds input validation that strips thinking block contamination from JSON values.
+        This protects against malformed tool args where LLM reasoning tags leaked into
+        parameter values after strip_thinking_blocks was removed from _call_tool.
+        """
         if isinstance(params, str):
             try:
                 if strict_json:
@@ -150,17 +156,27 @@ class BaseTool(ABC):
                 raise ValueError('Parameters must be formatted as a valid JSON!')
         else:
             params_json: dict = params
+        
+        # Sanitize string values in parsed JSON to remove thinking block contamination.
+        # This handles cases where thinking tags are embedded inside JSON string values.
+        sanitized_params = {}
+        for k, v in params_json.items():
+            if isinstance(v, str):
+                sanitized_params[k] = strip_thinking_blocks(v)
+            else:
+                sanitized_params[k] = v
+        
         if isinstance(self.parameters, list):
             for param in self.parameters:
                 if 'required' in param and param['required']:
-                    if param['name'] not in params_json:
+                    if param['name'] not in sanitized_params:
                         raise ValueError('Parameters %s is required!' % param['name'])
         elif isinstance(self.parameters, dict):
             import jsonschema
-            jsonschema.validate(instance=params_json, schema=self.parameters)
+            jsonschema.validate(instance=sanitized_params, schema=self.parameters)
         else:
             raise ValueError
-        return params_json
+        return sanitized_params
 
     @property
     def function(self) -> dict:  # Bad naming. It should be `function_info`.

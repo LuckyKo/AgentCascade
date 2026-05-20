@@ -32,7 +32,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - streaming does not fill message bubble in full sometimes before popping the next bubble.
 - duplicates user entries in logger
 - LOG API POST dump seems broken
-- need better timeout protection on code interpreter, we are still having issues with it getting stuck. watchdog sometimes kills container but fails to return the error back to agent. doesnt start new containers if users stops them.
-- forced context compression inserted summary at tail instead of the required insertion percentage. compressor received 0 messages to work with.
+- need better timeout protection on code interpreter and cmd_shell, we are still having issues with it getting stuck. watchdog sometimes kills container but fails to return the error back to agent. doesnt start new containers if users stops them.
+- 
 
 # EOF

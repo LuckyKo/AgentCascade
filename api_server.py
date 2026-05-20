@@ -66,6 +66,20 @@ except ImportError:
 # Pre-compiled regexes moved to agent_cascade.utils.thinking_block
 
 
+def _get_msg_role(msg):
+    """Extract the 'role' field from a message, handling both dict and Message object types."""
+    if isinstance(msg, dict):
+        return msg.get(ROLE)
+    return getattr(msg, 'role', None)
+
+
+def _get_msg_func_call(msg):
+    """Extract the 'function_call' field from a message, handling both dict and Message object types."""
+    if isinstance(msg, dict):
+        return msg.get('function_call')
+    return getattr(msg, 'function_call', None)
+
+
 def _parse_multimodal_content(text):
     """
     Parse markdown images ![alt](data:...) and return a list of content items.
@@ -196,9 +210,9 @@ def _refine_pop_count(history, pop_count):
     
     # Safety: Determine core messages (SYSTEM + first USER) that must NEVER be removed
     keep_at_least = 0
-    if len(history) > 0 and history[0].get(ROLE) == SYSTEM:
+    if len(history) > 0 and _get_msg_role(history[0]) == SYSTEM:
         keep_at_least = 1
-        if len(history) > 1 and history[1].get(ROLE) == USER:
+        if len(history) > 1 and _get_msg_role(history[1]) == USER:
             keep_at_least = 2
             
     removable = len(history) - keep_at_least
@@ -211,10 +225,10 @@ def _refine_pop_count(history, pop_count):
         
     while new_pop < removable:
         start_idx = len(history) - new_pop
-        if start_idx >= keep_at_least and history[start_idx].get(ROLE) == FUNCTION:
+        if start_idx >= keep_at_least and _get_msg_role(history[start_idx]) == FUNCTION:
             # If we land on a function response, we must also remove the call that preceded it.
             new_pop += 1
-        elif start_idx >= keep_at_least and history[start_idx].get(ROLE) == ASSISTANT and history[start_idx].get('function_call'):
+        elif start_idx >= keep_at_least and _get_msg_role(history[start_idx]) == ASSISTANT and _get_msg_func_call(history[start_idx]):
             # If we land on a tool call, it means we've already included it (or it's the start of our rollback).
             # We stop here to keep the history clean without rolling back into the previous successful turn.
             break
@@ -564,8 +578,13 @@ def create_app(agents, agent_pool, config=None):
                 summary = agent_pool.instance_summaries.get(name, "")
                 if not summary:
                     for msg in reversed(msgs):
-                        role = msg.get(ROLE)
-                        content = msg.get(CONTENT, '')
+                        # Handle both dict and Message object types
+                        if isinstance(msg, dict):
+                            role = msg.get(ROLE)
+                            content = msg.get(CONTENT, '')
+                        else:
+                            role = getattr(msg, 'role', None)
+                            content = getattr(msg, 'content', '') or ''
                         # Specifically target USER messages for context boundaries
                         if role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                             import re
@@ -944,8 +963,14 @@ def create_app(agents, agent_pool, config=None):
                     _model_name = getattr(agent_runner.llm, 'model', 'unknown') if has_llm else 'unknown'
                     _tool_names = list(agent_runner.function_map.keys()) if hasattr(agent_runner, 'function_map') else []
                     _sys_prompt = ''
-                    if current_history and current_history[0].get(ROLE) == SYSTEM:
-                        _sys_prompt = current_history[0].get(CONTENT, '')[:2000]
+                    if current_history and current_history[0]:
+                        first_msg = current_history[0]
+                        if isinstance(first_msg, dict):
+                            if first_msg.get(ROLE) == SYSTEM:
+                                _sys_prompt = str(first_msg.get(CONTENT, '') or '')[:2000]
+                        elif hasattr(first_msg, 'role'):
+                            if getattr(first_msg, 'role', None) == SYSTEM:
+                                _sys_prompt = str(getattr(first_msg, 'content', '') or '')[:2000]
                     _cfg_fp = TelemetryCollector.fingerprint_config(
                         model=_model_name,
                         generate_cfg=ui_cfg,
@@ -1773,13 +1798,13 @@ def create_app(agents, agent_pool, config=None):
                         continue
                     # Remove trailing assistant/function messages
                     while (session['history']
-                           and session['history'][-1].get(ROLE) in (ASSISTANT, FUNCTION)):
+                           and _get_msg_role(session['history'][-1]) in (ASSISTANT, FUNCTION)):
                         session['history'].pop()
 
                     # Roll back one more (the user message) to allow a clean re-trigger
                     # and ensure consistency with the last_turn_snapshots.
                     last_user_msg = None
-                    if session['history'] and session['history'][-1].get(ROLE) == USER:
+                    if session['history'] and _get_msg_role(session['history'][-1]) == USER:
                         last_user_msg = session['history'].pop()
 
                     if not session['history'] and not last_user_msg:

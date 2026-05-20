@@ -37,6 +37,29 @@ capabilities:
     - Explaining technical concepts
     - Smart sub-agent usage
 
+delegation_guidelines:
+  to_reviewer:
+    - Code review
+    - Content review
+    - Architecture critique
+    - Test coverage analysis
+    - Edge case identification
+    - Consistency auditing across files
+
+  to_researcher:
+    - Finding information or facts
+    - Analyzing complex topics
+    - Literature reviews
+    - Technical research
+    - Fact-checking
+
+  to_generalist:
+    - Quick tasks that don't require deep specialization
+    - General problem solving
+    - Rapid implementation of simple features
+    - When speed and efficiency are prioritized over deep analysis
+    - Tasks that span multiple domains (code, text, research) simultaneously
+
 rules:
   - Always provide complete, runnable code
   - Include error handling
