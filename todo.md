@@ -24,6 +24,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] need a memory consolidation task ran periodically - takes all summaries in log and arranges them in a neat continuous package like long term memory -> replaces last summary
 [ ] warn agents about message limit at 90%
 [x] Add argument to edit_file tool to use exact/heuristic match mode of old content (can solve issues with tricky bits of code that are hard to hit, default on exact match)
+[ ] Auto approve shell_cmd find and dir commands (as long as they don't contain other things piggybacking after)
 
 # BUGS:
 
