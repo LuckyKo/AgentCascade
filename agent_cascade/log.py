@@ -131,15 +131,24 @@ def _threading_excepthook(args):
     """Replace threading.excepthook to log uncaught thread exceptions."""
     try:
         thread_name = args.thread.name if args.thread else "unknown"
+        # Python 3.12+ renamed exc_tb -> exc_traceback in _thread._ExceptHookArgs
+        if hasattr(args, 'exc_traceback'):
+            tb = args.exc_traceback
+        elif hasattr(args, 'exc_tb'):
+            tb = args.exc_tb
+        else:
+            tb = None
         logger.error(
             "Uncaught exception in thread %s", thread_name,
-            exc_info=(args.exc_type, args.exc_value, args.exc_tb)
+            exc_info=(args.exc_type, args.exc_value, tb)
         )
+        if tb is None:
+            logger.warning("Uncaught exception in thread %s — no traceback available", thread_name)
     except Exception:
         # During interpreter shutdown logger may be None; fall back to stderr
         import traceback
         _original_stderr.write(traceback.format_exception(
-            args.exc_type, args.exc_value, args.exc_tb))
+            args.exc_type, args.exc_value, tb))
         _original_stderr.flush()
 
 threading.excepthook = _threading_excepthook
