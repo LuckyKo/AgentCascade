@@ -268,13 +268,14 @@ class ParallelAgentManager:
         return any(owner == session_name for _, owner, _ in self.active_tasks.values())
 
     def count_active_tasks_by_class(self, agent_class: str) -> int:
-        """Count how many active parallel tasks are running for a given agent class."""
+        """Count how many active parallel tasks are running for a given agent class (case-insensitive)."""
+        agent_class = (agent_class or '').strip().lower()
         return sum(1 for _, _, a_class in self.active_tasks.values() if a_class == agent_class)
 
     def submit_task(self, orchestrator, tool_name: str, tool_args: dict, current_response: List[Message], manager_history: List[Message]) -> str:
         """Submit a sub-agent stream to the background pool and return immediately."""
         instance_name = tool_args.get('instance_name', 'unknown')
-        agent_class = tool_args.get('agent_class', 'unknown')
+        agent_class = (tool_args.get('agent_class', 'unknown') or '').strip().lower()  # Normalize for case-insensitive tracking
         
         # We need a safe copy of the history to prevent thread mutation issues
         # (Though _stream_sub_agent_call itself makes copies, passing references 
@@ -309,7 +310,7 @@ class ParallelAgentManager:
                     del self.active_tasks[instance_name]
 
         future = self.executor.submit(task_wrapper)
-        self.active_tasks[instance_name] = (future, orchestrator.session_name)
+        self.active_tasks[instance_name] = (future, orchestrator.session_name, agent_class)
         return f"[Started agent '{instance_name}' in parallel. You will be notified via an async message when it finishes. You may continue with other tasks.]"
 
 
@@ -1146,7 +1147,7 @@ class OrchestratorAgent(Assistant):
 
                         if isinstance(parsed_args, dict) and parsed_args.get('parallel_launch') is True:
                             # ── Check Concurrency Limits ──
-                            agent_class = parsed_args.get('agent_class')
+                            agent_class = (parsed_args.get('agent_class') or '').strip().lower()  # Normalize for case-insensitive lookup
                             is_parallel_allowed = True
                             
                             if agent_class and hasattr(self.agent_pool, 'api_router'):
@@ -1476,7 +1477,7 @@ class OrchestratorAgent(Assistant):
             args = tool_args
 
         instance_name = args.get('instance_name', '')
-        agent_class = args.get('agent_class', '')
+        agent_class = (args.get('agent_class', '') or '').strip().lower()  # Normalize to lowercase for case-insensitive lookup
 
         # Prevent state corruption when an agent calls ITSELF recursively.
         # If the instance is already in the stack, cloning its state ensures

@@ -19,17 +19,17 @@ class AgentInstanceLogger:
     """Handles persistent logging for an agent instance."""
     
     def __init__(self, agent_class: str, instance_name: str, log_dir: str, base_metadata: Optional[Dict] = None):
-        self.agent_class = agent_class
+        self.agent_class = (agent_class or '').strip().lower()  # Normalize for case-insensitive tracking
         self.instance_name = instance_name
         self.start_time = datetime.datetime.now()
         
         timestamp = self.start_time.strftime("%Y%m%d_%H%M%S")
-        filename = f"{agent_class}_{instance_name}_{timestamp}.jsonl"
+        filename = f"{self.agent_class}_{instance_name}_{timestamp}.jsonl"
         self.log_path = os.path.join(log_dir, filename)
         
         self.data = {
             "metadata": {
-                "agent_class": agent_class,
+                "agent_class": self.agent_class,  # Already normalized to lowercase
                 "instance_name": instance_name,
                 "start_timestamp": self.start_time.isoformat(),
                 "last_update": self.start_time.isoformat(),

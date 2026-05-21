@@ -23,7 +23,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] need a memory consolidation task ran periodically - takes all summaries in log and arranges them in a neat continuous package like long term memory -> replaces last summary
 [ ] warn agents about message limit at 90%
 [ ] make cmd_shell pop open a console window in the back so the user can inspect or interact with it if needed.
-[ ] make the call_agent arguments case insensitive
+[x] make the call_agent arguments case insensitive (2026-05-21)
 
 # BUGS:
 
@@ -35,8 +35,5 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - need better timeout protection on code interpreter and cmd_shell, we are still having issues with it getting stuck. watchdog sometimes kills container but fails to return the error back to agent. doesnt start new containers if users stops them.
 - stop button should halt all operations too (like code_intepreter or shell_cmds)
 - cmd_shell timeout does not kill processes that take to long, leaving it stray and blocking the system
-- forced compression seems to have mangle the active message pool causing the agent to forget some of the last few entries. the log was correct, after reload it was good.
-- forced compression fed 0 messages, ends up placing empty summary at tail
-- forced compression doesn't introduce a warning message at tail informing the agent about the event
 
 # EOF

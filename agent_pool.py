@@ -181,7 +181,7 @@ class AgentPool:
                 if len(parts) < 3: continue
                 
                 # Handling names with underscores
-                agent_class = parts[0]
+                agent_class = parts[0].strip().lower()  # Normalize for case-insensitive lookup
                 timestamp = parts[-2] + "_" + parts[-1]
                 instance_name = "_".join(parts[1:-2])
                 
@@ -444,8 +444,10 @@ rules:
         return agent
     
     def get_agent(self, agent_name: str) -> Optional[Assistant]:
-        """Get an agent by name."""
-        return self.agents.get(agent_name)
+        """Get an agent by name (case-insensitive)."""
+        if not agent_name:
+            return None
+        return self.agents.get(agent_name.strip().lower())
     
     def update_llm_cfg(self, new_cfg: dict):
         """Update the global LLM config and propagate it to all loaded agents."""
@@ -686,7 +688,7 @@ rules:
 
         # Determine instance and class
         instance_name = target_instance or metadata.get("instance_name") or "RecoveredSession"
-        agent_class = metadata.get("agent_class") or "Orchestrator"
+        agent_class = (metadata.get("agent_class") or "Orchestrator").strip().lower()  # Normalize for case-insensitive lookup
 
         # Filter out event markers and ensure role/content exist
         cleaned_messages = []
