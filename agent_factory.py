@@ -111,7 +111,18 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
 
     # ── Code Interpreter (sandbox) ──
     try:
-        code_tool = CodeInterpreter(cfg={'work_dir': str(agent_pool.operation_manager.base_dir)})
+        om = agent_pool.operation_manager
+        code_cfg = {'work_dir': str(om.base_dir)}
+        if hasattr(om, 'extra_work_folders_ro') and om.extra_work_folders_ro:
+            code_cfg['extra_work_folders_ro'] = [str(p) for p in om.extra_work_folders_ro]
+        if hasattr(om, 'extra_work_folders_rw') and om.extra_work_folders_rw:
+            code_cfg['extra_work_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
+        # Debug log when no extra folders are configured so operators know why nothing is mounted
+        if not code_cfg.get('extra_work_folders_ro') and not code_cfg.get('extra_work_folders_rw'):
+            logger.debug("CodeInterpreter: No extra work folders configured (RO/RW)")
+        code_tool = CodeInterpreter(cfg=code_cfg)
+        # Pass operation_manager reference so _start_kernel can read updated extra folders dynamically
+        code_tool._operation_manager = om
         agent.function_map['code_interpreter'] = code_tool
     except Exception as e:
         logger.warning(f"Failed to load CodeInterpreter for agent {agent_name}: {e}")
@@ -148,6 +159,9 @@ Workspace & Path Reference:
 - code_interpreter runs Python inside a Docker container where the workspace is mounted at "/workspace/".
   So a file at "src/main.py" (used by host tools) is available at "/workspace/src/main.py" inside Docker.
   The container's working directory is /workspace, so relative paths like "src/main.py" also work.
+  Additional mounted folders (if configured) appear as "/workspace/extra_rw_N" (writable) and
+  "/workspace/extra_ro_N" (read-only). A path mapping file "path_mapping_{kernel_id}.json" in the
+  work_dir lists all mounts with their host paths and access modes — read it to discover available folders.
 - NEVER use host-absolute paths (like "N:\\..." or "/home/user/...") in any tool — they will not resolve correctly.
 """
 

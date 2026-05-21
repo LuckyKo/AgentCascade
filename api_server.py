@@ -539,6 +539,8 @@ def create_app(agents, agent_pool, config=None):
                 # Incremental token counting for sub-agents.
                 # During streaming, sub-agent histories are mostly static — they only change
                 # when a new message arrives from that sub-agent (rare during main agent ticks).
+                # NOTE: slice_history_for_llm only appends/removes messages (never mutates in-place),
+                # so if active_count == last_active_count the cached stats are guaranteed valid.
                 cache_key = '_sa_stats_' + name
                 last_active_count = session.get(cache_key + '_count', -1)
                 
@@ -561,18 +563,22 @@ def create_app(agents, agent_pool, config=None):
                         stats = get_history_stats(active_msgs)
                     
                     session[cache_key + '_count'] = active_count
+                    session[cache_key] = stats.copy()  # FIX: Store stats so next call can use the cache
                 elif active_count < last_active_count:
                     # FIX2 (history shrank due to compression): Recompute from scratch.
                     # slice_history_for_llm may have dropped older messages after a context_summary,
                     # so the cached stats would overcount tokens if we reused them.
                     stats = get_history_stats(active_msgs)
                     session[cache_key + '_count'] = active_count
+                    session[cache_key] = stats.copy()  # FIX: Store stats so next call can use the cache
                 elif cache_key in session:
                     # Same active count AND cache exists — use cached stats (avoids tiktoken.encode per tick)
                     stats = session.get(cache_key, {'tokens': 0, 'words': 0}).copy()
                 else:
                     # First access or cache missing — compute stats to populate the cache
                     stats = get_history_stats(active_msgs)
+                    session[cache_key + '_count'] = active_count  # FIX: Also store count for next comparison
+                    session[cache_key] = stats.copy()  # FIX: Store stats so next call can use the cache
                 
                 # Dynamically extract summary from messages if missing from tracker (e.g. after restart)
                 summary = agent_pool.instance_summaries.get(name, "")
@@ -902,7 +908,8 @@ def create_app(agents, agent_pool, config=None):
             )
 
             if work_access_folders is not None and agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-                agent_pool.operation_manager.set_extra_work_folders(work_access_folders)
+                # Legacy format: work_access_folders is treated as RW folders (no RO)
+                agent_pool.operation_manager.set_extra_work_folders([], work_access_folders)
 
             has_llm = hasattr(agent_runner, 'llm') and agent_runner.llm
             old_cfg = None

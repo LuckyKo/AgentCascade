@@ -129,12 +129,12 @@ class FileManager:
                     files.append(item.name)
             
             if dirs:
-                result += "📁 Directories:\n"
+                result += "Directories:\n"
                 for d in sorted(dirs):
-                    result += f"  📂 {d}/\n"
+                    result += f"  [dir] {d}/\n"
             
             if files:
-                result += "\n📄 Files:\n"
+                result += "\nFiles:\n"
                 for f in sorted(files):
                     # Show file size
                     try:
@@ -142,7 +142,7 @@ class FileManager:
                         size_str = f"{size:,} bytes" if size > 1000 else f"{size} bytes"
                     except:
                         size_str = "?"
-                    result += f"  📝 {f} ({size_str})\n"
+                    result += f"  [file] {f} ({size_str})\n"
             
             if not dirs and not files:
                 result += "  (empty directory)"

@@ -41,12 +41,15 @@ COMPRESSION_PROMPT = (
 
 COMPRESSION_BASELINE_TEMPLATE = (
     COMPRESSION_MARKER + " ({header}) ---\n"
+    "**[SYSTEM NOTICE]**: Context compression was applied. {compression_notice}\n"
     "The following is a summary of the conversation context that was removed to save space.\n"
     "Summary of previous context:\n"
     "<context_summary>\n"
     "{summary}\n"
     "</context_summary>"
 )
+
+COMPRESSION_NOTICE_TEMPLATE = "A portion of earlier conversation history ({fraction}%) has been summarized to preserve context space. The key information from those messages is captured below."
 
 # --- Security Advisor ---
 SECURITY_ADVISOR_PROMPT = (
@@ -157,13 +160,22 @@ TOOL_METADATA = {
     },
     'grep': {
         'description': (
-            'Search for a text pattern in files (supports regex). Like the grep command.\n'
+            'Search for a text pattern in files. Supports Python regex syntax.\n'
+            '- Smart case by default: case-insensitive unless pattern contains uppercase letters.\n'
+            '- Respects .gitignore/.rgignore when ignore_vcs is True (default).\n'
+            '- Use "context" to show surrounding lines (like -C N in grep/ripgrep).\n'
+            '- Matched text is prefixed with ">>>" when context is used; context lines have spaces.\n'
+            '- Groups of matches are separated by "---".\n'
             'NOTE: All paths are relative to the workspace root.'
         ),
         'parameters': {
-            'pattern': 'Text or regex pattern to search for',
+            'pattern': 'Text or regex pattern to search for (Python regex syntax)',
             'path': 'Directory to search in, relative to workspace root (default: ".")',
-            'include': 'File pattern to include (e.g., "*.py", "*.md")'
+            'include': 'File glob pattern to include (e.g., "*.py", "*.md"). Default: "*"',
+            'exclude': 'File glob pattern to exclude (e.g., "*_test.py", "docs/*"). Default: ""',
+            'ignore_vcs': 'When True (default), skip .git/ and other VCS/build directories. Set False to search everything.',
+            'context': 'Number of lines to show before/after each match (like -C N). Default: 0',
+            'smart_case': 'When True (default), case-insensitive unless pattern contains uppercase letters. Set False for always case-insensitive.'
         }
     },
     'delete_file': {

@@ -548,8 +548,8 @@ class OrchestratorAgent(Assistant):
         log_dir = Path('workspace/logs')
         log_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        safe_tool = tool_name.replace('/', '_').replace('\\', '_')
-        safe_instance = instance_name.replace('/', '_').replace('\\', '_')
+        safe_tool = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name)
+        safe_instance = re.sub(r'[^a-zA-Z0-9_-]', '_', instance_name)
         spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}.txt"
         spill_path = log_dir / spill_filename
         
@@ -621,7 +621,8 @@ class OrchestratorAgent(Assistant):
                 # Call tool directly with 50% fraction
                 params = json.dumps({
                     'fraction': 0.5,
-                    'justification': f'CRITICAL THRESHOLD REACHED ({usage_pct:.1f}%)'
+                    'justification': f'CRITICAL THRESHOLD REACHED ({usage_pct:.1f}%)',
+                    'force': True
                 })
 
                 # Pass necessary kwargs for direct application

@@ -15,11 +15,15 @@ import uuid
 import threading
 import time
 import difflib
+import shutil
+import subprocess
+import fnmatch
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import lru_cache
 from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_HEURISTIC_MATCH_THRESHOLD
 from agent_cascade.log import logger
 
@@ -54,6 +58,44 @@ class PendingApproval:
 
 # Timeout for user approval (seconds). Auto-rejects after this.
 APPROVAL_TIMEOUT_SECONDS = 300  # 5 minutes
+
+# Maximum size for spill files (grep/shell output saved to disk). Prevents disk exhaustion.
+MAX_SPILL_SIZE = 50 * 1024 * 1024  # 50MB
+
+
+# ─── Module-level cached helpers (P1-1, P3-1) ─────────────────────────────
+
+@lru_cache(maxsize=256)
+def _compile_grep_pattern(pattern: str, *, flags: int = 0):
+    """Cache compiled regex patterns for grep to avoid recompiling on each call.
+    
+    Args:
+        pattern: The regex pattern string.
+        flags: Optional re.IGNORECASE flag for case-insensitive matching (smart_case).
+            Keyword-only to prevent cache key collisions between positional and keyword calls.
+    """
+    return re.compile(pattern, flags)
+
+
+@lru_cache(maxsize=512)
+def _path_is_contained_cached(path_str: str, container_str: str) -> bool:
+    """Cached path containment check using os.path.commonpath().
+    
+    Prevents sibling-directory escape. Case-insensitive on all platforms.
+    Cached to avoid repeated commonpath() calls during file operations.
+    """
+    try:
+        common = os.path.commonpath([path_str, container_str])
+        return common.lower() == container_str.lower()
+    except ValueError:
+        # Different drive letters on Windows (e.g., C:\ vs D:\)
+        return False
+
+
+# Cache tool availability at module level — doesn't change at runtime
+_RIPGREP_AVAILABLE = shutil.which('rg') is not None
+# On Windows, standard grep may be a Git Bash wrapper that hangs
+_GREP_AVAILABLE = (shutil.which('grep') is not None) and (os.name != 'nt')
 
 
 class OperationManager:
@@ -104,7 +146,8 @@ class OperationManager:
             if not backup_base.exists():
                 return
             if agent_name:
-                agent_backup_dir = backup_base / agent_name
+                safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+                agent_backup_dir = backup_base / safe_agent
                 if agent_backup_dir.exists():
                     shutil.rmtree(agent_backup_dir)
             else:
@@ -253,6 +296,11 @@ class OperationManager:
 
     # ─── Path Resolution ──────────────────────────────────────────────────
 
+    @staticmethod
+    def _path_is_contained(path: Path, container: Path) -> bool:
+        """Check if *path* is inside *container* using the cached containment check."""
+        return _path_is_contained_cached(str(path), str(container))
+
     def _resolve_path(self, path: str, mode: str = "ro") -> Path:
         """Resolve a path to be within the allowed directories (security)."""
         # Handle virtual /workspace/ prefix
@@ -274,24 +322,18 @@ class OperationManager:
             resolved = (self.base_dir / clean_path).resolve()
         
         # 1. Base directory is always RW (and thus RO)
-        if str(resolved).startswith(str(self.base_dir)):
-            return resolved
-        if os.name == 'nt' and str(resolved).lower().startswith(str(self.base_dir).lower()):
+        if self._path_is_contained(resolved, self.base_dir):
             return resolved
 
         # 2. Check extra RW folders (allowed for both RO and RW)
         for extra in self.extra_work_folders_rw:
-            if str(resolved).startswith(str(extra)):
-                return resolved
-            if os.name == 'nt' and str(resolved).lower().startswith(str(extra).lower()):
+            if self._path_is_contained(resolved, extra):
                 return resolved
 
         # 3. Check extra RO folders (allowed only if mode is "ro")
         if mode == "ro":
             for extra in self.extra_work_folders_ro:
-                if str(resolved).startswith(str(extra)):
-                    return resolved
-                if os.name == 'nt' and str(resolved).lower().startswith(str(extra).lower()):
+                if self._path_is_contained(resolved, extra):
                     return resolved
 
         raise ValueError(f"Path '{path}' is outside the allowed {mode.upper()} directories")
@@ -300,7 +342,7 @@ class OperationManager:
     # ─── Read Operations (Free Access) ────────────────────────────────────
 
     def list_directory(self, path: str = ".") -> str:
-        """List contents of a directory."""
+        """List contents of a directory using os.scandir() for cached stat info."""
         try:
             resolved = self._resolve_path(path)
             if not resolved.exists():
@@ -311,26 +353,30 @@ class OperationManager:
             result = f"Contents of {path}/ (Absolute path: {resolved}):\n\n"
             dirs = []
             files = []
-            for item in resolved.iterdir():
-                if item.is_dir():
-                    dirs.append(item.name)
-                else:
-                    files.append(item.name)
+            with os.scandir(str(resolved)) as it:
+                for entry in it:
+                    if entry.is_dir():
+                        dirs.append(entry.name)
+                    else:
+                        try:
+                            size = entry.stat().st_size  # stat is cached from scandir
+                        except Exception:
+                            size = None
+                        files.append((entry.name, size))
 
             if dirs:
-                result += "📁 Directories:\n"
+                result += "Directories:\n"
                 for d in sorted(dirs):
-                    result += f"  📂 {d}/\n"
+                    result += f"  {d}/\n"
 
             if files:
-                result += "\n📄 Files:\n"
-                for f in sorted(files):
-                    try:
-                        size = (resolved / f).stat().st_size
+                result += "\nFiles:\n"
+                for fname, size in sorted(files):
+                    if size is not None:
                         size_str = f"{size:,} bytes" if size > 1000 else f"{size} bytes"
-                    except:
+                    else:
                         size_str = "?"
-                    result += f"  📝 {f} ({size_str})\n"
+                    result += f"  {fname} ({size_str})\n"
 
             if not dirs and not files:
                 result += "  (empty directory)"
@@ -340,7 +386,7 @@ class OperationManager:
             return f"Error listing directory: {str(e)}"
 
     def read_file(self, path: str, start_line: int = 1, limit: int = 1000) -> str:
-        """Read a file."""
+        """Read a file. Uses line-by-line iteration for memory efficiency when range is specified."""
         try:
             resolved = self._resolve_path(path, mode="ro")
             if not resolved.exists():
@@ -348,32 +394,365 @@ class OperationManager:
             if not resolved.is_file():
                 return f"Not a file: {path}"
 
+            end_line = start_line + limit - 1
+            total_lines = 0
+            hit_end = False
+            
             with open(resolved, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-
-            total_lines = len(lines)
-            start_idx = max(0, start_line - 1)
-            end_idx = min(total_lines, start_idx + limit)
-
-            content = "".join([f"{i+1}: {lines[i]}" for i in range(start_idx, end_idx)])
-            header = f"File content ({path}), lines {start_idx+1} to {end_idx} of {total_lines}:"
-            if end_idx < total_lines:
+                lines = []
+                for line_num, line in enumerate(f, 1):
+                    total_lines = line_num
+                    if line_num < start_line:
+                        continue  # skip to start
+                    if line_num > end_line:
+                        hit_end = True
+                        break     # stop at limit
+                    lines.append(line.rstrip('\n'))
+            
+            # If we didn't hit the limit, total_lines is accurate. Otherwise file is longer.
+            if hit_end:
+                total_lines_str = f">{total_lines}"
+            else:
+                total_lines_str = str(total_lines)
+            # Format output with line numbers (1-indexed from start_line)
+            content = "".join([f"{start_line + i}: {lines[i]}" for i in range(len(lines))])
+            header = f"File content ({path}), lines {start_line} to {start_line + len(lines) - 1} of {total_lines_str}:"
+            if hit_end:
                 header += " [TRUNCATED]"
 
             return f"{header}\n```\n{content}\n```"
         except Exception as e:
             return f"Error reading file: {str(e)}"
 
-    def grep(self, pattern: str, path: str = ".", include: str = "*", char_limit: int = 2000, agent_name: str = "unknown") -> str:
-        """Search for text pattern in files."""
+    # ── Subprocess grep fast path (P0-1) ────────────────────────────────────
+
+    def _try_subprocess_grep(self, pattern: str, path: Path, include: str, char_limit: int, timeout: float,
+                             exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True):
+        """Fast-path grep using system ripgrep or grep via subprocess.
+        
+        Returns (results_list, count, was_timed_out) on success, or (None, 0, False) on failure.
+        Output format matches Python fallback: "relative_path:line_number: content"
+        """
+        # Only try subprocess path if at least one tool is available (cached at module level)
+        if not _RIPGREP_AVAILABLE and not _GREP_AVAILABLE:
+            return None, 0, False
+        
+        try:
+            if _RIPGREP_AVAILABLE:
+                # ripgrep command — supports Perl regex, fast recursive search
+                cmd = [
+                    'rg',
+                    '-r',           # recursive
+                    '--no-heading', # don't print filename before each match group
+                    '-n',           # line numbers
+                    '--color', 'never',  # no ANSI color codes
+                    '--no-mmap',    # disable mmap — handle binary files gracefully like Python fallback
+                ]
+                
+                # H1: VCS/ignore support — default ripgrep respects .gitignore; disable with --no-ignore
+                if not ignore_vcs:
+                    cmd.extend(['--no-ignore'])
+                
+                # H3: Context lines
+                if context > 0:
+                    cmd.extend(['-C', str(context)])
+                
+                # M1: Smart case — ripgrep default is smart_case; only add -i when pattern has no uppercase
+                # Issue 4: Check for inline flags like (?-i:) that explicitly set case sensitivity
+                has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
+                if smart_case:
+                    # Smart case: only add -i if pattern has no uppercase letters
+                    if not re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
+                        cmd.append('-i')
+                # else: Not smart case — always case-sensitive (no -i flag)
+                
+                # H1: Exclude glob pattern
+                if exclude:
+                    cmd.extend(['--glob', f'!{exclude}'])
+                
+                cmd.extend([
+                    '--glob', include,  # file filter (include pattern)
+                    pattern,
+                ])
+            else:
+                # Standard grep — only reached on Unix-like systems (Windows grep may hang)
+                cmd = [
+                    'grep',
+                    '-r',           # recursive
+                    '--include=' + include,  # file filter
+                    '-n',           # line numbers
+                ]
+                
+                # M1: Smart case for standard grep too
+                has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
+                if smart_case:
+                    # Smart case: only add -i if pattern has no uppercase letters
+                    if not re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
+                        cmd.append('-i')
+                # else: Not smart case — always case-sensitive (no -i flag)
+                
+                # H3: Context lines (standard grep supports -C)
+                if context > 0:
+                    cmd.extend(['-C', str(context)])
+                
+                # H1: Exclude glob for standard grep
+                if exclude:
+                    cmd.append('--exclude=' + exclude)
+                
+                cmd.append(pattern)
+            
+            result = subprocess.run(
+                cmd,
+                cwd=str(path),
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            
+            if result.returncode == 0:
+                lines = result.stdout.split('\n') if result.stdout.strip() else []
+                # Convert grep/rg output (file:line:content) to our format (file:line: content)
+                formatted = []
+                # H3: When context is active, we need to distinguish match lines from context lines.
+                # ripgrep uses space prefix for context; standard grep uses "-" in filename part.
+                _match_re = re.compile(r'^(.+?):(\d+):(.*)$')  # file:linenum:content
+                _ctx_re = re.compile(r'^(.+?)-(\d+)-(.*)$')   # file-linenum-content (std grep context)
+                
+                for line in lines:
+                    if not line:
+                        continue
+                    # H3: When context is active, ripgrep outputs "---" separators and includes
+                    # line numbers for context lines. Standard grep uses "--" as separator.
+                    if line == "---" or line == "--":
+                        formatted.append("---")  # Normalize both to "---"
+                        continue
+                    
+                    # First try to parse as a match line (file:linenum:content)
+                    m = _match_re.match(line)
+                    if m:
+                        raw_path, linenum, content = m.groups()
+                        normalized_path = raw_path.replace('\\', '/')
+                        # M3: Don't strip content — preserve whitespace (important for Python/YAML)
+                        if _RIPGREP_AVAILABLE and context > 0 and normalized_path.startswith(' '):
+                            # Context line from ripgrep (path starts with space)
+                            normalized_path = normalized_path[1:]
+                            formatted.append(f"{normalized_path}:{linenum}:     {content}")
+                        elif context > 0:
+                            # Match line in context mode (ripgrep or standard grep)
+                            formatted.append(f"{normalized_path}:{linenum}: >>>{content}")
+                        else:
+                            # No context mode — just normalize
+                            formatted.append(f"{normalized_path}:{linenum}: {content}")
+                    elif not _RIPGREP_AVAILABLE and context > 0:
+                        # Standard grep with context: try to parse as context line (file-linenum-content)
+                        c = _ctx_re.match(line)
+                        if c:
+                            ctx_path, ctx_linenum, ctx_content = c.groups()
+                            normalized_ctx_path = ctx_path.replace('\\', '/')
+                            formatted.append(f"{normalized_ctx_path}:{ctx_linenum}:     {ctx_content}")
+                        else:
+                            # Can't parse — keep raw line
+                            formatted.append(line)
+                    else:
+                        formatted.append(line)
+                
+                # Count only actual match lines, not context lines or separators
+                if context > 0:
+                    count = sum(1 for l in formatted if ">>>" in l)
+                else:
+                    count = sum(1 for l in formatted if l != "---")
+                
+                # If char_limit is set and output exceeds it, truncate within subprocess path too
+                if char_limit != -1 and count > 0:
+                    output_size = sum(len(l) for l in formatted) + count  # +count for newlines
+                    if output_size > char_limit:
+                        # Truncate to fit within char_limit
+                        byte_budget = char_limit
+                        truncated = []
+                        for line in formatted:
+                            if byte_budget < len(line) + 1:
+                                break
+                            truncated.append(line)
+                            byte_budget -= len(line) + 1
+                        formatted = truncated
+                        # Recount after truncation (count only match lines)
+                        if context > 0:
+                            count = sum(1 for l in formatted if ">>>" in l)
+                        else:
+                            count = sum(1 for l in formatted if l != "---")
+                
+                return formatted, count, False
+            
+            # Non-zero return code (e.g., grep returns 1 for no matches) — still valid
+            if result.returncode == 1:
+                return [], 0, False
+                
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass  # Fall through to Python implementation
+        
+        return None, 0, False
+
+    def _grep_single_file(self, file_path: Path, pattern: str, char_limit: int,
+                          include: str = "*", exclude: str = "", context: int = 0, smart_case: bool = True) -> str:
+        """Search a single file for a regex pattern. Used when path is a file instead of directory."""
+        # Compute normalized relative path once (used for glob matching and output formatting)
+        try:
+            normalized_rel_path = str(file_path.relative_to(self.base_dir)).replace('\\', '/')
+        except ValueError:
+            normalized_rel_path = file_path.name
+
+        # Check include/exclude globs against the relative path (consistent with Python fallback)
+        if not fnmatch.fnmatch(normalized_rel_path, include):
+            return f"No matches found for pattern '{pattern}' in {file_path.name}"
+        if exclude and fnmatch.fnmatch(normalized_rel_path, exclude):
+            return f"No matches found for pattern '{pattern}' in {file_path.name} (excluded by {exclude})"
+
+        # Determine case-sensitivity flags
+        has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
+        if smart_case and re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
+            flags = 0  # Case-sensitive (smart case, pattern has uppercase)
+        elif smart_case:
+            flags = re.IGNORECASE  # Smart case, pattern is all lowercase
+        else:
+            flags = 0  # Not smart case — always case-sensitive
+
+        try:
+            pattern_re = _compile_grep_pattern(pattern, flags=flags)
+        except re.error as e:
+            return f"ERROR: Invalid regex pattern '{pattern}': {str(e)}. Please provide a valid Python regular expression."
+
+        try:
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+        except Exception as e:
+            return f"Error reading file {file_path.name}: {str(e)}"
+
+        lines = content.split('\n')
+        results = []
+        match_count = 0
+        hit_result_limit = False
+        was_timed_out = False
+        start_time = time.time()
+        timeout = 30.0  # seconds
+
+        if context > 0:
+            for line_num, line in enumerate(lines, 1):
+                if pattern_re.search(line):
+                    match_count += 1
+                    start = max(1, line_num - context)
+                    end = min(len(lines), line_num + context)
+                    for ctx_line in range(start - 1, end):
+                        prefix = ">>>" if ctx_line + 1 == line_num else "    "
+                        results.append(f"{normalized_rel_path}:{ctx_line + 1}: {prefix}{lines[ctx_line]}")
+                    results.append("---")
+                # Fix 4: Periodic timeout check inside context mode loop
+                if len(results) % 200 == 0 and time.time() - start_time > timeout:
+                    was_timed_out = True
+                    break
+                if len(results) > 5000:
+                    hit_result_limit = True
+                    break
+        else:
+            for line_num, line in enumerate(lines, 1):
+                if pattern_re.search(line):
+                    match_count += 1
+                    results.append(f"{normalized_rel_path}:{line_num}: {line}")
+                # Fix 4: Periodic timeout check inside non-context mode loop
+                if len(results) % 500 == 0 and time.time() - start_time > timeout:
+                    was_timed_out = True
+                    break
+                if len(results) > 5000:
+                    hit_result_limit = True
+                    break
+
+        if not results:
+            return f"No matches found for pattern '{pattern}' in {file_path.name}"
+
+        summary = f"Found {match_count} matches for '{pattern}'"
+        if context > 0:
+            summary += f" (with {context} line(s) of context)"
+        output_text = '\n'.join(results)
+
+        if was_timed_out:
+            summary += f" [TIMED OUT after {int(timeout)}s]"
+        elif hit_result_limit:
+            summary += " [TRUNCATED at 5000 results]"
+
+        if char_limit != -1 and len(output_text) > char_limit:
+            output_text = output_text[:char_limit] + "\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded.]"
+            summary += " [TRUNCATED]"
+
+        return f"{summary}:\n\n" + output_text
+
+    def grep(self, pattern: str, path: str = ".", include: str = "*", char_limit: int = 2000, agent_name: str = "unknown",
+             exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True) -> str:
+        """Search for text pattern in files.
+        
+        Args:
+            pattern: Regex pattern to search for (Python regex syntax).
+            path: Directory to search in (relative to workspace root, default ".").
+            include: Glob pattern for files to include (default "*").
+            char_limit: Maximum character count before truncation (default 2000, -1 for unlimited).
+            agent_name: Name of the calling agent (for logging).
+            exclude: Glob pattern for files/directories to exclude (default "").
+            ignore_vcs: When True (default), ripgrep respects .gitignore. Set False to search all files.
+            context: Number of lines to show before/after each match (default 0, like -C N in grep).
+            smart_case: When True (default), case-insensitive unless pattern has uppercase letters.
+        
+        Uses subprocess-based grep (ripgrep or system grep) as a fast path,
+        falling back to pure Python if the subprocess approach fails/times out.
+        """
         try:
             resolved = self._resolve_path(path)
             if not resolved.exists():
                 return f"Directory not found: {path}"
 
+            # Handle file paths — search the single file directly
+            if resolved.is_file():
+                return self._grep_single_file(resolved, pattern, char_limit, include=include,
+                                             exclude=exclude, context=context, smart_case=smart_case)
+
+            # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
+            results, count, was_timed_out = self._try_subprocess_grep(
+                pattern=pattern, path=resolved, include=include,
+                char_limit=char_limit, timeout=30.0,
+                exclude=exclude, ignore_vcs=ignore_vcs, context=context, smart_case=smart_case
+            )
+            if results is not None:
+                # Subprocess grep succeeded — format and return
+                if count == 0:
+                    # Don't return early — fall through to Python fallback which may find matches
+                    # in hidden directories or handle globs differently
+                    logger.debug(f"grep: subprocess found no matches for '{pattern}', trying Python fallback")
+                else:
+                    output_text = '\n'.join(results)
+                    summary = f"Found {count} matches for '{pattern}'"
+                    if context > 0:
+                        summary += f" (with {context} line(s) of context)"
+                    if was_timed_out:
+                        summary += f" [TIMED OUT after 30s]"
+
+                    # Truncate if needed (no spill file — orchestrator handles its own)
+                    if char_limit != -1 and len(output_text) > char_limit:
+                        output_text = output_text[:char_limit] + "\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded.]"
+                        summary += " [TRUNCATED]"
+
+                    return f"{summary}:\n\n" + output_text
+
+            # ── Slow path: pure Python fallback ──
+            logger.debug(f"grep: subprocess fast path unavailable (rg={_RIPGREP_AVAILABLE}, grep={_GREP_AVAILABLE}), falling back to Python")
             results = []
+            
+            # M1: Smart case — compile with or without IGNORECASE based on pattern content
+            # Issue 4: Respect inline regex flags like (?-i:) for explicit case sensitivity
+            has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
+            if smart_case and re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
+                flags = 0  # Case-sensitive (smart case, pattern has uppercase)
+            elif smart_case:
+                flags = re.IGNORECASE  # Smart case, pattern is all lowercase
+            else:
+                flags = 0  # Not smart case — always case-sensitive
             try:
-                pattern_re = re.compile(pattern, re.IGNORECASE)
+                pattern_re = _compile_grep_pattern(pattern, flags=flags)
             except re.error as e:
                 return f"ERROR: Invalid regex pattern '{pattern}': {str(e)}. Please provide a valid Python regular expression."
 
@@ -382,40 +761,97 @@ class OperationManager:
             was_timed_out = False
             hit_result_limit = False
             file_count = 0
+            match_count = 0  # Track actual matches (not context/separator lines)
+            
+            # H1: Directories to skip (VCS/build artifacts) in Python fallback
+            skip_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build', '.tox'}
+            
             for file_path in resolved.rglob(include):
                 if time.time() - start_time > timeout:
                     was_timed_out = True
                     break
                 if file_path.is_file():
+                    # H1: Skip files in VCS/build directories (only when ignore_vcs=True)
+                    if ignore_vcs:
+                        parts = file_path.relative_to(resolved).parts
+                        if any(p in skip_dirs for p in parts):
+                            continue
+                    # H1: Skip files matching the exclude glob pattern (use fnmatch for ** support)
+                    if exclude:
+                        try:
+                            rel = file_path.relative_to(resolved)
+                            if fnmatch.fnmatch(str(rel), exclude):
+                                continue
+                        except ValueError:
+                            pass  # Fallback — can't determine relative path
                     try:
                         content = file_path.read_text(encoding='utf-8', errors='ignore')
                         lines = content.split('\n')
-                        for line_num, line in enumerate(lines, 1):
-                            if pattern_re.search(line):
-                                try:
-                                    rel_path = file_path.relative_to(self.base_dir)
-                                except ValueError:
-                                    rel_path = file_path.name # Fallback
-                                results.append(f"{rel_path}:{line_num}: {line.strip()}")
-                            # Periodic timeout check inside line loop to prevent single huge files from bypassing it
-                            if len(results) % 500 == 0 and time.time() - start_time > timeout:
-                                was_timed_out = True
+                        
+                        if context > 0:
+                            # H3: Context lines mode — store extra lines around each match
+                            for line_num, line in enumerate(lines, 1):
+                                if pattern_re.search(line):
+                                    match_count += 1  # Count actual matches
+                                    start = max(1, line_num - context)
+                                    end = min(len(lines), line_num + context)
+                                    for ctx_line in range(start - 1, end):
+                                        # >>> prefix on matched line, spaces for context lines
+                                        prefix = ">>>" if ctx_line + 1 == line_num else "    "
+                                        try:
+                                            normalized_rel_path = str(file_path.relative_to(self.base_dir)).replace('\\', '/')
+                                        except ValueError:
+                                            normalized_rel_path = file_path.name
+                                        # M3: Don't strip — preserve whitespace; H2: normalize path separators
+                                        results.append(f"{normalized_rel_path}:{ctx_line + 1}: {prefix}{lines[ctx_line]}")
+                                    # Separator between context groups
+                                    results.append("---")
+                                # Issue 6: Periodic timeout check inside context mode loop
+                                if len(results) % 200 == 0 and time.time() - start_time > timeout:
+                                    was_timed_out = True
+                                    break
+                                if len(results) > 5000:
+                                    hit_result_limit = True
+                                    break
+                        else:
+                            # Standard mode (no context)
+                            for line_num, line in enumerate(lines, 1):
+                                if pattern_re.search(line):
+                                    match_count += 1  # Count actual matches
+                                    try:
+                                        rel_path = file_path.relative_to(self.base_dir)
+                                    except ValueError:
+                                        rel_path = file_path.name  # Fallback
+                                    normalized_rel_path = str(rel_path).replace('\\', '/')
+                                    # M3: Don't strip — preserve whitespace; H2: normalize path separators
+                                    results.append(f"{normalized_rel_path}:{line_num}: {line}")
+                                # Periodic timeout check inside line loop to prevent single huge files from bypassing it
+                                if len(results) % 500 == 0 and time.time() - start_time > timeout:
+                                    was_timed_out = True
+                                    break
+                            if was_timed_out:
                                 break
-                        if was_timed_out:
-                            break
+                        
                         file_count += 1  # Count only successfully processed files
-                        if len(results) > 5000: # Safety limit to prevent OOM
+                        if len(results) > 5000:  # Safety limit to prevent OOM
                             hit_result_limit = True
                             break
                     except Exception:
                         continue
 
+            # Fix 3: Debug log when Python fallback also finds no matches (subprocess already confirmed)
+            if not results and not was_timed_out:
+                logger.debug(f"grep: Python fallback also found no matches for '{pattern}' (subprocess already confirmed)")
+
             if not results:
                 if was_timed_out:
                     return f"Search timed out after {int(timeout)}s before finding any matches for '{pattern}'. Narrow your pattern or scope."
-                return f"No matches found for pattern '{pattern}' in {path}/**/{include}"
+                exclude_info = f", excluding {exclude}" if exclude else ""
+                return f"No matches found for pattern '{pattern}' in {path}/**/{include}{exclude_info}"
 
-            summary = f"Found {len(results)} matches for '{pattern}'"
+            summary = f"Found {match_count} matches for '{pattern}'"
+            if context > 0:
+                summary += f" (with {context} line(s) of context)"
             output_text = '\n'.join(results)
             
             if was_timed_out:
@@ -424,25 +860,9 @@ class OperationManager:
             elif hit_result_limit:
                 summary += " [TRUNCATED at 5000 results]"
 
-            if char_limit != -1 and len(output_text) > char_limit and not hit_result_limit:
-                # Save full result to spill file
-                log_dir = self.base_dir / 'logs'
-                log_dir.mkdir(parents=True, exist_ok=True)
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                safe_agent = agent_name.replace('/', '_').replace('\\', '_')
-                spill_filename = f"{safe_agent}_grep_{timestamp}.txt"
-                spill_path = log_dir / spill_filename
-                
-                try:
-                    spill_path.write_text(output_text, encoding='utf-8')
-                    try:
-                        rel_spill = str(spill_path.relative_to(self.base_dir))
-                    except ValueError:
-                        rel_spill = str(spill_path)
-                except Exception as e:
-                    rel_spill = f"ERROR SAVING SPILL: {e}"
-
-                output_text = output_text[:char_limit] + f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. Full output saved to: {rel_spill}]"
+            if char_limit != -1 and len(output_text) > char_limit:
+                # P0-2: Truncate silently — no spill file (orchestrator handles its own)
+                output_text = output_text[:char_limit] + "\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded.]"
                 summary += " [TRUNCATED]"
 
             return f"{summary}:\n\n" + output_text
@@ -481,7 +901,8 @@ class OperationManager:
             backup_path_str = ""
             if resolved.exists():
                 import time, shutil
-                backup_dir = self.base_dir / "logs" / "backups" / agent_name
+                safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+                backup_dir = self.base_dir / "logs" / "backups" / safe_agent
                 backup_dir.mkdir(parents=True, exist_ok=True)
                 backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
                 shutil.copy2(resolved, backup_path)
@@ -523,7 +944,7 @@ class OperationManager:
         if match_mode == 'exact':
             count = file_content.count(old_content)
             if count == 0:
-                return f"ERROR: Pattern not found in {path}. The 'old_content' string must exactly match the existing file content character-for-character, including whitespace and indentation."
+                return f"ERROR: Pattern not found in {path}. The 'old_content' string must exactly match the existing file content character-for-character, including whitespace and indentation, or consider using heuristic match mode."
             if count > 1:
                 return f"ERROR: Pattern found {count} times in {path}. The 'old_content' block must be unique. Please include more surrounding lines in 'old_content' to make it unique."
         elif match_mode == 'heuristic':
@@ -743,7 +1164,8 @@ class OperationManager:
         try:
             import time, shutil
             resolved = self._resolve_path(path, mode="rw")
-            backup_dir = self.base_dir / "logs" / "backups" / agent_name
+            safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+            backup_dir = self.base_dir / "logs" / "backups" / safe_agent
             backup_dir.mkdir(parents=True, exist_ok=True)
             backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
             shutil.copy2(resolved, backup_path)
@@ -890,29 +1312,138 @@ class OperationManager:
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
 
+    @staticmethod
+    def _is_safe_readonly_shell_command(command: str) -> bool:
+        """
+        Check if a shell command is purely read-only (directory listing/search).
+
+        Safe commands: find, dir, ls, tree — without dangerous piggybacking.
+
+        Returns False (requires approval) if the command contains any of:
+          - Command chaining: && ; ||
+          - Pipes to anything other than safe pager/sort/head/tail/grep
+          - Subshell execution: $(...) or backticks
+          - Redirections that write: > >>
+          - Background processes: & (not inside &&)
+          - Any non-read-only commands
+        """
+        cmd = command.strip()
+        if not cmd:
+            return False
+
+        # Check for dangerous patterns first (these always require approval)
+        # Command chaining with && ; ||
+        # We need to be careful: 'find ... -name "*.py" | grep "foo"' is fine, but
+        # 'find . ; rm -rf /' is not.
+        if '&&' in cmd or ';' in cmd or '||' in cmd:
+            return False
+
+        # Subshell execution: $(...) or backticks
+        if '$(' in cmd or '`' in cmd:
+            return False
+
+        # Redirections that write to files (but not 2>/dev/null for suppressing errors)
+        # Match > or >> that are NOT part of /dev/null or NUL patterns
+        redirect_match = re.search(r'>[^>]', cmd)
+        if redirect_match:
+            # Check if it redirects to /dev/null or NUL (which is safe - just discards output)
+            redir_target = redirect_match.group(0)
+            if '/dev/null' not in redir_target and 'NUL' not in redir_target.upper():
+                return False
+
+        # Background processes: & that's not part of && (already checked above)
+        # Simple check: if there's a standalone & not preceded by another &
+        if re.search(r'(?<!&)&(?!&)', cmd):
+            return False
+
+        # Extract the primary command(s) — split on pipe
+        pipeline = cmd.split('|')
+        
+        # Safe secondary commands in a pipe (sorting, filtering, paging)
+        SAFE_PIPE_COMMANDS = {
+            'grep', 'egrep', 'fgrep', 'head', 'tail', 'sort', 'uniq', 
+            'wc', 'cat', 'more', 'less', 'awk', 'sed', 'cut', 'tr',
+            'tee', 'xargs', 'comm', 'diff', 'nl', 'rev', 'fold'
+        }
+
+        # Safe primary commands (read-only filesystem operations)
+        SAFE_PRIMARY_COMMANDS = {
+            'find', 'dir', 'ls', 'tree', 'dir', 'directory',
+            'vfd', 'where', 'whereis', 'locate', 'which', 'type',
+            'pwd', 'stat', 'file', 'du', 'df',
+        }
+
+        # Parse the first command in the pipeline (the primary action)
+        first_cmd_part = pipeline[0].strip()
+        
+        # Handle Windows commands with / switches: "dir /s /b"
+        # Also handle "cmd /c dir ..." patterns
+        words = first_cmd_part.split()
+        if not words:
+            return False
+
+        primary_cmd = words[0].lower()
+
+        # Check for "cmd /c" or "powershell -c" wrappers — not auto-approvable
+        if primary_cmd in ('cmd', 'command.com'):
+            # cmd /c could run anything, so reject
+            return False
+        if primary_cmd in ('powershell', 'pwsh'):
+            return False
+
+        # Check if the primary command is a safe read-only command
+        if primary_cmd not in SAFE_PRIMARY_COMMANDS:
+            return False
+
+        # For "find" commands, check that they don't use -exec with dangerous actions
+        if primary_cmd == 'find':
+            # find -exec is dangerous if it runs arbitrary commands
+            if '-exec' in cmd or '-ok' in cmd:
+                return False
+
+        # Check all subsequent pipeline stages are safe
+        for i, stage in enumerate(pipeline[1:], 1):
+            stage_words = stage.strip().split()
+            if not stage_words:
+                continue
+            stage_cmd = stage_words[0].lower()
+            if stage_cmd not in SAFE_PIPE_COMMANDS:
+                return False
+
+        return True
+
     def execute_shell_command(self, command: str, justification: str, agent_name: str, cwd: str = ".", char_limit: int = 2000) -> str:
-        """Execute a shell command — NEVER auto-approved, always requires user approval."""
+        """Execute a shell command — auto-approved for safe read-only commands (find, dir, ls), requires user approval for everything else."""
         try:
             resolved_cwd = self._resolve_path(cwd, mode="rw") # shell commands usually need RW for artifacts
         except Exception as e:
             return f"ERROR: Invalid working directory: {str(e)}"
 
-        description = (
-            f"⚠️ **SECURITY WARNING**: This is a host shell command. It can potentially bypass folder restrictions!\n\n"
-            f"**CWD**: {resolved_cwd}\n"
-            f"**Execute Shell Command**:\n```bash\n{command}\n```\n**Justification**: {justification}"
-        )
+        # Check if this is a safe read-only command that can be auto-approved
+        is_safe = self._is_safe_readonly_shell_command(command)
         
-        approved, reason = self.request_user_approval(
-            agent_name=agent_name,
-            tool_name='shell_cmd',
-            tool_args={'command': command, 'justification': justification, 'cwd': cwd},
-            description=description,
-        )
-        
-        if not approved:
-            return f"REJECTED BY USER: {reason}"
-        justification_text = reason
+        if is_safe:
+            # Auto-approve safe read-only commands without user interaction
+            approved = True
+            reason = "Auto-approved: safe read-only filesystem operation"
+            justification_text = reason
+        else:
+            description = (
+                f"⚠️ **SECURITY WARNING**: This is a host shell command. It can potentially bypass folder restrictions!\n\n"
+                f"**CWD**: {resolved_cwd}\n"
+                f"**Execute Shell Command**:\n```bash\n{command}\n```\n**Justification**: {justification}"
+            )
+            
+            approved, reason = self.request_user_approval(
+                agent_name=agent_name,
+                tool_name='shell_cmd',
+                tool_args={'command': command, 'justification': justification, 'cwd': cwd},
+                description=description,
+            )
+            
+            if not approved:
+                return f"REJECTED BY USER: {reason}"
+            justification_text = reason
             
         try:
             import subprocess
@@ -947,11 +1478,14 @@ class OperationManager:
                 log_dir = self.base_dir / 'logs'
                 log_dir.mkdir(parents=True, exist_ok=True)
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                safe_agent = agent_name.replace('/', '_').replace('\\', '_')
+                safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
                 spill_filename = f"{safe_agent}_shell_{timestamp}.txt"
                 spill_path = log_dir / spill_filename
                 
                 try:
+                    # Cap spill file to prevent disk exhaustion from massive shell output
+                    if len(output) > MAX_SPILL_SIZE:
+                        output = output[:MAX_SPILL_SIZE] + "\n\n[SPILL FILE TRUNCATED — exceeded maximum size]"
                     spill_path.write_text(output, encoding='utf-8')
                     try:
                         rel_spill = str(spill_path.relative_to(self.base_dir))
@@ -963,9 +1497,13 @@ class OperationManager:
                 final_output = output[:char_limit] + f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. Full output saved to: {rel_spill}]"
                 status += " [TRUNCATED]"
 
-            final_msg = f"APPROVED: {status}\n"
-            if justification_text:
-                final_msg += f"Security Justification: {justification_text}\n"
+            # Format output differently for auto-approved vs user-approved
+            if is_safe:
+                final_msg = f"AUTO-APPROVED: {status}\n"
+            else:
+                final_msg = f"APPROVED: {status}\n"
+                if justification_text:
+                    final_msg += f"Security Justification: {justification_text}\n"
             return final_msg + f"\n{final_output}"
             
         except subprocess.TimeoutExpired:
@@ -975,11 +1513,12 @@ class OperationManager:
 
     # ─── Context Compression (still internal, auto-approved) ──────────────
 
-    def apply_context_compression(self, agent_name: str, summary: str, fraction: float, num_to_remove: int = None, agent_obj: Optional[Any] = None):
+    def apply_context_compression(self, agent_name: str, summary: str, fraction: float, target_discard_count: Optional[int] = None, agent_obj: Optional[Any] = None):
         """Apply context compression — this is internal so no user approval needed."""
         if not self.agent_pool:
             raise ValueError("agent_pool not connected to OperationManager")
-        self.agent_pool._apply_context_compression(agent_name, summary, fraction, num_to_remove=num_to_remove, agent_obj=agent_obj)
+        logger.info(f"Applying context compression for {agent_name}: {fraction*100}% fraction, {target_discard_count} messages to discard")
+        self.agent_pool._apply_context_compression(agent_name, summary, fraction, target_discard_count=target_discard_count, agent_obj=agent_obj)
 
     # ─── Utilities ────────────────────────────────────────────────────────
 

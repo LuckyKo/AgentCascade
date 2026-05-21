@@ -23,8 +23,15 @@ from agent_cascade.settings import DEFAULT_WORKSPACE
 
 from agent_logger import AgentInstanceLogger
 from telemetry import TelemetryCollector
-from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE, COMPRESSION_MARKER
+from agent_cascade.prompts.dna import (
+    COMPRESSION_BASELINE_TEMPLATE, 
+    COMPRESSION_MARKER,
+    COMPRESSION_NOTICE_TEMPLATE
+)
 from api_router import APIRouter
+
+# Minimum length for a valid compression summary (below this, skip insertion)
+MIN_SUMMARY_LENGTH = 10
 
 
 class AgentPool:
@@ -550,6 +557,37 @@ rules:
             
         return list(sliced)
 
+    def get_compression_target_set(self, agent_name: str) -> tuple[Optional[int], List[Union[dict, Message]], int]:
+        """
+        Returns the compression target set for an agent: 
+        (active_start_idx, messages_to_compress, latest_summary_idx).
+        Shared helper used by both the compress_context tool and _apply_context_compression.
+        
+        active_start_idx: The index where the active (uncompressed) set begins.
+        messages_to_compress: The list of active messages eligible for compression.
+        latest_summary_idx: The index of the most recent compression marker (-1 if none).
+        """
+        history = self.get_conversation(agent_name)
+        if not history:
+            return None, [], -1
+        
+        # Determine start index (skip system message if present)
+        start_idx = 1 if (history[0].get('role') == SYSTEM if isinstance(history[0], dict) else getattr(history[0], 'role', '') == SYSTEM) else 0
+        
+        # Find the latest compression marker to identify the active set boundary
+        latest_summary_idx = -1
+        for i in range(len(history) - 1, -1, -1):
+            msg = history[i]
+            content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+            if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                latest_summary_idx = i
+                break
+        
+        active_start_idx = latest_summary_idx + 1 if latest_summary_idx != -1 else start_idx
+        messages_to_compress = history[active_start_idx:]
+        
+        return active_start_idx, messages_to_compress, latest_summary_idx
+
     def clear_conversation(self, instance_name: str):
         """Clear an agent instance's conversation history."""
         self.instance_conversations.pop(instance_name, None)
@@ -807,36 +845,30 @@ rules:
         
         self.instance_conversations[instance_name] = messages
     
-    def _apply_context_compression(self, agent_name: str, summary: str, fraction: float, num_to_remove: int = None, agent_obj=None):
+    def _apply_context_compression(self, agent_name: str, summary: str, fraction: float, target_discard_count: Optional[int] = None, agent_obj=None):
         """
         Actually replace the oldest messages in an agent's history with a summary.
         Called by OperationManager after approval.
+        
+        If target_discard_count is provided, used as-is (subject to safety clamps).
+        If None, calculated from fraction.
         """
-        history = self.get_conversation(agent_name)
-        if not history:
+        # Use shared helper to determine the active compression set
+        active_start_idx, messages_to_compress, latest_summary_idx = self.get_compression_target_set(agent_name)
+        if not messages_to_compress:
+            logger.warning(f"No messages to compress for agent '{agent_name}': empty conversation history")
             return
-            
+        
         # Keep the first message if it's SYSTEM
         system_msg = None
         start_idx = 0
+        history = self.get_conversation(agent_name)
         first_role = history[0].get('role') if isinstance(history[0], dict) else getattr(history[0], 'role', '')
         if first_role == SYSTEM:
             system_msg = history[0]
             start_idx = 1
-            
-        # Find latest summary to only compress the active set
-        latest_summary_idx = -1
-        for i in range(len(history) - 1, -1, -1):
-            msg = history[i]
-            content = msg.get('content', '') if isinstance(history[i], dict) else getattr(history[i], 'content', '')
-            if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                latest_summary_idx = i
-                break
-                
-        active_start_idx = latest_summary_idx + 1 if latest_summary_idx != -1 else start_idx
-        messages_to_compress = history[active_start_idx:]
         
-        # DEBUG: verify last summary content in pool
+        # DEBUG: verify last summary content in pool (only at debug level)
         _pool_last_summary_preview = ""
         _pool_post_summary_preview = ""
         if latest_summary_idx != -1:
@@ -851,7 +883,7 @@ rules:
         
         from agent_cascade.utils.tokenization_qwen import count_tokens
         
-        if num_to_remove is None:
+        if target_discard_count is None:
             # Fallback: Calculate total tokens to find the actual fraction of content to compress
             total_tokens = 0
             token_counts = []
@@ -881,33 +913,49 @@ rules:
             target_tokens = int(total_tokens * fraction)
             
             tokens_seen = 0
-            num_to_remove = 0
+            target_discard_count = 0
             for count in token_counts:
                 tokens_seen += count
-                num_to_remove += 1
-                if tokens_seen >= target_tokens and num_to_remove < len(messages_to_compress) - 1:
+                target_discard_count += 1
+                if tokens_seen >= target_tokens and target_discard_count < len(messages_to_compress) - 1:
                     break
                 
-        # Ensure we remove at least 1 message if possible
-        num_to_remove = max(1, num_to_remove)
+        # Not enough messages to compress meaningfully - need at least 3 to keep 2 tail messages
+        if len(messages_to_compress) <= 2:
+            logger.warning(f"Not enough active messages to compress for agent '{agent_name}': only {len(messages_to_compress)} available")
+            return
         
         # Safety clamp: don't compress more messages than exist in the active set.
-        # This can happen if compression_tools passes an inflated num_to_summarize
-        # (e.g., when there are already compressed summaries in the history).
-        num_to_remove = min(num_to_remove, len(messages_to_compress))
+        # Also ensure at least 2 messages remain after the summary marker for agent continuity.
+        target_discard_count = min(target_discard_count, len(messages_to_compress))
+        if len(messages_to_compress) > 2:
+            target_discard_count = min(target_discard_count, len(messages_to_compress) - 2)
+        
+        # Safety floor: ensure at least 1 message is compressed if we reach this point.
+        # For normal tool flow, this is unreachable (tool rejects <= 0).
+        # For forced compression or direct callers, this prevents no-op compression events.
+        # NOTE: Applied AFTER clamps so the clamp doesn't defeat the floor.
+        if target_discard_count <= 0:
+            logger.warning(f"target_discard_count was 0 for agent '{agent_name}', forcing minimum of 1")
+            target_discard_count = 1
         
         # The compression summary marker itself acts as a safe starting point 
         # for the active context, so we don't need to scan for non-FUNCTION roles.
         # This ensures the exact fraction requested by the user is respected.
         pass
             
-        if num_to_remove <= 0:
+        # Guard: if the summary is empty or trivially short (likely generated from no content), skip insertion.
+        # This prevents inserting meaningless markers that confuse the agent and slice_history_for_llm.
+        if not summary or len(summary.strip()) < MIN_SUMMARY_LENGTH:
+            logger.warning(f"Empty or trivial summary for agent '{agent_name}' (len={len(summary) if summary else 0}), skipping compression insertion")
             return
-            
-        # Create the summary text
+        
+        # Create the summary text using the notice template from dna.py
+        compression_notice = COMPRESSION_NOTICE_TEMPLATE.format(fraction=int(fraction * 100))
         summary_text = COMPRESSION_BASELINE_TEMPLATE.format(
             header=f"{int(fraction * 100)}% of history summarized",
-            summary=summary
+            summary=summary,
+            compression_notice=compression_notice
         )
         
         # New history baseline marker
@@ -915,11 +963,11 @@ rules:
         summary_msg = {'role': USER, 'content': str(summary_text)} if is_dict else Message(role=USER, content=str(summary_text))
         
         # 1. CUMULATIVE: Insert summary marker at the boundary position.
-        #    The boundary is right after the summarized messages (active_start_idx + num_to_remove).
+        #    The boundary is right after the summarized messages (active_start_idx + target_discard_count).
         #    We do NOT pop the summarized messages to provide full visibility in the UI.
         #    The slice_history_for_llm method handles actual LLM truncation by scanning
         #    for the COMPRESSION_MARKER.
-        insert_pos = active_start_idx + num_to_remove
+        insert_pos = active_start_idx + target_discard_count
         history.insert(insert_pos, summary_msg)
         
         # 2. Track the active summary
@@ -931,17 +979,17 @@ rules:
         #    This avoids problems from pool/log divergence: the log may have extra
         #    incrementally-logged messages that shift absolute positions, but the
         #    number of tail messages is stable and comparable.
-        tail_count = len(messages_to_compress) - num_to_remove
-        logger.info(f"[COMPRESSION DEBUG] Agent={agent_name}, pool_summary_idx={latest_summary_idx}, active_start={active_start_idx}, active_set={len(messages_to_compress)}, num_to_remove={num_to_remove}, insert_pos={insert_pos}, tail={tail_count}")
-        logger.info(f"[COMPRESSION DEBUG] Pool summary preview: {_pool_last_summary_preview[:100]}")
-        logger.info(f"[COMPRESSION DEBUG] Pool post-summary preview: {_pool_post_summary_preview[:100]}")
+        tail_count = len(messages_to_compress) - target_discard_count
+        logger.debug(f"[COMPRESSION DEBUG] Agent={agent_name}, pool_summary_idx={latest_summary_idx}, active_start={active_start_idx}, active_set={len(messages_to_compress)}, target_discard_count={target_discard_count}, insert_pos={insert_pos}, tail={tail_count}")
+        logger.debug(f"[COMPRESSION DEBUG] Pool summary preview: {_pool_last_summary_preview[:100]}")
+        logger.debug(f"[COMPRESSION DEBUG] Pool post-summary preview: {_pool_post_summary_preview[:100]}")
         
         if agent_name in self.instance_loggers:
             self.instance_loggers[agent_name].insert_compression_marker(
                 summary_msg, tail_count
             )
         
-        logger.info(f"Cumulative compression: Inserted summary after {num_to_remove} messages for agent '{agent_name}'. Full history preserved in memory.")
+        logger.info(f"Cumulative compression: Inserted summary after {target_discard_count} messages for agent '{agent_name}'. Full history preserved in memory.")
     
     def get_agent_info(self, agent_name: str) -> Optional[dict]:
         """Get info about a specific agent."""

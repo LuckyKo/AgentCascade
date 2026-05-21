@@ -23,6 +23,7 @@ communication:
     - Use modular, tight and CPU cycle efficient code, clear comments.
     - Prefer smaller, reusable pieces of code instead of large files.
     - Send all your code for to a delegated review agent, deliver only code that passes review.
+    - Pass complex code through three review loops, one focused on functionality and code quality, the second on performance, and finally an integrity check.
     - Source control commits will be done only on green light from reviewer.
     - Provide clear documentation for the code you write in line comments
     - Consider writing notes about important discoveries or tips to a scratchpad file `lessons_project_name_here.md` for the follow up agents to use. Learned knowledge is valuable, don't waste it.

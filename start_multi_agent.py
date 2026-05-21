@@ -190,6 +190,7 @@ if __name__ == '__main__':
             if 'code_interpreter' in default_tools:
                 try:
                     agent.function_map['code_interpreter'] = code_interpreter.CodeInterpreter(cfg={'work_dir': DEFAULT_WORKSPACE})
+                    agent.function_map['code_interpreter']._operation_manager = agent_pool.operation_manager
                 except Exception:
                     pass
             
@@ -236,6 +237,7 @@ if __name__ == '__main__':
     if 'code_interpreter' in default_orch_tools:
         try:
             orchestrator.function_map['code_interpreter'] = code_interpreter.CodeInterpreter(cfg={'work_dir': DEFAULT_WORKSPACE})
+            orchestrator.function_map['code_interpreter']._operation_manager = agent_pool.operation_manager
         except Exception:
             pass
 

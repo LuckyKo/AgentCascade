@@ -36,6 +36,11 @@ class CompressContext(BaseTool):
             'summary_text': {
                 'type': 'string',
                 'description': TOOL_METADATA['compress_context']['parameters']['summary_text']
+            },
+            'force': {
+                'type': 'boolean',
+                'description': 'If true, bypass normal validation guards and compress regardless of message count. Used for forced compression at critical thresholds.',
+                'default': False
             }
         },
         'required': ['fraction'],
@@ -137,6 +142,7 @@ class CompressContext(BaseTool):
         params = self._verify_json_format_args(params)
         fraction = min(params.get('fraction', 0.2), 1.0)
         justification = params.get('justification', 'Context management')
+        force = params.get('force', False)  # Whether to bypass normal validation guards
         
         if not self.agent_pool:
             return "ERROR: agent_pool not connected to tool"
@@ -160,28 +166,9 @@ class CompressContext(BaseTool):
         if not history:
             return "ERROR: No conversation history to compress."
             
-        # Handle both dicts (from pool) and Message objects (from kwargs)
-        start_idx = 0
-        first_msg = history[0]
-        first_role = first_msg.get('role') if isinstance(first_msg, dict) else getattr(first_msg, 'role', '')
+        # Use shared helper from agent_pool to determine the active compression set
+        active_start_idx, active_set, latest_summary_idx = self.agent_pool.get_compression_target_set(agent_name)
         
-        if first_role == SYSTEM:
-            start_idx = 1
-            
-        # 1. Identify the 'active set' of messages (those not yet summarized)
-        latest_summary_idx = -1
-        for i in range(len(history) - 1, -1, -1):
-            msg = history[i]
-            content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-            if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                latest_summary_idx = i
-                break
-        
-        if latest_summary_idx != -1:
-            active_set = history[latest_summary_idx + 1:]
-        else:
-            active_set = history[start_idx:]
-            
         if not active_set:
             return "ERROR: No active messages to compress."
 
@@ -208,21 +195,31 @@ class CompressContext(BaseTool):
         target_tokens = int(total_tokens * fraction)
         
         tokens_seen = 0
-        num_to_discard = 0
+        target_discard_count = 0
         if total_tokens > 0:
             for count in token_counts:
                 tokens_seen += count
-                num_to_discard += 1
+                target_discard_count += 1
                 # Stop once we've reached the target token budget
                 if tokens_seen >= target_tokens:
                     break
         else:
             # Fallback to message count if tokens can't be calculated
-            num_to_discard = int(len(active_set) * fraction)
+            target_discard_count = int(len(active_set) * fraction)
         
         # Safety: ensure we leave at least 2 active messages at the tail for continuity.
-        # We also allow num_to_discard to be 0 if the history is too short to keep 2 messages.
-        num_to_discard = max(0, min(num_to_discard, len(active_set) - 2))
+        # We also allow target_discard_count to be 0 if the history is too short to keep 2 messages.
+        target_discard_count = max(0, min(target_discard_count, len(active_set) - 2))
+        
+        # If nothing to discard, skip compression — no point generating a summary from empty content.
+        # Unless force=True, in which case we compress at least 1 message.
+        if target_discard_count <= 0:
+            if not force:
+                return "Not enough messages to compress; deferring further compression until more messages accumulate."
+            else:
+                # Forced compression: compress at least 1 message even if the active set is small
+                logger.info(f"Forced compression for agent '{agent_name}': setting minimum discard count of 1")
+                target_discard_count = 1
 
         # 3. Determine the messages to be sent to the Compression Agent for summarization.
         #    To optimize context usage, we surgically send only the messages being
@@ -230,18 +227,17 @@ class CompressContext(BaseTool):
         if latest_summary_idx != -1:
             # Part A: The latest summary (context boundary).
             # Part B: The new messages from the active set being discarded.
-            target_messages = history[latest_summary_idx : latest_summary_idx + 1 + num_to_discard]
+            target_messages = history[latest_summary_idx : latest_summary_idx + 1 + target_discard_count]
             
-            # num_to_summarize is the number of active messages to compress.
+            # target_discard_count is the number of active messages to compress.
             # _apply_context_compression independently finds the latest summary marker
-            # and inserts the new one at active_start_idx + num_to_remove, so we only
+            # and inserts the new one at active_start_idx + target_discard_count, so we only
             # need to tell it how many active messages to skip over — NOT the total
             # count from start_idx (which would include already-compressed history).
-            num_to_summarize = num_to_discard
+            pass  # target_discard_count is already set above
         else:
             # First compression: just send the messages we are about to compress.
-            num_to_summarize = num_to_discard
-            target_messages = active_set[:num_to_summarize]
+            target_messages = active_set[:target_discard_count]
         
         # Determine compression mode (default 'auto' = LLM-generated summary)
         mode = params.get('mode', 'auto')
@@ -272,7 +268,7 @@ class CompressContext(BaseTool):
                 agent_name=agent_name,
                 summary=summary,
                 fraction=fraction,
-                num_to_remove=num_to_summarize,
+                target_discard_count=target_discard_count,
                 agent_obj=agent_obj,
             )
             
@@ -311,6 +307,11 @@ class CompressContext(BaseTool):
                     # Mutate directly so the caller's reference is updated
                     active_msgs.clear()
                     active_msgs.extend(new_active)
+                    
+                    # Verification: ensure compression didn't remove too many messages.
+                    # If fewer than 2 active messages remain, something went wrong with the compression.
+                    if len(new_active) < 2:
+                        logger.warning(f"Compression may have removed too many messages for agent '{agent_name}': only {len(new_active)} active messages remain")
 
             return (
                 f"Context compressed ({mode} mode): {int(fraction*100)}% of older history for agent '{agent_name}' has been summarized."

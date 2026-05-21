@@ -20,19 +20,23 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] unify the chat and subagent tabs (merge best of both). same for other logic inside - there should be no difference between orchestrator and other subagents, its only a call tree.
 [ ] implement "branch" button on main chat message bubbles, branching an agent history from that point into a new session.
 [ ] implement rate limits for each API endpoint to avoid spamming and getting locked out.
-[x] add console logging to server - need expansion, doesnt cover all errors
 [ ] need a memory consolidation task ran periodically - takes all summaries in log and arranges them in a neat continuous package like long term memory -> replaces last summary
 [ ] warn agents about message limit at 90%
-[x] Add argument to edit_file tool to use exact/heuristic match mode of old content (can solve issues with tricky bits of code that are hard to hit, default on exact match)
+[ ] make cmd_shell pop open a console window in the back so the user can inspect or interact with it if needed.
+[ ] make the call_agent arguments case insensitive
 
 # BUGS:
 
 - security advisor gets spammed with new calls from a single request (Auto-Ask ON) - HIGH PRIO
 - edit/delete message bubbles broke after we added trim chat history option
 - streaming does not fill message bubble in full sometimes before popping the next bubble.
-- duplicates user entries in logger
+- duplicates user entries in logger when hitting retry
 - LOG API POST dump seems broken
 - need better timeout protection on code interpreter and cmd_shell, we are still having issues with it getting stuck. watchdog sometimes kills container but fails to return the error back to agent. doesnt start new containers if users stops them.
-- 
+- stop button should halt all operations too (like code_intepreter or shell_cmds)
+- cmd_shell timeout does not kill processes that take to long, leaving it stray and blocking the system
+- forced compression seems to have mangle the active message pool causing the agent to forget some of the last few entries. the log was correct, after reload it was good.
+- forced compression fed 0 messages, ends up placing empty summary at tail
+- forced compression doesn't introduce a warning message at tail informing the agent about the event
 
 # EOF

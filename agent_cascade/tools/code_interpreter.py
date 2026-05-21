@@ -63,8 +63,8 @@ DOCKER_IMAGE_FILE = str(Path(__file__).absolute().parent / 'resource' / 'code_in
 _KERNEL_CLIENTS: dict = {}
 _DOCKER_CONTAINERS: Dict[str, str] = {}
 
-# Track last activity per kernel for watchdog
-_KERNEL_ACTIVITY: Dict[str, float] = {}
+# Track last activity per kernel for watchdog (value is {'last_active': float, 'work_dir': str})
+_KERNEL_ACTIVITY: Dict[str, dict] = {}
 
 
 def _kill_kernels_and_containers(_sig_num=None, _frame=None):
@@ -112,8 +112,8 @@ def _kernel_watchdog():
         _WATCHDOG_TERMINATE.wait(timeout=5)
         now = time.time()
         stale_kernels = []
-        for kernel_id, last_active in list(_KERNEL_ACTIVITY.items()):
-            if now - last_active > CONTAINER_WATCHDOG_TIMEOUT:
+        for kernel_id, activity in list(_KERNEL_ACTIVITY.items()):
+            if now - activity['last_active'] > CONTAINER_WATCHDOG_TIMEOUT:
                 stale_kernels.append(kernel_id)
         
         for kernel_id in stale_kernels:
@@ -147,10 +147,8 @@ def _kernel_watchdog():
                     # Always remove from tracking even if docker stop/rm fails
                     del _DOCKER_CONTAINERS[kernel_id]
             
-            # Clean up connection files and launch script
-            work_dir_base = os.path.join(
-                os.getenv('M6_CODE_INTERPRETER_WORK_DIR', '.'), ''
-            )
+            # Clean up connection files, launch script, and path mapping — use the work_dir stored at kernel start
+            work_dir_base = _KERNEL_ACTIVITY.get(kernel_id, {}).get('work_dir', '.')
             for suffix in ['_host.json', '_container.json']:
                 conn_file = os.path.join(work_dir_base, f'kernel_connection_file_{kernel_id}{suffix}')
                 try:
@@ -165,6 +163,14 @@ def _kernel_watchdog():
                     os.remove(launch_script)
             except OSError as e:
                 logger.warning(f"Failed to remove launch script {launch_script}: {e}")
+            
+            # Clean up path mapping file for this kernel
+            mapping_file = os.path.join(work_dir_base, f'path_mapping_{kernel_id}.json')
+            try:
+                if os.path.exists(mapping_file):
+                    os.remove(mapping_file)
+            except OSError as e:
+                logger.warning(f"Failed to remove path mapping file {mapping_file}: {e}")
             
             if kernel_id in _KERNEL_ACTIVITY:
                 del _KERNEL_ACTIVITY[kernel_id]
@@ -190,8 +196,14 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
-        self.work_dir: str = os.getenv('M6_CODE_INTERPRETER_WORK_DIR', self.work_dir)
-        self.work_dir: str = self.cfg.get('work_dir', self.work_dir)
+        # Priority: config > env var > inherited default — merged into single assignment
+        env_work_dir = os.getenv('M6_CODE_INTERPRETER_WORK_DIR')
+        self.work_dir: str = str(self.cfg.get('work_dir', env_work_dir or self.work_dir))
+        # Extra work folder paths to mount into the Docker container (copied to avoid shared mutable state)
+        self.extra_work_folders_ro: List[str] = list(self.cfg.get('extra_work_folders_ro', []))
+        self.extra_work_folders_rw: List[str] = list(self.cfg.get('extra_work_folders_rw', []))
+        # Store reference to operation_manager for dynamic extra-folder resolution at kernel start time
+        self._operation_manager = None
         self.instance_id: str = str(uuid.uuid4())
         self.docker_image_name: str = 'code-interpreter:latest'
         self.container_work_dir = '/workspace'
@@ -297,7 +309,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 logger.warning(f"Kernel interrupt failed: {interrupt_err}")
             
             # Update activity timestamp so watchdog doesn't double-kill
-            _KERNEL_ACTIVITY[kernel_id] = time.time()
+            # Preserve the dict structure (watchdog reads _KERNEL_ACTIVITY[kernel_id].get('work_dir'))
+            if kernel_id in _KERNEL_ACTIVITY and isinstance(_KERNEL_ACTIVITY[kernel_id], dict):
+                _KERNEL_ACTIVITY[kernel_id]['last_active'] = time.time()
+            else:
+                _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
             
             if exec_timeout and isinstance(e, TimeoutError):
                 return f'Timeout: Code execution exceeded the {exec_timeout}-second time limit. Please optimize your code or break it into smaller steps.'
@@ -364,6 +380,84 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 pass
             finally:
                 del _DOCKER_CONTAINERS[k]
+        
+        # Clean up path mapping file for this kernel
+        mapping_file = os.path.join(self.work_dir, f'path_mapping_{k}.json')
+        try:
+            if os.path.exists(mapping_file):
+                os.remove(mapping_file)
+        except OSError:
+            pass
+
+    def _is_path_allowed(self, abs_path: str, allowed_prefixes: List[str]) -> bool:
+        """Check if a path is within an allowed directory using proper containment check.
+        
+        Uses os.path.commonpath() instead of .startswith() to prevent sibling-directory escape.
+        E.g., /workspace_extra would pass .startswith('/workspace') but fails commonpath check.
+        """
+        for prefix in allowed_prefixes:
+            try:
+                if os.path.commonpath([abs_path, prefix]) == prefix:
+                    return True
+            except ValueError:
+                # Different drive letters on Windows (e.g., C:\ vs D:\)
+                continue
+        return False
+
+    def _resolve_extra_folders(self):
+        """Resolve extra work folders, reading from operation_manager if available for dynamic config.
+        
+        Falls back to stored defaults if no operation_manager is set (e.g., standalone use).
+        Returns:
+            Tuple of (extra_rw_list, extra_ro_list) as lists of strings.
+        """
+        if self._operation_manager is not None:
+            om = self._operation_manager
+            extra_rw = [str(p) for p in getattr(om, 'extra_work_folders_rw', [])]
+            extra_ro = [str(p) for p in getattr(om, 'extra_work_folders_ro', [])]
+        else:
+            # Fall back to config-set values (backward compatible)
+            # Note: In production via agent_factory.py, _operation_manager is always set,
+            # so this path primarily serves standalone/testing use cases.
+            extra_rw = list(self.extra_work_folders_rw)
+            extra_ro = list(self.extra_work_folders_ro)
+        return extra_rw, extra_ro
+
+    def _build_path_mapping(self, kernel_id: str, mounted_rw: List[dict], mounted_ro: List[dict]) -> dict:
+        """Build the path mapping dict for a kernel.
+        
+        Args:
+            kernel_id: The kernel identifier.
+            mounted_rw: List of {'host': ..., 'container': ...} dicts for RW mounts.
+            mounted_ro: List of {'host': ..., 'container': ...} dicts for RO mounts.
+        Returns:
+            Path mapping dict ready to be serialized to JSON.
+        """
+        path_mapping = {
+            'work_dir': self.container_work_dir,
+            'extra_rw': [m['container'] for m in mounted_rw],
+            'extra_ro': [m['container'] for m in mounted_ro],
+        }
+        path_mapping['host_to_container'] = {}
+        path_mapping['host_to_container']['work_dir'] = {
+            'host': os.path.abspath(self.work_dir),
+            'container': self.container_work_dir,
+        }
+        for i, m in enumerate(mounted_rw):
+            key = f'extra_rw_{i}'
+            path_mapping['host_to_container'][key] = {
+                'host': m['host'],
+                'container': m['container'],
+                'access': 'read-write',
+            }
+        for i, m in enumerate(mounted_ro):
+            key = f'extra_ro_{i}'
+            path_mapping['host_to_container'][key] = {
+                'host': m['host'],
+                'container': m['container'],
+                'access': 'read-only',
+            }
+        return path_mapping
 
     def _build_docker_image(self):
         """Build Docker image from Dockerfile if not exists"""
@@ -457,6 +551,55 @@ class CodeInterpreter(BaseToolWithFileAccess):
             '-v', f'{os.path.abspath(self.work_dir)}:{self.container_work_dir}',
             '-w', self.container_work_dir,
         ]
+        
+        # Resolve extra folders dynamically (picks up runtime config changes if operation_manager is set)
+        extra_rw, extra_ro = self._resolve_extra_folders()
+        
+        # Track which extra folders were actually mounted (for path mapping)
+        mounted_rw = []
+        mounted_ro = []
+        
+        # Allowed prefixes for path security validation — prevent mounting arbitrary host paths
+        # Use work_dir as the allowed root; also add extra folder paths themselves since they
+        # come from trusted config and may be siblings of work_dir (not children)
+        allowed_prefixes = {os.path.realpath(self.work_dir)} if self.work_dir else set()
+        for fp in [*extra_rw, *extra_ro]:
+            rp = os.path.realpath(fp)
+            allowed_prefixes.add(rp)
+        
+        # Mount extra RW work folders as /workspace/extra_rw_0, /workspace/extra_rw_1, etc.
+        for folder_path in extra_rw:
+            abs_path = os.path.realpath(folder_path)  # resolves symlinks for security check
+            if not os.path.isdir(abs_path):
+                logger.warning("Extra RW mount path does not exist, skipping: %s", abs_path)
+                continue
+            # Security: verify path is within allowed directories (uses commonpath, not startswith)
+            if not self._is_path_allowed(abs_path, allowed_prefixes):
+                logger.warning("Extra RW mount path %s is outside allowed directories, skipping", abs_path)
+                continue
+            mount_point = f'{self.container_work_dir}/extra_rw_{len(mounted_rw)}'
+            docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}'])
+            mounted_rw.append({'host': abs_path, 'container': mount_point})
+        
+        # Mount extra RO work folders as /workspace/extra_ro_0, /workspace/extra_ro_1, etc. (read-only)
+        for folder_path in extra_ro:
+            abs_path = os.path.realpath(folder_path)  # resolves symlinks for security check
+            if not os.path.isdir(abs_path):
+                logger.warning("Extra RO mount path does not exist, skipping: %s", abs_path)
+                continue
+            # Security: verify path is within allowed directories (uses commonpath, not startswith)
+            if not self._is_path_allowed(abs_path, allowed_prefixes):
+                logger.warning("Extra RO mount path %s is outside allowed directories, skipping", abs_path)
+                continue
+            mount_point = f'{self.container_work_dir}/extra_ro_{len(mounted_ro)}'
+            docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}:ro'])
+            mounted_ro.append({'host': abs_path, 'container': mount_point})
+        
+        # Create path mapping data (file is written AFTER container starts to avoid orphaned files)
+        path_mapping = self._build_path_mapping(kernel_id, mounted_rw, mounted_ro)
+        # Store file path for writing after container confirmation
+        path_mapping_file = os.path.join(self.work_dir, f'path_mapping_{kernel_id}.json')
+
         for p in ports:
             docker_run_cmd.extend(['-p', f'{p}:{p}'])
 
@@ -474,6 +617,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
         result = subprocess.run(docker_run_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
         if result.returncode != 0:
             raise RuntimeError(f'Failed to start Docker container: {result.stderr}')
+        
+        # Container started successfully — now write the path mapping file (avoids orphaned files on failure)
+        with open(path_mapping_file, 'w') as f:
+            json.dump(path_mapping, f, indent=2)
         
         container_id = result.stdout.strip()
         logger.info(f"INFO: Docker container ID = {container_id}")
@@ -534,8 +681,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     )
                     raise RuntimeError(f'Kernel failed to start: {e}\nContainer logs:\n{logs.stdout}\n{logs.stderr}')
 
-        # Initialize activity tracking for watchdog
-        _KERNEL_ACTIVITY[kernel_id] = time.time()
+        # Initialize activity tracking for watchdog (include work_dir for cleanup)
+        _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
         
         return kc, container_id
 
@@ -619,7 +766,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
             
             # Update kernel activity timestamp for watchdog
             kernel_id = f'{self.instance_id}_{os.getpid()}'
-            _KERNEL_ACTIVITY[kernel_id] = time.time()
+            # Preserve the dict structure (watchdog reads _KERNEL_ACTIVITY[kernel_id].get('work_dir'))
+            if kernel_id in _KERNEL_ACTIVITY and isinstance(_KERNEL_ACTIVITY[kernel_id], dict):
+                _KERNEL_ACTIVITY[kernel_id]['last_active'] = time.time()
+            else:
+                _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
 
             if text:
                 result += f'\n\n{msg_type}:\n\n```\n{text}\n```'

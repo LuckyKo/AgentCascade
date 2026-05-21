@@ -574,6 +574,22 @@ class Grep(BaseTool):
             'include': {
                 'type': 'string',
                 'description': TOOL_METADATA['grep']['parameters']['include']
+            },
+            'exclude': {
+                'type': 'string',
+                'description': TOOL_METADATA['grep']['parameters']['exclude']
+            },
+            'ignore_vcs': {
+                'type': 'boolean',
+                'description': TOOL_METADATA['grep']['parameters']['ignore_vcs']
+            },
+            'context': {
+                'type': 'integer',
+                'description': TOOL_METADATA['grep']['parameters']['context']
+            },
+            'smart_case': {
+                'type': 'boolean',
+                'description': TOOL_METADATA['grep']['parameters']['smart_case']
             }
         },
         'required': ['pattern'],
@@ -591,6 +607,10 @@ class Grep(BaseTool):
         pattern = params['pattern']
         path = params.get('path', '.')
         include = params.get('include', '*')
+        exclude = params.get('exclude', '')
+        ignore_vcs = params.get('ignore_vcs', True)
+        context = params.get('context', 0)
+        smart_case = params.get('smart_case', True)
 
         # Get the truncation limit from agent/tool options
         char_limit = 2000
@@ -601,7 +621,15 @@ class Grep(BaseTool):
             char_limit = self.cfg.get('grep_char_limit')
 
         agent_name = kwargs.get('agent_instance_name', 'unknown')
-        return self.agent_pool.operation_manager.grep(pattern, path, include, char_limit=int(char_limit), agent_name=agent_name)
+        return self.agent_pool.operation_manager.grep(
+            pattern, path, include, 
+            char_limit=int(char_limit), 
+            agent_name=agent_name,
+            exclude=exclude,
+            ignore_vcs=bool(ignore_vcs),
+            context=int(context),
+            smart_case=bool(smart_case)
+        )
 
 
 class DeleteFile(BaseTool):

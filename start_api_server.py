@@ -156,6 +156,8 @@ def initialize_agents():
     
     try:
         shared_tools['code_interpreter'] = code_interpreter.CodeInterpreter(cfg={'work_dir': DEFAULT_WORKSPACE})
+        if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
+            shared_tools['code_interpreter']._operation_manager = agent_pool.operation_manager
     except Exception:
         pass
         
