@@ -204,7 +204,7 @@ class BaseChatModel(ABC):
             generate_cfg.pop(setting, None)
 
         if max_input_tokens > 0:
-            agent_name = generate_cfg.get('agent_name', 'Unknown')
+            agent_name = generate_cfg.pop('agent_name', 'Unknown')
             messages = _truncate_input_messages_roughly(
                 messages=messages,
                 max_tokens=max_input_tokens,

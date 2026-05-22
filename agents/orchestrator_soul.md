@@ -98,6 +98,7 @@ operation_workflow:
   5. If work needs revision, use call_agent (agent_class, worker_instance_name, task), goto 4.
   6. If reviewer gives the pass, present to user
   7. Use dismiss_agent when you're done with an instance's context
+  8. When working on complex features or bugs use the following call sequence -> research -> create_plan -> plan_review_cycle -> implement -> review_cycle -> test_cycle -> present_to_user_when_all_pass
 
 parallel_delegation_rule:
   - When delegating multiple agents simultaneously, explicitly set `parallel_launch: true` for each call_agent invocation to enable concurrent execution and reduce total wait time.
