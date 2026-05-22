@@ -1050,14 +1050,19 @@ def create_app(agents, agent_pool, config=None):
                         len_changed = (resp_len != last_resp_len)
                         
                         has_tool_event = False
+                        new_msg_is_empty_assistant = False  # FIX 1B: Track if new message is an empty Assistant
                         if resp_len > 0:
                             last_m = responses[-1]
-                            if isinstance(last_m, dict):
-                                has_tool_event = last_m.get('function_call') or last_m.get(ROLE) == FUNCTION
-                            else:
-                                has_tool_event = getattr(last_m, 'function_call', None) or getattr(last_m, 'role', '') == FUNCTION
+                            has_tool_event = _get_msg_func_call(last_m) or _get_msg_role(last_m) == FUNCTION
+                            # FIX 1B: Check if the new message is an Assistant with no meaningful content (text or reasoning)
+                            if len_changed and not has_tool_event and _get_msg_role(last_m) == ASSISTANT:
+                                content_val = last_m.get(CONTENT, '') if isinstance(last_m, dict) else getattr(last_m, 'content', '')
+                                reasoning_val = last_m.get(REASONING_CONTENT, '') if isinstance(last_m, dict) else getattr(last_m, 'reasoning_content', '')
+                                if not (content_val or '').strip() and not (reasoning_val or '').strip():
+                                    new_msg_is_empty_assistant = True
 
-                        if now - last_send > 0.15 or stack_changed or len_changed or has_tool_event:
+                        # FIX 1B: Don't trigger immediate send for empty Assistant messages — let the 150ms throttle handle it
+                        if now - last_send > 0.15 or stack_changed or (len_changed and not new_msg_is_empty_assistant) or has_tool_event:
                             session['_last_resp_len'] = resp_len
                             
                             # Sub-agent state update strategy:

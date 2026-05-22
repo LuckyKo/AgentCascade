@@ -1107,27 +1107,66 @@ function renderMessages() {
     return;
   }
 
-  // Append new messages
+  // Append new messages (with content threshold to prevent bubble race condition)
   if (currentCount > lastRenderedCount) {
+    // FIX: Define minimum content threshold — tool calls and function results always render immediately
+    const MIN_CONTENT_LEN = 1; // At least 1 character of text to create a bubble
+
     for (let i = lastRenderedCount; i < currentCount; i++) {
-      container.appendChild(createMessageEl(msgs[i], i));
+      const msg = msgs[i];
+      const isToolCall = !!msg.function_call;
+      const isFunctionResult = msg.role === 'function';
+      const contentLen = (msg.content || '').trim().length;
+      const reasoningLen = (msg.reasoning_content || '').trim().length;
+
+      // FIX: Skip creating bubble for empty Assistant messages.
+      // Tool calls and function results always render immediately — they are meaningful events.
+      // For Assistant text messages, require at least MIN_CONTENT_LEN characters of content or reasoning.
+      // This applies regardless of streaming state to handle interrupted turns (Edge Case 3).
+      if (!isToolCall && !isFunctionResult
+          && msg.role === 'assistant' && contentLen < MIN_CONTENT_LEN && reasoningLen < MIN_CONTENT_LEN) {
+        // Defer this message — don't update lastRenderedCount for it
+        continue;
+      }
+
+      container.appendChild(createMessageEl(msg, i));
     }
+
+    // FIX: Update lastRenderedCount to the last message that was ACTUALLY rendered.
+    // Walk backwards from currentCount to find the last rendered message.
+    let newLastRendered = lastRenderedCount;
+    for (let j = currentCount - 1; j >= lastRenderedCount; j--) {
+      const msg = msgs[j];
+      const isToolCall = !!msg.function_call;
+      const isFunctionResult = msg.role === 'function';
+      const contentLen = (msg.content || '').trim().length;
+      const reasoningLen = (msg.reasoning_content || '').trim().length;
+
+      if (isToolCall || isFunctionResult || contentLen >= MIN_CONTENT_LEN || reasoningLen >= MIN_CONTENT_LEN) {
+        newLastRendered = j + 1;
+        break;
+      }
+    }
+
     // Throttle context bar updates to ~1Hz during streaming
     if (!state.genStats.lastContextBarUpdate) state.genStats.lastContextBarUpdate = 0;
     const nowInRender = performance.now();
-    if (nowInRender - state.genStats.lastContextBarUpdate > 1000 || currentCount - lastRenderedCount > 1) {
+    if (nowInRender - state.genStats.lastContextBarUpdate > 1000 || newLastRendered - lastRenderedCount > 1) {
       updateContextBar(document.getElementById('chatContextFill'), msgs, state.totalTokens, state.maxTokens);
       state.genStats.lastContextBarUpdate = nowInRender;
     }
-    lastRenderedCount = currentCount;
+    lastRenderedCount = newLastRendered;
   }
 
   // Update last message content (streaming) — use fine-grained content comparison for delta updates
   if (lastContent !== lastLastContent && container.lastElementChild) {
     const lastBubble = container.lastElementChild;
     const idx = parseInt(lastBubble.dataset.index);
-    if (idx === currentCount - 1 && state.editingIndex !== idx) {
-      updateBubbleContent(lastBubble, msgs[currentCount - 1]);
+    // FIX: Check against the actual last rendered index, not currentCount - 1.
+    // If the last message was deferred (empty content), idx will be less than currentCount - 1,
+    // and we should still update that bubble with its own message data.
+    if (idx < currentCount && state.editingIndex !== idx) {
+      updateBubbleContent(lastBubble, msgs[idx]);
     }
   }
   lastLastContent = lastContent;

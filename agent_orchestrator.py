@@ -1122,6 +1122,7 @@ class OrchestratorAgent(Assistant):
                 pass  # Telemetry must never block agent execution
 
             turn_output: List[Message] = []
+            _first_llm_tick = True  # FIX 1A: Track first tick to suppress empty initial messages (persists across yields)
             for output in self._call_llm(llm_messages, functions=active_functions, stream=True, extra_generate_cfg=extra_generate_cfg):
                 if self.agent_pool.stopped:
                     logger.info(f"Agent {self.name} stopped during LLM stream.")
@@ -1130,7 +1131,34 @@ class OrchestratorAgent(Assistant):
                 if self.agent_pool.is_halted(self.session_name):
                     logger.info(f"Agent {self.name} halted during LLM stream.")
                     break
-                # Telemetry: record first token time
+                turn_output = output
+                
+                # FIX 1A: Suppress first-tick empty messages to prevent bubble race condition.
+                # On the very first tick of a streaming LLM turn, skip yielding if there's no 
+                # meaningful content yet (no text, no reasoning, and no tool calls). Tool calls always flow through.
+                if _first_llm_tick and output:
+                    has_text = False
+                    has_tool_call = False
+                    for m in output:
+                        role = m.get('role') if isinstance(m, dict) else getattr(m, 'role', None)
+                        content = m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')
+                        reasoning = m.get('reasoning_content', '') if isinstance(m, dict) else getattr(m, 'reasoning_content', '')
+                        fc = m.get('function_call') if isinstance(m, dict) else getattr(m, 'function_call', None)
+                        # Check for non-empty text OR reasoning in Assistant messages
+                        if role == ASSISTANT and ((content or '').strip() or (reasoning or '').strip()):
+                            has_text = True
+                            break
+                        # Tool calls are always meaningful events
+                        if fc:
+                            has_tool_call = True
+                    # Only suppress if there's no text/reasoning AND no tool call — i.e., output is noise
+                    if not has_text and not has_tool_call:
+                        _first_llm_tick = False  # Mark as processed even though we skip the yield
+                        continue
+                
+                _first_llm_tick = False
+                
+                # Telemetry: record first token time (only on actual meaningful yields, after suppression check)
                 if not _llm_first_token_recorded and output:
                     try:
                         if hasattr(self.agent_pool, 'telemetry'):
@@ -1138,7 +1166,7 @@ class OrchestratorAgent(Assistant):
                     except Exception:
                         pass
                     _llm_first_token_recorded = True
-                turn_output = output
+                
                 yield response + turn_output
             
             # Telemetry: estimate output tokens and record LLM call end (non-blocking)
