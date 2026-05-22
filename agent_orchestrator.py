@@ -626,8 +626,8 @@ class OrchestratorAgent(Assistant):
         # Reserve space for the truncation notice itself (~300 chars)
         char_budget = max(100, char_budget - 300)
         
-        # Save full result to spill file
-        log_dir = Path('workspace/logs/spillover')
+        # Save full result to spill file (use workspace_dir from agent_pool for correct path resolution)
+        log_dir = self.agent_pool.workspace_dir / 'logs' / 'spillover'
         log_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_tool = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name)
