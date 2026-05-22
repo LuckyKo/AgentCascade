@@ -1227,6 +1227,7 @@ body {
   max-height: 45vh;
   overflow-y: auto;
   z-index: 50;
+  flex-shrink: 0;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
   animation: slide-down 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -1328,6 +1329,7 @@ body {
 /* ─── Input area ──────────────────────────────────────────────────────────── */
 
 .input-area {
+  flex-shrink: 0;
   padding: 16px 24px;
   border-top: 1px solid var(--bg-elevated);
   background: var(--bg-secondary);
