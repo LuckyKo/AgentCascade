@@ -53,6 +53,14 @@ from agent_cascade.compression import compress_context, rebuild_working_set
 
 from agent_pool import AgentPool
 
+def _safe_get_role(msg):
+    """Safely get the role from a message, handling both dict and Message objects."""
+    return msg.get(ROLE) if isinstance(msg, dict) else getattr(msg, 'role', None)
+
+def _safe_get_content(msg):
+    """Safely get the content from a message, handling both dict and Message objects."""
+    return msg.get(CONTENT) if isinstance(msg, dict) else getattr(msg, 'content', None)
+
 class LoopDetectedError(Exception):
     """Raised when a repetitive loop is detected in agent turns."""
     def __init__(self, reason, agent_name=None, pop_count=None, turn_pop_count=0, resp_snapshot=None):
@@ -424,7 +432,10 @@ class OrchestratorAgent(Assistant):
         # 1. Base generation config from the agent's internal state (held by the LLM object)
         merged_cfg = copy.deepcopy(getattr(self.llm, 'generate_cfg', {}))
         
-        # 2. Merge UI overrides (temperature, etc.)
+        # 2. Inject agent name so log messages show the correct agent instead of "Unknown"
+        merged_cfg['agent_name'] = self.name
+        
+        # 3. Merge UI overrides (temperature, etc.)
         if extra_generate_cfg:
             merged_cfg.update(extra_generate_cfg)
 
@@ -1705,8 +1716,15 @@ class OrchestratorAgent(Assistant):
             else:
                 # Existing instance: update the system message in-place with latest metadata
                 conv_existing = self.agent_pool.instance_conversations[instance_name]
-                if conv_existing and conv_existing[0].get(ROLE) == SYSTEM:
-                    conv_existing[0].content = final_sys_content
+                if conv_existing:
+                    first_msg = conv_existing[0]
+                    # Check role using both dict and object styles
+                    role = _safe_get_role(first_msg)
+                    if role == SYSTEM:
+                        if isinstance(first_msg, dict):
+                            first_msg['content'] = final_sys_content
+                        else:
+                            first_msg.content = final_sys_content
                 if not logger_inst.data["history"]:
                     logger_inst.update_history(conv_existing)
             
@@ -1728,7 +1746,7 @@ class OrchestratorAgent(Assistant):
         
         seen_images = {}
         for msg in manager_history:
-            content = msg.get(CONTENT)
+            content = _safe_get_content(msg)
             if isinstance(content, list):
                 for item in content:
                     # Content item might be dict or object
@@ -1748,9 +1766,9 @@ class OrchestratorAgent(Assistant):
                 added_to_sub.add(img_url)
         
         if len(sub_agent_msg_content) == 1 and tool_name == 'call_agent':
-            last_user_msg = next((m for m in reversed(manager_history) if m.get(ROLE) == USER), None)
+            last_user_msg = next((m for m in reversed(manager_history) if _safe_get_role(m) == USER), None)
             if last_user_msg:
-                content = last_user_msg.get(CONTENT)
+                content = _safe_get_content(last_user_msg)
                 if isinstance(content, list):
                     for item in content:
                         item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
@@ -1935,10 +1953,17 @@ class OrchestratorAgent(Assistant):
                         yield current_response
                         
                         # Efficient logging: check if a tool call was just completed
-                        if resp and (resp[-1].get(ROLE) == FUNCTION or resp[-1].get('function_call')):
-                            # Incremental logging via log_message (already called in agent loop) 
-                            # ensures history is persistent. update_history is redundant here.
-                            pass
+                        if resp:
+                            last_resp = resp[-1]
+                            if isinstance(last_resp, dict):
+                                role_check = last_resp.get(ROLE) == FUNCTION or last_resp.get('function_call')
+                            else:
+                                role_check = getattr(last_resp, 'role', None) == FUNCTION or getattr(last_resp, 'function_call', None)
+
+                            if role_check:
+                                # Incremental logging via log_message (already called in agent loop)
+                                # ensures history is persistent. update_history is redundant here.
+                                pass
                     
                     # Turn successfully completed
                     break
@@ -2065,7 +2090,13 @@ def extract_sub_agent_feedback(messages: List[Dict], instance_name: str) -> str:
     """
     last_tool_idx = -1
     for i, msg in enumerate(messages):
-        if msg.get(ROLE) == FUNCTION or msg.get('function_call'):
+        # Handle both dict and Message object types
+        if isinstance(msg, dict):
+            role_check = msg.get(ROLE) == FUNCTION or msg.get('function_call')
+        else:
+            role_check = getattr(msg, 'role', None) == FUNCTION or getattr(msg, 'function_call', None)
+
+        if role_check:
             last_tool_idx = i
 
     relevant_msgs = messages[last_tool_idx + 1:] if last_tool_idx != -1 else messages
@@ -2075,7 +2106,7 @@ def extract_sub_agent_feedback(messages: List[Dict], instance_name: str) -> str:
         if isinstance(msg, dict):
             msg_role = msg.get('role', '')
         else:
-            msg_role = msg.role
+            msg_role = getattr(msg, 'role', '')
 
         if msg_role == ASSISTANT:
             text = extract_text_from_message(msg, add_upload_info=False)
