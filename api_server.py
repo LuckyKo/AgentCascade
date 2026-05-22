@@ -914,7 +914,7 @@ def create_app(agents, agent_pool, config=None):
             NON_LLM_KEYS = (
                 'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
                 'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-                'tool_result_max_chars', 'grep_char_limit', 'shell_char_limit', 'code_char_limit',
+                'tool_result_max_chars', 'grep_char_limit', 'grep_spillover', 'shell_char_limit', 'code_char_limit',
                 'disabled_tools'
             )
 
@@ -1050,19 +1050,11 @@ def create_app(agents, agent_pool, config=None):
                         len_changed = (resp_len != last_resp_len)
                         
                         has_tool_event = False
-                        new_msg_is_empty_assistant = False  # FIX 1B: Track if new message is an empty Assistant
                         if resp_len > 0:
                             last_m = responses[-1]
                             has_tool_event = _get_msg_func_call(last_m) or _get_msg_role(last_m) == FUNCTION
-                            # FIX 1B: Check if the new message is an Assistant with no meaningful content (text or reasoning)
-                            if len_changed and not has_tool_event and _get_msg_role(last_m) == ASSISTANT:
-                                content_val = last_m.get(CONTENT, '') if isinstance(last_m, dict) else getattr(last_m, 'content', '')
-                                reasoning_val = last_m.get(REASONING_CONTENT, '') if isinstance(last_m, dict) else getattr(last_m, 'reasoning_content', '')
-                                if not (content_val or '').strip() and not (reasoning_val or '').strip():
-                                    new_msg_is_empty_assistant = True
 
-                        # FIX 1B: Don't trigger immediate send for empty Assistant messages — let the 150ms throttle handle it
-                        if now - last_send > 0.15 or stack_changed or (len_changed and not new_msg_is_empty_assistant) or has_tool_event:
+                        if now - last_send > 0.15 or stack_changed or len_changed or has_tool_event:
                             session['_last_resp_len'] = resp_len
                             
                             # Sub-agent state update strategy:
@@ -2084,7 +2076,7 @@ def create_app(agents, agent_pool, config=None):
                                         NON_LLM_KEYS = (
                                             'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
                                             'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-                                            'read_file_limit', 'grep_char_limit', 'shell_char_limit', 'code_char_limit',
+                                            'read_file_limit', 'grep_char_limit', 'grep_spillover', 'shell_char_limit', 'code_char_limit',
                                             'disabled_tools',
                                             # Exclude endpoint-identifying keys to let the agent use its own assigned API Router config
                                             'model', 'model_server', 'api_base', 'base_url', 'api_key', 'model_type'

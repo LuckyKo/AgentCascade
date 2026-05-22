@@ -153,7 +153,6 @@ const ranges = [
   { input: $('#setting-repeat-penalty'), output: $('#val-repeat-penalty') },
   { input: $('#setting-presence-penalty'), output: $('#val-presence-penalty') },
   { input: $('#setting-frequency-penalty'), output: $('#val-frequency-penalty') },
-  { input: $('#setting-grep-char-limit'), output: $('#val-grep-char-limit') },
   { input: $('#setting-shell-char-limit'), output: $('#val-shell-char-limit') },
   { input: $('#setting-code-char-limit'), output: $('#val-code-char-limit') },
 ];
@@ -493,6 +492,12 @@ function loadSettings() {
     if (s['tool-result-max-chars'] !== undefined) {
       $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
       $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
+    }
+    if (s['grep-char-limit'] !== undefined) {
+      $('#setting-grep-char-limit').value = s['grep-char-limit'];
+    }
+    if (s['grep-spillover'] !== undefined) {
+      $('#setting-grep-spillover').checked = s['grep-spillover'];
     }
 
     if (settingImageDetail && s['setting-image-detail'] !== undefined) {
@@ -1107,30 +1112,34 @@ function renderMessages() {
     return;
   }
 
-  // Append new messages (with content threshold to prevent bubble race condition)
+  // Append new messages — only create bubbles when the previous message has content (done streaming)
   if (currentCount > lastRenderedCount) {
-    // FIX: Define minimum content threshold — tool calls and function results always render immediately
-    const MIN_CONTENT_LEN = 1; // At least 1 character of text to create a bubble
-
     let newLastRendered = lastRenderedCount;
     for (let i = lastRenderedCount; i < currentCount; i++) {
       const msg = msgs[i];
       const isToolCall = !!msg.function_call;
       const isFunctionResult = msg.role === 'function';
-      const contentLen = (msg.content || '').trim().length;
-      const reasoningLen = (msg.reasoning_content || '').trim().length;
 
-      // FIX: Skip creating bubble for empty Assistant messages.
-      // Tool calls and function results always render immediately — they are meaningful events.
-      // For Assistant text messages, require at least MIN_CONTENT_LEN characters of content or reasoning.
-      // This applies regardless of streaming state to handle interrupted turns (Edge Case 3).
-      if (!isToolCall && !isFunctionResult
-          && msg.role === 'assistant' && contentLen < MIN_CONTENT_LEN && reasoningLen < MIN_CONTENT_LEN) {
-        continue; // Defer this message — newLastRendered stays at previous value
+      // Tool calls and function results always render immediately
+      if (isToolCall || isFunctionResult) {
+        container.appendChild(createMessageEl(msg, i));
+        newLastRendered = i + 1;
+        continue;
       }
 
-      container.appendChild(createMessageEl(msg, i));
-      newLastRendered = i + 1; // Track last rendered index inline (eliminates backward walk)
+      // For assistant/user messages: only create bubble if the PREVIOUS message 
+      // already has content (meaning it's done streaming), OR this is the last message
+      const prevMsg = i > 0 ? msgs[i - 1] : null;
+      const prevHasContent = prevMsg && (
+        ((prevMsg.content || '').trim().length > 0) || 
+        ((prevMsg.reasoning_content || '').trim().length > 0)
+      );
+
+      if (prevHasContent || i === currentCount - 1) {
+        container.appendChild(createMessageEl(msg, i));
+        newLastRendered = i + 1;
+      }
+      // Otherwise: wait until previous message finishes streaming
     }
 
     // Throttle context bar updates to ~1Hz during streaming
@@ -1138,7 +1147,6 @@ function renderMessages() {
     const nowInRender = performance.now();
     if (nowInRender - state.genStats.lastContextBarUpdate > 1000 || newLastRendered - lastRenderedCount > 1) {
       updateContextBar(document.getElementById('chatContextFill'), msgs, state.totalTokens, state.maxTokens);
-      state.genStats.lastContextBarUpdate = nowInRender;
     }
     lastRenderedCount = newLastRendered;
   }
@@ -1147,9 +1155,6 @@ function renderMessages() {
   if (lastContent !== lastLastContent && container.lastElementChild) {
     const lastBubble = container.lastElementChild;
     const idx = parseInt(lastBubble.dataset.index);
-    // FIX: Check against the actual last rendered index, not currentCount - 1.
-    // If the last message was deferred (empty content), we update the last visible bubble with its own data.
-    // Deferred messages have no DOM element yet, so their content changes are detected but silently ignored until they render.
     if (idx < currentCount && state.editingIndex !== idx) {
       updateBubbleContent(lastBubble, msgs[idx]);
     }
@@ -3061,7 +3066,8 @@ function getGenerateCfg() {
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
   if ($('#setting-max-rollbacks')) cfg.max_auto_rollbacks = parseInt($('#setting-max-rollbacks').value);
   if ($('#setting-tool-result-max-chars')) cfg.tool_result_max_chars = parseInt($('#setting-tool-result-max-chars').value) || 10000;
-  if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value);
+  if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value) || -1;
+  if ($('#setting-grep-spillover')) cfg.grep_spillover = $('#setting-grep-spillover').checked;
   if ($('#setting-shell-char-limit')) cfg.shell_char_limit = parseInt($('#setting-shell-char-limit').value);
   if ($('#setting-code-char-limit')) cfg.code_char_limit = parseInt($('#setting-code-char-limit').value);
 

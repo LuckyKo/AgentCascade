@@ -449,7 +449,7 @@ rules:
         EXCLUDE_KEYS = {
             'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
             'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-            'tool_result_max_chars', 'grep_char_limit', 'shell_char_limit', 'code_char_limit'
+            'tool_result_max_chars', 'grep_char_limit', 'grep_spillover', 'shell_char_limit', 'code_char_limit'
         }
         
         for agent_name, agent in self.agents.items():

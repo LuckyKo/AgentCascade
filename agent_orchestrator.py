@@ -581,6 +581,13 @@ class OrchestratorAgent(Assistant):
         if hasattr(self, 'agent_pool') and self.agent_pool:
             wild_read_limit = self.agent_pool.llm_cfg.get('tool_result_max_chars', wild_read_limit)
         
+        # Check grep-specific char limit if set
+        is_grep = tool_name == 'grep'
+        if is_grep and hasattr(self, 'agent_pool') and self.agent_pool:
+            grep_char_limit = self.agent_pool.llm_cfg.get('grep_char_limit')
+            if grep_char_limit and grep_char_limit != -1 and len(tool_result) > grep_char_limit:
+                is_wild_read = True
+        
         if not wild_read_limit or wild_read_limit == 10000:
              wild_read_limit = getattr(agent_cascade.settings, 'DEFAULT_TOOL_RESULT_MAX_CHARS', 10000)
         is_wild_read = len(tool_result) > wild_read_limit
@@ -626,21 +633,34 @@ class OrchestratorAgent(Assistant):
         # Reserve space for the truncation notice itself (~300 chars)
         char_budget = max(100, char_budget - 300)
         
-        # Save full result to spill file (use workspace_dir from agent_pool for correct path resolution)
-        log_dir = self.agent_pool.workspace_dir / 'logs' / 'spillover'
-        log_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        safe_tool = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name)
-        safe_instance = re.sub(r'[^a-zA-Z0-9_-]', '_', instance_name)
-        spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}.txt"
-        spill_path = log_dir / spill_filename
+        # For read_file, skip spillover write — the file already exists on disk
+        # For grep, check if spillover is disabled via grep_spillover config
+        is_read_file = tool_name == 'read_file'
+        # is_grep already set above in Wild Read Detection section
+        file_path = (tool_args or {}).get('absolute_path', 'unknown') if is_read_file else None
         
-        try:
-            with open(spill_path, 'w', encoding='utf-8') as f:
-                f.write(tool_result)
-        except Exception as e:
-            logger.error(f"Failed to write spill file {spill_path}: {e}")
-            # Even if spill fails, still truncate to prevent context overflow
+        # Check if spillover is disabled for grep
+        grep_spillover_enabled = True  # default
+        if is_grep and hasattr(self, 'agent_pool') and self.agent_pool:
+            grep_spillover_enabled = self.agent_pool.llm_cfg.get('grep_spillover', True)
+        
+        # Skip spillover write for read_file (file exists on disk) or when disabled for grep
+        if not is_read_file and (not is_grep or grep_spillover_enabled):
+            # Save full result to spill file (use workspace_dir from agent_pool for correct path resolution)
+            log_dir = self.agent_pool.workspace_dir / 'logs' / 'spillover'
+            log_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            safe_tool = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name)
+            safe_instance = re.sub(r'[^a-zA-Z0-9_-]', '_', instance_name)
+            spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}.txt"
+            spill_path = log_dir / spill_filename
+            
+            try:
+                with open(spill_path, 'w', encoding='utf-8') as f:
+                    f.write(tool_result)
+            except Exception as e:
+                logger.error(f"Failed to write spill file {spill_path}: {e}")
+                # Even if spill fails, still truncate to prevent context overflow
         
         truncated = tool_result[:char_budget]
         
@@ -651,17 +671,32 @@ class OrchestratorAgent(Assistant):
             else:
                 reason = f"Total context safety (capacity at {(non_system_tokens+result_tokens)/available_tokens*100:.0f}%)"
 
-        notice = (
-            f"\n\n[TOOL RESPONSE TRUNCATED — {reason}. "
-            f"Full output ({len(tool_result)} chars) saved to: {spill_path}\n"
-            f"You can read it with read_file if needed. "
-            f"Consider compressing context before continuing.]"
-        )
+        if is_read_file:
+            notice = (
+                f"\n\n[TOOL RESPONSE TRUNCATED — {reason}. "
+                f"Full content ({len(tool_result)} chars) is available at: {file_path}\n"
+                f"You can re-read with limit/offset parameters to get specific sections. "
+                f"Consider compressing context before continuing.]"
+            )
+        elif is_grep and not grep_spillover_enabled:
+            notice = (
+                f"\n\n[TOOL RESPONSE TRUNCATED — {reason}. "
+                f"Output was {len(tool_result)} chars. Spillover is disabled for grep. "
+                f"Consider compressing context before continuing.]"
+            )
+        else:
+            notice = (
+                f"\n\n[TOOL RESPONSE TRUNCATED — {reason}. "
+                f"Full output ({len(tool_result)} chars) saved to: {spill_path}\n"
+                f"You can read it with read_file if needed. "
+                f"Consider compressing context before continuing.]"
+            )
         
         logger.info(
             f"Truncated '{tool_name}' result for {instance_name}: "
             f"{len(tool_result)} chars -> {len(truncated)} chars. Reason: {reason}. "
-            f"Spill file: {spill_path}"
+            + (f"Original file: {file_path}" if is_read_file 
+               else ("" if (is_grep and not grep_spillover_enabled) else f"Spill file: {spill_path}"))
         )
         
         return truncated + notice
@@ -1122,7 +1157,6 @@ class OrchestratorAgent(Assistant):
                 pass  # Telemetry must never block agent execution
 
             turn_output: List[Message] = []
-            _first_llm_tick = True  # FIX 1A: Track first tick to suppress empty initial messages (persists across yields)
             for output in self._call_llm(llm_messages, functions=active_functions, stream=True, extra_generate_cfg=extra_generate_cfg):
                 if self.agent_pool.stopped:
                     logger.info(f"Agent {self.name} stopped during LLM stream.")
@@ -1131,38 +1165,7 @@ class OrchestratorAgent(Assistant):
                 if self.agent_pool.is_halted(self.session_name):
                     logger.info(f"Agent {self.name} halted during LLM stream.")
                     break
-                turn_output = output
-                
-                # FIX 1A: Suppress first-tick empty messages to prevent bubble race condition.
-                # On the very first tick of a streaming LLM turn, skip yielding if there's no 
-                # meaningful content yet (no text, no reasoning, and no tool calls). Tool calls always flow through.
-                # Wrapped in try/finally to guarantee _first_llm_tick is reset even on exception — prevents permanent suppression.
-                if _first_llm_tick and output:
-                    try:
-                        has_text = False
-                        has_tool_call = False
-                        for m in output:
-                            role = m.get('role') if isinstance(m, dict) else getattr(m, 'role', None)
-                            content = m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')
-                            reasoning = m.get('reasoning_content', '') if isinstance(m, dict) else getattr(m, 'reasoning_content', '')
-                            # Safety coercion: prevent AttributeError if reasoning/content is a non-string type (e.g., list, None with no default)
-                            content = str(content) if content else ''
-                            reasoning = str(reasoning) if reasoning else ''
-                            fc = m.get('function_call') if isinstance(m, dict) else getattr(m, 'function_call', None)
-                            # Check for non-empty text OR reasoning in Assistant messages
-                            if role == ASSISTANT and ((content or '').strip() or (reasoning or '').strip()):
-                                has_text = True
-                                break
-                            # Tool calls are always meaningful events
-                            if fc:
-                                has_tool_call = True
-                        # Only suppress if there's no text/reasoning AND no tool call — i.e., output is noise
-                        if not has_text and not has_tool_call:
-                            continue  # Don't reset flag here — finally will do it
-                    finally:
-                        _first_llm_tick = False  # Always reset, even on exception
-                
-                # Telemetry: record first token time (only on actual meaningful yields, after suppression check)
+                # Telemetry: record first token time
                 if not _llm_first_token_recorded and output:
                     try:
                         if hasattr(self.agent_pool, 'telemetry'):
@@ -1170,7 +1173,7 @@ class OrchestratorAgent(Assistant):
                     except Exception:
                         pass
                     _llm_first_token_recorded = True
-                
+                turn_output = output
                 yield response + turn_output
             
             # Telemetry: estimate output tokens and record LLM call end (non-blocking)

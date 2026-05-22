@@ -468,9 +468,13 @@
                     <span>Wild Read Threshold (Chars)</span>
                     <input type="number" id="setting-tool-result-max-chars" min="1000" max="500000" step="1000" value="10000" />
                   </label>
+                  <label class="setting-field toggle-field">
+                    <span>Grep Spillover</span>
+                    <input type="checkbox" id="setting-grep-spillover" checked />
+                  </label>
                   <label class="setting-field">
-                    <span>Grep Char Limit <output id="val-grep-char-limit">2000</output></span>
-                    <input type="range" id="setting-grep-char-limit" min="-1" max="4000" step="50" value="2000" />
+                    <span>Grep Char Limit</span>
+                    <input type="number" id="setting-grep-char-limit" min="-1" max="100000" step="100" value="2000" />
                   </label>
                   <label class="setting-field">
                     <span>Shell Output Char Limit <output id="val-shell-char-limit">2000</output></span>

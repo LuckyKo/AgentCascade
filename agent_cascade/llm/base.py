@@ -457,7 +457,8 @@ class BaseChatModel(ABC):
                 logger.warning('Tool call arguments dict was not JSON-serializable (%s); defaulting to "{}"', repr(fn_args))
                 return '{}'
         if not isinstance(fn_args, str) or not fn_args.strip():
-            logger.warning('Tool call arguments were empty/None (type: %s); defaulting to "{}"', type(fn_args).__name__)
+            # Empty args are normal during streaming (name arrives before arguments fill in) — only debug-level
+            logger.debug('Tool call arguments were empty/None (type: %s); defaulting to "{}"', type(fn_args).__name__)
             return '{}'
         # Validate the string is parseable JSON and represents an object
         try:
