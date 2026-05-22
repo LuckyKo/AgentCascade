@@ -248,7 +248,7 @@ TOOL_METADATA = {
         'description': (
             'Retrieves the current system information. '
             'This includes the operating system, current time and date, '
-            'current work directories, Python version, and basic session stats.'
+            'current work directories and respective Docker mounts, Python version, and basic session stats.'
         ),
         'parameters': {}
     },
@@ -341,7 +341,7 @@ TOOL_METADATA = {
     'list_agents': {
         'description': (
             'List all available agent classes with their descriptions, '
-            'plus any active instances currently running or previously used.'
+            'plus any active instances currently running or previously used. Use this to find out how to call a specific agent or instance'
         ),
         'parameters': {}
     },

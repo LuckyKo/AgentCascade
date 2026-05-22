@@ -48,7 +48,7 @@ from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_MAX_INPUT_TOKENS
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX
-from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_BASELINE_TEMPLATE, COMPRESSION_MARKER
+from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_MARKER
 from agent_cascade.llm.base import _truncate_input_messages_roughly
 
 from agent_cascade.utils.thinking_block import (
@@ -603,7 +603,8 @@ def create_app(agents, agent_pool, config=None):
                 # Optimization: During streaming, we only send the tail of the message list
                 # to avoid O(N^2) JSON traffic and parsing lag in the browser.
                 if streaming and state.get('active') and len(msgs) > 5:
-                    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-3:])]
+                    start_idx = max(0, len(msgs) - 3)
+                    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-3:], start_idx)]
                     is_partial = True
                 else:
                     serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
@@ -799,6 +800,8 @@ def create_app(agents, agent_pool, config=None):
             # We cache the stats of ALL PREVIOUS messages, excluding the current growing one
             prev_responses = responses[:-1] if len(responses) > 1 else []
             session['_cached_r_stats'] = get_history_stats(prev_responses)
+            # Reset content length baseline — old message's length is no longer relevant
+            session['_last_resp_content_len'] = 0
         else:
             # Same messages, just growing text — use cached stats + quick estimate for the last message
             cached_r_stats = session.get('_cached_r_stats', {'tokens': 0, 'words': 0})
@@ -809,20 +812,28 @@ def create_app(agents, agent_pool, config=None):
                     content = " ".join([str(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')) for item in content])
                 else:
                     content = str(content)
-                # Simple word/token estimation (approx 4 chars per token)
-                est_words = len(content.split())
-                est_tokens = len(content) // 4
-                r_stats = {
-                    'tokens': cached_r_stats['tokens'] + est_tokens,
-                    'words': cached_r_stats['words'] + est_words
-                }
+                # FIX: Only estimate the delta (new chars since last tick) to avoid cumulative drift.
+                # Previously this added the full content length each tick on top of cached_r_stats,
+                # causing token counts to inflate by hundreds over long streaming sessions.
+                prev_len = session.get('_last_resp_content_len', 0)
+                delta_len = len(content) - prev_len
+                session['_last_resp_content_len'] = len(content)
+                if delta_len > 0:
+                    est_words = max(1, delta_len // 5)  # approx 5 chars per word
+                    est_tokens = max(1, delta_len // 4)  # approx 4 chars per token
+                    r_stats = {
+                        'tokens': cached_r_stats['tokens'] + est_tokens,
+                        'words': cached_r_stats['words'] + est_words
+                    }
+                else:
+                    r_stats = cached_r_stats.copy()
             else:
                 r_stats = cached_r_stats.copy()
 
         return {
             'history_count': history_count,
             'response_messages': response_msgs,
-            'sub_agents': sub_agents if sub_agents is not None else get_sub_agent_state(streaming=True),
+            'sub_agents': sub_agents,  # None means "no update this tick" — frontend reuses cached state
             'active_stack': get_active_stack(),
             'approvals': get_approvals(),
             'generating': True,
@@ -1049,10 +1060,39 @@ def create_app(agents, agent_pool, config=None):
                         if now - last_send > 0.15 or stack_changed or len_changed or has_tool_event:
                             session['_last_resp_len'] = resp_len
                             
-                            # Force sub-agent cache update if stack changed, tool event occurred, or any sub-agent is active
+                            # Sub-agent state update strategy:
+                            # - On stack changes or tool events: force a refresh immediately.
+                            # - When sub-agents are active: check if anything changed before computing state.
+                            #   Only call get_sub_agent_state when at least one agent's message count differs,
+                            #   OR the last message of an active agent has grown (streaming text).
+                            #   This avoids O(N*M) work on ticks where nothing happened.
                             any_sa_active = any(sa.get('active') for sa in agent_pool.sub_agent_state.values()) if (agent_pool and hasattr(agent_pool, 'sub_agent_state')) else False
-                            if tick_num % 5 == 0 or stack_changed or has_tool_event or any_sa_active:
-                                sub_agents_cache = get_sub_agent_state()
+                            
+                            # Quick change detection: compare current per-agent message counts + last msg sizes
+                            _sa_changed = stack_changed or has_tool_event
+                            if not _sa_changed and any_sa_active and tick_num % 2 == 0:
+                                # Check if any sub-agent's message count or last message size changed since last refresh
+                                _last_sa_counts = session.get('_last_sa_msg_counts', {})
+                                _cur_sa_counts = {}
+                                for sname, sstate in agent_pool.sub_agent_state.items():
+                                    msgs = sstate.get('messages', [])
+                                    msg_count = len(msgs)
+                                    # Also track the last active agent's last message size to detect streaming growth
+                                    is_waiting = sstate.get('is_waiting', False)
+                                    is_halted = sstate.get('is_halted', False)
+                                    has_queued = sstate.get('has_queued_messages', False)
+                                    if sstate.get('active') and msgs:
+                                        last_msg = msgs[-1]
+                                        content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
+                                        _cur_sa_counts[sname] = (msg_count, len(content), is_waiting, is_halted, has_queued)
+                                    else:
+                                        _cur_sa_counts[sname] = (msg_count, 0, is_waiting, is_halted, has_queued)
+                                if _cur_sa_counts != _last_sa_counts:
+                                    _sa_changed = True
+                                    session['_last_sa_msg_counts'] = _cur_sa_counts
+                            
+                            if _sa_changed or any_sa_active:
+                                sub_agents_cache = get_sub_agent_state(streaming=True)
                                 if agent_pool:
                                     agent_pool._last_seen_stack = current_stack
                             
@@ -1978,6 +2018,17 @@ def create_app(agents, agent_pool, config=None):
                         pending = agent_pool.operation_manager.list_pending_approvals()
                         ap = next((a for a in pending if a['request_id'] == rid), None)
                         if ap:
+                            if not hasattr(app, 'active_security_checks_lock'):
+                                app.active_security_checks_lock = threading.Lock()
+                            if not hasattr(app, 'active_security_checks'):
+                                app.active_security_checks = set()
+                                
+                            with app.active_security_checks_lock:
+                                if rid in app.active_security_checks:
+                                    logger.warning(f"Security check already active for request {rid}, ignoring duplicate.")
+                                    continue
+                                app.active_security_checks.add(rid)
+
                             loop = asyncio.get_running_loop()
                             def _security_check():
                                 try:
@@ -2226,6 +2277,9 @@ def create_app(agents, agent_pool, config=None):
                                         agent_pool.sub_agent_state[sec_key]['active'] = False
                                         if sec_key in agent_pool.active_stack:
                                             agent_pool.active_stack.remove(sec_key)
+                                    if hasattr(app, 'active_security_checks') and rid:
+                                        with app.active_security_checks_lock:
+                                            app.active_security_checks.discard(rid)
                             
                             threading.Thread(target=_security_check, daemon=True).start()
 

@@ -234,3 +234,76 @@ def test_heuristic_refinements():
         assert "APPROVED" in res
         assert file_path_html.read_text(encoding='utf-8') == new_content_html
 
+def test_heuristic_indentation_alignment():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        # Case 1: Surrounding block has higher indentation (8 spaces) but old/new are 4 spaces
+        file_path_py = Path(tmpdir) / "nested.py"
+        file_path_py.write_text(
+            "class MyClass:\n"
+            "    def my_func():\n"
+            "        x = 1\n"
+            "        y = 2\n",
+            encoding='utf-8'
+        )
+        op_mgr.file_ownership[str(file_path_py.resolve())] = "test_agent"
+
+        old_content = "def my_func():\n    x = 1\n    y = 2"
+        new_content = "def my_func():\n    x = 10\n    y = 20"
+
+        res = op_mgr.edit_file(
+            path="nested.py",
+            agent_name="test_agent",
+            old_content=old_content,
+            new_content=new_content,
+            match_mode="heuristic"
+        )
+        assert "APPROVED" in res
+        expected = (
+            "class MyClass:\n"
+            "    def my_func():\n"
+            "        x = 10\n"
+            "        y = 20\n"
+        )
+        assert file_path_py.read_text(encoding='utf-8') == expected
+
+        # Case 2: Single line replacement with unindented query
+        file_path_single = Path(tmpdir) / "single.py"
+        file_path_single.write_text(
+            "            x = 1\n",
+            encoding='utf-8'
+        )
+        op_mgr.file_ownership[str(file_path_single.resolve())] = "test_agent"
+
+        res = op_mgr.edit_file(
+            path="single.py",
+            agent_name="test_agent",
+            old_content="x = 1",
+            new_content="x = 2",
+            match_mode="heuristic"
+        )
+        assert "APPROVED" in res
+        assert file_path_single.read_text(encoding='utf-8') == "            x = 2\n"
+
+        # Case 3: Tabs indentation conversion and adjustment
+        file_path_tabs = Path(tmpdir) / "tabs.py"
+        file_path_tabs.write_text(
+            "class Foo:\n"
+            "\tdef bar(self):\n"
+            "\t\tx = 1\n",
+            encoding='utf-8'
+        )
+        op_mgr.file_ownership[str(file_path_tabs.resolve())] = "test_agent"
+
+        res = op_mgr.edit_file(
+            path="tabs.py",
+            agent_name="test_agent",
+            old_content="x = 1",
+            new_content="x = 2",
+            match_mode="heuristic"
+        )
+        assert "APPROVED" in res
+        assert file_path_tabs.read_text(encoding='utf-8') == "class Foo:\n\tdef bar(self):\n\t\tx = 2\n"
+

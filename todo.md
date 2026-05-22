@@ -23,11 +23,11 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] need a memory consolidation task ran periodically - takes all summaries in log and arranges them in a neat continuous package like long term memory -> replaces last summary
 [ ] warn agents about message limit at 90%
 [ ] make cmd_shell pop open a console window in the back so the user can inspect or interact with it if needed.
-[x] make the call_agent arguments case insensitive (2026-05-21)
+[ ] add full testing suit for compression log as it's getting trashed often by other changes it seems (by agent - auto/manual, by user with /compress x, by system - forced)
 
 # BUGS:
 
-- security advisor gets spammed with new calls from a single request (Auto-Ask ON) - HIGH PRIO
+- security advisor gets spammed with new calls after ending its task (Auto-Ask ON) - HIGH PRIO
 - edit/delete message bubbles broke after we added trim chat history option
 - streaming does not fill message bubble in full sometimes before popping the next bubble.
 - duplicates user entries in logger when hitting retry
@@ -35,5 +35,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - need better timeout protection on code interpreter and cmd_shell, we are still having issues with it getting stuck. watchdog sometimes kills container but fails to return the error back to agent. doesnt start new containers if users stops them.
 - stop button should halt all operations too (like code_intepreter or shell_cmds)
 - cmd_shell timeout does not kill processes that take to long, leaving it stray and blocking the system
+- compression triggered by the agent seems to mangle the active message pool of the agent, needs a sanity check. logger seems fine.
+- having issues with edit_file heuristic match mode, duplicating comments and messing up indentation.
 
 # EOF

@@ -37,7 +37,7 @@ from agent_cascade.utils.thinking_block import (
 )
 from agent_cascade.log import logger
 from agent_cascade.llm.schema import (
-    ASSISTANT, CONTENT, FUNCTION, IMAGE, ROLE, SYSTEM, USER, Message,
+    ASSISTANT, CONTENT, FUNCTION, IMAGE, ROLE, SYSTEM, USER, Message, ContentItem,
 )
 import agent_cascade.settings
 agent_cascade.settings.MAX_LLM_CALL_PER_RUN = 100
@@ -48,6 +48,8 @@ from agent_cascade.utils.utils import (
     get_basename_from_url,
     json_loads,
 )
+
+from agent_cascade.compression import compress_context, rebuild_working_set
 
 from agent_pool import AgentPool
 
@@ -277,15 +279,28 @@ class ParallelAgentManager:
         instance_name = tool_args.get('instance_name', 'unknown')
         agent_class = (tool_args.get('agent_class', 'unknown') or '').strip().lower()  # Normalize for case-insensitive tracking
         
-        # We need a safe copy of the history to prevent thread mutation issues
-        # (Though _stream_sub_agent_call itself makes copies, passing references 
-        # from a live orchestrator turn can be risky).
+        # Resolve the actual endpoint and acquire a lifecycle slot BEFORE submitting.
+        # We do this before deep-copying history to avoid wasted work on agents that must wait.
+        # Blocks if the endpoint is at capacity, preventing parallel agents on concurrency=0 endpoints (Phase 3 fix).
+        endpoint_release = None  # cleanup callback, may be None for unlimited endpoints
+        
+        if hasattr(self.agent_pool, 'api_router'):
+            router = self.agent_pool.api_router
+            # Get the effective concurrency for this agent class (includes default fallback)
+            concurrency_limit = router.get_effective_concurrency(agent_class)
+            
+            # Resolve the actual api_base that will be used
+            llm_cfg = router.get_llm_config(agent_class)
+            api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
+            
+            # Acquire a slot on the endpoint scheduler (blocks if at capacity)
+            endpoint_release = router.scheduler.acquire(api_base, concurrency_limit)
+        
+        # Safe copy of history to prevent thread mutation issues
         safe_response = copy.deepcopy(current_response)
         safe_history = copy.deepcopy(manager_history)
 
         def task_wrapper():
-            # Because _stream_sub_agent_call is a generator for the WebUI, 
-            # we must iterate it to completion to get the final return value.
             try:
                 gen = orchestrator._stream_sub_agent_call(tool_name, tool_args, safe_response, safe_history)
                 result = None
@@ -295,10 +310,7 @@ class ParallelAgentManager:
                 except StopIteration as e:
                     result = e.value
                 
-                # Format the parallel completion message
                 completion_msg = f"[Parallel Sub-Agent '{instance_name}' Finished]:\n{result}"
-                
-                # Push the result asynchronously into the caller's message queue
                 self.agent_pool.enqueue_message(orchestrator.session_name, completion_msg)
                 
             except Exception as e:
@@ -306,12 +318,70 @@ class ParallelAgentManager:
                 error_msg = f"[Parallel Sub-Agent '{instance_name}' Failed]:\n{str(e)}"
                 self.agent_pool.enqueue_message(orchestrator.session_name, error_msg)
             finally:
+                # Release the endpoint slot when the agent completes (Phase 3)
+                if endpoint_release is not None:
+                    try:
+                        endpoint_release()
+                    except Exception as e:
+                        logger.error(f"Failed to release endpoint slot for {instance_name}: {e}")
+                
                 if instance_name in self.active_tasks:
                     del self.active_tasks[instance_name]
 
         future = self.executor.submit(task_wrapper)
         self.active_tasks[instance_name] = (future, orchestrator.session_name, agent_class)
         return f"[Started agent '{instance_name}' in parallel. You will be notified via an async message when it finishes. You may continue with other tasks.]"
+
+
+def validate_message_pool(messages: List[Union[dict, Message]], agent_name: str) -> bool:
+    """
+    Sanity-check a message pool after compression to detect mangling.
+    
+    Returns True if the pool is valid, False if corruption is detected.
+    Checks:
+      - Pool is not empty
+      - First message is SYSTEM (if present)
+      - No duplicate consecutive messages (same role + content)
+      - Message roles are valid strings
+    """
+    if not messages:
+        logger.error(f"[MSG POOL VALIDATION] Empty message pool for agent '{agent_name}'")
+        return False
+    
+    # Check first message is SYSTEM
+    first = messages[0]
+    first_role = first.get('role') if isinstance(first, dict) else getattr(first, 'role', '')
+    if first_role != SYSTEM:
+        logger.warning(f"[MSG POOL VALIDATION] First message for '{agent_name}' is not SYSTEM (got {first_role})")
+    
+    # Check for duplicate consecutive messages (compression can cause this via extend+clear issues)
+    prev_content = None
+    prev_role = None
+    dup_count = 0
+    for i, msg in enumerate(messages):
+        role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+        # Normalize content for comparison (truncate long strings)
+        content_key = str(content)[:200] if content else ''
+        
+        if role == prev_role and content_key == prev_content:
+            dup_count += 1
+            logger.warning(f"[MSG POOL VALIDATION] Duplicate consecutive msg at index {i} for '{agent_name}'")
+        
+        prev_role = role
+        prev_content = content_key
+    
+    if dup_count > len(messages) * 0.3:
+        logger.error(f"[MSG POOL VALIDATION] Excessive duplicates ({dup_count}/{len(messages)}) for agent '{agent_name}'")
+        return False
+    
+    # Check that roles are valid strings (not None or empty after compression)
+    invalid_roles = sum(1 for m in messages if not (m.get('role') if isinstance(m, dict) else getattr(m, 'role', '')))
+    if invalid_roles:
+        logger.error(f"[MSG POOL VALIDATION] {invalid_roles} messages with invalid roles for '{agent_name}'")
+        return False
+    
+    return True
 
 
 class OrchestratorAgent(Assistant):
@@ -596,112 +666,128 @@ class OrchestratorAgent(Assistant):
         Returns False otherwise (safe to continue with LLM call).
         """
         max_tokens = self._get_max_tokens()
-
         current_tokens = self._get_history_tokens(messages)
         usage_pct = (current_tokens / max_tokens) * 100
-        
-        # 1. Critical Threshold Check (> 95%)
+
+        # ── Forced compression at >95% ──
         if usage_pct > 95.0:
-            # Skip if compress_context already ran this turn — prevents double-compression when
-            # LLM-initiated compression mutates the pool, but _inject_compression_warning checks
-            # a stale deep-copied llm_messages that still has all old messages.
+            # Prevent double-compression in same turn
             if getattr(self, '_compress_context_ran_this_turn', False):
                 logger.debug(f"Skipping forceful compression for {instance_name} — already ran this turn.")
                 return True  # Still signal halt — something already compressed this turn
-            
-            # Halt all other agents before compressing so no new content is added during compression.
-            # The agent being compressed (instance_name), the compression agent, and the main orchestrator are exempt.
-            exempt = [instance_name, 'compression_agent', self.session_name]
-            self.agent_pool.halt_all_instances(except_instances=exempt)
-            
-            logger.info(f"Context usage at {usage_pct:.1f}% for {instance_name} - Halting other agents and triggering FORCEFUL compression.")
-            compress_tool = agent.function_map.get('compress_context')
-            if compress_tool:
-                # Programmatically call the tool's internal compression logic
 
-                # Call tool directly with 50% fraction
-                params = json.dumps({
-                    'fraction': 0.5,
-                    'justification': f'CRITICAL THRESHOLD REACHED ({usage_pct:.1f}%)',
-                    'force': True
-                })
+            self._compress_context_ran_this_turn = True
+            try:
+                # Halt other agents (exempt the target, compression_agent, and orchestrator)
+                exempt = [instance_name, 'compression_agent', self.session_name]
+                self.agent_pool.halt_all_instances(except_instances=exempt)
 
-                # Pass necessary kwargs for direct application
-                self._compress_context_ran_this_turn = True
-                result = compress_tool.call(
-                    params,
-                    messages=messages,
-                    agent_instance_name=instance_name,
-                    agent_obj=agent
+                logger.info(
+                    f"Context usage at {usage_pct:.1f}% for {instance_name} — "
+                    f"Halting other agents and triggering FORCEFUL compression."
                 )
-                
-                # Check for failure
-                is_error = isinstance(result, str) and result.startswith('ERROR')
-                if is_error:
-                    logger.error(f"Forceful compression failed for {instance_name}: {result}")
-                    notification = (
-                        f"\n\n[SYSTEM NOTIFICATION: Context window exceeded 95% capacity ({usage_pct:.1f}%), "
-                        f"but automatic compression failed ({result}). The upcoming API call will likely fail due to length.]"
-                    )
-                else:
-                    # Add a system message to inform the agent that it happened
-                    agent_class = self.agent_pool.instance_classes.get(instance_name, 'Unknown')
-                    logger_inst = self.agent_pool.get_logger(instance_name, agent_class)
-                    notification = (
-                        f"\n\n[SYSTEM NOTIFICATION: Context window exceeded 95% capacity ({usage_pct:.1f}%). "
-                        "Forceful compression (50% ratio) has been effectuated to prevent errors. "
-                        f"Use your logs at `{logger_inst.log_path}` if you need to restore details from turns that were removed.]"
-                    )
-                
-                if messages:
-                    last_msg = messages[-1]
-                    if isinstance(last_msg.content, str):
-                        # Prevent duplicate notifications from stacking if the loop repeats
-                        if "[SYSTEM NOTIFICATION: Context window exceeded 95%" not in last_msg.content:
-                            last_msg.content += notification
-                    elif isinstance(last_msg.content, list):
-                        from agent_cascade.llm.schema import ContentItem
-                        
-                        # Prevent duplicate notifications from stacking
-                        has_notification = any(
-                            isinstance(item, ContentItem) and "[SYSTEM NOTIFICATION: Context window exceeded 95%" in getattr(item, 'text', '')
-                            for item in last_msg.content
-                        )
-                        if not has_notification:
-                            last_msg.content.append(ContentItem(text=notification))
-            # Resume all halted agents after compression completes
-            self.agent_pool.resume_all_instances()
-            
-            return True  # Signal caller to halt current turn
 
-        # 2. Warning Threshold (> 85%)
+                result = compress_context(
+                    agent_pool=self.agent_pool,
+                    target_agent_name=instance_name,
+                    fraction=0.5,
+                    mode="auto",
+                    force=True,               # Bypass guards — critical threshold
+                    justification=f"CRITICAL THRESHOLD ({usage_pct:.1f}%)",
+                    orchestrator=self,         # Pass self so Compression Agent can use _stream_sub_agent_call
+                )
+
+                if result.success:
+                    notification = (
+                        f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%. "
+                        f"Forced compression applied. {result.messages_discarded} messages summarized.]"
+                    )
+                    # Append notification to last message — PRESERVE existing duplicate-prevention logic
+                    self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
+
+                    # Rebuild working set from pool (single source of truth).
+                    # For sub-agent path: this is the only sync — caller returns after hook_forced.
+                    # For orchestrator's own _run: caller does additional sync at forced_compression_ran block,
+                    # rebuilding both canonical `messages` and sliced `llm_messages`.
+                    rebuild_working_set(messages, self.agent_pool, instance_name)
+                else:
+                    logger.error(f"Forced compression failed for {instance_name}: {result.error}")
+                    notification = (
+                        f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%, "
+                        f"but automatic compression failed ({result.error}). "
+                        f"The upcoming API call will likely fail due to length.]"
+                    )
+                    self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
+
+                return True  # Halt current turn — let next iteration use compressed context
+
+            except Exception as e:
+                logger.error(f"Forced compression raised exception for {instance_name}: {e}")
+                notification = (
+                    f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%, "
+                    f"but automatic compression encountered an error ({e}).]"
+                )
+                self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
+                return True  # Still halt — let next iteration proceed
+
+            finally:
+                self._compress_context_ran_this_turn = False
+                self.agent_pool.resume_all_instances()
+
+        # ── Warning at >85% ──
         if usage_pct > 85.0:
             warning_text = "[SYSTEM WARNING: Context window at"
             warning = (
-                f"\n\n{warning_text} {usage_pct:.1f}% capacity ({current_tokens}/{max_tokens} tokens). "
+                f"{warning_text} {usage_pct:.1f}% capacity ({current_tokens}/{max_tokens} tokens). "
                 "Consider using the `compress_context` tool to summarize old history and free up space. "
                 "Propose a fraction (e.g. 0.4 for 40%) and a justification. The summary will be sent for approval.]"
             )
-            # Find the most recent message to append warning (temporarily)
-            if messages:
-                # We append to the last message's content if it's text, or add a system message
-                # Note: This is NOT saved to the permanent AgentPool history
-                last_msg = messages[-1]
-                if isinstance(last_msg.content, str):
-                    if warning_text not in last_msg.content:
-                        last_msg.content += warning
-                elif isinstance(last_msg.content, list):
-                    from agent_cascade.llm.schema import ContentItem
-                    
-                    # Prevent duplicate notifications from stacking
-                    has_notification = any(
-                        isinstance(item, ContentItem) and warning_text in getattr(item, 'text', '')
-                        for item in last_msg.content
-                    )
-                    if not has_notification:
-                        last_msg.content.append(ContentItem(text=warning))
+            self._append_system_notification(messages, warning_text, warning)
 
         return False  # No forced compression, safe to continue with LLM call
+
+    def _append_system_notification(self, messages, guard_prefix: str, notification_text: str):
+        """Append a system notification to the last message, preventing duplicates.
+        
+        Handles both string content and multi-modal list content (ContentItem objects).
+        Also handles dict-style messages (e.g., after serialization/deserialization).
+        
+        Args:
+            messages: The working message list for this agent.
+            guard_prefix: Substring to check for duplicate prevention.
+            notification_text: The notification text to append.
+        """
+        if not messages:
+            return
+
+        last_msg = messages[-1]
+        # Support both Message objects and dict-style messages
+        content = (last_msg.get('content') if isinstance(last_msg, dict) 
+                   else getattr(last_msg, 'content', None))
+        
+        if isinstance(content, str):
+            # Prevent duplicate notifications from stacking if the loop repeats
+            if guard_prefix not in content:
+                new_content = content + f"\n\n{notification_text}"
+                if isinstance(last_msg, dict):
+                    last_msg['content'] = new_content
+                else:
+                    last_msg.content = new_content
+        elif isinstance(content, list):
+            # Prevent duplicate notifications from stacking — check both ContentItems and plain strings
+            has_notification = any(
+                (isinstance(item, ContentItem) and guard_prefix in getattr(item, 'text', ''))
+                or (isinstance(item, str) and guard_prefix in item)
+                for item in content
+            )
+            if not has_notification:
+                content.append(ContentItem(text=notification_text))
+        else:
+            # Content is None or unexpected type — skip silently with debug log
+            logger.debug(
+                f"Skipping notification append: last_msg content type is {type(content).__name__} "
+                f"(expected str or list)"
+            )
 
 
     @property
@@ -945,9 +1031,25 @@ class OrchestratorAgent(Assistant):
                 
                 compressed = self.agent_pool.get_conversation(self.session_name)
                 if compressed:
+                    # Validate pool integrity after forced compression
+                    if not validate_message_pool(compressed, self.session_name):
+                        logger.error(f"[COMPRESSION BUG] Message pool validation FAILED for '{self.session_name}' after forced compression. Attempting recovery from log...")
+                        # Recovery: try to reload from the logger's history (which is unaffected)
+                        try:
+                            recov = self.agent_pool.get_logger(self.session_name, self.agent_type).data.get('history', [])
+                            if recov and validate_message_pool(recov, self.session_name):
+                                logger.info(f"Recovered message pool from log for '{self.session_name}' ({len(recov)} messages)")
+                                # Update the pool with recovered data
+                                self.agent_pool.instance_conversations[self.session_name] = copy.deepcopy(recov)
+                                compressed = recov
+                            else:
+                                logger.error("Recovery from log also failed — message pool may be corrupted")
+                        except Exception as e:
+                            logger.error(f"Recovery attempt failed for '{self.session_name}': {e}")
+                    
                     # messages stays as canonical full history (used by loop detection, etc.)
                     messages.clear()
-                    messages.extend(compressed)
+                    messages.extend(copy.deepcopy(compressed))
                     # llm_messages gets the sliced working set — what actually goes to the LLM
                     sliced = self.agent_pool.slice_history_for_llm(compressed) if hasattr(self.agent_pool, 'slice_history_for_llm') else compressed
                     llm_messages.clear()
@@ -955,6 +1057,11 @@ class OrchestratorAgent(Assistant):
                 yield response
                 # Reset flag so BUG-7 block below doesn't redundantly re-sync every iteration
                 self._compress_context_ran_this_turn = False
+                
+                # Note: If compression didn't reduce tokens enough, the next iteration will
+                # attempt forced compression again. Each attempt discards messages until either
+                # token count drops below 95% or there aren't enough messages to discard.
+                
                 continue
 
             # BUG-7 fix: If compress_context ran via LLM tool call, llm_messages was compressed in-place
@@ -966,8 +1073,12 @@ class OrchestratorAgent(Assistant):
             if getattr(self, '_compress_context_ran_this_turn', False):
                 compressed = self.agent_pool.get_conversation(self.session_name)
                 if compressed:
+                    # Validate pool integrity after agent-triggered compression
+                    if not validate_message_pool(compressed, self.session_name):
+                        logger.error(f"[COMPRESSION BUG] Message pool validation FAILED for '{self.session_name}' after agent-triggered compression.")
+                    
                     messages.clear()
-                    messages.extend(compressed)
+                    messages.extend(copy.deepcopy(compressed))
             
             # --- LOOP DETECTION ---
             loop_info = detect_loop(messages)
@@ -1151,9 +1262,14 @@ class OrchestratorAgent(Assistant):
                             is_parallel_allowed = True
                             
                             if agent_class and hasattr(self.agent_pool, 'api_router'):
-                                limit = self.agent_pool.api_router.get_concurrency_limit(agent_class)
+                                # Use effective concurrency to include default-fallback endpoint limits.
+                                # This prevents agents without custom endpoints (e.g., Security Advisor) 
+                                # from bypassing the default endpoint's concurrency constraint.
+                                limit = self.agent_pool.api_router.get_effective_concurrency(agent_class)
                                 if limit == 0:
-                                    # User explicitly sets 0 to mean sequential delegation
+                                    # Concurrency is 0 — either user explicitly set sequential-only, or
+                                    # no matching endpoint was found (conservative fallback). Either way,
+                                    # force sequential execution.
                                     is_parallel_allowed = False
                                     logger.info(f"Forcing sequential launch for {agent_class} (concurrency_limit=0)")
                                 elif limit > 0:
@@ -1329,6 +1445,10 @@ class OrchestratorAgent(Assistant):
                     # it didn't (e.g., forced compression path), we need to do it here with slicing.
                     compressed_conv = self.agent_pool.get_conversation(self.session_name)
                     if compressed_conv:
+                        # Validate pool integrity after agent-triggered compression
+                        if not validate_message_pool(compressed_conv, self.session_name):
+                            logger.error(f"[COMPRESSION BUG] Message pool validation FAILED for '{self.session_name}' after compress_context tool call.")
+                        
                         sliced = self.agent_pool.slice_history_for_llm(compressed_conv) if hasattr(self.agent_pool, 'slice_history_for_llm') else compressed_conv
                         llm_messages.clear()
                         llm_messages.extend(copy.deepcopy(sliced))
@@ -1720,16 +1840,16 @@ class OrchestratorAgent(Assistant):
                                 logger_inst.log_message(async_msg)  # Log to JSONL file
                                 logger.info(f"Injected async user message into sub-agent {instance_name} via LLM hook: {async_msg_text}")
 
-                            hook_forced = self._inject_compression_warning_for_agent(self_agent, instance_name, messages)
+                            # Skip compression checks during Compression Agent execution
+                            # Prevents nested compression (circular dependency)
+                            hook_forced = False
+                            if instance_name != 'compression_agent':
+                                hook_forced = self._inject_compression_warning_for_agent(self_agent, instance_name, messages)
                             
                             # If forced compression ran, halt this LLM call — don't proceed.
                             if hook_forced:
                                 logger.info(f"Forced compression for sub-agent {instance_name} — halting LLM call.")
-                                # Sync messages from pool so the sub-agent's next iteration sees compressed state
-                                compressed = self.agent_pool.get_conversation(instance_name)
-                                if compressed:
-                                    messages.clear()
-                                    messages.extend(compressed)
+                                # rebuild_working_set() inside _inject_compression_warning_for_agent already synced
                                 return
                             
                             # --- CALL LLM WITH AUTO-CONTINUE ---

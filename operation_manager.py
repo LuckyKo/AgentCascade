@@ -37,7 +37,6 @@ class OperationType(Enum):
     FILE_REPLACE = "file_replace"
     CODE_EXECUTE = "code_execute"
     EXTERNAL_TOOL = "external_tool"
-    CONTEXT_COMPRESSION = "context_compression"
     CUSTOM = "custom"
 
 
@@ -1131,6 +1130,55 @@ class OperationManager:
             match_ratio = unique_match['ratio']
             
             last_matched_line = file_lines[orig_end_idx]
+            
+            # Auto-align indentation if match_mode is heuristic
+            def get_leading_whitespace(s: str) -> str:
+                for line in s.splitlines():
+                    if line.strip():
+                        return line[:len(line) - len(line.lstrip())]
+                return ""
+
+            file_indent = get_leading_whitespace(actual_old_content)
+            old_indent = get_leading_whitespace(old_content)
+
+            if file_indent != old_indent:
+                def get_indent_width(indent_str: str) -> int:
+                    width = 0
+                    for char in indent_str:
+                        if char == '\t':
+                            width += 4
+                        elif char == ' ':
+                            width += 1
+                    return width
+
+                file_width = get_indent_width(file_indent)
+                old_width = get_indent_width(old_indent)
+                delta = file_width - old_width
+
+                indent_char = ' '
+                if '\t' in file_indent or (not file_indent and '\t' in old_indent):
+                    indent_char = '\t'
+                    delta = delta // 4
+
+                adjusted_lines = []
+                for line in new_content.splitlines(keepends=True):
+                    if not line.strip():
+                        adjusted_lines.append(line)
+                        continue
+
+                    current_indent = line[:len(line) - len(line.lstrip())]
+                    current_width = get_indent_width(current_indent)
+                    
+                    if indent_char == '\t':
+                        current_tabs = current_width // 4
+                        new_tabs = max(0, current_tabs + delta)
+                        adjusted_lines.append(('\t' * new_tabs) + line.lstrip())
+                    else:
+                        new_spaces = max(0, current_width + delta)
+                        adjusted_lines.append((' ' * new_spaces) + line.lstrip())
+                
+                new_content = "".join(adjusted_lines)
+
             has_trailing_newline = last_matched_line.endswith('\n') or last_matched_line.endswith('\r')
             if has_trailing_newline:
                 if new_content and not (new_content.endswith('\n') or new_content.endswith('\r')):
@@ -1510,15 +1558,6 @@ class OperationManager:
             return "ERROR: Command timed out after 120 seconds. If the process is expected to take a long time, consider using a background command (e.g. using '&' on linux or 'Start-Job' on windows) or optimizing the task."
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
-
-    # ─── Context Compression (still internal, auto-approved) ──────────────
-
-    def apply_context_compression(self, agent_name: str, summary: str, fraction: float, target_discard_count: Optional[int] = None, agent_obj: Optional[Any] = None):
-        """Apply context compression — this is internal so no user approval needed."""
-        if not self.agent_pool:
-            raise ValueError("agent_pool not connected to OperationManager")
-        logger.info(f"Applying context compression for {agent_name}: {fraction*100}% fraction, {target_discard_count} messages to discard")
-        self.agent_pool._apply_context_compression(agent_name, summary, fraction, target_discard_count=target_discard_count, agent_obj=agent_obj)
 
     # ─── Utilities ────────────────────────────────────────────────────────
 
