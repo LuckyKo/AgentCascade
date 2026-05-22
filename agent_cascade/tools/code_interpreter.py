@@ -339,7 +339,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         if char_limit != -1 and len(result) > char_limit:
             from datetime import datetime
             # Save full result to spill file
-            log_dir = Path('workspace/logs')
+            log_dir = Path('workspace/logs/spillover')
             log_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             instance_name = kwargs.get('agent_instance_name', 'unknown')

@@ -1523,7 +1523,7 @@ class OperationManager:
             final_output = output
             if char_limit != -1 and len(output) > char_limit:
                 # Save full result to spill file
-                log_dir = self.base_dir / 'logs'
+                log_dir = self.base_dir / 'logs' / 'spillover'
                 log_dir.mkdir(parents=True, exist_ok=True)
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                 safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)

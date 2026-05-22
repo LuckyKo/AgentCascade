@@ -627,7 +627,7 @@ class OrchestratorAgent(Assistant):
         char_budget = max(100, char_budget - 300)
         
         # Save full result to spill file
-        log_dir = Path('workspace/logs')
+        log_dir = Path('workspace/logs/spillover')
         log_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_tool = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name)
