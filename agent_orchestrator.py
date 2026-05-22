@@ -1136,27 +1136,31 @@ class OrchestratorAgent(Assistant):
                 # FIX 1A: Suppress first-tick empty messages to prevent bubble race condition.
                 # On the very first tick of a streaming LLM turn, skip yielding if there's no 
                 # meaningful content yet (no text, no reasoning, and no tool calls). Tool calls always flow through.
+                # Wrapped in try/finally to guarantee _first_llm_tick is reset even on exception — prevents permanent suppression.
                 if _first_llm_tick and output:
-                    has_text = False
-                    has_tool_call = False
-                    for m in output:
-                        role = m.get('role') if isinstance(m, dict) else getattr(m, 'role', None)
-                        content = m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')
-                        reasoning = m.get('reasoning_content', '') if isinstance(m, dict) else getattr(m, 'reasoning_content', '')
-                        fc = m.get('function_call') if isinstance(m, dict) else getattr(m, 'function_call', None)
-                        # Check for non-empty text OR reasoning in Assistant messages
-                        if role == ASSISTANT and ((content or '').strip() or (reasoning or '').strip()):
-                            has_text = True
-                            break
-                        # Tool calls are always meaningful events
-                        if fc:
-                            has_tool_call = True
-                    # Only suppress if there's no text/reasoning AND no tool call — i.e., output is noise
-                    if not has_text and not has_tool_call:
-                        _first_llm_tick = False  # Mark as processed even though we skip the yield
-                        continue
-                
-                _first_llm_tick = False
+                    try:
+                        has_text = False
+                        has_tool_call = False
+                        for m in output:
+                            role = m.get('role') if isinstance(m, dict) else getattr(m, 'role', None)
+                            content = m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')
+                            reasoning = m.get('reasoning_content', '') if isinstance(m, dict) else getattr(m, 'reasoning_content', '')
+                            # Safety coercion: prevent AttributeError if reasoning/content is a non-string type (e.g., list, None with no default)
+                            content = str(content) if content else ''
+                            reasoning = str(reasoning) if reasoning else ''
+                            fc = m.get('function_call') if isinstance(m, dict) else getattr(m, 'function_call', None)
+                            # Check for non-empty text OR reasoning in Assistant messages
+                            if role == ASSISTANT and ((content or '').strip() or (reasoning or '').strip()):
+                                has_text = True
+                                break
+                            # Tool calls are always meaningful events
+                            if fc:
+                                has_tool_call = True
+                        # Only suppress if there's no text/reasoning AND no tool call — i.e., output is noise
+                        if not has_text and not has_tool_call:
+                            continue  # Don't reset flag here — finally will do it
+                    finally:
+                        _first_llm_tick = False  # Always reset, even on exception
                 
                 # Telemetry: record first token time (only on actual meaningful yields, after suppression check)
                 if not _llm_first_token_recorded and output:

@@ -1112,6 +1112,7 @@ function renderMessages() {
     // FIX: Define minimum content threshold — tool calls and function results always render immediately
     const MIN_CONTENT_LEN = 1; // At least 1 character of text to create a bubble
 
+    let newLastRendered = lastRenderedCount;
     for (let i = lastRenderedCount; i < currentCount; i++) {
       const msg = msgs[i];
       const isToolCall = !!msg.function_call;
@@ -1125,27 +1126,11 @@ function renderMessages() {
       // This applies regardless of streaming state to handle interrupted turns (Edge Case 3).
       if (!isToolCall && !isFunctionResult
           && msg.role === 'assistant' && contentLen < MIN_CONTENT_LEN && reasoningLen < MIN_CONTENT_LEN) {
-        // Defer this message — don't update lastRenderedCount for it
-        continue;
+        continue; // Defer this message — newLastRendered stays at previous value
       }
 
       container.appendChild(createMessageEl(msg, i));
-    }
-
-    // FIX: Update lastRenderedCount to the last message that was ACTUALLY rendered.
-    // Walk backwards from currentCount to find the last rendered message.
-    let newLastRendered = lastRenderedCount;
-    for (let j = currentCount - 1; j >= lastRenderedCount; j--) {
-      const msg = msgs[j];
-      const isToolCall = !!msg.function_call;
-      const isFunctionResult = msg.role === 'function';
-      const contentLen = (msg.content || '').trim().length;
-      const reasoningLen = (msg.reasoning_content || '').trim().length;
-
-      if (isToolCall || isFunctionResult || contentLen >= MIN_CONTENT_LEN || reasoningLen >= MIN_CONTENT_LEN) {
-        newLastRendered = j + 1;
-        break;
-      }
+      newLastRendered = i + 1; // Track last rendered index inline (eliminates backward walk)
     }
 
     // Throttle context bar updates to ~1Hz during streaming
@@ -1163,8 +1148,8 @@ function renderMessages() {
     const lastBubble = container.lastElementChild;
     const idx = parseInt(lastBubble.dataset.index);
     // FIX: Check against the actual last rendered index, not currentCount - 1.
-    // If the last message was deferred (empty content), idx will be less than currentCount - 1,
-    // and we should still update that bubble with its own message data.
+    // If the last message was deferred (empty content), we update the last visible bubble with its own data.
+    // Deferred messages have no DOM element yet, so their content changes are detected but silently ignored until they render.
     if (idx < currentCount && state.editingIndex !== idx) {
       updateBubbleContent(lastBubble, msgs[idx]);
     }
