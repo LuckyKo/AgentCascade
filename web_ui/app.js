@@ -1517,7 +1517,7 @@ function updateBubbleContent(bubble, msg) {
             }
         }
     }
-    html += renderMarkdown(text, !isGenerating);
+    html += renderMarkdown(text, false); // Skip thinking block parsing — reasoning_content is already rendered separately via renderThinkingBlock
   }
   setInnerHtmlWithState(contentDiv, html);
   
@@ -1695,13 +1695,33 @@ function renderToolResult(msg) {
   const isFail = isToolFailure(msg);
   const icon = isFail ? '❌' : '📋';
   const shouldTruncate = settingTruncateTools ? settingTruncateTools.checked : true;
-  const truncated = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
 
-  let contentHtml = `<pre><code>${escapeHtml(truncated)}</code></pre>`;
+  // Determine rendering strategy based on tool type and content characteristics.
+  // Some tools return prose/markdown (web_extractor, ddg_search, calculate) that should be formatted.
+  // Others return code-like output (code_interpreter, read_file, shell_cmd, grep, list_dir, write_file, python_compiler) that should stay in <pre><code>.
+  const isCodeTool = ['code_interpreter', 'read_file', 'shell_cmd', 'grep', 'list_dir', 'write_file', 'python_compiler'].includes(msg.name);
+  
+  let contentHtml;
   if (msg.name === 'view_image' || content.match(/!\[.*?\]\(.*?\)/)) {
-    // Rewrite file:/// URLs to use our backend proxy to avoid browser security restrictions
-    const proxiedContent = truncated.replace(/!\[(.*?)\]\((?:file:\/\/\/|file:\/\/)(.*?)\)/g, '![image](/api/file?path=$2)');
-    contentHtml = `<div class="tool-image-wrapper" style="padding-top: 8px;">${renderMarkdown(proxiedContent)}</div>`;
+    // Image content: process through markdown to render images, rewriting file:/// URLs via backend proxy
+    const truncatedForImage = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
+    const proxiedContent = truncatedForImage.replace(/!\[(.*?)\]\((?:file:\/\/\/|file:\/\/)(.*?)\)/g, '![image](/api/file?path=$2)');
+    contentHtml = `<div class="tool-image-wrapper" style="padding-top: 8px;">${renderMarkdown(proxiedContent, false)}</div>`;
+  } else if (!isCodeTool) {
+    // Prose/markdown tools: process through renderMarkdown for proper formatting.
+    // Do NOT truncate before rendering — truncating raw markdown mid-block produces malformed HTML.
+    // The <details> element naturally keeps large content collapsed until expanded by the user.
+    // If rendering fails (e.g., extremely large content), fall back to truncated <pre><code>.
+    try {
+      contentHtml = `<div class="tool-rendered-content">${renderMarkdown(content, false)}</div>`;
+    } catch {
+      const truncatedFallback = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
+      contentHtml = `<pre><code>${escapeHtml(truncatedFallback)}</code></pre>`;
+    }
+  } else {
+    // Code-like tools: truncate before escaping to keep <pre><code> from bloating
+    const truncated = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
+    contentHtml = `<pre><code>${escapeHtml(truncated)}</code></pre>`;
   }
 
   return `
@@ -2479,7 +2499,19 @@ function updateSubBubbleContent(bubble, msg, isGenerating) {
   } else if (msg.role === 'function') {
     html += renderToolResult(msg);
   } else {
-    html += renderMarkdown(msg.content || '', !isGenerating);
+    let text = msg.content || '';
+    // Deduplicate: If content starts with a thinking block that matches reasoning_content, strip it
+    if (msg.reasoning_content) {
+        const thinkMatch = text.match(_THINK_BLOCK_ANCHORED_RE) || text.match(_THINK_BLOCK_BRACKET_ANCHORED_RE);
+        if (thinkMatch) {
+            const embedded = thinkMatch[2].trim();
+            const reasoning = msg.reasoning_content.trim();
+            if (reasoning.includes(embedded) || embedded.includes(reasoning)) {
+                text = text.substring(thinkMatch[0].length).trim();
+            }
+        }
+    }
+    html += renderMarkdown(text, false); // Skip thinking block parsing — reasoning_content is already rendered separately via renderThinkingBlock
   }
 
   setInnerHtmlWithState(content, html);

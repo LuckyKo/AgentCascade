@@ -44,15 +44,6 @@ agent_cascade/agents/writing/__init__.py
 agent_cascade/agents/writing/continue_writing.py
 agent_cascade/agents/writing/expand_writing.py
 agent_cascade/agents/writing/outline_writing.py
-agent_cascade/gui/__init__.py
-agent_cascade/gui/gradio_dep.py
-agent_cascade/gui/gradio_utils.py
-agent_cascade/gui/utils.py
-agent_cascade/gui/web_ui.py
-agent_cascade/gui/assets/app.css
-agent_cascade/gui/assets/appBot.css
-agent_cascade/gui/assets/logo.jpeg
-agent_cascade/gui/assets/user.jpeg
 agent_cascade/llm/__init__.py
 agent_cascade/llm/azure.py
 agent_cascade/llm/base.py
@@ -91,6 +82,8 @@ agent_cascade/tools/storage.py
 agent_cascade/tools/web_extractor.py
 agent_cascade/tools/web_search.py
 agent_cascade/tools/custom/__init__.py
+agent_cascade/tools/custom/calculation.py
+agent_cascade/tools/custom/code_map.py
 agent_cascade/tools/custom/compression_tools.py
 agent_cascade/tools/custom/file_ops.py
 agent_cascade/tools/custom/manager_ops.py
@@ -111,5 +104,9 @@ agent_cascade/utils/output_beautify.py
 agent_cascade/utils/parallel_executor.py
 agent_cascade/utils/qwen.tiktoken
 agent_cascade/utils/str_processing.py
+agent_cascade/utils/thinking_block.py
 agent_cascade/utils/tokenization_qwen.py
 agent_cascade/utils/utils.py
+tests/test_code_interpreter_extra_mounts.py
+tests/test_json_robustness.py
+tests/test_security_parser.py

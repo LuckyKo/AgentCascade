@@ -29,6 +29,17 @@ class SystemInfo(BaseTool):
         self.agent_pool = agent_pool
         self.agent_name = agent_name
 
+    def _is_path_allowed(self, abs_path: str, allowed_prefixes: set) -> bool:
+        """Check if a path is within an allowed directory (mirrors code_interpreter._is_path_allowed)."""
+        for prefix in allowed_prefixes:
+            try:
+                if os.path.commonpath([abs_path, prefix]) == prefix:
+                    return True
+            except ValueError:
+                # Different drive letters on Windows
+                continue
+        return False
+
     def call(self, params: str, **kwargs) -> str:
         # Just return the information as a string
         now = datetime.datetime.now()
@@ -98,21 +109,61 @@ class SystemInfo(BaseTool):
                 cfg = agent_obj.llm.cfg
                 api_base = cfg.get('api_base') or cfg.get('base_url') or cfg.get('model_server') or "Unknown"
 
-        # Workspace and Folders information
+        # Workspace and Folders information (with Docker container mount paths)
         default_ws = DEFAULT_WORKSPACE
         ro_folders = []
         rw_folders = []
+        has_docker_context = False
         if hasattr(self, 'agent_pool') and self.agent_pool and self.agent_pool.operation_manager:
             om = self.agent_pool.operation_manager
             default_ws = str(om.base_dir)
             ro_folders = [str(p) for p in om.extra_work_folders_ro]
             rw_folders = [str(p) for p in om.extra_work_folders_rw]
+            has_docker_context = True
 
-        folders_info = f"Default Workspace (RW): {default_ws}\n"
-        if rw_folders:
-            folders_info += f"Additional RW Folders: {', '.join(rw_folders)}\n"
-        if ro_folders:
-            folders_info += f"Additional RO Folders: {', '.join(ro_folders)}\n"
+        # Build folder info with Docker mount mappings (mirrors code_interpreter.py validation logic)
+        # Only claim Docker paths when operation_manager is available (Docker context exists)
+        if has_docker_context:
+            folders_info = f"Default Workspace (RW): {default_ws} → /workspace (Docker)\n"
+            
+            # Filter and mount RW folders exactly like code_interpreter.py (lines 648-660)
+            allowed_prefixes = {os.path.realpath(default_ws)} if default_ws else set()
+            for fp in [*rw_folders, *ro_folders]:  # include both RW and RO (mirrors code_interpreter.py:644)
+                allowed_prefixes.add(os.path.realpath(fp))
+            
+            rw_idx = 0
+            if rw_folders:
+                folders_info += "Additional RW Folders:\n"
+                for folder in rw_folders:
+                    abs_path = os.path.realpath(folder)
+                    # Skip if path doesn't exist as a directory
+                    if not os.path.isdir(abs_path):
+                        continue
+                    # Skip if path is outside allowed directories (security check)
+                    if not self._is_path_allowed(abs_path, allowed_prefixes):
+                        continue
+                    docker_path = f"/workspace/extra_rw_{rw_idx}"
+                    folders_info += f"  - {folder} → {docker_path} (Docker)\n"
+                    rw_idx += 1
+            
+            # Filter and mount RO folders exactly like code_interpreter.py (lines 662-674)
+            ro_idx = 0
+            if ro_folders:
+                folders_info += "Additional RO Folders:\n"
+                for folder in ro_folders:
+                    abs_path = os.path.realpath(folder)
+                    # Skip if path doesn't exist as a directory
+                    if not os.path.isdir(abs_path):
+                        continue
+                    # Skip if path is outside allowed directories (security check)
+                    if not self._is_path_allowed(abs_path, allowed_prefixes):
+                        continue
+                    docker_path = f"/workspace/extra_ro_{ro_idx}"
+                    folders_info += f"  - {folder} → {docker_path} (Docker, read-only)\n"
+                    ro_idx += 1
+        else:
+            # No Docker context — don't claim Docker mount paths
+            folders_info = f"Default Workspace (RW): {default_ws} → /workspace (no Docker context)\n"
 
         info = (
             f"--- System Information ---\n"
@@ -121,11 +172,11 @@ class SystemInfo(BaseTool):
             f"Python Version: {py_version}\n"
             f"API Endpoint: {api_base}\n"
             f"Model Used: {model}\n"
-            f"--- Workspace & Permissions ---\n"
+            f"\n--- Workspace & Permissions ---\n"
             f"{folders_info}"
-            f"--- Session Stats ---\n"
+            f"\n--- Session Stats ---\n"
             f"{stats_str}\n"
-            f"--- Tool Policy ---\n"
+            f"\n--- Tool Policy ---\n"
             f"{tools_str}"
         )
         return info

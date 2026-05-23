@@ -248,7 +248,10 @@ TOOL_METADATA = {
         'description': (
             'Retrieves the current system information. '
             'This includes the operating system, current time and date, '
-            'current work directories and respective Docker mounts, Python version, and basic session stats.'
+            'current work directories with their Docker container mount paths (e.g., host N:\\work\\WD\\AgentWorkspace maps to /workspace inside containers), '
+            'Python version, and basic session stats. '
+            'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted. '
+            'NOTE: All file tool paths must still be relative to workspace root, not absolute host paths.'
         ),
         'parameters': {}
     },

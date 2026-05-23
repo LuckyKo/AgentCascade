@@ -1109,6 +1109,85 @@ body {
   word-break: break-word;
 }
 
+/* Markdown-rendered tool results (prose tools like web_extractor, ddg_search) 
+   — scoped to .tool-rendered-content wrapper so they don't affect code-tool <pre><code> */
+.tool-result .tool-rendered-content p {
+  margin: 0 0 8px;
+}
+.tool-result .tool-rendered-content p:last-child {
+  margin-bottom: 0;
+}
+.tool-result .tool-rendered-content ul,
+.tool-result .tool-rendered-content ol {
+  margin: 4px 0 8px 20px;
+}
+.tool-result .tool-rendered-content li {
+  margin: 2px 0;
+}
+.tool-result .tool-rendered-content strong {
+  font-weight: 600;
+}
+.tool-result .tool-rendered-content em {
+  font-style: italic;
+  color: var(--text-secondary);
+}
+.tool-result .tool-rendered-content a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.tool-result .tool-rendered-content a:hover {
+  text-decoration: underline;
+}
+.tool-result .tool-rendered-content code:not(pre code) {
+  background: var(--bg-primary);
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.tool-result .tool-rendered-content blockquote {
+  border-left: 3px solid var(--accent-dim);
+  padding-left: 12px;
+  color: var(--text-secondary);
+  margin: 8px 0;
+}
+
+/* Tables in prose tool results — match .msg-content table styling */
+.tool-result .tool-rendered-content table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+}
+.tool-result .tool-rendered-content th,
+.tool-result .tool-rendered-content td {
+  padding: 6px 12px;
+  border: 1px solid var(--bg-elevated);
+  text-align: left;
+}
+.tool-result .tool-rendered-content th {
+  background: var(--bg-tertiary);
+  font-weight: 600;
+}
+
+/* Code blocks inside prose tool results — match .msg-content pre styling.
+   Targets <pre> elements inside the .tool-rendered-content wrapper (prose tools),
+   not the direct <pre><code> children used for code-tool output (styled at line ~1102). */
+.tool-result .tool-rendered-content pre {
+  background: var(--bg-primary);
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  margin: 8px 0;
+  font-size: 12px;
+}
+
+/* Inline horizontal rules in prose tool results */
+.tool-result .tool-rendered-content hr {
+  border: none;
+  border-top: 1px solid var(--bg-elevated);
+  margin: 12px 0;
+}
+
 .truncation-hint {
   font-size: 11px;
   color: var(--text-muted);

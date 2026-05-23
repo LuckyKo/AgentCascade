@@ -35,7 +35,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] dismiss_agent tool should return the list of log paths of closed agents in case they need to be resurrected.
 - [x] dismissing an agent does not close the UI tab in real time, it current needs f5 to clear it.
 - [x] unused/idle agents should be automatically dismissed after a period of inactivity — they sit idle consuming memory and context when not needed [x] FIXED: configurable idle_timeout (default 5min) with activity heartbeat on dispatch + completion, CLI args (--idle-timeout/--idle-check-interval) and env var fallbacks
-- system_info tool does not show the mapped Docker paths for each work dir
+- [x] system_info tool does not show the mapped Docker paths for each work dir — FIXED: shows host → container mount mappings (e.g. N:\work\WD\AgentWorkspace → /workspace)
 - [x] when grep spillover is toggled in options we don't inform the model of the destination file — FIXED: spill path passed from orchestrator down through Grep tool to operation_manager; all 4 truncation points (subprocess early-trunc, subprocess re-check, Python fallback, single-file) write full output to spill file and include its workspace-relative path in the truncation notice. Orchestrator skips its own spillover writes for grep to avoid double-writing degraded content. Subprocess returns was_truncated flag for clean coordination.
 - [x] orchestrator _truncate_tool_result strips grep truncation notice with spill path — FIXED: check for existing "[TOOL RESPONSE TRUNCATED" in tool_result and skip replacement if found, preserving operation_manager's spill file notice
 - [x] subprocess grep truncation can result in "Found 0 matches" when all lines exceed char_limit — FIXED: _sub_truncated=True with count==0 no longer falls through to Python fallback; summary shows "Matches found [TRUNCATED]" instead of misleading "Found 0 matches"
@@ -45,7 +45,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - streaming is fixed in sub-agent tabs but inconsistent on main chat (why are we even using different formatting path? they should look the same). display speed seems to not keep up with generation speed so maybe if a new bubble pops, we should just fill in the full prev bubble and continue streaming into the new one... or use some faster formatting code. (i hope we're not processing older bubbles that do not change)
 - continue should not insert a new user message, just send the active agent_pool too the LLM so it can resume if it wants.
 - the approval window sometimes disappears (when there are a lot of agent tabs mostly), have to hit F5 to make it show up again.
-- message bubbles use no `md` formatting sometimes, its inconsistent.
+- [x] message bubbles use no `md` formatting sometimes, its inconsistent. — FIXED: renderToolResult now uses hybrid approach (prose tools via renderMarkdown, code tools via pre/code), allowThinking parameter made consistent across all rendering paths, added CSS for markdown-rendered tool content
 - auto agent discard timer value should be added to agent settings
 
 # EOF
