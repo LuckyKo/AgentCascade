@@ -3,7 +3,8 @@
     "allow": [
       "Read(n:\\work\\WD\\AgentWorkspace/**)",
       "Bash(python *)",
-      "Read(n:\\work\\WD\\AgentWorkspace\\logs/**)"
+      "Read(n:\\work\\WD\\AgentWorkspace\\logs/**)",
+      "Bash(wsl *)"
     ]
   },
   "$version": 4

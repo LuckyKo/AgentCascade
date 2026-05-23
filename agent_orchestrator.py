@@ -799,11 +799,7 @@ class OrchestratorAgent(Assistant):
                     )
                     # Append notification to last message — PRESERVE existing duplicate-prevention logic
                     self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
-
-                    # Rebuild working set from pool (single source of truth).
-                    # For sub-agent path: this is the only sync — caller returns after hook_forced.
-                    # For orchestrator's own _run: caller does additional sync at forced_compression_ran block,
-                    # rebuilding both canonical `messages` and sliced `llm_messages`.
+                    # compress_context() already modified the pool with compressed data — just rebuild working set from it
                     rebuild_working_set(messages, self.agent_pool, instance_name)
                 else:
                     logger.error(f"Forced compression failed for {instance_name}: {result.error}")
@@ -813,6 +809,9 @@ class OrchestratorAgent(Assistant):
                         f"The upcoming API call will likely fail due to length.]"
                     )
                     self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
+                    # No compression happened — write notification-containing messages to pool
+                    self.agent_pool.instance_conversations[instance_name] = copy.deepcopy(messages)
+                    rebuild_working_set(messages, self.agent_pool, instance_name)
 
                 return True  # Halt current turn — let next iteration use compressed context
 
@@ -823,6 +822,11 @@ class OrchestratorAgent(Assistant):
                     f"but automatic compression encountered an error ({e}).]"
                 )
                 self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
+                
+                # Write working set to pool and rebuild so the exception notification persists.
+                self.agent_pool.instance_conversations[instance_name] = copy.deepcopy(messages)
+                rebuild_working_set(messages, self.agent_pool, instance_name)
+                
                 return True  # Still halt — let next iteration proceed
 
             finally:

@@ -27,6 +27,7 @@ WebSocket protocol (all JSON):
 
 import asyncio
 import copy
+import glob
 import json
 import os
 import re
@@ -1901,6 +1902,74 @@ def create_app(agents, agent_pool, config=None):
                             if agent_pool:
                                 agent_pool.stopped = False
                                 agent_pool.instance_conversations[session['session_name']] = session['history']
+                                
+                                # ── Fix 3: Restore sub-agent pools from JSONL logs if corrupted ──
+                                # After a failed forced compression cycle, sub-agent pools may be empty/corrupted.
+                                # Read directly from log files on disk to recover.
+                                try:
+                                    # Import validate_message_pool locally (defined in agent_orchestrator.py)
+                                    from agent_orchestrator import validate_message_pool
+                                    
+                                    for sa_name in list(agent_pool.instance_classes.keys()):
+                                        if sa_name == session['session_name']:
+                                            continue  # Already synced above
+                                        
+                                        try:
+                                            agent_class = agent_pool.instance_classes.get(sa_name, '')
+                                            
+                                            # Check if current pool data is valid before restoring
+                                            current_pool_data = agent_pool.instance_conversations.get(sa_name, [])
+                                            if validate_message_pool(current_pool_data, sa_name):
+                                                continue  # Pool is fine, no need to restore
+                                            
+                                            # Find the actual log file via existing logger or glob
+                                            recov = []
+                                            logger_inst = agent_pool.instance_loggers.get(sa_name)
+                                            
+                                            if logger_inst and hasattr(logger_inst, 'log_path') and logger_inst.log_path:
+                                                actual_log_path = logger_inst.log_path
+                                            else:
+                                                # Search for the most recent log file matching this sub-agent
+                                                if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
+                                                    log_dir = agent_pool.operation_manager.base_dir / 'logs'
+                                                else:
+                                                    log_dir = Path(DEFAULT_WORKSPACE) / 'logs'
+                                                pattern = f"{agent_class}_{sa_name}_*.jsonl"
+                                                matches = sorted(glob.glob(str(log_dir / pattern)), reverse=True)
+                                                actual_log_path = matches[0] if matches else None
+                                            
+                                            # Read messages from log file
+                                            if actual_log_path and os.path.exists(actual_log_path):
+                                                with open(actual_log_path, 'r', encoding='utf-8') as f:
+                                                    for line in f:
+                                                        line = line.strip()
+                                                        if not line:
+                                                            continue
+                                                        try:
+                                                            item = json.loads(line)
+                                                            if "metadata" not in item:  # Skip metadata lines
+                                                                recov.append(item)
+                                                        except json.JSONDecodeError:
+                                                            continue
+                                            
+                                            # Only overwrite pool if recovered data is valid
+                                            if recov and validate_message_pool(recov, sa_name):
+                                                logger.info(
+                                                    f"Restoring sub-agent {sa_name} pool from log during resume "
+                                                    f"({len(recov)} messages)"
+                                                )
+                                                agent_pool.instance_conversations[sa_name] = copy.deepcopy(recov)
+                                            else:
+                                                logger.warning(
+                                                    f"Could not restore sub-agent {sa_name} pool — "
+                                                    f"no valid recovery data found in logs"
+                                                )
+                                        except Exception as _e:
+                                            # Single agent failure shouldn't block resume for others
+                                            logger.warning(f"Failed to restore sub-agent {sa_name} pool: {_e}")
+                                except ImportError:
+                                    logger.warning("validate_message_pool not available — skipping sub-agent pool restoration")
+                                # ── End Fix 3 ──
                             
                             session['generation_id'] += 1
                             gen_id = session['generation_id']

@@ -109,7 +109,8 @@ def compress_context(
         # Token counting is advisory — if it fails, skip the token guard
         total_tokens = 0
 
-    if len(active_set) < 3 and total_tokens < 200:
+    if not force and len(active_set) < 3 and total_tokens < 200:
+        # Only defer when NOT in force mode — force mode must attempt compression regardless
         logger.debug(
             f"Deferring compression for '{target_agent_name}': "
             f"{len(active_set)} messages, ~{total_tokens} tokens"

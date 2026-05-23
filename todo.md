@@ -47,5 +47,6 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - the approval window sometimes disappears (when there are a lot of agent tabs mostly), have to hit F5 to make it show up again.
 - [x] message bubbles use no `md` formatting sometimes, its inconsistent. — FIXED: renderToolResult now uses hybrid approach (prose tools via renderMarkdown, code tools via pre/code), allowThinking parameter made consistent across all rendering paths, added CSS for markdown-rendered tool content
 - auto agent discard timer value should be added to agent settings
+- [x] forced compression failed on sub-agent with not enough messages to compress, agent_pool got erased and started from scratch — FIXED: 3 bugs patched (see forced_compression_bug_fix_plan.md): (1) rebuild_working_set() now always called after forced compression attempt including failure/exception paths, (2) minimum message guard bypassed in force mode via `not force` check, (3) sub-agent pools restored from JSONL logs on resume 
 
 # EOF
