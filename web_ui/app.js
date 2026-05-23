@@ -493,11 +493,11 @@ function loadSettings() {
       $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
       $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
     }
-    if (s['grep-char-limit'] !== undefined) {
-      $('#setting-grep-char-limit').value = s['grep-char-limit'];
+    if (s['grep_char_limit'] !== undefined) {
+      $('#setting-grep-char-limit').value = s['grep_char_limit'];
     }
-    if (s['grep-spillover'] !== undefined) {
-      $('#setting-grep-spillover').checked = s['grep-spillover'];
+    if (s['grep_spillover'] !== undefined) {
+      $('#setting-grep-spillover').checked = s['grep_spillover'];
     }
 
     if (settingImageDetail && s['setting-image-detail'] !== undefined) {
@@ -848,15 +848,26 @@ function handleServerMessage(data) {
       state.messages.push(...responseMsgs);
 
       const oldStackStr = (state.activeStack || []).join(',');
+      // Track subagent changes to decide render urgency:
+      //   subAgentNewVisibleMessage — a new bubble was added to a VISIBLE panel (force immediate render)
+      //   subAgentContentChanged   — any subagent state changed (content streaming or new messages).
+      //     Note: subAgentNewVisibleMessage only covers new-message arrivals on visible panels;
+      //     streaming content updates rely on the tiered throttle timer below.
+      let subAgentNewVisibleMessage = false;
+      let subAgentContentChanged = false;
       if (data.sub_agents) {
         for (const [name, sa] of Object.entries(data.sub_agents)) {
+          const existing = state.subAgents[name];
+          const prevMsgCount = existing ? existing.messages.length : 0;
+          
           if (sa.is_partial) {
-            const existing = state.subAgents[name];
             if (existing && existing.messages) {
               const hCount = sa.history_count || 0;
               
-              // Skip stale updates that would truncate newer messages
-              if (hCount <= (existing._lastHistoryCount || 0)) {
+              // Skip stale updates that would truncate newer messages.
+              // Use strict < so that updates with the same history_count are still processed —
+              // during content streaming, history_count stays constant while message content grows.
+              if (hCount < (existing._lastHistoryCount || 0)) {
                 // Stale: only sync metadata, don't touch message array.
                 // Exclude sa.messages from Object.assign to prevent overwriting our local array.
                 const savedMessages = sa.messages;
@@ -887,6 +898,24 @@ function handleServerMessage(data) {
             }
           } else {
             state.subAgents[name] = sa;
+          }
+          
+          // Detect changes to decide render urgency:
+          //   - New messages (message count grew or brand new agent) → force immediate render if visible
+          //   - Any state change (including streaming content growth with same message count) → use tiered throttle
+          const newMsgCount = existing ? existing.messages.length : (sa.messages ? sa.messages.length : 0);
+          const hasNewMessage = newMsgCount > prevMsgCount || !prevMsgCount;
+          
+          if (hasNewMessage) {
+            subAgentContentChanged = true;
+            // Only force-render new bubbles for panels that are actually visible —
+            // avoid wasting DOM work on hidden panels.
+            if (state.activeSubTab === 'sub-' + name) {
+              subAgentNewVisibleMessage = true;
+            }
+          } else if (sa.is_partial && existing) {
+            // Partial arrived with same message count — content is streaming in an existing bubble
+            subAgentContentChanged = true;
           }
         }
       }
@@ -929,12 +958,16 @@ function handleServerMessage(data) {
       // Update UI controls (stop button, send disabled state, etc.)
       updateControls();
 
-      // Throttle sub-agent rendering. Render at ~300ms if a sub-agent is active
-      // to ensure smooth streaming without excessive CPU. Otherwise use a slower rate for idle agents.
+      // Throttle sub-agent rendering with tiered rates based on change urgency:
+      //   Tier 1 — New visible bubble (subAgentNewVisibleMessage): force immediate render, reset timer.
+      //            Only fires for panels the user is actually looking at (visibility guard above).
+      //   Tier 2 — Content streaming (no new messages, subAgentContentChanged): faster throttle (~150ms)
+      //            to keep text flowing smoothly without excessive DOM churn.
+      //   Tier 3 — Idle / no changes: slower throttle (~750ms) to save CPU.
       const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
-      const subThrottle = isSubAgentActive ? 300 : 750;
+      const subThrottleContent = isSubAgentActive ? 150 : 750;
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
-      if (stackChanged || now - state.genStats.lastSubAgentRender > subThrottle) {
+      if (stackChanged || subAgentNewVisibleMessage || now - state.genStats.lastSubAgentRender > subThrottleContent) {
         renderSubAgents();
         state.genStats.lastSubAgentRender = now;
         
@@ -1005,6 +1038,22 @@ function handleServerMessage(data) {
                   const input = card.querySelector('.reject-reason-input');
                   if (input) {
                       input.value = reason;
+                  }
+              }
+          }
+
+          // QoL: If security advisor timed out, auto-fill rejection field
+          if (verdict === 'TIMEOUT') {
+              const rejectBtn = card.querySelector('.btn-danger');
+              if (rejectBtn) {
+                  // Only show input if not already visible
+                  if (!card.querySelector('.reject-input-area')) {
+                      showRejectInput(request_id, rejectBtn);
+                  }
+                  // Find the input within this specific card
+                  const input = card.querySelector('.reject-reason-input');
+                  if (input) {
+                      input.value = 'Security advisor timed out after 180s. Please resubmit with clearer justification.';
                   }
               }
           }
@@ -1363,6 +1412,51 @@ function createMessageEl(msg, index) {
   return div;
 }
 
+// ── Shared streaming-delta helper ─────────────────────────────────────────────
+
+/**
+ * Append a raw-text delta during LLM streaming without re-parsing through marked.
+ * 
+ * Why raw text: calling marked.parse() on each delta wraps it in <p> tags, breaking
+ * mid-paragraph runs into separate blocks with visible gaps (the "chunked lines" bug).
+ * 
+ * Strategy: find the deepest block-level container and append raw text as a sibling
+ * text node so it flows visually within existing structure. Inline formatting elements
+ * (<code>, <strong>, <em>, <a>) are skipped to prevent trapping raw text inside them.
+ * Pre blocks trigger fallback to full re-render (incremental append diverges from parsing).
+ * 
+ * Tradeoffs: markdown characters (backticks, asterisks) in deltas appear as literal text
+ * until the next full re-render tick (~300ms throttled). This is acceptable — the full
+ * re-render restores proper formatting within that window.
+ * 
+ * @param {HTMLElement} container - The .msg-content or .sub-msg-content div
+ * @param {string} newText - The delta text to append
+ * @returns {boolean} true if appended successfully, false if caller should fall back to full re-render
+ */
+function appendStreamingDelta(container, newText) {
+  if (!newText || typeof newText !== 'string') return false;
+
+  let target = container.lastElementChild;
+  while (target && target.lastElementChild) {
+    const child = target.lastElementChild;
+    // Don't descend into inline formatting elements — they could trap raw text.
+    // Also skip if target itself is inside a <pre> block, or child is/will be inside one.
+    if (target.closest('pre') || ['code', 'strong', 'em', 'a'].includes(child.tagName.toLowerCase()) || child.closest('pre')) {
+      break;
+    }
+    target = child;
+  }
+  if (!target) return false; // Edge case: empty container → caller falls through to full re-render
+  try {
+    target.insertAdjacentText('beforeend', newText);
+    return true;
+  } catch (e) {
+    // Fallback: append as a text node directly to the container (safe, preserves existing content)
+    container.appendChild(document.createTextNode(newText));
+    return true;
+  }
+}
+
 function updateBubbleContent(bubble, msg) {
   const contentDiv = bubble.querySelector('.msg-content');
   if (!contentDiv) return;
@@ -1384,21 +1478,21 @@ function updateBubbleContent(bubble, msg) {
       // Incremental streaming update: only render the new portion
       const newText = curContent.slice(prevContent.length);
       if (newText) {
-        try {
-          const newHtml = marked.parse(newText);
-          // Use insertAdjacentHTML to append without re-serializing existing DOM (O(1) vs O(n²))
-          contentDiv.insertAdjacentHTML('beforeend', newHtml);
-        } catch {
-          contentDiv.textContent += newText;
+        if (appendStreamingDelta(contentDiv, newText)) {
+          bubble.dataset.prevContent = curContent;
+          return;
         }
+        // No suitable target — fall through to full re-render below
+      } else {
+        bubble.dataset.prevContent = curContent;
+        return;
       }
-      bubble.dataset.prevContent = curContent;
-      return;
     }
   }
   
   // Fallback: full re-render (content changed non-incrementally, or not generating)
   delete bubble.dataset.prevContent;
+  delete bubble.dataset.prevReasoning;
 
   let html = '';
   const isGenerating = state.generating;
@@ -1426,6 +1520,11 @@ function updateBubbleContent(bubble, msg) {
     html += renderMarkdown(text, !isGenerating);
   }
   setInnerHtmlWithState(contentDiv, html);
+  
+  // Restore prevContent/prevReasoning after full re-render so the next tick
+  // can use the incremental path if only plain content grew.
+  bubble.dataset.prevContent = curContent;
+  bubble.dataset.prevReasoning = msg.reasoning_content || '';
 }
 
 function setInnerHtmlWithState(el, html) {
@@ -2153,8 +2252,9 @@ function renderSubAgentPanel(panel, agentData, name) {
           const resp = await fetch(`/api/halt/${encodeURIComponent(name)}`, { method: 'POST' });
           if (resp.ok) pauseBtn.textContent = '▶️ Resume';
         } else {
-          const resp = await fetch(`/api/resume/${encodeURIComponent(name)}`, { method: 'POST' });
-          if (resp.ok) pauseBtn.textContent = '⏸ Pause';
+          // Send a WebSocket resume message so the server clears the halt flag AND restarts generation
+          send({ type: 'resume', instance_name: name });
+          pauseBtn.textContent = '⏸ Pause';
         }
       } catch(e) { console.error('Pause/Resume failed:', e); }
     });
@@ -2350,23 +2450,24 @@ function updateSubBubbleContent(bubble, msg, isGenerating) {
       delete bubble.dataset.prevSubContent;
       delete bubble.dataset.prevSubReasoning;
     } else if (curContent.startsWith(prevContent)) {
-      // Incremental streaming update: only render the new portion
+      // Incremental streaming update: only render the new portion.
       const newText = curContent.slice(prevContent.length);
       if (newText) {
-        try {
-          const newHtml = marked.parse(newText);
-          content.insertAdjacentHTML('beforeend', newHtml);
-        } catch {
-          content.textContent += newText;
+        if (appendStreamingDelta(content, newText)) {
+          bubble.dataset.prevSubContent = curContent;
+          return;
         }
+        // No suitable target — fall through to full re-render below
+      } else {
+        bubble.dataset.prevSubContent = curContent;
+        return;
       }
-      bubble.dataset.prevSubContent = curContent;
-      return;
     }
   }
   
   // Fallback: full re-render (content changed non-incrementally, or not generating)
   delete bubble.dataset.prevSubContent;
+  delete bubble.dataset.prevSubReasoning;
 
   let html = '';
   if (msg.reasoning_content) {
@@ -2382,6 +2483,11 @@ function updateSubBubbleContent(bubble, msg, isGenerating) {
   }
 
   setInnerHtmlWithState(content, html);
+  
+  // Restore prevSubContent/prevSubReasoning after full re-render so the next tick
+  // can use the incremental path if only plain content grew.
+  bubble.dataset.prevSubContent = curContent;
+  bubble.dataset.prevSubReasoning = msg.reasoning_content || '';
 }
 
 function switchMainTab(tabId) {
@@ -2992,8 +3098,10 @@ function createPauseButton(btn, instanceSource) {
         const resp = await fetch(`/api/halt/${encodeURIComponent(sessionName)}`, { method: 'POST' });
         if (resp.ok) { btn.textContent = '▶️ Resume'; state.instance_halted = true; }
       } else {
-        const resp = await fetch(`/api/resume/${encodeURIComponent(sessionName)}`, { method: 'POST' });
-        if (resp.ok) { btn.textContent = '⏸ Pause'; state.instance_halted = false; }
+        // Send a WebSocket resume message so the server clears the halt flag AND restarts generation
+        send({ type: 'resume', instance_name: sessionName });
+        btn.textContent = '⏸ Pause';
+        state.instance_halted = false;
       }
     } catch(e) { console.error('Pause/Resume failed:', e); }
   });

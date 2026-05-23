@@ -147,8 +147,16 @@ if __name__ == '__main__':
     logger.info("Initializing Agent Orchestrator...")
     logger.info("=" * 50)
 
+    # Resolve idle timeout settings from env vars (Issue #2)
+    idle_timeout = float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
+    idle_check_interval = float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
+
     # Create agent pool (auto-loads all agents from /agents directory)
-    agent_pool = AgentPool(llm_cfg, 'agents', workspace_dir=WORKSPACE_DIR)
+    agent_pool = AgentPool(
+        llm_cfg, 'agents', workspace_dir=WORKSPACE_DIR,
+        idle_timeout_seconds=idle_timeout,
+        idle_check_interval=idle_check_interval,
+    )
 
     # Add tools to all agents based on their role
     for agent_name in agent_pool.list_agents():

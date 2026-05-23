@@ -51,6 +51,9 @@ from agent_cascade.utils.utils import extract_text_from_message, get_message_sta
 from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_MARKER
 from agent_cascade.llm.base import _truncate_input_messages_roughly
 
+# Timeout constants for security advisor checks
+from operation_manager import SECURITY_ADVISOR_TIMEOUT_SECONDS, SECURITY_ADVISOR_WARNING_SECONDS
+
 from agent_cascade.utils.thinking_block import (
     _THINK_BLOCK_RE, _THINK_BLOCK_UNCLOSED_RE, _THINK_BLOCK_BRACKET_RE,
     _THINK_SEARCH_RE, _TOOL_TRUNCATED_RE, _CONTEXT_SUMMARY_RE,
@@ -869,6 +872,10 @@ def create_app(agents, agent_pool, config=None):
         Runs agent.run() in a background thread.
         Pushes state updates onto the async send_queue.
         """
+        # Set event loop reference for dismissal callback to use
+        if agent_pool:
+            agent_pool._ws_loop = loop
+        
         try:
             with session_lock:
                 session['generating'] = True
@@ -1372,13 +1379,39 @@ def create_app(agents, agent_pool, config=None):
     async def startup():
         asyncio.create_task(_sender_loop())
         asyncio.create_task(_approval_loop())
+        
+        # Register dismissal callback for real-time UI tab removal when LLM calls dismiss_agent
+        if agent_pool and hasattr(agent_pool, 'on_dismissed'):
+            def _on_dismiss_callback(instance_name, log_path):
+                """Fire a state broadcast when an agent is dismissed (runs from tool thread).
+                
+                Uses agent_pool._ws_loop to access the event loop set by run_agent_thread.
+                Only triggers for LLM-initiated dismissals (during active generation cycle).
+                UI-initiated dismissals have their own direct broadcast in terminate_sub_agent handler.
+                """
+                ws_loop = getattr(agent_pool, '_ws_loop', None)
+                if ws_loop and not ws_loop.is_closed() and send_queue:
+                    try:
+                        msg = {'type': 'dismissal', 'instance_name': instance_name}
+                        asyncio.run_coroutine_threadsafe(send_queue.put(msg), ws_loop)
+                    except Exception:
+                        pass  # Never let callback errors disrupt agent execution
+            
+            agent_pool.on_dismissed(_on_dismiss_callback)
 
     async def _sender_loop():
         """Global loop: reads from send_queue → broadcasts to all clients."""
         while True:
             try:
                 data = await send_queue.get()
-                await broadcast(data)
+                # Handle dismissal signal: build full state and broadcast (real-time tab removal)
+                if data.get('type') == 'dismissal':
+                    try:
+                        await broadcast({'type': 'state', **build_state()})
+                    except Exception as e:
+                        logger.error(f"Failed to build state for dismissal broadcast: {e}")
+                else:
+                    await broadcast(data)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -1830,6 +1863,70 @@ def create_app(agents, agent_pool, config=None):
                     if agent_pool:
                         agent_pool.stopped = True
 
+                elif msg_type == 'resume':
+                    # Resume a halted instance and restart its generation from where it left off
+                    target_instance = data.get('instance_name', session['session_name'])
+                    with session_lock:
+                        is_generating = session['generating']
+                    
+                    was_halted = False
+                    if agent_pool:
+                        was_halted = agent_pool.is_halted(target_instance)
+                        agent_pool.resume_instance(target_instance)
+                        logger.info(f"Instance {target_instance} resumed by user. Was halted: {was_halted}")
+                    
+                    # For the main session: only restart generation if it was actually halted
+                    if target_instance == session['session_name']:
+                        if is_generating and was_halted:
+                            # Currently generating but was halted — signal stop first, then restart with continuation
+                            logger.info(f"Main session was still generating — signalling stop before resume.")
+                            with session_lock:
+                                session['stop_requested'] = True
+                            agent_pool.stopped = True
+                            # Brief delay to allow old thread to observe the stop signal
+                            await asyncio.sleep(0.1)
+                        
+                        if was_halted:
+                            # Was halted (regardless of generating state — we already handled the generating case above)
+                            # Inject continuation and start fresh generation
+                            cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
+                            parsed_content = _parse_multimodal_content(cont_msg)
+                            with session_lock:
+                                session['history'].append({'role': USER, 'content': parsed_content})
+                            _save_session_history()
+                            
+                            # Start agent generation
+                            with session_lock:
+                                session['stop_requested'] = False
+                            if agent_pool:
+                                agent_pool.stopped = False
+                                agent_pool.instance_conversations[session['session_name']] = session['history']
+                            
+                            session['generation_id'] += 1
+                            gen_id = session['generation_id']
+                            agent_runner = get_agent()
+                            history_copy = copy.deepcopy(session['history'])
+                            loop = asyncio.get_event_loop()
+
+                            thread = threading.Thread(
+                                target=run_agent_thread,
+                                args=(history_copy, agent_runner, gen_id, loop),
+                                daemon=True,
+                            )
+                            thread.start()
+
+                            await broadcast({'type': 'state', **build_state(generating=True)})
+                        elif not is_generating:
+                            # Not halted and not generating — just update UI state (no-op from user's perspective)
+                            await broadcast({'type': 'state', **build_state()})
+                    
+                    # For sub-agents: inject a continuation message into their queue so when 
+                    # the orchestrator next calls them, they continue from where they left off
+                    elif target_instance != session['session_name'] and agent_pool and was_halted:
+                        cont_msg = f"[SYSTEM]: Agent {target_instance} was paused. Please continue from where you left off."
+                        agent_pool.enqueue_message(target_instance, cont_msg)
+                        logger.info(f"Injected continuation message into sub-agent {target_instance}'s queue.")
+
                 elif msg_type == 'terminate_sub_agent':
                     instance_name = data.get('instance_name')
                     if instance_name and agent_pool:
@@ -2028,6 +2125,7 @@ def create_app(agents, agent_pool, config=None):
 
                             loop = asyncio.get_running_loop()
                             def _security_check():
+                                sec_state_key = None  # Defined early so finally can reference it directly (Fix #4)
                                 try:
                                     import platform
                                     import json
@@ -2086,18 +2184,61 @@ def create_app(agents, agent_pool, config=None):
                                         
                                         final_msgs = []
                                         sec_first_broadcast = True
-                                        for partial in sec_agent.run(history, agent_instance_name='security_advisor', **llm_safe_cfg):
-                                            final_msgs = partial
-                                            # Update sub_agent_state with current message history during streaming
-                                            agent_pool.sub_agent_state[sec_state_key]['messages'] = list(history) + list(final_msgs) if isinstance(final_msgs, list) else [history[0]] + list(final_msgs)
-                                            agent_pool.instance_conversations[sec_state_key] = list(agent_pool.sub_agent_state[sec_state_key]['messages'])
-                                            # Only broadcast at start and end of security check (not every token)
-                                            if sec_first_broadcast:
-                                                asyncio.run_coroutine_threadsafe(
-                                                    send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
-                                                    loop
+                                        
+                                        # ── Timeout protection: prevent AFK rejection cascades ──
+                                        sec_start_time = time.monotonic()
+                                        sec_timeout_reached = False
+                                        sec_elapsed_at_timeout = None  # Fix #5: store elapsed at the moment of timeout
+                    
+                                        # Fix #1: Extract generator to close it on timeout (prevents resource leak)
+                                        run_gen = sec_agent.run(history, agent_instance_name='security_advisor', **llm_safe_cfg)
+                                        
+                                        # Schedule warning AFTER generator creation so timer is only created if gen succeeded
+                                        def _sec_warning_injector():
+                                            try:
+                                                agent_pool.enqueue_message(
+                                                    'security_advisor',
+                                                    "[SYSTEM WARNING] Your analysis is taking longer than expected. "
+                                                    "Please provide a verdict as soon as possible — the approval request may timeout soon."
                                                 )
-                                                sec_first_broadcast = False
+                                            except Exception:
+                                                pass  # Best-effort warning, don't fail the security check
+                                        
+                                        sec_warning_timer = threading.Timer(SECURITY_ADVISOR_WARNING_SECONDS, _sec_warning_injector)
+                                        sec_warning_timer.daemon = True
+                                        sec_warning_timer.start()
+                                        try:
+                                            for partial in run_gen:
+                                                # ── Check if we've exceeded the timeout ──
+                                                elapsed = time.monotonic() - sec_start_time
+                                                if elapsed > SECURITY_ADVISOR_TIMEOUT_SECONDS:
+                                                    sec_timeout_reached = True
+                                                    sec_elapsed_at_timeout = elapsed  # Fix #5: capture exact elapsed at break point
+                                                    logger.warning(
+                                                        f"[SECURITY] Timeout reached after {elapsed:.0f}s for request {rid}. "
+                                                        f"Terminating security advisor to prevent AFK rejection."
+                                                    )
+                                                    break
+                                                
+                                                final_msgs = partial
+                                                # Update sub_agent_state with current message history during streaming
+                                                agent_pool.sub_agent_state[sec_state_key]['messages'] = list(history) + list(final_msgs) if isinstance(final_msgs, list) else [history[0]] + list(final_msgs)
+                                                agent_pool.instance_conversations[sec_state_key] = list(agent_pool.sub_agent_state[sec_state_key]['messages'])
+                                                # Only broadcast at start and end of security check (not every token)
+                                                if sec_first_broadcast:
+                                                    asyncio.run_coroutine_threadsafe(
+                                                        send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
+                                                        loop
+                                                    )
+                                                    sec_first_broadcast = False
+                                        finally:
+                                            # Cancel the warning timer if we finished before it fires
+                                            sec_warning_timer.cancel()
+                                            # Fix #1: Close the generator to abort any active LLM call / HTTP connection
+                                            try:
+                                                run_gen.close()
+                                            except Exception:
+                                                pass  # Best-effort close; don't fail security check if cleanup throws
 
                                     display_response = ""
                                     parsing_response = ""
@@ -2217,7 +2358,51 @@ def create_app(agents, agent_pool, config=None):
                                         is_yes = False
                                         is_no = False
                                     
-                                    if is_yes or is_no:
+                                    # ── Handle security advisor timeout ──
+                                    if sec_timeout_reached:
+                                        elapsed = sec_elapsed_at_timeout  # Guaranteed non-None since timeout was just hit
+                                        logger.info(f"[SECURITY] Timeout after {elapsed:.0f}s for request {rid}. Auto-rejecting to prevent AFK rejection cascade.")
+                                        
+                                        # Halt the security advisor instance to stop it cleanly.
+                                        # Note: This is best-effort — only works between turns, not during active LLM calls.
+                                        # The actual timeout enforcement happens inside the for loop via `break` + generator.close().
+                                        agent_pool.halt_instance('security_advisor')
+                                        
+                                        # Common timeout handling for BOTH modes: reject and notify UI
+                                        reject_msg = (
+                                            "SECURITY ADVISOR TIMEOUT: The security check took too long to complete. "
+                                            "This may indicate an overly complex request or insufficient justification. "
+                                            "Please resubmit the request with a clearer, more specific justification "
+                                            "to help the security advisor reach a verdict faster."
+                                        )
+                                        agent_pool.operation_manager.user_reject(rid, reject_msg)
+
+                                        # Build response text — manual mode adds extra guidance for UI display
+                                        response_text = f"[TIMEOUT] Security check exceeded {SECURITY_ADVISOR_TIMEOUT_SECONDS}s limit after {elapsed:.0f}s."
+                                        if not auto_apply:
+                                            response_text += " Please resubmit with clearer justification if needed."
+
+                                        # Notify UI about the timeout
+                                        asyncio.run_coroutine_threadsafe(
+                                            send_queue.put({
+                                                'type': 'security_response',
+                                                'request_id': rid,
+                                                'response': response_text,
+                                                'verdict': 'TIMEOUT'
+                                            }),
+                                            loop
+                                        )
+
+                                        # Broadcast updated approval list so stale card is removed from frontend after timeout rejection
+                                        asyncio.run_coroutine_threadsafe(
+                                            send_queue.put({
+                                                'type': 'approvals',
+                                                'approvals': agent_pool.operation_manager.list_pending_approvals()
+                                            }),
+                                            loop
+                                        )
+
+                                    elif is_yes or is_no:
                                         if auto_apply:
                                             if is_yes:
                                                 logger.info(f"[SECURITY] Automatic Approval for {rid} with justification: {justification[:50]}...")
@@ -2269,11 +2454,11 @@ def create_app(agents, agent_pool, config=None):
                                         )
                                 finally:
                                     # Always clean up security advisor state when done
-                                    sec_key = locals().get('sec_state_key')
-                                    if sec_key and sec_key in agent_pool.sub_agent_state:
-                                        agent_pool.sub_agent_state[sec_key]['active'] = False
-                                        if sec_key in agent_pool.active_stack:
-                                            agent_pool.active_stack.remove(sec_key)
+                                    # sec_state_key is defined at function scope (as 'security_advisor'), so direct reference is safe
+                                    if sec_state_key and sec_state_key in agent_pool.sub_agent_state:
+                                        agent_pool.sub_agent_state[sec_state_key]['active'] = False
+                                        if sec_state_key in agent_pool.active_stack:
+                                            agent_pool.active_stack.remove(sec_state_key)
                                     if hasattr(app, 'active_security_checks') and rid:
                                         with app.active_security_checks_lock:
                                             app.active_security_checks.discard(rid)
@@ -2507,6 +2692,12 @@ if __name__ == "__main__":
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=12345, help="Port to bind to")
     parser.add_argument("--workspace", type=str, default=str(DEFAULT_WORKSPACE), help="Workspace directory")
+    parser.add_argument("--idle-timeout", type=float, default=None,
+                        help="Seconds of inactivity before auto-dismissing an idle agent (default: 300). "
+                             "Also settable via QWEN_AGENT_IDLE_TIMEOUT env var.")
+    parser.add_argument("--idle-check-interval", type=float, default=None,
+                        help="Seconds between idle-check sweeps (default: 60). "
+                             "Also settable via QWEN_AGENT_IDLE_CHECK_INTERVAL env var.")
     args = parser.parse_args()
 
     # Initialize the global agent_pool
@@ -2516,7 +2707,16 @@ if __name__ == "__main__":
         'api_key': os.getenv('QWEN_AGENT_API_KEY', 'EMPTY'),
     }
     
-    agent_pool = AgentPool(llm_cfg=initial_llm_cfg, workspace_dir=args.workspace)
+    # Resolve idle timeout settings: CLI > env var > default
+    idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
+    idle_check_interval = args.idle_check_interval if args.idle_check_interval is not None else float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
+    
+    agent_pool = AgentPool(
+        llm_cfg=initial_llm_cfg, 
+        workspace_dir=args.workspace,
+        idle_timeout_seconds=idle_timeout,
+        idle_check_interval=idle_check_interval,
+    )
     
     # Pre-load agents
     orch_agent = agent_pool.get_instance('Maine', 'Orchestrator')

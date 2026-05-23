@@ -135,7 +135,15 @@ def initialize_agents():
     logger.info("Initializing Agent Orchestrator (API Server)...")
     logger.info("=" * 50)
 
-    agent_pool = AgentPool(llm_cfg, 'agents', workspace_dir=WORKSPACE_DIR)
+    # Resolve idle timeout settings from env vars (Issue #2)
+    idle_timeout = float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
+    idle_check_interval = float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
+
+    agent_pool = AgentPool(
+        llm_cfg, 'agents', workspace_dir=WORKSPACE_DIR,
+        idle_timeout_seconds=idle_timeout,
+        idle_check_interval=idle_check_interval,
+    )
 
     # Instantiate heavy tools ONCE to share across all agents and prevent OOM
     shared_tools = {}

@@ -246,7 +246,17 @@ def compress_context(
     # ── 10. Apply to pool: trim → insert marker (atomic mutation via copy-and-replace) ──
     # NOTE: This is single-threaded by design — forced compression halts all other agents
     # before running, so no concurrent pool mutations can occur during this block.
+    
+    # Snapshot pre-mutation state for rollback if anything goes wrong after the pool write.
+    # Without this, a failure between mutation and return would leave the pool in partial state.
+    import copy as _copy
+    pre_mutation_history = _copy.deepcopy(
+        agent_pool.instance_conversations.get(target_agent_name) or []
+    )
+    
     try:
+        # NOTE: get_conversation returns the same list object as instance_conversations[].
+        # We build new_history as a new list and replace the reference on the next line.
         history = agent_pool.get_conversation(target_agent_name)
         insert_pos = active_start_idx + target_discard_count
 
@@ -293,10 +303,23 @@ def compress_context(
                     "'insert_compression_marker' method — marker not logged to file"
                 )
     except Exception as e:
-        # Logger notification failure is non-fatal — compression succeeded
-        logger.warning(
+        # Logger notification FAILURE is now fatal — pool and logger must stay in sync.
+        # Roll back the pool to pre-mutation state to avoid partial state inconsistency.
+        # The logger and pool should be in sync; if the logger couldn't record the
+        # compression, the pool shouldn't reflect it either.
+        logger.error(
             f"Logger notification failed after compression for agent "
-            f"'{target_agent_name}': {e}"
+            f"'{target_agent_name}': {e}. Rolling back pool to pre-mutation state."
+        )
+        agent_pool.instance_conversations[target_agent_name] = pre_mutation_history
+        return CompressResult(
+            success=False,
+            summary_text=generated_summary,
+            marker_message=None,
+            messages_discarded=0,
+            tail_count=0,
+            error=f"Logger sync failed after pool mutation: {e}",
+            mode=mode,
         )
 
     # ── 12. Log the successful compression event ──

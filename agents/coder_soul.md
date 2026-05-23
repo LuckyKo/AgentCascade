@@ -53,6 +53,7 @@ delegation_guidelines:
     - Literature reviews
     - Technical research
     - Fact-checking
+    - Quick help investigating tricky issues / alternative POV
 
   to_generalist:
     - Quick tasks that don't require deep specialization

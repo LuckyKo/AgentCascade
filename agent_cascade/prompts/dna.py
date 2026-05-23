@@ -235,7 +235,7 @@ TOOL_METADATA = {
     },
     'shell_cmd': {
         'description': (
-            'Execute a shell command on the host system. This ALWAYS requires explicit user approval. '
+            'Execute a shell command on the host system. This ALWAYS requires explicit user approval so use it as a last resort tool only! '
             'Commands run with the workspace directory as the working directory.'
         ),
         'parameters': {

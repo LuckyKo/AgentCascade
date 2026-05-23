@@ -8,6 +8,7 @@ context compression, and streaming state for the WebUI.
 import copy
 import json
 import os
+import time
 import datetime
 import threading
 from pathlib import Path
@@ -29,7 +30,17 @@ from api_router import APIRouter
 class AgentPool:
     """Manages a pool of specialized sub-agents."""
     
-    def __init__(self, llm_cfg: dict, agents_dir: str = 'agents', workspace_dir: Optional[str] = None):
+    def __init__(self, llm_cfg: dict, agents_dir: str = 'agents', workspace_dir: Optional[str] = None,
+                 idle_timeout_seconds: float = 300.0, idle_check_interval: float = 60.0):
+        """Initialize the AgentPool.
+
+        Args:
+            llm_cfg: LLM configuration dictionary.
+            agents_dir: Path to the agents directory.
+            workspace_dir: Path to the workspace directory.
+            idle_timeout_seconds: Seconds of inactivity before auto-dismissing an agent (default 300 = 5 min).
+            idle_check_interval: Seconds between idle-check sweeps (default 60 = 1 min).
+        """
         self.llm_cfg = llm_cfg
         self.agents_dir = Path(agents_dir)
         self.workspace_dir = Path(workspace_dir) if workspace_dir else Path(DEFAULT_WORKSPACE)
@@ -83,6 +94,9 @@ class AgentPool:
         # Key = instance_name, Value = bool (True = halted)
         self._instance_halted: Dict[str, bool] = {}
         
+        # Lock for thread-safe access to _instance_halted (used across WebSocket handler and agent threads)
+        self._halt_lock = threading.Lock()
+        
         # Track which instances were halted by forced compression specifically,
         # so resume_all_instances only clears those (not manual halts from /api/halt).
         self._compression_halted: set = set()
@@ -100,12 +114,36 @@ class AgentPool:
         self._state_lock = threading.Lock()           # Protects sub_agent_state, active_stack
         self._conversation_lock = threading.Lock()    # Protects instance_conversations writes
         
+        # ── Idle agent auto-dismissal ──────────────────────────────────────────
+        # Configurable timeout and interval for idle agent cleanup
+        self.idle_timeout_seconds = max(30.0, float(idle_timeout_seconds))  # Minimum 30s guard
+        self.idle_check_interval = max(10.0, float(idle_check_interval))
+        
+        # Per-instance last-activity timestamp (seconds since epoch via time.monotonic)
+        # Key = instance_name, Value = float (monotonic timestamp)
+        self._last_activity: Dict[str, float] = {}
+        
+        # Lock for thread-safe access to _last_activity
+        self._activity_lock = threading.Lock()
+        
+        # Background thread that periodically checks for and dismisses idle agents
+        self._idle_checker_thread: Optional[threading.Thread] = None
+        # Event used by the background thread to signal it should stop
+        self._idle_checker_stop_event = threading.Event()
+        
         # Initialize Parallel Agent Manager
         from agent_orchestrator import ParallelAgentManager
         self.parallel_manager = ParallelAgentManager(self, max_workers=llm_cfg.get('max_parallel_agents', 3))
         
+        # Callback hooks for dismissal events (used by api_server to broadcast real-time tab removal)
+        # Each callback receives: callback(instance_name: str, log_path: Optional[str])
+        self._on_dismissed_callbacks: list = []
+        
         # Auto-load all agents from the agents directory
         self._discover_agents()
+        
+        # Start background idle checker thread
+        self._start_idle_checker()
 
     # ── stopped property (Event-backed for cross-thread visibility) ───────
     @property
@@ -119,18 +157,37 @@ class AgentPool:
         else:
             self._stopped_event.clear()
 
+    # ── Dismiss callback hooks (for real-time UI tab removal) ────────────────
+    def on_dismissed(self, callback):
+        """Register a callback invoked when an agent instance is dismissed.
+        
+        Callback signature: callback(instance_name: str, log_path: Optional[str])
+        """
+        self._on_dismissed_callbacks.append(callback)
+    
+    def _fire_on_dismissed(self, instance_name: str, log_path: Optional[str] = None):
+        """Fire all registered dismissal callbacks for a dismissed agent."""
+        for cb in self._on_dismissed_callbacks:
+            try:
+                cb(instance_name, log_path)
+            except Exception as e:
+                logger.error(f"Error in on_dismissed callback for {instance_name}: {e}")
+
     # ── Per-instance halt for forced compression ──────────────────────────
     def is_halted(self, instance_name: str) -> bool:
         """Check if a specific agent instance has been halted (e.g. during forced compression)."""
-        return self._instance_halted.get(instance_name, False)
+        with self._halt_lock:
+            return self._instance_halted.get(instance_name, False)
 
     def halt_instance(self, instance_name: str):
         """Halt a specific agent instance while allowing others to continue."""
-        self._instance_halted[instance_name] = True
+        with self._halt_lock:
+            self._instance_halted[instance_name] = True
 
     def resume_instance(self, instance_name: str):
         """Resume a previously halted agent instance."""
-        self._instance_halted[instance_name] = False
+        with self._halt_lock:
+            self._instance_halted[instance_name] = False
 
     def halt_all_instances(self, except_instance: str = None, except_instances: List[str] = None):
         """Halt all active instances except the given one(s) (used before forced compression)."""
@@ -145,7 +202,7 @@ class AgentPool:
         all_instances = set(self.message_queues.keys()) | set(self.active_stack) | set(self.instance_conversations.keys())
         for inst in all_instances:
             if inst not in skip:
-                was_already_halted = self._instance_halted.get(inst, False)
+                was_already_halted = self.is_halted(inst)
                 self.halt_instance(inst)
                 # Only track instances that weren't already halted — preserves manual halts
                 if not was_already_halted:
@@ -207,6 +264,10 @@ class AgentPool:
         if target not in self.message_queues:
             self.message_queues[target] = []
         self.message_queues[target].append(text)
+        
+        # Mark activity: someone is sending messages to this agent
+        if hasattr(self, '_mark_activity'):
+            self._mark_activity(target)
 
     def drain_queue(self, target: str) -> List[str]:
         """Pop and return all pending messages for a specific agent.
@@ -253,12 +314,21 @@ class AgentPool:
             self._stopped_event.set()
 
     def dismiss_instance(self, instance_name: str):
-        """Remove an instance from the pool. If it's active, it will be stopped and cleared upon completion."""
+        """Remove an instance from the pool. If it's active, it will be stopped and cleared upon completion.
+        
+        NOTE: This method is called for UI-initiated termination (terminate_sub_agent WebSocket message).
+        The UI handler already broadcasts state after calling this, so we do NOT fire the dismissal
+        callback here — that would cause a double-broadcast. Only LLM-initiated dismissals via
+        DismissAgent.call() should fire callbacks for real-time tab removal.
+        """
         if instance_name in self.active_stack:
             self.terminated_instances.add(instance_name)
             self._stopped_event.set()
         else:
             self.clear_conversation(instance_name)
+            # Clean up activity tracking to prevent memory leak (Issue #1)
+            with self._activity_lock:
+                self._last_activity.pop(instance_name, None)
 
     def capture_snapshots(self) -> Dict[str, int]:
         """Capture the current history lengths of all active sub-agent instances."""
@@ -601,6 +671,9 @@ rules:
 
     def reset(self):
         """Full reset of all sub-agent instances and persistent data."""
+        # Stop the idle checker first to avoid race conditions during reset (Issue #5)
+        self._stop_idle_checker()
+        
         self.instance_conversations.clear()
         self.instance_classes.clear()
         self.instance_loggers.clear()
@@ -610,8 +683,174 @@ rules:
         self.terminated_instances.clear()
         self._instance_halted.clear()
         self._compression_halted.clear()
+        # Also clear activity tracking on reset
+        with self._activity_lock:
+            self._last_activity.clear()
+        
         logger.info("AgentPool reset — all instances and loggers cleared.")
+        # Restart the idle checker after reinitialization
+        self._start_idle_checker()
     
+    # ── Idle agent auto-dismissal ───────────────────────────────────────
+
+    def _mark_activity(self, instance_name: str) -> None:
+        """Record the current time as the last activity timestamp for an agent.
+        
+        Thread-safe; calls from any context (orchestrator loop, message injection, etc.)
+        are safe because we hold the _activity_lock.
+        """
+        with self._activity_lock:
+            self._last_activity[instance_name] = time.monotonic()
+    
+    def _get_idle_seconds(self, instance_name: str) -> Optional[float]:
+        """Return how many seconds an agent has been idle (None if no record)."""
+        with self._activity_lock:
+            last = self._last_activity.get(instance_name)
+        if last is None:
+            return None
+        return time.monotonic() - last
+    
+    def _is_agent_idle(self, instance_name: str) -> bool:
+        """Determine whether an agent is idle and eligible for auto-dismissal.
+        
+        An agent is considered idle when ALL of the following hold:
+        1. It is NOT in the active_stack (not currently executing).
+        2. It has conversation history or a class mapping (i.e., it exists as a sub-agent).
+        3. Its last activity was more than idle_timeout_seconds ago.
+        4. It is NOT the main orchestrator ("Maine").
+        5. It is NOT currently halted (halted agents are intentionally paused).
+        
+        Thread-safety: Reads active_stack under _state_lock and halted status under _halt_lock
+        to avoid TOCTOU races where an agent starts running between checks.
+        """
+        # Never auto-dismiss the main orchestrator
+        if instance_name == 'Maine':
+            return False
+        
+        # Must be a sub-agent with conversation history or class mapping
+        has_history = (instance_name in self.instance_conversations or 
+                       instance_name in self.instance_classes)
+        if not has_history:
+            return False
+        
+        # Must NOT be actively running — check atomically under state_lock (Issue #4)
+        with self._state_lock:
+            is_active = instance_name in self.active_stack
+        if is_active:
+            return False
+        
+        # Must NOT be halted (halted agents are intentionally paused, e.g. during compression)
+        if self.is_halted(instance_name):
+            return False
+        
+        # Must have exceeded the idle timeout threshold
+        idle_secs = self._get_idle_seconds(instance_name)
+        if idle_secs is None or idle_secs < self.idle_timeout_seconds:
+            return False
+        
+        return True
+    
+    def _start_idle_checker(self) -> None:
+        """Start the background thread that periodically checks for idle agents."""
+        # Guard against double-start: don't start a new thread if one is already alive
+        if self._idle_checker_thread is not None and self._idle_checker_thread.is_alive():
+            return  # Already running
+        self._idle_checker_stop_event.clear()
+        self._idle_checker_thread = threading.Thread(
+            target=self._idle_checker_loop,
+            name="IdleAgentChecker",
+            daemon=True,  # Daemon so it doesn't block interpreter shutdown
+        )
+        self._idle_checker_thread.start()
+        logger.info(
+            f"Idle agent checker started: timeout={self.idle_timeout_seconds:.0f}s, "
+            f"interval={self.idle_check_interval:.0f}s"
+        )
+    
+    def _stop_idle_checker(self) -> None:
+        """Signal the idle checker to stop and wait for it to exit."""
+        if self._idle_checker_thread is not None and self._idle_checker_thread.is_alive():
+            self._idle_checker_stop_event.set()
+            self._idle_checker_thread.join(timeout=self.idle_check_interval + 5.0)
+            if self._idle_checker_thread.is_alive():
+                logger.warning("Idle agent checker thread did not exit in time, forcing shutdown.")
+        self._idle_checker_thread = None
+    
+    def _idle_checker_loop(self) -> None:
+        """Background loop that periodically checks for and dismisses idle agents."""
+        while not self._idle_checker_stop_event.is_set():
+            try:
+                # Snapshot the set of known instances to avoid holding locks during check
+                with self._activity_lock:
+                    all_instances = set(self._last_activity.keys())
+                
+                dismissed_this_round = []
+                
+                for inst in all_instances:
+                    if self._idle_checker_stop_event.is_set():
+                        break
+                    
+                    try:
+                        if self._is_agent_idle(inst):
+                            self._auto_dismiss_idle_agent(inst)
+                            dismissed_this_round.append(inst)
+                    except Exception as e:
+                        # Never let a single bad instance crash the whole checker
+                        logger.error(
+                            f"Idle checker error processing '{inst}': {e}", exc_info=True
+                        )
+                
+                if dismissed_this_round:
+                    logger.info(
+                        f"[idle_checker] Auto-dismissed {len(dismissed_this_round)} idle agent(s): "
+                        f"{', '.join(dismissed_this_round)}"
+                    )
+            
+            except Exception as e:
+                # Catch-all: a crash in the loop shouldn't bring down the system
+                logger.error(f"[idle_checker] Loop error: {e}", exc_info=True)
+            
+            # Wait for next check interval (or until stop event fires)
+            self._idle_checker_stop_event.wait(timeout=self.idle_check_interval)
+    
+    def _auto_dismiss_idle_agent(self, instance_name: str) -> None:
+        """Dismiss a single idle agent and clean up its resources.
+        
+        Uses the existing clear_conversation and _fire_on_dismissed mechanism
+        so UI tabs close in real-time (leveraging the callback hooks).
+        """
+        # Capture log path BEFORE clearing (clear_conversation removes the logger)
+        log_path = None
+        logger_inst = self.instance_loggers.get(instance_name)
+        if logger_inst:
+            log_path = getattr(logger_inst, 'log_path', None)
+        
+        idle_secs = self._get_idle_seconds(instance_name) or 0.0
+        
+        logger.info(
+            f"[idle_checker] Auto-dismissing idle agent '{instance_name}' "
+            f"(idle for {idle_secs:.0f}s, threshold={self.idle_timeout_seconds:.0f}s)"
+        )
+        
+        # Clear the conversation (removes instance_conversations, instance_classes, etc.)
+        self.clear_conversation(instance_name)
+        
+        # Clean up any pending operation backups
+        if hasattr(self, 'operation_manager') and self.operation_manager:
+            self.operation_manager.cleanup_backups(instance_name)
+        
+        # Remove from activity tracking
+        with self._activity_lock:
+            self._last_activity.pop(instance_name, None)
+        
+        # Fire dismissal callbacks for real-time UI tab removal
+        if hasattr(self, '_fire_on_dismissed'):
+            self._fire_on_dismissed(instance_name, log_path)
+    
+    def stop(self):
+        """Shut down the AgentPool gracefully (including background threads)."""
+        self._stop_idle_checker()
+
     def load_session_from_log(self, log_input: str, target_instance: Optional[str] = None) -> str:
         """
         Load session history from a log entry (JSON string) or a log file path.

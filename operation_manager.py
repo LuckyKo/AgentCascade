@@ -16,10 +16,12 @@ import threading
 import time
 import difflib
 import shutil
+import signal
 import subprocess
 import fnmatch
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
+from collections import Counter
 from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
@@ -57,6 +59,11 @@ class PendingApproval:
 
 # Timeout for user approval (seconds). Auto-rejects after this.
 APPROVAL_TIMEOUT_SECONDS = 300  # 5 minutes
+
+# Timeout for security advisor checks (seconds). If the security advisor takes longer
+# than this, it is terminated and the operation is auto-rejected to prevent AFK rejection cascades.
+SECURITY_ADVISOR_TIMEOUT_SECONDS = 180   # 3 minutes — gives slow models breathing room
+SECURITY_ADVISOR_WARNING_SECONDS = 120   # Warn at 2 minutes — agent gets a nudge via message queue
 
 # Maximum size for spill files (grep/shell output saved to disk). Prevents disk exhaustion.
 MAX_SPILL_SIZE = 50 * 1024 * 1024  # 50MB
@@ -121,6 +128,10 @@ class OperationManager:
 
         # File ownership tracking (still useful for context in approval UI)
         self.file_ownership: Dict[str, str] = {}
+        
+        # Track heuristic edit counts per file to warn about indentation drift
+        # Key: resolved file path string, Value: count of heuristic edits
+        self._heuristic_edit_counts: Dict[str, int] = {}
         
         # User toggleable timeout
         self.enable_timeout: bool = True
@@ -255,11 +266,11 @@ class OperationManager:
     def user_approve(self, request_id: str, reason: str = "") -> str:
         """Called by WebUI when user clicks Approve."""
         with self._lock:
-            approval = self.pending.get(request_id)
-            
+            approval = self.pending.pop(request_id, None)
+
         if not approval:
             return f"ERROR: Request '{request_id}' not found or already resolved."
-            
+
         approval.approved = True
         approval.outcome_reason = reason
         approval.event.set()
@@ -268,7 +279,7 @@ class OperationManager:
     def user_reject(self, request_id: str, reason: str = "") -> str:
         """Called by WebUI when user clicks Reject."""
         with self._lock:
-            approval = self.pending.get(request_id)
+            approval = self.pending.pop(request_id, None)
 
         if not approval:
             return f"ERROR: Request '{request_id}' not found or already resolved."
@@ -426,15 +437,17 @@ class OperationManager:
     # ── Subprocess grep fast path (P0-1) ────────────────────────────────────
 
     def _try_subprocess_grep(self, pattern: str, path: Path, include: str, char_limit: int, timeout: float,
-                             exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True):
+                             exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True,
+                             spill_file_path: Optional[str] = None):
         """Fast-path grep using system ripgrep or grep via subprocess.
         
-        Returns (results_list, count, was_timed_out) on success, or (None, 0, False) on failure.
+        Returns (results_list, count, was_timed_out, was_truncated, original_output_size) on success, 
+        or (None, 0, False, False, 0) on failure.
         Output format matches Python fallback: "relative_path:line_number: content"
         """
         # Only try subprocess path if at least one tool is available (cached at module level)
         if not _RIPGREP_AVAILABLE and not _GREP_AVAILABLE:
-            return None, 0, False
+            return None, 0, False, False, 0
         
         try:
             if _RIPGREP_AVAILABLE:
@@ -562,9 +575,24 @@ class OperationManager:
                     count = sum(1 for l in formatted if l != "---")
                 
                 # If char_limit is set and output exceeds it, truncate within subprocess path too
+                _was_truncated = False
+                _original_output_size = 0
                 if char_limit != -1 and count > 0:
                     output_size = sum(len(l) for l in formatted) + count  # +count for newlines
                     if output_size > char_limit:
+                        # Capture original size before truncation (for consistent truncation notices)
+                        _original_output_size = output_size
+                        # Write full output to spill file before truncating
+                        if spill_file_path is not None:
+                            try:
+                                full_text = '\n'.join(formatted)
+                                spill_abs = self.base_dir / spill_file_path
+                                spill_abs.parent.mkdir(parents=True, exist_ok=True)
+                                with open(spill_abs, 'w', encoding='utf-8') as f:
+                                    f.write(full_text)
+                            except Exception as e:
+                                logger.warning(f"Failed to write grep spill file {spill_file_path}: {e}")
+
                         # Truncate to fit within char_limit
                         byte_budget = char_limit
                         truncated = []
@@ -579,20 +607,22 @@ class OperationManager:
                             count = sum(1 for l in formatted if ">>>" in l)
                         else:
                             count = sum(1 for l in formatted if l != "---")
+                        _was_truncated = True
                 
-                return formatted, count, False
+                return formatted, count, False, _was_truncated, _original_output_size
             
             # Non-zero return code (e.g., grep returns 1 for no matches) — still valid
             if result.returncode == 1:
-                return [], 0, False
+                return [], 0, False, False, 0
                 
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass  # Fall through to Python implementation
         
-        return None, 0, False
+        return None, 0, False, False, 0
 
     def _grep_single_file(self, file_path: Path, pattern: str, char_limit: int,
-                          include: str = "*", exclude: str = "", context: int = 0, smart_case: bool = True) -> str:
+                          include: str = "*", exclude: str = "", context: int = 0, smart_case: bool = True,
+                          spill_file_path: Optional[str] = None) -> str:
         """Search a single file for a regex pattern. Used when path is a file instead of directory."""
         # Compute normalized relative path once (used for glob matching and output formatting)
         try:
@@ -677,13 +707,29 @@ class OperationManager:
             summary += " [TRUNCATED at 5000 results]"
 
         if char_limit != -1 and len(output_text) > char_limit:
-            output_text = output_text[:char_limit] + "\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded.]"
+            full_output = output_text  # Save before truncating
+            output_text = output_text[:char_limit]
             summary += " [TRUNCATED]"
+
+            if spill_file_path is not None:
+                try:
+                    spill_abs = self.base_dir / spill_file_path
+                    spill_abs.parent.mkdir(parents=True, exist_ok=True)
+                    with open(spill_abs, 'w', encoding='utf-8') as f:
+                        f.write(full_output)
+                except Exception as e:
+                    logger.warning(f"Failed to write grep spill file {spill_file_path}: {e}")
+
+            output_text += f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded."
+            if spill_file_path is not None:
+                output_text += f" Full output ({len(full_output)} chars) saved to: {spill_file_path}"
+            output_text += "\nYou can read it with read_file if needed.]"
 
         return f"{summary}:\n\n" + output_text
 
     def grep(self, pattern: str, path: str = ".", include: str = "*", char_limit: int = 2000, agent_name: str = "unknown",
-             exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True) -> str:
+             exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True,
+             spill_file_path: Optional[str] = None) -> str:
         """Search for text pattern in files.
         
         Args:
@@ -696,6 +742,7 @@ class OperationManager:
             ignore_vcs: When True (default), ripgrep respects .gitignore. Set False to search all files.
             context: Number of lines to show before/after each match (default 0, like -C N in grep).
             smart_case: When True (default), case-insensitive unless pattern has uppercase letters.
+            spill_file_path: Pre-computed spillover file path (workspace-relative) for truncated output.
         
         Uses subprocess-based grep (ripgrep or system grep) as a fast path,
         falling back to pure Python if the subprocess approach fails/times out.
@@ -708,32 +755,59 @@ class OperationManager:
             # Handle file paths — search the single file directly
             if resolved.is_file():
                 return self._grep_single_file(resolved, pattern, char_limit, include=include,
-                                             exclude=exclude, context=context, smart_case=smart_case)
+                                             exclude=exclude, context=context, smart_case=smart_case,
+                                             spill_file_path=spill_file_path)
 
             # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
-            results, count, was_timed_out = self._try_subprocess_grep(
+            results, count, was_timed_out, _sub_truncated, _orig_output_size = self._try_subprocess_grep(
                 pattern=pattern, path=resolved, include=include,
                 char_limit=char_limit, timeout=30.0,
-                exclude=exclude, ignore_vcs=ignore_vcs, context=context, smart_case=smart_case
+                exclude=exclude, ignore_vcs=ignore_vcs, context=context, smart_case=smart_case,
+                spill_file_path=spill_file_path
             )
             if results is not None:
                 # Subprocess grep succeeded — format and return
-                if count == 0:
+                if count == 0 and not _sub_truncated:
                     # Don't return early — fall through to Python fallback which may find matches
                     # in hidden directories or handle globs differently
                     logger.debug(f"grep: subprocess found no matches for '{pattern}', trying Python fallback")
                 else:
                     output_text = '\n'.join(results)
-                    summary = f"Found {count} matches for '{pattern}'"
+                    # When _sub_truncated=True and count==0, matches were found but all truncated — 
+                    # report the truncation in the summary so "Found 0 matches" isn't misleading
+                    if _sub_truncated and count == 0:
+                        summary = f"Matches found for '{pattern}' [TRUNCATED]"
+                    else:
+                        summary = f"Found {count} matches for '{pattern}'"
                     if context > 0:
                         summary += f" (with {context} line(s) of context)"
                     if was_timed_out:
                         summary += f" [TIMED OUT after 30s]"
 
-                    # Truncate if needed (no spill file — orchestrator handles its own)
+                    # Truncate if needed — write to spill file and inform the model of its location
+                    # Note: _try_subprocess_grep may have already truncated output here.
+                    # We check for a second time because the join might slightly exceed char_limit.
                     if char_limit != -1 and len(output_text) > char_limit:
-                        output_text = output_text[:char_limit] + "\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded.]"
+                        full_output = output_text  # Save before truncating
+                        output_text = output_text[:char_limit]
+
+                        if spill_file_path is not None:
+                            try:
+                                spill_abs = self.base_dir / spill_file_path
+                                spill_abs.parent.mkdir(parents=True, exist_ok=True)
+                                with open(spill_abs, 'w', encoding='utf-8') as f:
+                                    f.write(full_output)
+                            except Exception as e:
+                                logger.warning(f"Failed to write grep spill file {spill_file_path}: {e}")
+
+                        output_text += f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded."
+                        if spill_file_path is not None:
+                            output_text += f" Full output ({len(full_output)} chars) saved to: {spill_file_path}"
+                        output_text += "\nYou can read it with read_file if needed.]"
+                    elif _sub_truncated and spill_file_path is not None:
+                        # Subprocess already truncated and wrote spill file — just add the truncation notice
                         summary += " [TRUNCATED]"
+                        output_text += f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. Full output ({_orig_output_size} chars) saved to: {spill_file_path}\nYou can read it with read_file if needed.]"
 
                     return f"{summary}:\n\n" + output_text
 
@@ -860,9 +934,23 @@ class OperationManager:
                 summary += " [TRUNCATED at 5000 results]"
 
             if char_limit != -1 and len(output_text) > char_limit:
-                # P0-2: Truncate silently — no spill file (orchestrator handles its own)
-                output_text = output_text[:char_limit] + "\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded.]"
+                full_output = output_text  # Save before truncating
+                output_text = output_text[:char_limit]
                 summary += " [TRUNCATED]"
+
+                if spill_file_path is not None:
+                    try:
+                        spill_abs = self.base_dir / spill_file_path
+                        spill_abs.parent.mkdir(parents=True, exist_ok=True)
+                        with open(spill_abs, 'w', encoding='utf-8') as f:
+                            f.write(full_output)
+                    except Exception as e:
+                        logger.warning(f"Failed to write grep spill file {spill_file_path}: {e}")
+
+                output_text += f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded."
+                if spill_file_path is not None:
+                    output_text += f" Full output ({len(full_output)} chars) saved to: {spill_file_path}"
+                output_text += "\nYou can read it with read_file if needed.]"
 
             return f"{summary}:\n\n" + output_text
         except Exception as e:
@@ -947,126 +1035,25 @@ class OperationManager:
             if count > 1:
                 return f"ERROR: Pattern found {count} times in {path}. The 'old_content' block must be unique. Please include more surrounding lines in 'old_content' to make it unique."
         elif match_mode == 'heuristic':
-            ext = Path(path).suffix.lower()
-            
-            def remove_comments_keep_layout(content: str, file_ext: str) -> str:
-                is_python_style = file_ext in ['.py', '.sh', '.yaml', '.yml', '.toml', '.ini', '.properties', '.dockerfile', '.conf']
-                is_c_style = file_ext in ['.c', '.cpp', '.h', '.hpp', '.java', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs', '.cs', '.php', '.css', '.swift', '.kt', '.scala']
-                is_html_style = file_ext in ['.html', '.htm', '.xml', '.svg', '.xhtml']
-                is_sql_style = file_ext in ['.sql']
-
-                # No known comment syntax — skip the char-level scan entirely
-                if not (is_python_style or is_c_style or is_html_style or is_sql_style):
-                    return content
-
-                chars = list(content)
-                n = len(chars)
-                i = 0
-                in_string = None
-
-                while i < n:
-                    if in_string:
-                        if chars[i] == '\\' and i + 1 < n:
-                            i += 2
-                            continue
-                        if chars[i] == in_string:
-                            in_string = None
-                        elif len(in_string) == 3 and chars[i:i+3] == list(in_string):
-                            in_string = None
-                            i += 2
-                        i += 1
-                        continue
-
-                    if chars[i] in ['"', "'"]:
-                        in_string = chars[i]
-                        if is_python_style and i + 2 < n and chars[i+1] == in_string and chars[i+2] == in_string:
-                            in_string = in_string * 3
-                            i += 3
-                            continue
-                        i += 1
-                        continue
-                    elif is_c_style and chars[i] == '`':
-                        in_string = '`'
-                        i += 1
-                        continue
-
-                    if is_python_style and chars[i] == '#':
-                        while i < n and chars[i] not in ['\n', '\r']:
-                            chars[i] = ' '
-                            i += 1
-                        continue
-
-                    if is_c_style and chars[i] == '/' and i + 1 < n and chars[i+1] == '/':
-                        while i < n and chars[i] not in ['\n', '\r']:
-                            chars[i] = ' '
-                            i += 1
-                        continue
-
-                    if (is_c_style or is_sql_style) and chars[i] == '/' and i + 1 < n and chars[i+1] == '*':
-                        chars[i] = ' '
-                        chars[i+1] = ' '
-                        i += 2
-                        while i < n:
-                            if chars[i] == '*' and i + 1 < n and chars[i+1] == '/':
-                                chars[i] = ' '
-                                chars[i+1] = ' '
-                                i += 2
-                                break
-                            if chars[i] not in ['\n', '\r']:
-                                chars[i] = ' '
-                            i += 1
-                        continue
-
-                    if is_sql_style and chars[i] == '-' and i + 1 < n and chars[i+1] == '-':
-                        while i < n and chars[i] not in ['\n', '\r']:
-                            chars[i] = ' '
-                            i += 1
-                        continue
-
-                    if is_html_style and chars[i] == '<' and i + 3 < n and chars[i+1] == '!' and chars[i+2] == '-' and chars[i+3] == '-':
-                        chars[i] = ' '
-                        chars[i+1] = ' '
-                        chars[i+2] = ' '
-                        chars[i+3] = ' '
-                        i += 4
-                        while i < n:
-                            if chars[i] == '-' and i + 2 < n and chars[i+1] == '-' and chars[i+2] == '>':
-                                chars[i] = ' '
-                                chars[i+1] = ' '
-                                chars[i+2] = ' '
-                                i += 3
-                                break
-                            if chars[i] not in ['\n', '\r']:
-                                chars[i] = ' '
-                            i += 1
-                        continue
-
-                    i += 1
-
-                return "".join(chars)
-
-            clean_file_content = remove_comments_keep_layout(file_content, ext)
-            clean_old_content = remove_comments_keep_layout(old_content, ext)
-
+            # Normalize raw content (no comment stripping — comments are part of the structure)
             file_lines = file_content.splitlines(keepends=True)
-            clean_file_lines = clean_file_content.splitlines(keepends=True)
-            clean_old_lines = clean_old_content.splitlines(keepends=True)
             
-            # Map normalized clean content
+            # Map normalized (whitespace-stripped, non-blank) lines of the raw file
             file_line_info = []
-            for idx, line in enumerate(clean_file_lines):
+            for idx, line in enumerate(file_lines):
                 norm = "".join(line.split())
                 if norm:
                     file_line_info.append((idx, norm))
-                    
+            
+            # Map normalized (whitespace-stripped, non-blank) lines of old_content
             old_line_info = []
-            for line in clean_old_lines:
+            for line in old_content.splitlines(keepends=True):
                 norm = "".join(line.split())
                 if norm:
                     old_line_info.append(norm)
             
             if not old_line_info:
-                return "ERROR: The 'old_content' contains only whitespace and/or comments. Heuristic match mode requires at least some non-whitespace actual content to match."
+                return "ERROR: The 'old_content' contains only whitespace. Heuristic match mode requires at least some non-whitespace content to match."
             
             # Map normalized line to its indices in the filtered file list
             file_line_map = {}
@@ -1131,54 +1118,214 @@ class OperationManager:
             
             last_matched_line = file_lines[orig_end_idx]
             
-            # Auto-align indentation if match_mode is heuristic
+            # ====================================================================
+            # Heuristic edit: preserve indentation from matched file block
+            #
+            # DESIGN RATIONALE:
+            #   When heuristic matching finds a block in the file whose normalized
+            #   content matches old_content, the replacement must use the FILE'S
+            #   original indentation — not new_content's — to avoid compounding
+            #   drift across repeated edits.  The approach has three phases:
+            #
+            #   1. Alignment: Use difflib.SequenceMatcher on normalized lines of
+            #      old_content vs the matched file block to build a reliable
+            #      line-to-line correspondence, even when duplicate normalized
+            #      lines appear at different indent levels.
+            #   2. Preservation: For each new_content line whose normalized form
+            #      maps to an aligned file line, apply the file's original indent.
+            #      Lines with no match get a base-indent delta adjustment.
+            #   3. Validation: Check the result for indentation anomalies using
+            #      increment-based heuristics (not global mode) to avoid false
+            #      positives on normal nested code.
+            #
+            # KNOWN LIMITATIONS:
+            #   - If new_content reorders lines relative to old_content, alignment
+            #     may be imperfect; the base-indent fallback handles most cases.
+            #   - Deeply nested structures with >8-space indent increments may
+            #     produce validation warnings even when correct.
+            # ====================================================================
+
             def get_leading_whitespace(s: str) -> str:
+                """Get leading whitespace of first non-blank line."""
                 for line in s.splitlines():
                     if line.strip():
                         return line[:len(line) - len(line.lstrip())]
                 return ""
 
+            def get_indent_width(indent_str: str) -> int:
+                """Calculate indent width in spaces (tab=4)."""
+                return sum(4 if c == '\t' else 1 for c in indent_str if c in ' \t')
+
+            def detect_indent_char(indent_str: str) -> str:
+                """Detect whether file uses tabs or spaces for indentation."""
+                return '\t' if '\t' in indent_str else ' '
+
             file_indent = get_leading_whitespace(actual_old_content)
             old_indent = get_leading_whitespace(old_content)
+            delta_width = get_indent_width(file_indent) - get_indent_width(old_indent)
 
-            if file_indent != old_indent:
-                def get_indent_width(indent_str: str) -> int:
-                    width = 0
-                    for char in indent_str:
-                        if char == '\t':
-                            width += 4
-                        elif char == ' ':
-                            width += 1
-                    return width
+            # ------------------------------------------------------------------
+            # Phase 1 — Alignment: map each new_content line to its corresponding
+            #   file line via difflib, then record that file line's original indent.
+            # ------------------------------------------------------------------
 
-                file_width = get_indent_width(file_indent)
-                old_width = get_indent_width(old_indent)
-                delta = file_width - old_width
+            # Normalize lines of old_content and the matched file block
+            old_norm_lines = ["".join(l.split()) for l in old_content.splitlines()]
+            file_norm_lines = ["".join(l.split()) for l in actual_old_content.splitlines()]
+            new_norm_lines = ["".join(l.split()) for l in new_content.splitlines()]
 
-                indent_char = ' '
-                if '\t' in file_indent or (not file_indent and '\t' in old_indent):
-                    indent_char = '\t'
-                    delta = delta // 4
+            # Build alignment: old_content line index -> file block line index
+            matcher = difflib.SequenceMatcher(None, old_norm_lines, file_norm_lines)
+            old_to_file_map = {}  # old_line_idx -> file_line_idx
+            for tag, i1_start, i1_end, j1_start, j1_end in matcher.get_opcodes():
+                if tag == 'equal':
+                    for a, b in zip(range(i1_start, i1_end), range(j1_start, j1_end)):
+                        old_to_file_map[a] = b
+                elif tag == 'replace':
+                    # Try to align replaced lines via sub-matching on norm text
+                    sub_matcher = difflib.SequenceMatcher(
+                        None,
+                        old_norm_lines[i1_start:i1_end],
+                        file_norm_lines[j1_start:j1_end]
+                    )
+                    for tag, a_s, a_e, b_s, b_e in sub_matcher.get_opcodes():
+                        if tag == 'equal':
+                            for a, b in zip(range(a_s, a_e), range(b_s, b_e)):
+                                old_to_file_map[i1_start + a] = j1_start + b
 
-                adjusted_lines = []
-                for line in new_content.splitlines(keepends=True):
-                    if not line.strip():
+            # Build alignment: new_content line index -> old_content line index
+            #   (same normalized text likely means same semantic line)
+            new_to_old_map = {}
+            matcher2 = difflib.SequenceMatcher(None, new_norm_lines, old_norm_lines)
+            for tag, i1_start, i1_end, j1_start, j1_end in matcher2.get_opcodes():
+                if tag == 'equal':
+                    for a, b in zip(range(i1_start, i1_end), range(j1_start, j1_end)):
+                        new_to_old_map[a] = b
+
+            # Combine: new_content line -> file block line (via old_content as bridge)
+            new_to_file_map = {}
+            for new_idx, old_idx in new_to_old_map.items():
+                if old_idx in old_to_file_map:
+                    new_to_file_map[new_idx] = old_to_file_map[old_idx]
+
+            # Record original indents from the file block
+            file_block_lines = actual_old_content.splitlines(keepends=True)
+            file_indent_by_line = {}  # file_line_idx -> leading_ws
+            for idx, fl in enumerate(file_block_lines):
+                norm = "".join(fl.split())
+                if norm:
+                    leading_ws = fl[:len(fl) - len(fl.lstrip())] if fl.strip() else ""
+                    file_indent_by_line[idx] = leading_ws
+
+            # ------------------------------------------------------------------
+            # Phase 2 — Preservation: apply file indents to new_content lines
+            # ------------------------------------------------------------------
+
+            new_content_lines = new_content.splitlines(keepends=True)
+            adjusted_lines = []
+
+            for line_idx, line in enumerate(new_content_lines):
+                if not line.strip():
+                    # Apply base indent delta to blank lines too (Issue 2 fix)
+                    if file_indent != old_indent and delta_width != 0:
+                        indent_char = detect_indent_char(file_indent)
+                        if indent_char == '\t':
+                            base_tabs = max(0, round(get_indent_width(file_indent) / 4))
+                            adjusted_lines.append(('\t' * base_tabs) + line.lstrip(' \t'))
+                        else:
+                            adjusted_lines.append((' ' * max(0, get_indent_width(file_indent))) + line.lstrip(' \t'))
+                    else:
                         adjusted_lines.append(line)
+                    continue
+
+                # If this new_content line maps to a file block line, use its indent
+                if line_idx in new_to_file_map:
+                    f_idx = new_to_file_map[line_idx]
+                    if f_idx in file_indent_by_line:
+                        orig_leading_ws = file_indent_by_line[f_idx]
+                        adjusted_lines.append(orig_leading_ws + line.lstrip())
                         continue
 
+                # No alignment found — apply base indent delta adjustment
+                if file_indent != old_indent and delta_width != 0:
                     current_indent = line[:len(line) - len(line.lstrip())]
                     current_width = get_indent_width(current_indent)
-                    
+
+                    indent_char = detect_indent_char(file_indent)
                     if indent_char == '\t':
-                        current_tabs = current_width // 4
-                        new_tabs = max(0, current_tabs + delta)
+                        delta_tabs = round(delta_width / 4)  # Issue 4: use round instead of //
+                        new_tabs = max(0, (current_width // 4) + delta_tabs)
                         adjusted_lines.append(('\t' * new_tabs) + line.lstrip())
                     else:
-                        new_spaces = max(0, current_width + delta)
+                        new_spaces = max(0, current_width + delta_width)
                         adjusted_lines.append((' ' * new_spaces) + line.lstrip())
-                
-                new_content = "".join(adjusted_lines)
+                elif file_indent:
+                    # Unmapped line but file block has base indent — apply it as fallback
+                    # so the line isn't left unindented inside an indented block
+                    adjusted_lines.append(file_indent + line.lstrip())
+                else:
+                    adjusted_lines.append(line)
 
+            new_content = "".join(adjusted_lines)
+
+            # ------------------------------------------------------------------
+            # Phase 3 — Validation: increment-based indentation anomaly detection
+            # ------------------------------------------------------------------
+
+            def validate_indentation_consistency(content: str, file_path: str) -> list:
+                """Check that content has consistent indentation within code blocks.
+
+                Uses an increment-based approach: compute the most common indent
+                increment between adjacent non-blank lines, then flag any line
+                whose deviation from its predecessor exceeds 3x that increment.
+                This naturally handles nested code without false positives.
+                """
+                warnings = []
+                indent_widths = []
+
+                for i, line in enumerate(content.splitlines()):
+                    if not line.strip():
+                        continue
+                    leading_ws = line[:len(line) - len(line.lstrip())]
+                    width = get_indent_width(leading_ws)
+                    indent_widths.append((i + 1, width))
+
+                # Compute the most common absolute increment between adjacent lines
+                if len(indent_widths) >= 2:
+                    increments = [abs(indent_widths[j][1] - indent_widths[j-1][1])
+                                  for j in range(1, len(indent_widths))]
+                    positive_increments = [inc for inc in increments if inc > 0]
+
+                    # Need at least 2 positive increments to establish "typical" style.
+                    # With only 1 increment we can't tell if it's normal or anomalous,
+                    # so fall back to a fixed threshold of 16 spaces.
+                    if len(positive_increments) >= 2:
+                        typical_increment = Counter(positive_increments).most_common(1)[0][0]
+                        threshold = max(typical_increment * 3, 8)
+                    else:
+                        threshold = 16  # fixed fallback when style is unclear
+
+                    for j in range(1, len(indent_widths)):
+                        prev_line_num, prev_w = indent_widths[j - 1]
+                        curr_line_num, curr_w = indent_widths[j]
+                        diff = abs(curr_w - prev_w)
+                        if diff > threshold:
+                            direction = "increased" if curr_w > prev_w else "decreased"
+                            warnings.append(
+                                f"Indentation anomaly at line {curr_line_num} in {file_path}: "
+                                f"indent {direction} from {prev_w} to {curr_w} "
+                                f"(jump of {diff} spaces, threshold={threshold})"
+                            )
+
+                return warnings
+
+            indent_warnings = validate_indentation_consistency(new_content, path)
+
+            # --- Track heuristic edit history per file (Issue 5: use as_posix for consistency) ---
+            resolved_path_key = resolved.as_posix()
+            self._heuristic_edit_counts[resolved_path_key] = \
+                self._heuristic_edit_counts.get(resolved_path_key, 0) + 1
+            
             has_trailing_newline = last_matched_line.endswith('\n') or last_matched_line.endswith('\r')
             if has_trailing_newline:
                 if new_content and not (new_content.endswith('\n') or new_content.endswith('\r')):
@@ -1230,7 +1377,17 @@ class OperationManager:
             
             res_msg = f"APPROVED: Edited {path}"
             if match_mode == 'heuristic':
-                res_msg += f" (Heuristic match similarity: {match_ratio:.1%}). Please check the file to ensure the insertion was applied correctly."
+                res_msg += f" (Heuristic match similarity: {match_ratio:.1%})"
+                # Warn about edit history drift risk
+                resolved_path_str = resolved.as_posix()
+                edit_count = self._heuristic_edit_counts.get(resolved_path_str, 0)
+                if edit_count >= 3:
+                    res_msg += f" [NOTE: This file has been edited {edit_count} times in heuristic mode this session. Indentation drift may have accumulated.]"
+                # Include indentation validation warnings
+                if indent_warnings:
+                    for w in indent_warnings:
+                        res_msg += f"\n  ⚠ {w}"
+                res_msg += ". Please check the file to ensure the insertion was applied correctly."
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
             if backup_path_str:
@@ -1495,67 +1652,188 @@ class OperationManager:
             
         try:
             import subprocess
-            
-            # Execute the command in the workspace directory
-            result = subprocess.run(
+
+            SHELL_TIMEOUT = 120  # seconds — prevent hanging indefinitely
+
+            # Execute the command in the workspace directory.
+            # On Windows, use CREATE_NEW_PROCESS_GROUP so we can kill the entire
+            # process tree (including child python.exe processes) on timeout.
+            if os.name == 'nt':
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore
+            else:
+                creationflags = 0
+
+            proc = subprocess.Popen(
                 command,
                 cwd=str(resolved_cwd),
                 shell=True,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=120  # Prevent hanging indefinitely
+                creationflags=creationflags,
+                start_new_session=True,  # Unix: ensures process group isolation for killpg; ignored on Windows
             )
-            
-            output = ""
-            if result.stdout:
-                output += f"STDOUT:\n{result.stdout}\n"
-            if result.stderr:
-                output += f"STDERR:\n{result.stderr}\n"
-                
-            if result.returncode == 0:
-                status = "Command completed successfully."
-            else:
-                status = f"Command exited with return code {result.returncode}."
-                
-            if not output.strip():
-                output = "No output produced."
-            
-            final_output = output
-            if char_limit != -1 and len(output) > char_limit:
-                # Save full result to spill file
-                log_dir = self.base_dir / 'logs' / 'spillover'
-                log_dir.mkdir(parents=True, exist_ok=True)
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
-                spill_filename = f"{safe_agent}_shell_{timestamp}.txt"
-                spill_path = log_dir / spill_filename
-                
-                try:
-                    # Cap spill file to prevent disk exhaustion from massive shell output
-                    if len(output) > MAX_SPILL_SIZE:
-                        output = output[:MAX_SPILL_SIZE] + "\n\n[SPILL FILE TRUNCATED — exceeded maximum size]"
-                    spill_path.write_text(output, encoding='utf-8')
+
+            try:
+                stdout, stderr = proc.communicate(timeout=SHELL_TIMEOUT)
+                result_ok = True
+            except subprocess.TimeoutExpired:
+                # ── Timeout: kill the ENTIRE process tree, not just cmd.exe ──
+                result_ok = False
+                if os.name == 'nt':
+                    # On Windows, use taskkill /T to recursively kill the process
+                    # group (cmd.exe + all children like python.exe).
                     try:
-                        rel_spill = str(spill_path.relative_to(self.base_dir))
-                    except ValueError:
-                        rel_spill = str(spill_path)
-                except Exception as e:
-                    rel_spill = f"ERROR SAVING SPILL: {e}"
+                        subprocess.run(
+                            ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
+                            capture_output=True, timeout=10,
+                        )
+                    except Exception as e:
+                        logger.warning(f"taskkill failed for PID {proc.pid}: {e}, falling back to proc.kill()")
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                    
+                    # Second pass: taskkill /T may miss grandchildren if their parent was
+                    # already killed before the tree traversal reached them. Run a second pass
+                    # with a brief delay to catch any processes that just orphaned.
+                    time.sleep(0.5)
+                    try:
+                        subprocess.run(
+                            ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
+                            capture_output=True, timeout=10,
+                        )
+                    except Exception:
+                        pass
+                    
+                    # Third pass: recursive WMIC sweep to find any remaining descendants.
+                    # Collect all descendant PIDs first, then kill them in bulk.
+                    try:
+                        def _get_child_pids(parent_pid):
+                            """Recursively get all child/grandchild PIDs."""
+                            res = subprocess.run(
+                                ['wmic', 'process', 'where',
+                                 f'ParentProcessId={parent_pid}',
+                                 'get', 'ProcessId'],
+                                capture_output=True, text=True, timeout=5,
+                            )
+                            pids = []
+                            for line in res.stdout.strip().split('\n'):
+                                line = line.strip()
+                                if line.isdigit():
+                                    pids.append(int(line))
+                            return pids
+                        
+                        # Gather all descendant PIDs (up to 4 levels deep)
+                        descendants = set()
+                        to_check = [proc.pid]
+                        for _ in range(4):
+                            next_level = []
+                            for pid in to_check:
+                                children = _get_child_pids(pid)
+                                for cpid in children:
+                                    if cpid not in descendants and cpid != proc.pid:
+                                        descendants.add(cpid)
+                                        next_level.append(cpid)
+                            to_check = next_level
+                            if not next_level:
+                                break
+                        
+                        # Kill all discovered descendants
+                        for dpid in descendants:
+                            try:
+                                subprocess.run(
+                                    ['taskkill', '/F', '/PID', str(dpid)],
+                                    capture_output=True, timeout=5,
+                                )
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.warning(f"WMIC descendant sweep failed: {e}")
+                else:
+                    # On Unix, kill the process group using -PID (negative = group)
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
 
-                final_output = output[:char_limit] + f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. Full output saved to: {rel_spill}]"
-                status += " [TRUNCATED]"
+                # Drain any partial output before reporting timeout
+                try:
+                    stdout, stderr = proc.communicate(timeout=5)
+                except Exception:
+                    stdout, stderr = '', ''
 
-            # Format output differently for auto-approved vs user-approved
-            if is_safe:
-                final_msg = f"AUTO-APPROVED: {status}\n"
+            if result_ok:
+                output = ""
+                if stdout:
+                    output += f"STDOUT:\n{stdout}\n"
+                if stderr:
+                    output += f"STDERR:\n{stderr}\n"
+
+                if proc.returncode == 0:
+                    status = "Command completed successfully."
+                else:
+                    status = f"Command exited with return code {proc.returncode}."
+
+                if not output.strip():
+                    output = "No output produced."
+
+                final_output = output
+                if char_limit != -1 and len(output) > char_limit:
+                    # Save full result to spill file
+                    log_dir = self.base_dir / 'logs' / 'spillover'
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+                    spill_filename = f"{safe_agent}_shell_{timestamp}.txt"
+                    spill_path = log_dir / spill_filename
+
+                    try:
+                        # Cap spill file to prevent disk exhaustion from massive shell output
+                        if len(output) > MAX_SPILL_SIZE:
+                            output = output[:MAX_SPILL_SIZE] + "\n\n[SPILL FILE TRUNCATED — exceeded maximum size]"
+                        spill_path.write_text(output, encoding='utf-8')
+                        try:
+                            rel_spill = str(spill_path.relative_to(self.base_dir))
+                        except ValueError:
+                            rel_spill = str(spill_path)
+                    except Exception as e:
+                        rel_spill = f"ERROR SAVING SPILL: {e}"
+
+                    final_output = output[:char_limit] + f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. Full output saved to: {rel_spill}]"
+                    status += " [TRUNCATED]"
+
+                # Format output differently for auto-approved vs user-approved
+                if is_safe:
+                    final_msg = f"AUTO-APPROVED: {status}\n"
+                else:
+                    final_msg = f"APPROVED: {status}\n"
+                    if justification_text:
+                        final_msg += f"Security Justification: {justification_text}\n"
+                return final_msg + f"\n{final_output}"
             else:
-                final_msg = f"APPROVED: {status}\n"
-                if justification_text:
-                    final_msg += f"Security Justification: {justification_text}\n"
-            return final_msg + f"\n{final_output}"
-            
-        except subprocess.TimeoutExpired:
-            return "ERROR: Command timed out after 120 seconds. If the process is expected to take a long time, consider using a background command (e.g. using '&' on linux or 'Start-Job' on windows) or optimizing the task."
+                # Timeout path — include any partial output that was captured
+                output = ""
+                if stdout:
+                    output += f"STDOUT (partial):\n{stdout}\n"
+                if stderr:
+                    output += f"STDERR (partial):\n{stderr}\n"
+
+                timeout_msg = (
+                    f"ERROR: Command timed out after {SHELL_TIMEOUT} seconds. "
+                    f"All child processes have been forcibly terminated. "
+                    f"Command was: `{command[:200]}`. "
+                    f"If the process is expected to take a long time, consider using a background command "
+                    f"(e.g. using '&' on linux or 'Start-Job' on windows) or optimizing the task."
+                )
+                if output.strip():
+                    return f"{timeout_msg}\n\n{output}"
+                return timeout_msg
+
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
 

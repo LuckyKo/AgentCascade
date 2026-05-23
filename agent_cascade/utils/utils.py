@@ -565,26 +565,49 @@ def extract_text_from_message(
     return text.strip()
 
 
-def extract_files_from_messages(messages: List[Message], include_images: bool) -> List[str]:
+def _get_msg_content(msg):
+    """Extract content from a message, handling both Message objects and dicts.
+    
+    Returns the content attribute/value, or None if not present.
+    """
+    if isinstance(msg, dict):
+        return msg.get('content')
+    return getattr(msg, 'content', None)
+
+
+def _get_item_attr(item, attr_name: str):
+    """Extract an attribute from a ContentItem object or dict."""
+    if isinstance(item, dict):
+        return item.get(attr_name)
+    return getattr(item, attr_name, None)
+
+
+def extract_files_from_messages(messages: List[Union[dict, Message]], include_images: bool) -> List[str]:
     files = []
     for msg in messages:
-        if isinstance(msg.content, list):
-            for item in msg.content:
-                if item.file and item.file not in files:
-                    files.append(item.file)
-                if include_images and item.image and item.image not in files:
-                    files.append(item.image)
+        content = _get_msg_content(msg)
+        if isinstance(content, list):
+            for item in content:
+                file_val = _get_item_attr(item, 'file')
+                if file_val and file_val not in files:
+                    files.append(file_val)
+                if include_images:
+                    image_val = _get_item_attr(item, 'image')
+                    if image_val and image_val not in files:
+                        files.append(image_val)
     return files
 
 
-def extract_images_from_messages(messages: List[Message]) -> List[str]:
-    files = []
+def extract_images_from_messages(messages: List[Union[dict, Message]]) -> List[str]:
+    images = []
     for msg in messages:
-        if isinstance(msg.content, list):
-            for item in msg.content:
-                if item.image and item.image not in files:
-                    files.append(item.image)
-    return files
+        content = _get_msg_content(msg)
+        if isinstance(content, list):
+            for item in content:
+                image_val = _get_item_attr(item, 'image')
+                if image_val and image_val not in images:
+                    images.append(image_val)
+    return images
 
 
 def merge_generate_cfgs(base_generate_cfg: Optional[dict], new_generate_cfg: Optional[dict]) -> dict:

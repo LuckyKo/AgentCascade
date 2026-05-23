@@ -6,6 +6,7 @@ consistent error handling. Falls back to direct comp_agent.run() when called
 outside the orchestrator context (e.g., from API server forced compression).
 """
 import logging
+import time as _time
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 from agent_cascade.llm.schema import SYSTEM, USER
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
@@ -140,22 +141,31 @@ def invoke_compression_agent(
 
             final_msgs = []
             subagent_return_value = None  # Capture StopIteration.value as fallback
-            max_polls = 1000             # Safeguard against infinite polling
+            start_time = _time.monotonic()   # Monotonic clock — immune to NTP adjustments
+            max_poll_time = 300            # 5-minute timeout for large compression tasks
             poll_count = 0
 
             try:
                 gen = orchestrator._stream_sub_agent_call(
                     'call_agent', tool_args, current_response, manager_history
                 )
-                # Iterate the generator synchronously (same pattern as yield from)
+                # Iterate the generator synchronously (same pattern as yield from).
+                # Each LLM streaming chunk produces one yield through the chain:
+                #   _original_call_llm → hooked_call_llm → _run → run() → _stream_sub_agent_call
+                # For large compression tasks (60K+ tokens of input), 1000+ chunks are common.
+                # We use a time-based timeout instead of iteration count to handle any task size.
                 while True:
                     yielded = next(gen)
                     poll_count += 1
-                    if poll_count > max_polls:
+
+                    # Time-based check — adapts to any streaming chunk rate
+                    elapsed = _time.monotonic() - start_time
+                    if elapsed > max_poll_time:
                         raise RuntimeError(
-                            f"Compression agent polling exceeded {max_polls} iterations — "
-                            "sub_agent_state may not be populated"
+                            f"Compression agent timed out after {elapsed:.0f}s "
+                            f"({poll_count} iterations) — further processing may have been incomplete"
                         )
+
                     # The generator yields intermediate state for WebUI — capture final messages
                     if comp_state_key in agent_pool.sub_agent_state:
                         msgs = agent_pool.sub_agent_state[comp_state_key].get('messages', [])
@@ -184,8 +194,23 @@ def invoke_compression_agent(
             agent_pool.instance_conversations[comp_state_key] = list(comp_history)
 
             final_msgs = []
+            start_time = _time.monotonic()   # Monotonic clock for timeout (same as call_agent path)
+            max_poll_time = 300            # 5-minute timeout for large compression tasks
+            poll_count = 0
+
             for partial in comp_agent.run(comp_history, agent_instance_name=comp_state_key):
                 final_msgs = partial
+                # Note: poll_count here counts run() yields (~1 per LLM turn), not token chunks
+                poll_count += 1
+
+                # Time-based check — adapts to any streaming chunk rate (same as call_agent path)
+                elapsed = _time.monotonic() - start_time
+                if elapsed > max_poll_time:
+                    raise RuntimeError(
+                        f"Compression agent timed out after {elapsed:.0f}s "
+                        f"({poll_count} iterations in direct run path)"
+                    )
+
                 # Update sub_agent_state during streaming so WebUI reflects progress
                 agent_pool.sub_agent_state[comp_state_key]['messages'] = (
                     list(comp_history) + (list(final_msgs) if isinstance(final_msgs, list) else [final_msgs])

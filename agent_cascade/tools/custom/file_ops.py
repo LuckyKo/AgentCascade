@@ -621,6 +621,7 @@ class Grep(BaseTool):
             char_limit = self.cfg.get('grep_char_limit')
 
         agent_name = kwargs.get('agent_instance_name', 'unknown')
+        spill_file_path = kwargs.get('spill_file_path')  # Pre-computed by orchestrator
         return self.agent_pool.operation_manager.grep(
             pattern, path, include, 
             char_limit=int(char_limit), 
@@ -628,7 +629,8 @@ class Grep(BaseTool):
             exclude=exclude,
             ignore_vcs=bool(ignore_vcs),
             context=int(context),
-            smart_case=bool(smart_case)
+            smart_case=bool(smart_case),
+            spill_file_path=spill_file_path
         )
 
 

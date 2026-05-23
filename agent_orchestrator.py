@@ -314,6 +314,10 @@ class ParallelAgentManager:
                 result = None
                 try:
                     while True:
+                        # Check if user pressed stop or this instance was halted — halt parallel sub-agent execution
+                        if self.agent_pool.stopped or self.agent_pool.is_halted(instance_name):
+                            logger.info(f"Parallel sub-agent {instance_name} stopped due to global stop flag or per-instance halt.")
+                            break
                         next(gen)
                 except StopIteration as e:
                     result = e.value
@@ -332,6 +336,10 @@ class ParallelAgentManager:
                         endpoint_release()
                     except Exception as e:
                         logger.error(f"Failed to release endpoint slot for {instance_name}: {e}")
+                
+                # Mark activity on completion so agents aren't auto-dismissed right after long runs (Issue #3)
+                if hasattr(self.agent_pool, '_mark_activity'):
+                    self.agent_pool._mark_activity(instance_name)
                 
                 if instance_name in self.active_tasks:
                     del self.active_tasks[instance_name]
@@ -526,6 +534,36 @@ class OrchestratorAgent(Assistant):
         
         return DEFAULT_MAX_INPUT_TOKENS
 
+    def _compute_grep_spill_path(self, instance_name: str) -> Optional[str]:
+        """Pre-compute the spillover file path for grep output.
+
+        This is computed before tool execution so operation_manager.grep() can include
+        the path in its truncation message when char_limit is exceeded — the model
+        needs to know where the full output lives immediately.
+
+        Returns None if spillover is disabled or agent_pool/workspace_dir not available.
+        """
+        if not hasattr(self, 'agent_pool') or not self.agent_pool:
+            return None
+
+        # Check if grep spillover is enabled
+        grep_spillover_enabled = self.agent_pool.llm_cfg.get('grep_spillover', True)
+        if not grep_spillover_enabled:
+            return None
+
+        workspace_dir = getattr(self.agent_pool, 'workspace_dir', None)
+        if not workspace_dir:
+            return None
+
+        log_dir = workspace_dir / 'logs' / 'spillover'
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S%f')
+        safe_instance = re.sub(r'[^a-zA-Z0-9_-]', '_', instance_name)
+        spill_filename = f"{safe_instance}_grep_{timestamp}.txt"
+        try:
+            return str((log_dir / spill_filename).relative_to(workspace_dir)).replace('\\', '/')
+        except ValueError:
+            return None
+
     def _truncate_tool_result(
         self,
         tool_result: str,
@@ -634,18 +672,15 @@ class OrchestratorAgent(Assistant):
         char_budget = max(100, char_budget - 300)
         
         # For read_file, skip spillover write — the file already exists on disk
-        # For grep, check if spillover is disabled via grep_spillover config
+        # For grep, operation_manager handles spillover writes (it knows char_limit and writes before truncating)
         is_read_file = tool_name == 'read_file'
         # is_grep already set above in Wild Read Detection section
         file_path = (tool_args or {}).get('absolute_path', 'unknown') if is_read_file else None
         
-        # Check if spillover is disabled for grep
-        grep_spillover_enabled = True  # default
-        if is_grep and hasattr(self, 'agent_pool') and self.agent_pool:
-            grep_spillover_enabled = self.agent_pool.llm_cfg.get('grep_spillover', True)
+        spill_rel = None  # Defensive init — only set inside the spillover block below
         
-        # Skip spillover write for read_file (file exists on disk) or when disabled for grep
-        if not is_read_file and (not is_grep or grep_spillover_enabled):
+        # Skip spillover write for read_file (file exists on disk), grep (handled by operation_manager), and when disabled
+        if not is_read_file and not is_grep:
             # Save full result to spill file (use workspace_dir from agent_pool for correct path resolution)
             log_dir = self.agent_pool.workspace_dir / 'logs' / 'spillover'
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -661,6 +696,13 @@ class OrchestratorAgent(Assistant):
             except Exception as e:
                 logger.error(f"Failed to write spill file {spill_path}: {e}")
                 # Even if spill fails, still truncate to prevent context overflow
+            
+            # Convert to relative path so the model can use it with read_file (expects workspace-relative paths)
+            try:
+                spill_rel = str(spill_path.relative_to(self.agent_pool.workspace_dir)).replace('\\', '/')
+            except ValueError:
+                # Fallback if spill_path is outside workspace_dir — still normalize slashes for consistency
+                spill_rel = str(spill_path).replace('\\', '/')
         
         truncated = tool_result[:char_budget]
         
@@ -678,16 +720,22 @@ class OrchestratorAgent(Assistant):
                 f"You can re-read with limit/offset parameters to get specific sections. "
                 f"Consider compressing context before continuing.]"
             )
-        elif is_grep and not grep_spillover_enabled:
-            notice = (
-                f"\n\n[TOOL RESPONSE TRUNCATED — {reason}. "
-                f"Output was {len(tool_result)} chars. Spillover is disabled for grep. "
-                f"Consider compressing context before continuing.]"
-            )
+        elif is_grep:
+            # Grep spillover is handled entirely by operation_manager — it writes the full output to the spill file
+            # and includes the path in its truncation notice. If operation_manager already added a truncation notice,
+            # preserve it (it contains the spill file path). Only add our own notice if there's no existing one.
+            if "[TOOL RESPONSE TRUNCATED" in tool_result:
+                # operation_manager already truncated and included spill path — don't overwrite that notice
+                notice = ""
+            else:
+                notice = (
+                    f"\n\n[TOOL RESPONSE TRUNCATED — {reason}. "
+                    f"Consider compressing context before continuing.]"
+                )
         else:
             notice = (
                 f"\n\n[TOOL RESPONSE TRUNCATED — {reason}. "
-                f"Full output ({len(tool_result)} chars) saved to: {spill_path}\n"
+                f"Full output ({len(tool_result)} chars) saved to: {spill_rel}\n"
                 f"You can read it with read_file if needed. "
                 f"Consider compressing context before continuing.]"
             )
@@ -696,7 +744,8 @@ class OrchestratorAgent(Assistant):
             f"Truncated '{tool_name}' result for {instance_name}: "
             f"{len(tool_result)} chars -> {len(truncated)} chars. Reason: {reason}. "
             + (f"Original file: {file_path}" if is_read_file 
-               else ("" if (is_grep and not grep_spillover_enabled) else f"Spill file: {spill_path}"))
+               else (f"Grep — notice preserved from operation_manager" if (is_grep and not notice) 
+                     else ("" if is_grep else f"Spill file: {spill_rel}")))
         )
         
         return truncated + notice
@@ -884,10 +933,19 @@ class OrchestratorAgent(Assistant):
                     if '## Session Metadata' not in m0_content:
                         meta_lines = [
                             "## Session Metadata",
-                            f"- Supervisor: User",
+                            f"- Supervisor: User",  # Orchestrator's supervisor is always the user (vs sub-agents which use self.session_name)
+                            f"- Working Dir: {logger_inst.data['metadata'].get('working_dir', 'Unknown')}",
                             f"- Log Path: {logger_inst.log_path}",
-                            "Use your logs to recall details from turns that were compressed.\n"
                         ]
+                        
+                        # Add extra paths to prompt if they exist
+                        extra_ro = logger_inst.data['metadata'].get('extra_paths_ro', [])
+                        extra_rw = logger_inst.data['metadata'].get('extra_paths_rw', [])
+                        if extra_ro:
+                            meta_lines.append(f"- Extra Paths (Read-Only): {', '.join(extra_ro)}")
+                        if extra_rw:
+                            meta_lines.append(f"- Extra Paths (Read-Write): {', '.join(extra_rw)}")
+                        meta_lines.append("Use your logs to recall details from turns that were compressed.\n")
                         content_lines = m0_content.split('\n')
                         insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith("#") else 1
                         for i, ml in enumerate(meta_lines): content_lines.insert(insert_pos + i, ml)
@@ -1100,6 +1158,16 @@ class OrchestratorAgent(Assistant):
                     sliced = self.agent_pool.slice_history_for_llm(compressed) if hasattr(self.agent_pool, 'slice_history_for_llm') else compressed
                     llm_messages.clear()
                     llm_messages.extend(copy.deepcopy(sliced))
+                    
+                    # CRITICAL: Sync the logger's internal data["history"] tracking to match the current
+                    # pool state. Without this, update_history() will treat pool messages not yet seen by
+                    # the logger as "new" and append them, causing duplication.
+                    try:
+                        logger_inst = self.agent_pool.get_logger(self.session_name, self.agent_type)
+                        logger_inst.update_history(compressed)
+                    except Exception as e:
+                        logger.error(f"Logger sync after forced compression FAILED for '{self.session_name}': {e}. "
+                                     f"Pool may desync — manual intervention required.")
                 yield response
                 # Reset flag so BUG-7 block below doesn't redundantly re-sync every iteration
                 self._compress_context_ran_this_turn = False
@@ -1125,6 +1193,10 @@ class OrchestratorAgent(Assistant):
                     
                     messages.clear()
                     messages.extend(copy.deepcopy(compressed))
+                    # NOTE: No logger sync needed here — compress_context() in core.py already
+                    # called insert_compression_marker() on the logger, which updates
+                    # logger.data["history"] to match the pool. Only forced compression recovery
+                    # (above) needs explicit logger sync because it rebuilds from scratch.
             
             # --- LOOP DETECTION ---
             loop_info = detect_loop(messages)
@@ -1269,7 +1341,7 @@ class OrchestratorAgent(Assistant):
                     is_truncated = True
             
             # --- AUTO-CONTINUE ON LENGTH LIMIT ---
-            if is_truncated and self.auto_continue_enabled and not self.agent_pool.stopped:
+            if is_truncated and self.auto_continue_enabled and not self.agent_pool.stopped and not self.agent_pool.is_halted(self.session_name):
                 logger.info(f"Detected message truncation (length limit) for {self.name}. Auto-triggering continuation.")
                 # Increment budget to allow the continuation
                 num_llm_calls_available += 1
@@ -1290,6 +1362,17 @@ class OrchestratorAgent(Assistant):
                 used_any_tool = True
                 # Yield the tool call request immediately so UI sees "calling tool..."
                 yield response
+                
+                # ── Stop/Halt check BEFORE tool execution ────────────────────────
+                # Prevent long-running tools (code_interpreter, shell_cmd) from starting
+                # if the user pressed stop or this instance was halted.
+                if self.agent_pool.stopped:
+                    logger.info(f"Agent {self.name} stopped before executing tool '{tool_name}'.")
+                    break
+                if self.agent_pool.is_halted(self.session_name):
+                    logger.info(f"Agent {self.name} halted before executing tool '{tool_name}'.")
+                    break
+                
                 _tool_success = True
                 _tool_error = ""
                 try:
@@ -1396,9 +1479,15 @@ class OrchestratorAgent(Assistant):
                                 if 'agent_instance_name' not in call_kwargs:
                                     call_kwargs['agent_instance_name'] = self.session_name
                                 
-                                # Pass the agent itself so tools (like compress_context) can sync 
+                                # Pass the agent itself so tools (like compress_context) can sync
                                 # back to its base system_message for persistence across turns.
                                 call_kwargs['agent_obj'] = self
+
+                                # Pre-compute spillover path for grep so operation_manager can include it in truncation notices
+                                if tool_name == 'grep' and hasattr(self, 'agent_pool') and self.agent_pool:
+                                    spill_rel = self._compute_grep_spill_path(self.session_name)
+                                    if spill_rel is not None:
+                                        call_kwargs['spill_file_path'] = spill_rel
                                     
                                 # Telemetry: track tool call
                                 try:
@@ -1406,6 +1495,11 @@ class OrchestratorAgent(Assistant):
                                         self.agent_pool.telemetry.record_tool_call_start(self.session_name, tool_name)
                                 except Exception:
                                     pass
+                                
+                                # Re-check stop/halt right before executing the tool (race condition guard)
+                                if self.agent_pool.stopped or self.agent_pool.is_halted(self.session_name):
+                                    logger.info(f"Agent {self.name} stopped/halted just before executing tool '{tool_name}'.")
+                                    break
                                 
                                 try:
                                     tool_result = self._call_tool(
@@ -1434,6 +1528,18 @@ class OrchestratorAgent(Assistant):
                             if 'agent_instance_name' not in call_kwargs:
                                 call_kwargs['agent_instance_name'] = self.session_name
                             call_kwargs['agent_obj'] = self
+
+                            # Pre-compute spillover path for grep so operation_manager can include it in truncation notices
+                            if tool_name == 'grep' and hasattr(self, 'agent_pool') and self.agent_pool:
+                                spill_rel = self._compute_grep_spill_path(self.session_name)
+                                if spill_rel is not None:
+                                    call_kwargs['spill_file_path'] = spill_rel
+                            
+                            # Re-check stop/halt right before executing the tool (race condition guard)
+                            if self.agent_pool.stopped or self.agent_pool.is_halted(self.session_name):
+                                logger.info(f"Agent {self.name} stopped/halted just before executing tool '{tool_name}'.")
+                                break
+                            
                             try:
                                 if hasattr(self.agent_pool, 'telemetry'):
                                     self.agent_pool.telemetry.record_tool_call_start(self.session_name, tool_name)
@@ -1588,7 +1694,7 @@ class OrchestratorAgent(Assistant):
                         # Poll for either a new message or all tasks completion
                         while not self.agent_pool.has_messages(instance) and \
                               self.agent_pool.parallel_manager.has_active_tasks(instance):
-                            if self.agent_pool.stopped: break
+                            if self.agent_pool.stopped or self.agent_pool.is_halted(self.session_name): break
                             time.sleep(0.5)
                         
                         if self.agent_pool.has_messages(instance):
@@ -1688,6 +1794,10 @@ class OrchestratorAgent(Assistant):
 
         if self.agent_pool.stopped:
             return f"Operation cancelled by user."
+        
+        # Check if this instance was halted (e.g. during forced compression or manual pause)
+        if self.agent_pool.is_halted(instance_name):
+            return f"Instance {instance_name} is currently halted (paused)."
         
         # If log_file is provided and instance doesn't exist yet, restore session from log
         log_file = args.get('log_file')
@@ -1831,6 +1941,10 @@ class OrchestratorAgent(Assistant):
         
         # Track this call in the active stack for UI context switching
         self.agent_pool.active_stack.append(instance_name)
+        
+        # Mark activity: this agent is now actively being used
+        if hasattr(self.agent_pool, '_mark_activity'):
+            self.agent_pool._mark_activity(instance_name)
 
         # Telemetry: record sub-agent delegation start time
         _sub_agent_start = time.time()
@@ -1935,7 +2049,7 @@ class OrchestratorAgent(Assistant):
                             # Note: self is the OrchestratorAgent instance
                             auto_continue_enabled = getattr(self, 'auto_continue_enabled', True)
                             
-                            if is_truncated and auto_continue_enabled and not self.agent_pool.stopped:
+                            if is_truncated and auto_continue_enabled and not self.agent_pool.stopped and not self.agent_pool.is_halted(instance_name):
                                 logger.info(f"Sub-agent {instance_name} truncated by length limit. Auto-triggering continuation...")
                                 cont_msg = Message(role=USER, content="[SYSTEM]: Your previous response was cut off by the length limit. Please continue exactly from where you left off, without repeating yourself.")
                                 messages.append(cont_msg)
@@ -2107,6 +2221,10 @@ class OrchestratorAgent(Assistant):
                     self.agent_pool.active_stack.pop(i)
                     removed = True
                     break
+            
+            # Mark activity on completion so agents aren't auto-dismissed right after long runs (Issue #3)
+            if hasattr(self.agent_pool, '_mark_activity'):
+                self.agent_pool._mark_activity(instance_name)
             
             # If the instance was marked for termination (dismissed from UI), clear it now that the loop is done
             if removed and instance_name in self.agent_pool.terminated_instances:
