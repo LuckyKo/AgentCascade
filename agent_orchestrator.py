@@ -37,7 +37,7 @@ from agent_cascade.utils.thinking_block import (
 )
 from agent_cascade.log import logger
 from agent_cascade.llm.schema import (
-    ASSISTANT, CONTENT, FUNCTION, IMAGE, ROLE, SYSTEM, USER, Message,
+    ASSISTANT, CONTENT, FUNCTION, IMAGE, ROLE, SYSTEM, USER, Message, ContentItem,
 )
 import agent_cascade.settings
 agent_cascade.settings.MAX_LLM_CALL_PER_RUN = 100
@@ -49,7 +49,19 @@ from agent_cascade.utils.utils import (
     json_loads,
 )
 
+from agent_cascade.compression import compress_context, rebuild_working_set
+
 from agent_pool import AgentPool
+
+from config.unified import USE_UNIFIED_LOOP
+
+def _safe_get_role(msg):
+    """Safely get the role from a message, handling both dict and Message objects."""
+    return msg.get(ROLE) if isinstance(msg, dict) else getattr(msg, 'role', None)
+
+def _safe_get_content(msg):
+    """Safely get the content from a message, handling both dict and Message objects."""
+    return msg.get(CONTENT) if isinstance(msg, dict) else getattr(msg, 'content', None)
 
 class LoopDetectedError(Exception):
     """Raised when a repetitive loop is detected in agent turns."""
@@ -268,36 +280,51 @@ class ParallelAgentManager:
         return any(owner == session_name for _, owner, _ in self.active_tasks.values())
 
     def count_active_tasks_by_class(self, agent_class: str) -> int:
-        """Count how many active parallel tasks are running for a given agent class."""
+        """Count how many active parallel tasks are running for a given agent class (case-insensitive)."""
+        agent_class = (agent_class or '').strip().lower()
         return sum(1 for _, _, a_class in self.active_tasks.values() if a_class == agent_class)
 
     def submit_task(self, orchestrator, tool_name: str, tool_args: dict, current_response: List[Message], manager_history: List[Message]) -> str:
         """Submit a sub-agent stream to the background pool and return immediately."""
         instance_name = tool_args.get('instance_name', 'unknown')
-        agent_class = tool_args.get('agent_class', 'unknown')
+        agent_class = (tool_args.get('agent_class', 'unknown') or '').strip().lower()  # Normalize for case-insensitive tracking
         
-        # We need a safe copy of the history to prevent thread mutation issues
-        # (Though _stream_sub_agent_call itself makes copies, passing references 
-        # from a live orchestrator turn can be risky).
+        # Resolve the actual endpoint and acquire a lifecycle slot BEFORE submitting.
+        # We do this before deep-copying history to avoid wasted work on agents that must wait.
+        # Blocks if the endpoint is at capacity, preventing parallel agents on concurrency=0 endpoints (Phase 3 fix).
+        endpoint_release = None  # cleanup callback, may be None for unlimited endpoints
+        
+        if hasattr(self.agent_pool, 'api_router'):
+            router = self.agent_pool.api_router
+            # Get the effective concurrency for this agent class (includes default fallback)
+            concurrency_limit = router.get_effective_concurrency(agent_class)
+            
+            # Resolve the actual api_base that will be used
+            llm_cfg = router.get_llm_config(agent_class)
+            api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
+            
+            # Acquire a slot on the endpoint scheduler (blocks if at capacity)
+            endpoint_release = router.scheduler.acquire(api_base, concurrency_limit)
+        
+        # Safe copy of history to prevent thread mutation issues
         safe_response = copy.deepcopy(current_response)
         safe_history = copy.deepcopy(manager_history)
 
         def task_wrapper():
-            # Because _stream_sub_agent_call is a generator for the WebUI, 
-            # we must iterate it to completion to get the final return value.
             try:
                 gen = orchestrator._stream_sub_agent_call(tool_name, tool_args, safe_response, safe_history)
                 result = None
                 try:
                     while True:
+                        # Check if user pressed stop or this instance was halted — halt parallel sub-agent execution
+                        if self.agent_pool.stopped or self.agent_pool.is_halted(instance_name):
+                            logger.info(f"Parallel sub-agent {instance_name} stopped due to global stop flag or per-instance halt.")
+                            break
                         next(gen)
                 except StopIteration as e:
                     result = e.value
                 
-                # Format the parallel completion message
                 completion_msg = f"[Parallel Sub-Agent '{instance_name}' Finished]:\n{result}"
-                
-                # Push the result asynchronously into the caller's message queue
                 self.agent_pool.enqueue_message(orchestrator.session_name, completion_msg)
                 
             except Exception as e:
@@ -305,12 +332,74 @@ class ParallelAgentManager:
                 error_msg = f"[Parallel Sub-Agent '{instance_name}' Failed]:\n{str(e)}"
                 self.agent_pool.enqueue_message(orchestrator.session_name, error_msg)
             finally:
+                # Release the endpoint slot when the agent completes (Phase 3)
+                if endpoint_release is not None:
+                    try:
+                        endpoint_release()
+                    except Exception as e:
+                        logger.error(f"Failed to release endpoint slot for {instance_name}: {e}")
+                
+                # Mark activity on completion so agents aren't auto-dismissed right after long runs (Issue #3)
+                if hasattr(self.agent_pool, '_mark_activity'):
+                    self.agent_pool._mark_activity(instance_name)
+                
                 if instance_name in self.active_tasks:
                     del self.active_tasks[instance_name]
 
         future = self.executor.submit(task_wrapper)
-        self.active_tasks[instance_name] = (future, orchestrator.session_name)
+        self.active_tasks[instance_name] = (future, orchestrator.session_name, agent_class)
         return f"[Started agent '{instance_name}' in parallel. You will be notified via an async message when it finishes. You may continue with other tasks.]"
+
+
+def validate_message_pool(messages: List[Union[dict, Message]], agent_name: str) -> bool:
+    """
+    Sanity-check a message pool after compression to detect mangling.
+    
+    Returns True if the pool is valid, False if corruption is detected.
+    Checks:
+      - Pool is not empty
+      - First message is SYSTEM (if present)
+      - No duplicate consecutive messages (same role + content)
+      - Message roles are valid strings
+    """
+    if not messages:
+        logger.error(f"[MSG POOL VALIDATION] Empty message pool for agent '{agent_name}'")
+        return False
+    
+    # Check first message is SYSTEM
+    first = messages[0]
+    first_role = first.get('role') if isinstance(first, dict) else getattr(first, 'role', '')
+    if first_role != SYSTEM:
+        logger.warning(f"[MSG POOL VALIDATION] First message for '{agent_name}' is not SYSTEM (got {first_role})")
+    
+    # Check for duplicate consecutive messages (compression can cause this via extend+clear issues)
+    prev_content = None
+    prev_role = None
+    dup_count = 0
+    for i, msg in enumerate(messages):
+        role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+        # Normalize content for comparison (truncate long strings)
+        content_key = str(content)[:200] if content else ''
+        
+        if role == prev_role and content_key == prev_content:
+            dup_count += 1
+            logger.warning(f"[MSG POOL VALIDATION] Duplicate consecutive msg at index {i} for '{agent_name}'")
+        
+        prev_role = role
+        prev_content = content_key
+    
+    if dup_count > len(messages) * 0.3:
+        logger.error(f"[MSG POOL VALIDATION] Excessive duplicates ({dup_count}/{len(messages)}) for agent '{agent_name}'")
+        return False
+    
+    # Check that roles are valid strings (not None or empty after compression)
+    invalid_roles = sum(1 for m in messages if not (m.get('role') if isinstance(m, dict) else getattr(m, 'role', '')))
+    if invalid_roles:
+        logger.error(f"[MSG POOL VALIDATION] {invalid_roles} messages with invalid roles for '{agent_name}'")
+        return False
+    
+    return True
 
 
 class OrchestratorAgent(Assistant):
@@ -353,7 +442,10 @@ class OrchestratorAgent(Assistant):
         # 1. Base generation config from the agent's internal state (held by the LLM object)
         merged_cfg = copy.deepcopy(getattr(self.llm, 'generate_cfg', {}))
         
-        # 2. Merge UI overrides (temperature, etc.)
+        # 2. Inject agent name so log messages show the correct agent instead of "Unknown"
+        merged_cfg['agent_name'] = self.name
+        
+        # 3. Merge UI overrides (temperature, etc.)
         if extra_generate_cfg:
             merged_cfg.update(extra_generate_cfg)
 
@@ -444,6 +536,36 @@ class OrchestratorAgent(Assistant):
         
         return DEFAULT_MAX_INPUT_TOKENS
 
+    def _compute_grep_spill_path(self, instance_name: str) -> Optional[str]:
+        """Pre-compute the spillover file path for grep output.
+
+        This is computed before tool execution so operation_manager.grep() can include
+        the path in its truncation message when char_limit is exceeded — the model
+        needs to know where the full output lives immediately.
+
+        Returns None if spillover is disabled or agent_pool/workspace_dir not available.
+        """
+        if not hasattr(self, 'agent_pool') or not self.agent_pool:
+            return None
+
+        # Check if grep spillover is enabled
+        grep_spillover_enabled = self.agent_pool.llm_cfg.get('grep_spillover', True)
+        if not grep_spillover_enabled:
+            return None
+
+        workspace_dir = getattr(self.agent_pool, 'workspace_dir', None)
+        if not workspace_dir:
+            return None
+
+        log_dir = workspace_dir / 'logs' / 'spillover'
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S%f')
+        safe_instance = re.sub(r'[^a-zA-Z0-9_-]', '_', instance_name)
+        spill_filename = f"{safe_instance}_grep_{timestamp}.txt"
+        try:
+            return str((log_dir / spill_filename).relative_to(workspace_dir)).replace('\\', '/')
+        except ValueError:
+            return None
+
     def _truncate_tool_result(
         self,
         tool_result: str,
@@ -499,6 +621,13 @@ class OrchestratorAgent(Assistant):
         if hasattr(self, 'agent_pool') and self.agent_pool:
             wild_read_limit = self.agent_pool.llm_cfg.get('tool_result_max_chars', wild_read_limit)
         
+        # Check grep-specific char limit if set
+        is_grep = tool_name == 'grep'
+        if is_grep and hasattr(self, 'agent_pool') and self.agent_pool:
+            grep_char_limit = self.agent_pool.llm_cfg.get('grep_char_limit')
+            if grep_char_limit and grep_char_limit != -1 and len(tool_result) > grep_char_limit:
+                is_wild_read = True
+        
         if not wild_read_limit or wild_read_limit == 10000:
              wild_read_limit = getattr(agent_cascade.settings, 'DEFAULT_TOOL_RESULT_MAX_CHARS', 10000)
         is_wild_read = len(tool_result) > wild_read_limit
@@ -544,21 +673,38 @@ class OrchestratorAgent(Assistant):
         # Reserve space for the truncation notice itself (~300 chars)
         char_budget = max(100, char_budget - 300)
         
-        # Save full result to spill file
-        log_dir = Path('workspace/logs')
-        log_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        safe_tool = tool_name.replace('/', '_').replace('\\', '_')
-        safe_instance = instance_name.replace('/', '_').replace('\\', '_')
-        spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}.txt"
-        spill_path = log_dir / spill_filename
+        # For read_file, skip spillover write — the file already exists on disk
+        # For grep, operation_manager handles spillover writes (it knows char_limit and writes before truncating)
+        is_read_file = tool_name == 'read_file'
+        # is_grep already set above in Wild Read Detection section
+        file_path = (tool_args or {}).get('absolute_path', 'unknown') if is_read_file else None
         
-        try:
-            with open(spill_path, 'w', encoding='utf-8') as f:
-                f.write(tool_result)
-        except Exception as e:
-            logger.error(f"Failed to write spill file {spill_path}: {e}")
-            # Even if spill fails, still truncate to prevent context overflow
+        spill_rel = None  # Defensive init — only set inside the spillover block below
+        
+        # Skip spillover write for read_file (file exists on disk), grep (handled by operation_manager), and when disabled
+        if not is_read_file and not is_grep:
+            # Save full result to spill file (use workspace_dir from agent_pool for correct path resolution)
+            log_dir = self.agent_pool.workspace_dir / 'logs' / 'spillover'
+            log_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            safe_tool = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name)
+            safe_instance = re.sub(r'[^a-zA-Z0-9_-]', '_', instance_name)
+            spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}.txt"
+            spill_path = log_dir / spill_filename
+            
+            try:
+                with open(spill_path, 'w', encoding='utf-8') as f:
+                    f.write(tool_result)
+            except Exception as e:
+                logger.error(f"Failed to write spill file {spill_path}: {e}")
+                # Even if spill fails, still truncate to prevent context overflow
+            
+            # Convert to relative path so the model can use it with read_file (expects workspace-relative paths)
+            try:
+                spill_rel = str(spill_path.relative_to(self.agent_pool.workspace_dir)).replace('\\', '/')
+            except ValueError:
+                # Fallback if spill_path is outside workspace_dir — still normalize slashes for consistency
+                spill_rel = str(spill_path).replace('\\', '/')
         
         truncated = tool_result[:char_budget]
         
@@ -569,17 +715,39 @@ class OrchestratorAgent(Assistant):
             else:
                 reason = f"Total context safety (capacity at {(non_system_tokens+result_tokens)/available_tokens*100:.0f}%)"
 
-        notice = (
-            f"\n\n[TOOL RESPONSE TRUNCATED — {reason}. "
-            f"Full output ({len(tool_result)} chars) saved to: {spill_path}\n"
-            f"You can read it with read_file if needed. "
-            f"Consider compressing context before continuing.]"
-        )
+        if is_read_file:
+            notice = (
+                f"\n\n[TOOL RESPONSE TRUNCATED — {reason}. "
+                f"Full content ({len(tool_result)} chars) is available at: {file_path}\n"
+                f"You can re-read with limit/offset parameters to get specific sections. "
+                f"Consider compressing context before continuing.]"
+            )
+        elif is_grep:
+            # Grep spillover is handled entirely by operation_manager — it writes the full output to the spill file
+            # and includes the path in its truncation notice. If operation_manager already added a truncation notice,
+            # preserve it (it contains the spill file path). Only add our own notice if there's no existing one.
+            if "[TOOL RESPONSE TRUNCATED" in tool_result:
+                # operation_manager already truncated and included spill path — don't overwrite that notice
+                notice = ""
+            else:
+                notice = (
+                    f"\n\n[TOOL RESPONSE TRUNCATED — {reason}. "
+                    f"Consider compressing context before continuing.]"
+                )
+        else:
+            notice = (
+                f"\n\n[TOOL RESPONSE TRUNCATED — {reason}. "
+                f"Full output ({len(tool_result)} chars) saved to: {spill_rel}\n"
+                f"You can read it with read_file if needed. "
+                f"Consider compressing context before continuing.]"
+            )
         
         logger.info(
             f"Truncated '{tool_name}' result for {instance_name}: "
             f"{len(tool_result)} chars -> {len(truncated)} chars. Reason: {reason}. "
-            f"Spill file: {spill_path}"
+            + (f"Original file: {file_path}" if is_read_file 
+               else (f"Grep — notice preserved from operation_manager" if (is_grep and not notice) 
+                     else ("" if is_grep else f"Spill file: {spill_rel}")))
         )
         
         return truncated + notice
@@ -595,111 +763,132 @@ class OrchestratorAgent(Assistant):
         Returns False otherwise (safe to continue with LLM call).
         """
         max_tokens = self._get_max_tokens()
-
         current_tokens = self._get_history_tokens(messages)
         usage_pct = (current_tokens / max_tokens) * 100
-        
-        # 1. Critical Threshold Check (> 95%)
+
+        # ── Forced compression at >95% ──
         if usage_pct > 95.0:
-            # Skip if compress_context already ran this turn — prevents double-compression when
-            # LLM-initiated compression mutates the pool, but _inject_compression_warning checks
-            # a stale deep-copied llm_messages that still has all old messages.
+            # Prevent double-compression in same turn
             if getattr(self, '_compress_context_ran_this_turn', False):
                 logger.debug(f"Skipping forceful compression for {instance_name} — already ran this turn.")
                 return True  # Still signal halt — something already compressed this turn
-            
-            # Halt all other agents before compressing so no new content is added during compression.
-            # The agent being compressed (instance_name), the compression agent, and the main orchestrator are exempt.
-            exempt = [instance_name, 'compression_agent', self.session_name]
-            self.agent_pool.halt_all_instances(except_instances=exempt)
-            
-            logger.info(f"Context usage at {usage_pct:.1f}% for {instance_name} - Halting other agents and triggering FORCEFUL compression.")
-            compress_tool = agent.function_map.get('compress_context')
-            if compress_tool:
-                # Programmatically call the tool's internal compression logic
 
-                # Call tool directly with 50% fraction
-                params = json.dumps({
-                    'fraction': 0.5,
-                    'justification': f'CRITICAL THRESHOLD REACHED ({usage_pct:.1f}%)'
-                })
+            self._compress_context_ran_this_turn = True
+            try:
+                # Halt other agents (exempt the target, compression_agent, and orchestrator)
+                exempt = [instance_name, 'compression_agent', self.session_name]
+                self.agent_pool.halt_all_instances(except_instances=exempt)
 
-                # Pass necessary kwargs for direct application
-                self._compress_context_ran_this_turn = True
-                result = compress_tool.call(
-                    params,
-                    messages=messages,
-                    agent_instance_name=instance_name,
-                    agent_obj=agent
+                logger.info(
+                    f"Context usage at {usage_pct:.1f}% for {instance_name} — "
+                    f"Halting other agents and triggering FORCEFUL compression."
                 )
-                
-                # Check for failure
-                is_error = isinstance(result, str) and result.startswith('ERROR')
-                if is_error:
-                    logger.error(f"Forceful compression failed for {instance_name}: {result}")
-                    notification = (
-                        f"\n\n[SYSTEM NOTIFICATION: Context window exceeded 95% capacity ({usage_pct:.1f}%), "
-                        f"but automatic compression failed ({result}). The upcoming API call will likely fail due to length.]"
-                    )
-                else:
-                    # Add a system message to inform the agent that it happened
-                    agent_class = self.agent_pool.instance_classes.get(instance_name, 'Unknown')
-                    logger_inst = self.agent_pool.get_logger(instance_name, agent_class)
-                    notification = (
-                        f"\n\n[SYSTEM NOTIFICATION: Context window exceeded 95% capacity ({usage_pct:.1f}%). "
-                        "Forceful compression (50% ratio) has been effectuated to prevent errors. "
-                        f"Use your logs at `{logger_inst.log_path}` if you need to restore details from turns that were removed.]"
-                    )
-                
-                if messages:
-                    last_msg = messages[-1]
-                    if isinstance(last_msg.content, str):
-                        # Prevent duplicate notifications from stacking if the loop repeats
-                        if "[SYSTEM NOTIFICATION: Context window exceeded 95%" not in last_msg.content:
-                            last_msg.content += notification
-                    elif isinstance(last_msg.content, list):
-                        from agent_cascade.llm.schema import ContentItem
-                        
-                        # Prevent duplicate notifications from stacking
-                        has_notification = any(
-                            isinstance(item, ContentItem) and "[SYSTEM NOTIFICATION: Context window exceeded 95%" in getattr(item, 'text', '')
-                            for item in last_msg.content
-                        )
-                        if not has_notification:
-                            last_msg.content.append(ContentItem(text=notification))
-            # Resume all halted agents after compression completes
-            self.agent_pool.resume_all_instances()
-            
-            return True  # Signal caller to halt current turn
 
-        # 2. Warning Threshold (> 85%)
+                result = compress_context(
+                    agent_pool=self.agent_pool,
+                    target_agent_name=instance_name,
+                    fraction=0.5,
+                    mode="auto",
+                    force=True,               # Bypass guards — critical threshold
+                    justification=f"CRITICAL THRESHOLD ({usage_pct:.1f}%)",
+                    orchestrator=self,         # Pass self so Compression Agent can use _stream_sub_agent_call
+                )
+
+                if result.success:
+                    notification = (
+                        f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%. "
+                        f"Forced compression applied. {result.messages_discarded} messages summarized.]"
+                    )
+                    # Append notification to last message — PRESERVE existing duplicate-prevention logic
+                    self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
+                    # compress_context() already modified the pool with compressed data — just rebuild working set from it
+                    rebuild_working_set(messages, self.agent_pool, instance_name)
+                else:
+                    logger.error(f"Forced compression failed for {instance_name}: {result.error}")
+                    notification = (
+                        f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%, "
+                        f"but automatic compression failed ({result.error}). "
+                        f"The upcoming API call will likely fail due to length.]"
+                    )
+                    self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
+                    # No compression happened — write notification-containing messages to pool
+                    self.agent_pool.instance_conversations[instance_name] = copy.deepcopy(messages)
+                    rebuild_working_set(messages, self.agent_pool, instance_name)
+
+                return True  # Halt current turn — let next iteration use compressed context
+
+            except Exception as e:
+                logger.error(f"Forced compression raised exception for {instance_name}: {e}")
+                notification = (
+                    f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%, "
+                    f"but automatic compression encountered an error ({e}).]"
+                )
+                self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
+                
+                # Write working set to pool and rebuild so the exception notification persists.
+                self.agent_pool.instance_conversations[instance_name] = copy.deepcopy(messages)
+                rebuild_working_set(messages, self.agent_pool, instance_name)
+                
+                return True  # Still halt — let next iteration proceed
+
+            finally:
+                self._compress_context_ran_this_turn = False
+                self.agent_pool.resume_all_instances()
+
+        # ── Warning at >85% ──
         if usage_pct > 85.0:
             warning_text = "[SYSTEM WARNING: Context window at"
             warning = (
-                f"\n\n{warning_text} {usage_pct:.1f}% capacity ({current_tokens}/{max_tokens} tokens). "
+                f"{warning_text} {usage_pct:.1f}% capacity ({current_tokens}/{max_tokens} tokens). "
                 "Consider using the `compress_context` tool to summarize old history and free up space. "
                 "Propose a fraction (e.g. 0.4 for 40%) and a justification. The summary will be sent for approval.]"
             )
-            # Find the most recent message to append warning (temporarily)
-            if messages:
-                # We append to the last message's content if it's text, or add a system message
-                # Note: This is NOT saved to the permanent AgentPool history
-                last_msg = messages[-1]
-                if isinstance(last_msg.content, str):
-                    if warning_text not in last_msg.content:
-                        last_msg.content += warning
-                elif isinstance(last_msg.content, list):
-                    from agent_cascade.llm.schema import ContentItem
-                    
-                    # Prevent duplicate notifications from stacking
-                    has_notification = any(
-                        isinstance(item, ContentItem) and warning_text in getattr(item, 'text', '')
-                        for item in last_msg.content
-                    )
-                    if not has_notification:
-                        last_msg.content.append(ContentItem(text=warning))
+            self._append_system_notification(messages, warning_text, warning)
 
         return False  # No forced compression, safe to continue with LLM call
+
+    def _append_system_notification(self, messages, guard_prefix: str, notification_text: str):
+        """Append a system notification to the last message, preventing duplicates.
+        
+        Handles both string content and multi-modal list content (ContentItem objects).
+        Also handles dict-style messages (e.g., after serialization/deserialization).
+        
+        Args:
+            messages: The working message list for this agent.
+            guard_prefix: Substring to check for duplicate prevention.
+            notification_text: The notification text to append.
+        """
+        if not messages:
+            return
+
+        last_msg = messages[-1]
+        # Support both Message objects and dict-style messages
+        content = (last_msg.get('content') if isinstance(last_msg, dict) 
+                   else getattr(last_msg, 'content', None))
+        
+        if isinstance(content, str):
+            # Prevent duplicate notifications from stacking if the loop repeats
+            if guard_prefix not in content:
+                new_content = content + f"\n\n{notification_text}"
+                if isinstance(last_msg, dict):
+                    last_msg['content'] = new_content
+                else:
+                    last_msg.content = new_content
+        elif isinstance(content, list):
+            # Prevent duplicate notifications from stacking — check both ContentItems and plain strings
+            has_notification = any(
+                (isinstance(item, ContentItem) and guard_prefix in getattr(item, 'text', ''))
+                or (isinstance(item, str) and guard_prefix in item)
+                for item in content
+            )
+            if not has_notification:
+                content.append(ContentItem(text=notification_text))
+        else:
+            # Content is None or unexpected type — skip silently with debug log
+            logger.debug(
+                f"Skipping notification append: last_msg content type is {type(content).__name__} "
+                f"(expected str or list)"
+            )
 
 
     @property
@@ -750,10 +939,19 @@ class OrchestratorAgent(Assistant):
                     if '## Session Metadata' not in m0_content:
                         meta_lines = [
                             "## Session Metadata",
-                            f"- Supervisor: User",
+                            f"- Supervisor: User",  # Orchestrator's supervisor is always the user (vs sub-agents which use self.session_name)
+                            f"- Working Dir: {logger_inst.data['metadata'].get('working_dir', 'Unknown')}",
                             f"- Log Path: {logger_inst.log_path}",
-                            "Use your logs to recall details from turns that were compressed.\n"
                         ]
+                        
+                        # Add extra paths to prompt if they exist
+                        extra_ro = logger_inst.data['metadata'].get('extra_paths_ro', [])
+                        extra_rw = logger_inst.data['metadata'].get('extra_paths_rw', [])
+                        if extra_ro:
+                            meta_lines.append(f"- Extra Paths (Read-Only): {', '.join(extra_ro)}")
+                        if extra_rw:
+                            meta_lines.append(f"- Extra Paths (Read-Write): {', '.join(extra_rw)}")
+                        meta_lines.append("Use your logs to recall details from turns that were compressed.\n")
                         content_lines = m0_content.split('\n')
                         insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith("#") else 1
                         for i, ml in enumerate(meta_lines): content_lines.insert(insert_pos + i, ml)
@@ -943,16 +1141,47 @@ class OrchestratorAgent(Assistant):
                 
                 compressed = self.agent_pool.get_conversation(self.session_name)
                 if compressed:
+                    # Validate pool integrity after forced compression
+                    if not validate_message_pool(compressed, self.session_name):
+                        logger.error(f"[COMPRESSION BUG] Message pool validation FAILED for '{self.session_name}' after forced compression. Attempting recovery from log...")
+                        # Recovery: try to reload from the logger's history (which is unaffected)
+                        try:
+                            recov = self.agent_pool.get_logger(self.session_name, self.agent_type).data.get('history', [])
+                            if recov and validate_message_pool(recov, self.session_name):
+                                logger.info(f"Recovered message pool from log for '{self.session_name}' ({len(recov)} messages)")
+                                # Update the pool with recovered data
+                                self.agent_pool.instance_conversations[self.session_name] = copy.deepcopy(recov)
+                                compressed = recov
+                            else:
+                                logger.error("Recovery from log also failed — message pool may be corrupted")
+                        except Exception as e:
+                            logger.error(f"Recovery attempt failed for '{self.session_name}': {e}")
+                    
                     # messages stays as canonical full history (used by loop detection, etc.)
                     messages.clear()
-                    messages.extend(compressed)
+                    messages.extend(copy.deepcopy(compressed))
                     # llm_messages gets the sliced working set — what actually goes to the LLM
                     sliced = self.agent_pool.slice_history_for_llm(compressed) if hasattr(self.agent_pool, 'slice_history_for_llm') else compressed
                     llm_messages.clear()
                     llm_messages.extend(copy.deepcopy(sliced))
+                    
+                    # CRITICAL: Sync the logger's internal data["history"] tracking to match the current
+                    # pool state. Without this, update_history() will treat pool messages not yet seen by
+                    # the logger as "new" and append them, causing duplication.
+                    try:
+                        logger_inst = self.agent_pool.get_logger(self.session_name, self.agent_type)
+                        logger_inst.update_history(compressed)
+                    except Exception as e:
+                        logger.error(f"Logger sync after forced compression FAILED for '{self.session_name}': {e}. "
+                                     f"Pool may desync — manual intervention required.")
                 yield response
                 # Reset flag so BUG-7 block below doesn't redundantly re-sync every iteration
                 self._compress_context_ran_this_turn = False
+                
+                # Note: If compression didn't reduce tokens enough, the next iteration will
+                # attempt forced compression again. Each attempt discards messages until either
+                # token count drops below 95% or there aren't enough messages to discard.
+                
                 continue
 
             # BUG-7 fix: If compress_context ran via LLM tool call, llm_messages was compressed in-place
@@ -964,8 +1193,16 @@ class OrchestratorAgent(Assistant):
             if getattr(self, '_compress_context_ran_this_turn', False):
                 compressed = self.agent_pool.get_conversation(self.session_name)
                 if compressed:
+                    # Validate pool integrity after agent-triggered compression
+                    if not validate_message_pool(compressed, self.session_name):
+                        logger.error(f"[COMPRESSION BUG] Message pool validation FAILED for '{self.session_name}' after agent-triggered compression.")
+                    
                     messages.clear()
-                    messages.extend(compressed)
+                    messages.extend(copy.deepcopy(compressed))
+                    # NOTE: No logger sync needed here — compress_context() in core.py already
+                    # called insert_compression_marker() on the logger, which updates
+                    # logger.data["history"] to match the pool. Only forced compression recovery
+                    # (above) needs explicit logger sync because it rebuilds from scratch.
             
             # --- LOOP DETECTION ---
             loop_info = detect_loop(messages)
@@ -1110,7 +1347,7 @@ class OrchestratorAgent(Assistant):
                     is_truncated = True
             
             # --- AUTO-CONTINUE ON LENGTH LIMIT ---
-            if is_truncated and self.auto_continue_enabled and not self.agent_pool.stopped:
+            if is_truncated and self.auto_continue_enabled and not self.agent_pool.stopped and not self.agent_pool.is_halted(self.session_name):
                 logger.info(f"Detected message truncation (length limit) for {self.name}. Auto-triggering continuation.")
                 # Increment budget to allow the continuation
                 num_llm_calls_available += 1
@@ -1131,11 +1368,26 @@ class OrchestratorAgent(Assistant):
                 used_any_tool = True
                 # Yield the tool call request immediately so UI sees "calling tool..."
                 yield response
+                
+                # ── Stop/Halt check BEFORE tool execution ────────────────────────
+                # Prevent long-running tools (code_interpreter, shell_cmd) from starting
+                # if the user pressed stop or this instance was halted.
+                if self.agent_pool.stopped:
+                    logger.info(f"Agent {self.name} stopped before executing tool '{tool_name}'.")
+                    break
+                if self.agent_pool.is_halted(self.session_name):
+                    logger.info(f"Agent {self.name} halted before executing tool '{tool_name}'.")
+                    break
+                
                 _tool_success = True
                 _tool_error = ""
                 try:
                     if tool_name in self.STREAMING_TOOLS:
                         # ── Sub-agent call ──
+                        # NOTE: This branch replaces the inline __USE_PREV_ARG__ resolution
+                        # that exists in the else (non-streaming) path below. The shared
+                        # resolver is called here when USE_UNIFIED_LOOP=True, preventing
+                        # double-resolution if both paths were active simultaneously.
                         parsed_args = tool_args
                         if isinstance(tool_args, str):
                             try:
@@ -1143,15 +1395,36 @@ class OrchestratorAgent(Assistant):
                             except Exception:
                                 parsed_args = {}
 
-                        if isinstance(parsed_args, dict) and parsed_args.get('parallel_launch') is True:
+                        # ── Resolve __USE_PREV_ARG__ placeholders (Phase 3 unification) ──
+                        if USE_UNIFIED_LOOP and isinstance(parsed_args, dict):
+                            from agent_cascade.tool_utils import resolve_prev_arg_placeholders
+
+                            instance_scope = self.session_name if hasattr(self, 'session_name') else 'root'
+                            parsed_args, prev_arg_error = resolve_prev_arg_placeholders(
+                                parsed_args, instance_scope, tool_name, self.agent_pool, lock=self.agent_pool._state_lock
+                            )
+                        else:
+                            prev_arg_error = None
+
+                        if prev_arg_error is not None:
+                            # Resolution failed — don't call the sub-agent, return error.
+                            # tool_result flows to generic truncation and post-execution
+                            # handling below (same path as any other tool result).
+                            tool_result = prev_arg_error
+                        elif isinstance(parsed_args, dict) and parsed_args.get('parallel_launch') is True:
                             # ── Check Concurrency Limits ──
-                            agent_class = parsed_args.get('agent_class')
+                            agent_class = (parsed_args.get('agent_class') or '').strip().lower()  # Normalize for case-insensitive lookup
                             is_parallel_allowed = True
                             
                             if agent_class and hasattr(self.agent_pool, 'api_router'):
-                                limit = self.agent_pool.api_router.get_concurrency_limit(agent_class)
+                                # Use effective concurrency to include default-fallback endpoint limits.
+                                # This prevents agents without custom endpoints (e.g., Security Advisor) 
+                                # from bypassing the default endpoint's concurrency constraint.
+                                limit = self.agent_pool.api_router.get_effective_concurrency(agent_class)
                                 if limit == 0:
-                                    # User explicitly sets 0 to mean sequential delegation
+                                    # Concurrency is 0 — either user explicitly set sequential-only, or
+                                    # no matching endpoint was found (conservative fallback). Either way,
+                                    # force sequential execution.
                                     is_parallel_allowed = False
                                     logger.info(f"Forcing sequential launch for {agent_class} (concurrency_limit=0)")
                                 elif limit > 0:
@@ -1169,17 +1442,17 @@ class OrchestratorAgent(Assistant):
                             else:
                                 # Fallback to sequential if limit reached or 0
                                 tool_result = yield from self._stream_sub_agent_call(
-                                    tool_name, tool_args, response, messages
+                                    tool_name, parsed_args, response, messages
                                 )
                         else:
                             # ── Synchronous streaming execution ──
                             tool_result = yield from self._stream_sub_agent_call(
-                                tool_name, tool_args, response, messages
+                                tool_name, parsed_args, response, messages
                             )
                     else:
                         # ── Normal synchronous tool ──
                         
-                        # --- Handle __USE_PREV_ARG__ Placeholder Replacement ---
+                        # --- Handle __USE_PREV_ARG__ Placeholder Replacement (shared resolver) ---
                         if isinstance(tool_args, str):
                             tool_args = tool_args.strip()
                             if tool_args:
@@ -1187,54 +1460,38 @@ class OrchestratorAgent(Assistant):
                                     # Use relaxed json_loads to handle trailing commas or other LLM quirks
                                     tool_args = json_loads(tool_args)
                                 except Exception:
-                                    pass # Let _call_tool handle standard verification
+                                    pass  # Let _call_tool handle standard verification
                             else:
-                                tool_args = {} # Guard against empty string arguments
-                        
+                                tool_args = {}  # Guard against empty string arguments
+
                         if isinstance(tool_args, dict):
-                            # Use the current instance name as the scope for the last_tool_args cache
-                            instance_scope = self.session_name
-                            
-                            # Resolve placeholders
-                            placeholders_found = []
-                            for arg_key, arg_val in tool_args.items():
-                                if arg_val == "__USE_PREV_ARG__":
-                                    placeholders_found.append(arg_key)
-                                    
-                            if placeholders_found:
-                                # 1. Try tool-specific cache first
-                                prev_args = self.agent_pool.last_tool_args.get(instance_scope, {}).get(tool_name)
-                                
-                                # 2. Fallback to global cache for common parameters like 'path'
-                                global_args = self.agent_pool.last_tool_args.get(instance_scope, {}).get("__GLOBAL__", {})
-                                
-                                if not prev_args and not global_args:
-                                    tool_result = f"Error: Cannot use __USE_PREV_ARG__ for '{tool_name}' because no previous call to this tool was recorded for instance '{instance_scope}'."
-                                    # Skip tool execution if placeholder fails
-                                    skip_execution = True
-                                else:
-                                    skip_execution = False
-                                    for arg_key in placeholders_found:
-                                        # Prefer tool-specific, then global
-                                        if prev_args and arg_key in prev_args:
-                                            tool_args[arg_key] = prev_args[arg_key]
-                                        elif arg_key in global_args:
-                                            tool_args[arg_key] = global_args[arg_key]
-                                        else:
-                                            tool_result = f"Error: Cannot use __USE_PREV_ARG__ for argument '{arg_key}' because it was not found in previous calls (neither specific to '{tool_name}' nor globally)."
-                                            skip_execution = True
-                                            break
+                            instance_scope = self.session_name if hasattr(self, 'session_name') else 'root'
+                            from agent_cascade.tool_utils import resolve_prev_arg_placeholders
+
+                            tool_args, prev_arg_error = resolve_prev_arg_placeholders(
+                                tool_args, instance_scope, tool_name, self.agent_pool, lock=self.agent_pool._state_lock
+                            )
+                            if prev_arg_error:
+                                # Resolution failed — skip tool execution, return error
+                                tool_result = prev_arg_error
+                                skip_execution = True
                             else:
                                 skip_execution = False
-                                
+
                             if not skip_execution:
                                 call_kwargs = kwargs.copy()
                                 if 'agent_instance_name' not in call_kwargs:
                                     call_kwargs['agent_instance_name'] = self.session_name
                                 
-                                # Pass the agent itself so tools (like compress_context) can sync 
+                                # Pass the agent itself so tools (like compress_context) can sync
                                 # back to its base system_message for persistence across turns.
                                 call_kwargs['agent_obj'] = self
+
+                                # Pre-compute spillover path for grep so operation_manager can include it in truncation notices
+                                if tool_name == 'grep' and hasattr(self, 'agent_pool') and self.agent_pool:
+                                    spill_rel = self._compute_grep_spill_path(self.session_name)
+                                    if spill_rel is not None:
+                                        call_kwargs['spill_file_path'] = spill_rel
                                     
                                 # Telemetry: track tool call
                                 try:
@@ -1242,6 +1499,11 @@ class OrchestratorAgent(Assistant):
                                         self.agent_pool.telemetry.record_tool_call_start(self.session_name, tool_name)
                                 except Exception:
                                     pass
+                                
+                                # Re-check stop/halt right before executing the tool (race condition guard)
+                                if self.agent_pool.stopped or self.agent_pool.is_halted(self.session_name):
+                                    logger.info(f"Agent {self.name} stopped/halted just before executing tool '{tool_name}'.")
+                                    break
                                 
                                 try:
                                     tool_result = self._call_tool(
@@ -1270,6 +1532,18 @@ class OrchestratorAgent(Assistant):
                             if 'agent_instance_name' not in call_kwargs:
                                 call_kwargs['agent_instance_name'] = self.session_name
                             call_kwargs['agent_obj'] = self
+
+                            # Pre-compute spillover path for grep so operation_manager can include it in truncation notices
+                            if tool_name == 'grep' and hasattr(self, 'agent_pool') and self.agent_pool:
+                                spill_rel = self._compute_grep_spill_path(self.session_name)
+                                if spill_rel is not None:
+                                    call_kwargs['spill_file_path'] = spill_rel
+                            
+                            # Re-check stop/halt right before executing the tool (race condition guard)
+                            if self.agent_pool.stopped or self.agent_pool.is_halted(self.session_name):
+                                logger.info(f"Agent {self.name} stopped/halted just before executing tool '{tool_name}'.")
+                                break
+                            
                             try:
                                 if hasattr(self.agent_pool, 'telemetry'):
                                     self.agent_pool.telemetry.record_tool_call_start(self.session_name, tool_name)
@@ -1327,6 +1601,10 @@ class OrchestratorAgent(Assistant):
                     # it didn't (e.g., forced compression path), we need to do it here with slicing.
                     compressed_conv = self.agent_pool.get_conversation(self.session_name)
                     if compressed_conv:
+                        # Validate pool integrity after agent-triggered compression
+                        if not validate_message_pool(compressed_conv, self.session_name):
+                            logger.error(f"[COMPRESSION BUG] Message pool validation FAILED for '{self.session_name}' after compress_context tool call.")
+                        
                         sliced = self.agent_pool.slice_history_for_llm(compressed_conv) if hasattr(self.agent_pool, 'slice_history_for_llm') else compressed_conv
                         llm_messages.clear()
                         llm_messages.extend(copy.deepcopy(sliced))
@@ -1420,7 +1698,7 @@ class OrchestratorAgent(Assistant):
                         # Poll for either a new message or all tasks completion
                         while not self.agent_pool.has_messages(instance) and \
                               self.agent_pool.parallel_manager.has_active_tasks(instance):
-                            if self.agent_pool.stopped: break
+                            if self.agent_pool.stopped or self.agent_pool.is_halted(self.session_name): break
                             time.sleep(0.5)
                         
                         if self.agent_pool.has_messages(instance):
@@ -1475,7 +1753,7 @@ class OrchestratorAgent(Assistant):
             args = tool_args
 
         instance_name = args.get('instance_name', '')
-        agent_class = args.get('agent_class', '')
+        agent_class = (args.get('agent_class', '') or '').strip().lower()  # Normalize to lowercase for case-insensitive lookup
 
         # Prevent state corruption when an agent calls ITSELF recursively.
         # If the instance is already in the stack, cloning its state ensures
@@ -1520,6 +1798,10 @@ class OrchestratorAgent(Assistant):
 
         if self.agent_pool.stopped:
             return f"Operation cancelled by user."
+        
+        # Check if this instance was halted (e.g. during forced compression or manual pause)
+        if self.agent_pool.is_halted(instance_name):
+            return f"Instance {instance_name} is currently halted (paused)."
         
         # If log_file is provided and instance doesn't exist yet, restore session from log
         log_file = args.get('log_file')
@@ -1583,8 +1865,15 @@ class OrchestratorAgent(Assistant):
             else:
                 # Existing instance: update the system message in-place with latest metadata
                 conv_existing = self.agent_pool.instance_conversations[instance_name]
-                if conv_existing and conv_existing[0].get(ROLE) == SYSTEM:
-                    conv_existing[0].content = final_sys_content
+                if conv_existing:
+                    first_msg = conv_existing[0]
+                    # Check role using both dict and object styles
+                    role = _safe_get_role(first_msg)
+                    if role == SYSTEM:
+                        if isinstance(first_msg, dict):
+                            first_msg['content'] = final_sys_content
+                        else:
+                            first_msg.content = final_sys_content
                 if not logger_inst.data["history"]:
                     logger_inst.update_history(conv_existing)
             
@@ -1606,7 +1895,7 @@ class OrchestratorAgent(Assistant):
         
         seen_images = {}
         for msg in manager_history:
-            content = msg.get(CONTENT)
+            content = _safe_get_content(msg)
             if isinstance(content, list):
                 for item in content:
                     # Content item might be dict or object
@@ -1626,9 +1915,9 @@ class OrchestratorAgent(Assistant):
                 added_to_sub.add(img_url)
         
         if len(sub_agent_msg_content) == 1 and tool_name == 'call_agent':
-            last_user_msg = next((m for m in reversed(manager_history) if m.get(ROLE) == USER), None)
+            last_user_msg = next((m for m in reversed(manager_history) if _safe_get_role(m) == USER), None)
             if last_user_msg:
-                content = last_user_msg.get(CONTENT)
+                content = _safe_get_content(last_user_msg)
                 if isinstance(content, list):
                     for item in content:
                         item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
@@ -1656,6 +1945,10 @@ class OrchestratorAgent(Assistant):
         
         # Track this call in the active stack for UI context switching
         self.agent_pool.active_stack.append(instance_name)
+        
+        # Mark activity: this agent is now actively being used
+        if hasattr(self.agent_pool, '_mark_activity'):
+            self.agent_pool._mark_activity(instance_name)
 
         # Telemetry: record sub-agent delegation start time
         _sub_agent_start = time.time()
@@ -1666,8 +1959,9 @@ class OrchestratorAgent(Assistant):
             'agent_name': f"{instance_name} ({agent_class})",
             'messages': copy.deepcopy(conv),
         }
-        # Overwrite any existing state for this instance
-        self.agent_pool.sub_agent_state[instance_name] = state
+        # Overwrite any existing state for this instance (protected by _state_lock)
+        with self.agent_pool._state_lock:
+            self.agent_pool.sub_agent_state[instance_name] = state
 
         # Force an immediate yield so the WebUI detects the new active_stack entry
         # and switches the subagent window context immediately.
@@ -1718,16 +2012,16 @@ class OrchestratorAgent(Assistant):
                                 logger_inst.log_message(async_msg)  # Log to JSONL file
                                 logger.info(f"Injected async user message into sub-agent {instance_name} via LLM hook: {async_msg_text}")
 
-                            hook_forced = self._inject_compression_warning_for_agent(self_agent, instance_name, messages)
+                            # Skip compression checks during Compression Agent execution
+                            # Prevents nested compression (circular dependency)
+                            hook_forced = False
+                            if instance_name != 'compression_agent':
+                                hook_forced = self._inject_compression_warning_for_agent(self_agent, instance_name, messages)
                             
                             # If forced compression ran, halt this LLM call — don't proceed.
                             if hook_forced:
                                 logger.info(f"Forced compression for sub-agent {instance_name} — halting LLM call.")
-                                # Sync messages from pool so the sub-agent's next iteration sees compressed state
-                                compressed = self.agent_pool.get_conversation(instance_name)
-                                if compressed:
-                                    messages.clear()
-                                    messages.extend(compressed)
+                                # rebuild_working_set() inside _inject_compression_warning_for_agent already synced
                                 return
                             
                             # --- CALL LLM WITH AUTO-CONTINUE ---
@@ -1760,7 +2054,7 @@ class OrchestratorAgent(Assistant):
                             # Note: self is the OrchestratorAgent instance
                             auto_continue_enabled = getattr(self, 'auto_continue_enabled', True)
                             
-                            if is_truncated and auto_continue_enabled and not self.agent_pool.stopped:
+                            if is_truncated and auto_continue_enabled and not self.agent_pool.stopped and not self.agent_pool.is_halted(instance_name):
                                 logger.info(f"Sub-agent {instance_name} truncated by length limit. Auto-triggering continuation...")
                                 cont_msg = Message(role=USER, content="[SYSTEM]: Your previous response was cut off by the length limit. Please continue exactly from where you left off, without repeating yourself.")
                                 messages.append(cont_msg)
@@ -1813,10 +2107,17 @@ class OrchestratorAgent(Assistant):
                         yield current_response
                         
                         # Efficient logging: check if a tool call was just completed
-                        if resp and (resp[-1].get(ROLE) == FUNCTION or resp[-1].get('function_call')):
-                            # Incremental logging via log_message (already called in agent loop) 
-                            # ensures history is persistent. update_history is redundant here.
-                            pass
+                        if resp:
+                            last_resp = resp[-1]
+                            if isinstance(last_resp, dict):
+                                role_check = last_resp.get(ROLE) == FUNCTION or last_resp.get('function_call')
+                            else:
+                                role_check = getattr(last_resp, 'role', None) == FUNCTION or getattr(last_resp, 'function_call', None)
+
+                            if role_check:
+                                # Incremental logging via log_message (already called in agent loop)
+                                # ensures history is persistent. update_history is redundant here.
+                                pass
                     
                     # Turn successfully completed
                     break
@@ -1871,7 +2172,8 @@ class OrchestratorAgent(Assistant):
                     # Sync log and UI state immediately so user sees the hint and rollback in history
                     logger_inst.update_history(conv)
                     state['messages'] = list(conv)
-                    self.agent_pool.sub_agent_state[instance_name] = state
+                    with self.agent_pool._state_lock:
+                        self.agent_pool.sub_agent_state[instance_name] = state
                     
                     # Restart the turn for this sub-agent
                     continue
@@ -1916,15 +2218,23 @@ class OrchestratorAgent(Assistant):
             state['active'] = False
             # Ensure the UI state reflects the full history including the final turn results
             state['messages'] = list(conv)
-            self.agent_pool.sub_agent_state[instance_name] = state
             
-            # Remove from active stack (pop the most recent occurrence)
-            removed = False
-            for i in range(len(self.agent_pool.active_stack) - 1, -1, -1):
-                if self.agent_pool.active_stack[i] == instance_name:
-                    self.agent_pool.active_stack.pop(i)
-                    removed = True
-                    break
+            # Protect both sub_agent_state and active_stack writes under _state_lock
+            # (_state_lock protects both of these shared data structures per agent_pool.py:114)
+            with self.agent_pool._state_lock:
+                self.agent_pool.sub_agent_state[instance_name] = state
+                
+                # Remove from active stack (pop the most recent occurrence)
+                removed = False
+                for i in range(len(self.agent_pool.active_stack) - 1, -1, -1):
+                    if self.agent_pool.active_stack[i] == instance_name:
+                        self.agent_pool.active_stack.pop(i)
+                        removed = True
+                        break
+            
+            # Mark activity on completion so agents aren't auto-dismissed right after long runs (Issue #3)
+            if hasattr(self.agent_pool, '_mark_activity'):
+                self.agent_pool._mark_activity(instance_name)
             
             # If the instance was marked for termination (dismissed from UI), clear it now that the loop is done
             if removed and instance_name in self.agent_pool.terminated_instances:
@@ -1943,7 +2253,13 @@ def extract_sub_agent_feedback(messages: List[Dict], instance_name: str) -> str:
     """
     last_tool_idx = -1
     for i, msg in enumerate(messages):
-        if msg.get(ROLE) == FUNCTION or msg.get('function_call'):
+        # Handle both dict and Message object types
+        if isinstance(msg, dict):
+            role_check = msg.get(ROLE) == FUNCTION or msg.get('function_call')
+        else:
+            role_check = getattr(msg, 'role', None) == FUNCTION or getattr(msg, 'function_call', None)
+
+        if role_check:
             last_tool_idx = i
 
     relevant_msgs = messages[last_tool_idx + 1:] if last_tool_idx != -1 else messages
@@ -1953,7 +2269,7 @@ def extract_sub_agent_feedback(messages: List[Dict], instance_name: str) -> str:
         if isinstance(msg, dict):
             msg_role = msg.get('role', '')
         else:
-            msg_role = msg.role
+            msg_role = getattr(msg, 'role', '')
 
         if msg_role == ASSISTANT:
             text = extract_text_from_message(msg, add_upload_info=False)

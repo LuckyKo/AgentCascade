@@ -41,12 +41,15 @@ COMPRESSION_PROMPT = (
 
 COMPRESSION_BASELINE_TEMPLATE = (
     COMPRESSION_MARKER + " ({header}) ---\n"
+    "**[SYSTEM NOTICE]**: Context compression was applied. {compression_notice}\n"
     "The following is a summary of the conversation context that was removed to save space.\n"
     "Summary of previous context:\n"
     "<context_summary>\n"
     "{summary}\n"
     "</context_summary>"
 )
+
+COMPRESSION_NOTICE_TEMPLATE = "A portion of earlier conversation history ({fraction}%) has been summarized to preserve context space. The key information from those messages is captured below."
 
 # --- Security Advisor ---
 SECURITY_ADVISOR_PROMPT = (
@@ -157,13 +160,22 @@ TOOL_METADATA = {
     },
     'grep': {
         'description': (
-            'Search for a text pattern in files (supports regex). Like the grep command.\n'
+            'Search for a text pattern in files. Supports Python regex syntax.\n'
+            '- Smart case by default: case-insensitive unless pattern contains uppercase letters.\n'
+            '- Respects .gitignore/.rgignore when ignore_vcs is True (default).\n'
+            '- Use "context" to show surrounding lines (like -C N in grep/ripgrep).\n'
+            '- Matched text is prefixed with ">>>" when context is used; context lines have spaces.\n'
+            '- Groups of matches are separated by "---".\n'
             'NOTE: All paths are relative to the workspace root.'
         ),
         'parameters': {
-            'pattern': 'Text or regex pattern to search for',
+            'pattern': 'Text or regex pattern to search for (Python regex syntax)',
             'path': 'Directory to search in, relative to workspace root (default: ".")',
-            'include': 'File pattern to include (e.g., "*.py", "*.md")'
+            'include': 'File glob pattern to include (e.g., "*.py", "*.md"). Default: "*"',
+            'exclude': 'File glob pattern to exclude (e.g., "*_test.py", "docs/*"). Default: ""',
+            'ignore_vcs': 'When True (default), skip .git/ and other VCS/build directories. Set False to search everything.',
+            'context': 'Number of lines to show before/after each match (like -C N). Default: 0',
+            'smart_case': 'When True (default), case-insensitive unless pattern contains uppercase letters. Set False for always case-insensitive.'
         }
     },
     'delete_file': {
@@ -223,7 +235,7 @@ TOOL_METADATA = {
     },
     'shell_cmd': {
         'description': (
-            'Execute a shell command on the host system. This ALWAYS requires explicit user approval. '
+            'Execute a shell command on the host system. This ALWAYS requires explicit user approval so use it as a last resort tool only! '
             'Commands run with the workspace directory as the working directory.'
         ),
         'parameters': {
@@ -236,7 +248,10 @@ TOOL_METADATA = {
         'description': (
             'Retrieves the current system information. '
             'This includes the operating system, current time and date, '
-            'current work directories, Python version, and basic session stats.'
+            'current work directories with their Docker container mount paths (e.g., host N:\\work\\WD\\AgentWorkspace maps to /workspace inside containers), '
+            'Python version, and basic session stats. '
+            'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted. '
+            'NOTE: All file tool paths must still be relative to workspace root, not absolute host paths.'
         ),
         'parameters': {}
     },
@@ -329,7 +344,7 @@ TOOL_METADATA = {
     'list_agents': {
         'description': (
             'List all available agent classes with their descriptions, '
-            'plus any active instances currently running or previously used.'
+            'plus any active instances currently running or previously used. Use this to find out how to call a specific agent or instance'
         ),
         'parameters': {}
     },

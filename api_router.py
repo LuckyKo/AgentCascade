@@ -65,6 +65,145 @@ class APIEndpoint:
         return cls(**filtered)
 
 
+# ── Endpoint Scheduler (Lifecycle-aware serialization) ───────────────────────
+
+class EndpointScheduler:
+    """
+    Manages per-API-base scheduling with lifecycle-aware serialization.
+    
+    Uses threading.Semaphore per endpoint for race-free capacity control.
+    For concurrency=0 endpoints: agents are strictly serialized — one at a time,
+    from task submission to full completion (including all LLM calls and tool waits).
+    For concurrency=N endpoints: at most N agents can run simultaneously.
+    For concurrency=-1 endpoints: no scheduling needed (unlimited).
+    
+    This operates at the AGENT TASK level (entire agent lifecycle), NOT the
+    individual API call level. This prevents interleaving of LLM calls between
+    different agents on the same endpoint.
+    """
+    
+    def __init__(self):
+        self._lock = threading.Lock()
+        # Per-endpoint semaphore for blocking acquire + active counter
+        # api_base -> {'sem': Semaphore(max_active), 'active_count': int}
+        self._schedules: Dict[str, Dict] = {}
+    
+    def acquire(self, api_base: str, concurrency_limit: int) -> Optional[Callable[[], None]]:
+        """
+        Acquire a slot on the endpoint. Blocks if at capacity.
+        Returns a cleanup callback to release the slot, or None if unlimited.
+        
+        If the concurrency limit has changed since this endpoint was last scheduled,
+        the semaphore is safely resized — active agents retain their slots, and
+        new agents see the updated capacity.
+        
+        Args:
+            api_base: The API base URL of the endpoint
+            concurrency_limit: -1=unlimited, 0=sequential, N>0=max parallel
+            
+        Returns:
+            A callable that releases the slot when called, or None if no scheduling needed.
+        """
+        if concurrency_limit == -1:  # unlimited — no scheduling needed
+            return None
+        
+        new_max = concurrency_limit if concurrency_limit > 0 else 1  # 0 means strictly one at a time
+        
+        with self._lock:
+            if api_base not in self._schedules:
+                self._schedules[api_base] = {
+                    'sem': threading.Semaphore(new_max),
+                    'active_count': 0,
+                    'max_active': new_max,
+                }
+            else:
+                sched = self._schedules[api_base]
+                # Check if concurrency limit changed and resize if needed
+                if sched['max_active'] != new_max:
+                    old_max = sched['max_active']
+                    sched['max_active'] = new_max
+                    
+                    # Resize the semaphore safely: create a new one and transfer
+                    # active_count worth of permits to reflect currently running agents.
+                    new_sem = threading.Semaphore(new_max)
+                    
+                    # Pre-acquire slots in new sem equal to current active count
+                    # (these agents already hold their slots, so the new sem should
+                    # have fewer available permits accordingly).
+                    for _ in range(sched['active_count']):
+                        new_sem.acquire()
+                    
+                    # Swap atomically under lock — all subsequent acquire/release
+                    # calls will use the resized semaphore.
+                    sched['sem'] = new_sem
+                    
+                    logger.info(f"[EndpointScheduler] Resized '{api_base}' from {old_max} → {new_max}")
+            
+            sched = self._schedules[api_base]
+        
+        # Semaphore.acquire() blocks atomically if at capacity — no TOCTOU race
+        sched['sem'].acquire()
+        
+        with self._lock:
+            sched['active_count'] += 1
+            current = sched['active_count']
+            logger.info(f"[EndpointScheduler] Agent acquired slot on '{api_base}' "
+                       f"(active: {current}, limit: {sched['max_active']})")
+        
+        # Return cleanup callback that releases the semaphore when called.
+        # IMPORTANT: reads the CURRENT semaphore from the live schedule entry,
+        # not a captured reference — this is critical because the semaphore may
+        # have been resized (swapped) since acquire() was called.
+        def release():
+            with self._lock:
+                current_sched = self._schedules.get(api_base)
+                if current_sched:
+                    # Guard against negative active_count (shouldn't happen, but safe)
+                    current_sched['active_count'] = max(0, current_sched['active_count'] - 1)
+                    new_count = current_sched['active_count']
+                    logger.info(f"[EndpointScheduler] Agent released slot on '{api_base}' "
+                               f"(active: {new_count}, limit: {current_sched['max_active']})")
+                    # Release the CURRENT semaphore (may differ from acquire-time sem after resize)
+                    current_sched['sem'].release()
+        
+        return release
+    
+    def count_active(self, api_base: str) -> int:
+        """Count active tasks on an endpoint."""
+        with self._lock:
+            sched = self._schedules.get(api_base)
+            return sched['active_count'] if sched else 0
+    
+    def get_status(self) -> Dict[str, Dict]:
+        """Get status of all scheduled endpoints (for diagnostics)."""
+        with self._lock:
+            result = {}
+            for api_base, sched in self._schedules.items():
+                # Semaphore._value is implementation detail but useful for diagnostics
+                sem_value = sched['sem']._value if hasattr(sched['sem'], '_value') else 'unknown'
+                result[api_base] = {
+                    'active_count': sched['active_count'],
+                    'max_active': sched['max_active'],
+                    'semaphore_slots': sem_value,
+                }
+            return result
+    
+    def cleanup_stale(self):
+        """Remove schedule entries for endpoints with no activity.
+        
+        A schedule is stale when active_count is 0 AND all semaphore permits
+        are available (no waiting agents). This prevents memory leaks from
+        endpoints that were used temporarily and have since gone idle.
+        """
+        with self._lock:
+            stale = [ab for ab, s in self._schedules.items()
+                     if s['active_count'] == 0 and s['sem']._value >= s['max_active']]
+            for ab in stale:
+                del self._schedules[ab]
+            if stale:
+                logger.info(f"[EndpointScheduler] Cleaned up {len(stale)} stale schedule(s)")
+
+
 # ── API Router ───────────────────────────────────────────────────────────────
 
 class APIRouter:
@@ -91,6 +230,11 @@ class APIRouter:
         # Per-server semaphores for concurrency control: api_base -> (Semaphore, limit)
         self._semaphores: Dict[str, Tuple[threading.Semaphore, int]] = {}
         self._sem_lock = threading.Lock()
+
+        # Lifecycle-aware endpoint scheduler for parallel agent management.
+        # Acquires a slot at task submission time and holds it for the entire
+        # agent lifecycle — prevents interleaving of LLM calls between agents.
+        self.scheduler = EndpointScheduler()
 
         # Persistence path
         if config_dir:
@@ -150,7 +294,8 @@ class APIRouter:
 
     def list_endpoints(self) -> List[APIEndpoint]:
         """Return all endpoints in insertion order."""
-        return list(self.endpoints.values())
+        with self._lock:
+            return list(self.endpoints.values())
 
     # ── Agent Priority Management ────────────────────────────────────────
 
@@ -167,19 +312,52 @@ class APIRouter:
 
     def get_agent_priorities(self, agent_type: str) -> List[str]:
         """Get the endpoint ID list for a specific agent type."""
-        return self.agent_priorities.get(agent_type, [])
+        with self._lock:
+            return list(self.agent_priorities.get(agent_type, []))
 
     def get_concurrency_limit(self, agent_type: str) -> int:
         """
         Returns the concurrency_limit for the highest-priority enabled endpoint 
         of the given agent type. Returns -1 if unlimited (default).
+        
+        DEPRECATED — delegates to get_effective_concurrency() which also checks
+        the default fallback endpoint. Kept for backward compatibility.
         """
+        return self.get_effective_concurrency(agent_type)
+
+    def get_effective_concurrency(self, agent_type: str) -> int:
+        """
+        Returns the concurrency limit of the actual endpoint that will be used 
+        for the given agent type, including the default fallback.
+        Returns -1 only if truly unlimited (no endpoint config found at all).
+        Returns 0 as a conservative default when the default config specifies an
+        api_base but no matching endpoint exists in self.endpoints — this prevents
+        unexpected parallel launches on unknown endpoints.
+        
+        This is the correct method to use for parallel launch checks because it
+        resolves the real endpoint — agents with no custom endpoints (like
+        Security Advisor) inherit the caller's default and must respect its
+        concurrency, not blindly return -1.
+        """
+        defaults = self.default_llm_cfg or {}
         with self._lock:
+            # First check agent-specific priorities
             for eid in self.agent_priorities.get(agent_type, []):
                 ep = self.endpoints.get(eid)
                 if ep and ep.enabled:
                     return ep.concurrency_limit
-        return -1 # Default fallback is unlimited
+            # Fall back to default endpoint — find it by api_base
+            default_base = defaults.get('api_base') or defaults.get('model_server', '')
+            for ep in self.endpoints.values():
+                if ep.api_base == default_base:
+                    return ep.concurrency_limit
+        # Default config exists with an api_base but no matching endpoint found.
+        # Return 0 (sequential) as a conservative safety measure rather than -1,
+        # because the user has configured an endpoint — we just can't find it.
+        if defaults.get('api_base') or defaults.get('model_server'):
+            return 0
+        # Truly no config at all — unlimited
+        return -1
 
     # ── LLM Config Resolution ────────────────────────────────────────────
 
@@ -199,7 +377,8 @@ class APIRouter:
         Returns the effective max_input_tokens for an agent type.
         Calculates the MIN of (general settings limit) and (highest priority endpoint limit).
         """
-        general_limit = (self.default_llm_cfg or {}).get('max_input_tokens', 0)
+        defaults = self.default_llm_cfg or {}
+        general_limit = defaults.get('max_input_tokens', 0)
         
         # Find the first enabled endpoint for this agent_type
         ep_limit = 0
@@ -223,23 +402,25 @@ class APIRouter:
           1. Agent-specific endpoints (priority order, enabled only)
           2. General Settings default (always last)
         """
+        defaults = self.default_llm_cfg or {}
+        general_limit = defaults.get('max_input_tokens', 0)
         configs = []
 
-        # 1. Agent-specific endpoints
-        general_limit = (self.default_llm_cfg or {}).get('max_input_tokens', 0)
-        
-        for eid in self.agent_priorities.get(agent_type, []):
-            ep = self.endpoints.get(eid)
-            if ep and ep.enabled:
-                cfg = ep.to_llm_cfg()
-                
-                # Apply MIN logic: min(endpoint_limit, general_limit)
-                ep_limit = ep.max_input_tokens
-                if general_limit > 0:
-                    if ep_limit <= 0 or ep_limit > general_limit:
-                        cfg['max_input_tokens'] = general_limit
-                
-                configs.append(cfg)
+        # 1. Agent-specific endpoints — under lock to prevent RuntimeError
+        # from concurrent dict modification during iteration
+        with self._lock:
+            for eid in self.agent_priorities.get(agent_type, []):
+                ep = self.endpoints.get(eid)
+                if ep and ep.enabled:
+                    cfg = ep.to_llm_cfg()
+                    
+                    # Apply MIN logic: min(endpoint_limit, general_limit)
+                    ep_limit = ep.max_input_tokens
+                    if general_limit > 0:
+                        if ep_limit <= 0 or ep_limit > general_limit:
+                            cfg['max_input_tokens'] = general_limit
+                    
+                    configs.append(cfg)
 
         # 2. Always append the default as last resort
         configs.append(copy.deepcopy(self.default_llm_cfg))
@@ -268,18 +449,26 @@ class APIRouter:
             concurrency_limit = 0
             is_default = (cfg_idx == len(chain) - 1)
             
-            # Resolve endpoint-specific settings
+            # Resolve endpoint-specific settings — always try to read from
+            # the endpoint config, even for the default fallback endpoint.
+            # The default endpoint may also be in self.endpoints with its own
+            # concurrency setting (Phase 1 fix).
             endpoint_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
-            if not is_default:
+            with self._lock:
                 for ep in self.endpoints.values():
                     if ep.api_base == endpoint_base:
                         max_retries = ep.max_retries
                         concurrency_limit = ep.concurrency_limit
                         break
             
-            # ── CONCURRENCY CONTROL (Semaphore) ──
-            # We manage semaphores per api_base because different models 
-            # on the same server share the same hardware (e.g. LM Studio).
+            # ── CONCURRENCY CONTROL (Per-API-Call Semaphore, Layer 2) ──
+            # Layer 1 (EndpointScheduler in submit_task): serializes agent lifecycles.
+            # Layer 2 (this semaphore): limits parallel API calls WITHIN an agent's window.
+            # For concurrency=0 endpoints both layers are active but redundant — 
+            # EndpointScheduler ensures only one agent at a time, so this just adds
+            # an extra gate on each individual LLM call (harmless).
+            # For concurrency=N>0 endpoints, this layer prevents an agent from making
+            # more than N concurrent API calls to the same server.
             sem = None
             if concurrency_limit >= 0:
                 # 0 means sequential delegation AND sequential requests (Semaphore of 1)
@@ -310,11 +499,14 @@ class APIRouter:
                     result = call_fn(*args, **kwargs)
                     if hasattr(result, '__iter__') and not isinstance(result, (list, dict, str)):
                         # It's a generator. Wrap it to release the semaphore only when exhausted.
-                        def sem_generator_wrapper(gen):
+                        # Use default-argument capture (_sem=sem) to freeze the semaphore reference
+                        # at definition time — prevents stale-semaphore risk if the endpoint is
+                        # resized between this iteration and when the generator is consumed (audit fix).
+                        def sem_generator_wrapper(gen, _sem=sem):
                             try:
                                 yield from gen
                             finally:
-                                sem.release()
+                                _sem.release()
                         return sem_generator_wrapper(result)
                     else:
                         # Regular result, release now
@@ -347,15 +539,6 @@ class APIRouter:
                     # to catch connection/auth/model errors.
                     if hasattr(result, '__iter__') and not isinstance(result, (list, dict, str)):
                         try:
-                            # Wrap the generator to preserve the first item
-                            def generator_wrapper(gen):
-                                try:
-                                    first = next(gen)
-                                    yield first
-                                    yield from gen
-                                except Exception:
-                                    raise
-                            
                             # We can only "test" the generator once. 
                             # If it fails on the VERY FIRST next(), we catch and fallback.
                             # Note: This is a bit of a hack but common for API stream wrappers.

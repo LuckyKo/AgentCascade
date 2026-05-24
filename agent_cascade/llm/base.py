@@ -204,7 +204,7 @@ class BaseChatModel(ABC):
             generate_cfg.pop(setting, None)
 
         if max_input_tokens > 0:
-            agent_name = generate_cfg.get('agent_name', 'Unknown')
+            agent_name = generate_cfg.pop('agent_name', 'Unknown')
             messages = _truncate_input_messages_roughly(
                 messages=messages,
                 max_tokens=max_input_tokens,
@@ -457,7 +457,8 @@ class BaseChatModel(ABC):
                 logger.warning('Tool call arguments dict was not JSON-serializable (%s); defaulting to "{}"', repr(fn_args))
                 return '{}'
         if not isinstance(fn_args, str) or not fn_args.strip():
-            logger.warning('Tool call arguments were empty/None (type: %s); defaulting to "{}"', type(fn_args).__name__)
+            # Empty args are normal during streaming (name arrives before arguments fill in) — only debug-level
+            logger.debug('Tool call arguments were empty/None (type: %s); defaulting to "{}"', type(fn_args).__name__)
             return '{}'
         # Validate the string is parseable JSON and represents an object
         try:

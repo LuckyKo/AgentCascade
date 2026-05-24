@@ -53,19 +53,34 @@ const state = {
     // Throttle timestamps for streaming performance
     lastGenStatsUpdate: 0,       // For updateGenStats throttling (~2Hz)
     lastSubAgentRender: 0,      // For renderSubAgents throttling (~750ms)
+    lastChatRender: 0,          // For renderMessages throttling (~300ms streaming / 750ms idle)
+    lastContextBarUpdate: 0,    // For updateContextBar throttling (~1Hz during streaming)
+    lastUiUpdate: 0,            // For updateMainActivityBar throttling (~1Hz)
+    lastControlsUpdate: 0,      // For updateControls throttling (~1Hz)
+    lastTelemetryUpdate: 0,     // For updateTelemetryPanel throttling (~2s)
+    lastChatContentKey: '',     // Content key for early-exit optimization (count:length)
   },
   totalTokens: 0,
   totalWords: 0,
   maxTokens: 32768,
   autoSecurity: false,
+  activeSecurityChecks: new Set(),
+  securityResponses: {},
   summary: "", // Active compression summary
   lastMemoryEditTime: 0, // Timestamp of last manual memory edit to prevent race condition reverts
+  _lastIsGenerating: undefined, // For change detection in updateControls()
 };
 
 let ws = null;
 let reconnectTimer = null;
 let lastRenderedCount = Infinity;
 let lastLastContent = null;
+
+// Page Visibility API: skip rendering when tab is hidden to save GPU/CPU
+let documentHidden = false;
+document.addEventListener('visibilitychange', () => {
+  documentHidden = document.hidden;
+});
 
 // Sticky auto-scroll: locked at bottom by default, unlocks when user scrolls up
 let isAutoScrollLocked = true;
@@ -94,7 +109,7 @@ const btnToggleSettings = $('#btn-toggle-settings');
 if (messagesEl) {
   messagesEl.addEventListener('scroll', () => {
     const distFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
-    isAutoScrollLocked = (distFromBottom <= 50);
+    isAutoScrollLocked = (distFromBottom < 50);
   });
 }
 const sidePanel = $('#side-panel');
@@ -147,7 +162,6 @@ const ranges = [
   { input: $('#setting-repeat-penalty'), output: $('#val-repeat-penalty') },
   { input: $('#setting-presence-penalty'), output: $('#val-presence-penalty') },
   { input: $('#setting-frequency-penalty'), output: $('#val-frequency-penalty') },
-  { input: $('#setting-grep-char-limit'), output: $('#val-grep-char-limit') },
   { input: $('#setting-shell-char-limit'), output: $('#val-shell-char-limit') },
   { input: $('#setting-code-char-limit'), output: $('#val-code-char-limit') },
 ];
@@ -244,6 +258,24 @@ async function fetchSessions() {
 
 // Initial fetch
 fetchSessions();
+
+// ── Unified UI State for tab/message unification ──────────────────────────────
+const UIState = {
+    // Scroll positions per agent instance
+    scrollPositions: {},
+    
+    // Active tab / focused agent
+    activeInstance: 'root',
+    
+    // Pending streaming requests per instance
+    pendingRequests: {},
+    
+    // Whether an instance is currently generating
+    generating: {},
+    
+    // Scroll to bottom flags per instance
+    scrollToBottom: { root: true },
+};
 
 
 // Render session list
@@ -487,6 +519,12 @@ function loadSettings() {
     if (s['tool-result-max-chars'] !== undefined) {
       $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
       $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
+    }
+    if (s['grep_char_limit'] !== undefined) {
+      $('#setting-grep-char-limit').value = s['grep_char_limit'];
+    }
+    if (s['grep_spillover'] !== undefined) {
+      $('#setting-grep-spillover').checked = s['grep_spillover'];
     }
 
     if (settingImageDetail && s['setting-image-detail'] !== undefined) {
@@ -815,6 +853,10 @@ function handleServerMessage(data) {
         updateGenStats(state.messages, true);
         state.genStats.active = false;
         
+        // Invalidate activity preview cache so next turn computes fresh preview
+        delete state._lastActivityPreviewKey;
+        delete state._lastActivityPreview;
+        
         // Refresh telemetry config comparison after turn ends
         fetchTelemetry();
       }
@@ -837,21 +879,50 @@ function handleServerMessage(data) {
       state.messages.push(...responseMsgs);
 
       const oldStackStr = (state.activeStack || []).join(',');
+      // Track subagent changes to decide render urgency:
+      //   subAgentNewVisibleMessage — a new bubble was added to a VISIBLE panel (force immediate render)
+      //   subAgentContentChanged   — any subagent state changed (content streaming or new messages).
+      //     Note: subAgentNewVisibleMessage only covers new-message arrivals on visible panels;
+      //     streaming content updates rely on the tiered throttle timer below.
+      let subAgentNewVisibleMessage = false;
+      let subAgentContentChanged = false;
       if (data.sub_agents) {
         for (const [name, sa] of Object.entries(data.sub_agents)) {
+          const existing = state.subAgents[name];
+          const prevMsgCount = existing ? existing.messages.length : 0;
+          
           if (sa.is_partial) {
-            const existing = state.subAgents[name];
             if (existing && existing.messages) {
               const hCount = sa.history_count || 0;
-              const startIdx = hCount - sa.messages.length;
-              if (startIdx >= 0) {
-                // Merge: replace only the changed tail of the message history
-                existing.messages.length = startIdx;
-                existing.messages.push(...sa.messages);
+              
+              // Skip stale updates that would truncate newer messages.
+              // Use strict < so that updates with the same history_count are still processed —
+              // during content streaming, history_count stays constant while message content grows.
+              if (hCount < (existing._lastHistoryCount || 0)) {
+                // Stale: only sync metadata, don't touch message array.
+                // Exclude sa.messages from Object.assign to prevent overwriting our local array.
+                const savedMessages = sa.messages;
+                delete sa.messages;
+                Object.assign(existing, sa);
+                sa.messages = savedMessages;
+                existing._lastHistoryCount = hCount;
+                delete existing.is_partial;
+              } else {
+                // Normal merge path
+                const startIdx = hCount - sa.messages.length;
+                if (startIdx >= 0 && startIdx <= existing.messages.length) {
+                  existing.messages.length = startIdx;
+                  existing.messages.push(...sa.messages);
+                }
+                // Sync other metadata fields — but NOT messages (we just merged those above).
+                // Object.assign would overwrite our merged array with the partial sa.messages.
+                const savedMessages = sa.messages;
+                delete sa.messages;
+                Object.assign(existing, sa);
+                sa.messages = savedMessages;
+                existing._lastHistoryCount = hCount;
+                delete existing.is_partial; // local state should be complete
               }
-              // Sync other metadata fields
-              Object.assign(existing, sa);
-              delete existing.is_partial; // local state should be complete
             } else {
               // Fallback: if we don't have existing state, we can't merge partials
               state.subAgents[name] = sa;
@@ -859,9 +930,34 @@ function handleServerMessage(data) {
           } else {
             state.subAgents[name] = sa;
           }
+          
+          // Detect changes to decide render urgency:
+          //   - New messages (message count grew or brand new agent) → force immediate render if visible
+          //   - Any state change (including streaming content growth with same message count) → use tiered throttle
+          const newMsgCount = existing ? existing.messages.length : (sa.messages ? sa.messages.length : 0);
+          const hasNewMessage = newMsgCount > prevMsgCount || !prevMsgCount;
+          
+          if (hasNewMessage) {
+            subAgentContentChanged = true;
+            // Only force-render new bubbles for panels that are actually visible —
+            // avoid wasting DOM work on hidden panels.
+            if (state.activeSubTab === 'sub-' + name) {
+              subAgentNewVisibleMessage = true;
+            }
+          } else if (sa.is_partial && existing) {
+            // Partial arrived with same message count — content is streaming in an existing bubble
+            subAgentContentChanged = true;
+          }
         }
       }
       if (data.active_stack) state.activeStack = data.active_stack;
+      // Reset throttle state if generation just started (was idle before this tick).
+      // Server can initiate generation via stream_update without calling resetGenStats().
+      if (!state.generating) {
+        state.genStats.lastChatRender = 0;
+        state.genStats.lastChatContentKey = '';
+        lastRenderedCount = Infinity;
+      }
       state.generating = true;
       const newStackStr = (state.activeStack || []).join(',');
       const stackChanged = oldStackStr !== newStackStr;
@@ -871,7 +967,24 @@ function handleServerMessage(data) {
       if (data.total_words !== undefined) state.totalWords = data.total_words;
       if (data.max_tokens !== undefined) state.maxTokens = data.max_tokens;
       if (data.current_model && statusModel) statusModel.textContent = data.current_model;
-      if (data.telemetry) updateTelemetryPanel(data.telemetry);
+      if (data.telemetry) {
+        state.pendingTelemetry = data.telemetry;
+        const telemNow = performance.now();
+        if (telemNow - state.genStats.lastTelemetryUpdate > 2000) {
+          updateTelemetryPanel(data.telemetry);
+          state.genStats.lastTelemetryUpdate = telemNow;
+        }
+      }
+
+      // Skip all rendering when tab is hidden to save GPU/CPU during tool execution
+      if (documentHidden) {
+        // Update controls minimally for button states (throttled to ~1Hz)
+        if (performance.now() - state.genStats.lastControlsUpdate > 1000) {
+          updateControls();
+          state.genStats.lastControlsUpdate = performance.now();
+        }
+        return;
+      }
 
       // Approvals require immediate rendering (user must see these promptly)
       if (data.approvals) {
@@ -880,18 +993,33 @@ function handleServerMessage(data) {
       }
 
       // Always update message display — already incremental-optimized inside renderMessages()
-      renderMessages();
-
-      // Update UI controls (stop button, send disabled state, etc.)
-      updateControls();
-
-      // Throttle sub-agent rendering. Render more frequently (100ms) if a sub-agent is active 
-      // to ensure smooth streaming. Otherwise use a slower rate for idle agents.
-      const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
-      const subThrottle = isSubAgentActive ? 100 : 750;
+      // Throttled to ~300ms during streaming (users can't perceive faster than ~10fps)
+      // and ~750ms when idle, matching the sub-agent throttle pattern.
+      const isStreaming = state.generating;
+      const chatThrottle = isStreaming ? 300 : 750;
       const now = performance.now();
+      if (now - state.genStats.lastChatRender > chatThrottle) {
+        renderMessages();
+        state.genStats.lastChatRender = now;
+      }
+
+      // Throttle control updates to ~1Hz during streaming; always update when generating state changes
+      const wasGenerating = state.generating;
+      if (wasGenerating !== state.generating || now - state.genStats.lastControlsUpdate > 1000) {
+        updateControls();
+        state.genStats.lastControlsUpdate = now;
+      }
+
+      // Throttle sub-agent rendering with tiered rates based on change urgency:
+      //   Tier 1 — New visible bubble (subAgentNewVisibleMessage): force immediate render, reset timer.
+      //            Only fires for panels the user is actually looking at (visibility guard above).
+      //   Tier 2 — Content streaming (no new messages, subAgentContentChanged): faster throttle (~150ms)
+      //            to keep text flowing smoothly without excessive DOM churn.
+      //   Tier 3 — Idle / no changes: slower throttle (~750ms) to save CPU.
+      const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
+      const subThrottleContent = isSubAgentActive ? 150 : 750;
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
-      if (stackChanged || now - state.genStats.lastSubAgentRender > subThrottle) {
+      if (stackChanged || subAgentNewVisibleMessage || now - state.genStats.lastSubAgentRender > subThrottleContent) {
         renderSubAgents();
         state.genStats.lastSubAgentRender = now;
         
@@ -930,6 +1058,9 @@ function handleServerMessage(data) {
 
     case 'security_response': {
       const { request_id, response, verdict, reason } = data;
+      state.activeSecurityChecks.delete(request_id);
+      state.securityResponses[request_id] = { response, verdict, reason };
+
       const card = document.querySelector(`.approval-card[data-request-id="${request_id}"]`);
       if (card) {
           let respDiv = card.querySelector('.security-response-box');
@@ -962,6 +1093,24 @@ function handleServerMessage(data) {
                   }
               }
           }
+
+          // QoL: If security advisor timed out, auto-fill rejection field
+          if (verdict === 'TIMEOUT') {
+              const rejectBtn = card.querySelector('.btn-danger');
+              if (rejectBtn) {
+                  // Only show input if not already visible
+                  if (!card.querySelector('.reject-input-area')) {
+                      showRejectInput(request_id, rejectBtn);
+                  }
+                  // Find the input within this specific card
+                  const input = card.querySelector('.reject-reason-input');
+                  if (input) {
+                      input.value = 'Security advisor timed out after 180s. Please resubmit with clearer justification.';
+                  }
+              }
+          }
+      } else {
+          renderApprovals();
       }
       break;
     }
@@ -969,6 +1118,8 @@ function handleServerMessage(data) {
     case 'error':
       state.generating = false;
       appendSystemBubble(`⚠️ Error: ${data.message}`);
+      delete state._lastActivityPreviewKey;
+      delete state._lastActivityPreview;
       updateControls();
       break;
   }
@@ -1027,8 +1178,6 @@ function renderMessages() {
   const msgs = state.messages;
   const container = messagesEl;
 
-
-
   // Word count and token estimation from Backend
   if (statusWords) statusWords.textContent = `${state.totalWords} words`;
   if (statusTokens) statusTokens.textContent = `${state.totalTokens} tokens`;
@@ -1041,6 +1190,26 @@ function renderMessages() {
   // Quick check: if nothing meaningful changed, skip heavy re-render
   const currentCount = msgs.length;
   const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+  // contentKey: composite of message count + last message content length (cheap, reliable)
+  // Avoids building large strings every tick — sub-agent pattern proven effective
+  const currentKey = `${currentCount}:${lastMsg ? (lastMsg.content || '').length : 0}`;
+
+  // EARLY EXIT: if key unchanged, skip everything except stats
+  if (currentKey === state.genStats.lastChatContentKey) {
+    return;
+  }
+
+  // Skip rendering during tool execution if only function_call arguments grew and no visible text is streaming
+  const isToolExecuting = lastMsg && lastMsg.function_call && !lastMsg.content && !lastMsg.reasoning_content;
+  if (isToolExecuting && currentCount === lastRenderedCount) {
+    return; // Tool arguments streaming but no visible content to update
+  }
+
+  // Content actually changed — update the content key NOW, before any DOM operations.
+  // If a DOM operation throws, the key is already updated so we don't get permanently stuck.
+  state.genStats.lastChatContentKey = currentKey;
+
+  // Compute the full content string for delta comparison below
   const lastContent = lastMsg ? (lastMsg.content || '') + (lastMsg.function_call ? JSON.stringify(lastMsg.function_call) : '') + (lastMsg.reasoning_content || '') : '';
 
   // Full re-render if count changed significantly or decreased
@@ -1052,41 +1221,83 @@ function renderMessages() {
     return;
   }
 
-  // Append new messages
+  // Append new messages — only create bubbles when the previous message has content (done streaming)
   if (currentCount > lastRenderedCount) {
+    const readyMsgs = [];
+    const readyIndexMap = [];
     for (let i = lastRenderedCount; i < currentCount; i++) {
-      container.appendChild(createMessageEl(msgs[i], i));
+      const msg = msgs[i];
+      const isToolCall = !!msg.function_call;
+      const isFunctionResult = msg.role === 'function';
+
+      // Tool calls and function results always render immediately
+      if (isToolCall || isFunctionResult) {
+        readyMsgs.push(msg);
+        readyIndexMap.push(i);
+        continue;
+      }
+
+      // For assistant/user messages: only create bubble if the PREVIOUS message 
+      // already has content (meaning it's done streaming), OR this is the last message
+      const prevMsg = i > 0 ? msgs[i - 1] : null;
+      const prevHasContent = prevMsg && (
+        ((prevMsg.content || '').trim().length > 0) || 
+        ((prevMsg.reasoning_content || '').trim().length > 0)
+      );
+
+      if (prevHasContent || i === currentCount - 1) {
+        readyMsgs.push(msg);
+        readyIndexMap.push(i);
+      }
+      // Otherwise: wait until previous message finishes streaming
     }
-    updateContextBar(document.getElementById('chatContextFill'), msgs, state.totalTokens, state.maxTokens);
-    lastRenderedCount = currentCount;
+
+    // Use unified render path for incremental appends too
+    if (readyMsgs.length > 0) {
+      container.appendChild(renderAgentConversation('root', readyMsgs, 0, readyIndexMap));
+      lastRenderedCount = readyIndexMap[readyIndexMap.length - 1] + 1;
+    }
+
+    // Throttle context bar updates to ~1Hz during streaming
+    if (!state.genStats.lastContextBarUpdate) state.genStats.lastContextBarUpdate = 0;
+    const nowInRender = performance.now();
+    if (nowInRender - state.genStats.lastContextBarUpdate > 1000 || readyMsgs.length > 1) {
+      updateContextBar(document.getElementById('chatContextFill'), msgs, state.totalTokens, state.maxTokens);
+    }
   }
 
-  // Auto-scroll logic: only scroll if was at bottom before update
-  const wasAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
-
-  // Update last message content (streaming)
+  // Update last message content (streaming) — use fine-grained content comparison for delta updates
   if (lastContent !== lastLastContent && container.lastElementChild) {
     const lastBubble = container.lastElementChild;
     const idx = parseInt(lastBubble.dataset.index);
-    if (idx === currentCount - 1 && state.editingIndex !== idx) {
-      updateBubbleContent(lastBubble, msgs[currentCount - 1]);
+    if (idx < currentCount && state.editingIndex !== idx) {
+      updateBubbleContent(lastBubble, msgs[idx], getRootAgentConfig());
     }
   }
   lastLastContent = lastContent;
 
-  // Sticky auto-scroll: only scroll to bottom if locked (user hasn't scrolled up)
-  if (isAutoScrollLocked) {
-    isAutoScrollLocked = false; // Unlock on each tick so user can scroll freely
-    scrollToBottom();
-  }
+  // Auto-scroll: batched in requestAnimationFrame to avoid forced reflows.
+  // Reads layout (scrollHeight/scrollTop/clientHeight) AFTER DOM writes complete,
+  // then scrolls if needed — single read-write cycle instead of interleaved reads/writes.
+  // The isAutoScrollLocked flag persists across ticks: locked = scroll + unlock, unlocked but at bottom = re-lock.
+  requestAnimationFrame(() => {
+    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
 
-  // Re-lock if user scrolls back to bottom between ticks
-  if (wasAtBottom && !isAutoScrollLocked) {
-    isAutoScrollLocked = true;
-  }
+    if (isAutoScrollLocked) {
+      isAutoScrollLocked = false; // Unlock on each tick so user can scroll freely
+      container.scrollTop = container.scrollHeight;
+    } else if (atBottom) {
+      isAutoScrollLocked = true; // Re-lock if user scrolled back to bottom
+    }
+  });
 
-  // Update main activity bar
-  updateMainActivityBar();
+  // Update main activity bar (throttled to ~1Hz during streaming)
+  if (!state.genStats.lastUiUpdate) state.genStats.lastUiUpdate = 0;
+  const nowUiUpdate = performance.now();
+  if (nowUiUpdate - state.genStats.lastUiUpdate > 1000) {
+    updateMainActivityBar();
+    state.genStats.lastUiUpdate = nowUiUpdate;
+  }
 }
 
 function updateMainActivityBar() {
@@ -1106,7 +1317,19 @@ function updateMainActivityBar() {
     } else {
       const msgs = state.messages || [];
       const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
-      newStatus = lastMsg ? getActivityPreview(lastMsg) : 'Agent Starting...';
+      if (lastMsg) {
+        // Cache activity preview to avoid repeated string parsing when only tool args grow
+        const previewKey = `${lastMsg.function_call?.name}:${(lastMsg.function_call?.arguments || '').length}`;
+        if (previewKey !== state._lastActivityPreviewKey) {
+          newStatus = getActivityPreview(lastMsg);
+          state._lastActivityPreviewKey = previewKey;
+          state._lastActivityPreview = newStatus;
+        } else {
+          newStatus = state._lastActivityPreview || 'Streaming...';
+        }
+      } else {
+        newStatus = 'Agent Starting...';
+      }
     }
   } else {
     newStatus = 'Agent Idle';
@@ -1130,9 +1353,9 @@ function updateMainActivityBar() {
     if (chatTab) chatTab.classList.remove('agent-active');
   }
 
-  // Only update tab label if needed
+  // Only update tab label if needed — skip during generation to avoid race with updateControls
   const newTabLabel = `<span class="main-tab-icon">💬</span> Chat`;
-  if (chatTab && chatTab.innerHTML !== newTabLabel) {
+  if (chatTab && !state.generating && chatTab.innerHTML !== newTabLabel) {
     chatTab.innerHTML = newTabLabel;
   }
 
@@ -1141,36 +1364,135 @@ function updateMainActivityBar() {
   if (queuedEl) {
     queuedEl.style.display = state.has_queued_messages ? 'block' : 'none';
   }
+
+  // Toggle pulse dim class for JS-driven animation at ~1Hz throttle rate
+  togglePulseElements();
 }
 
 function fullRender(msgs, container) {
   container.innerHTML = '';
+  // Filter out system messages (root chat hides them), tracking original indices
+  const visibleMsgs = [];
+  const indexMap = []; // maps filtered-index → original-index in msgs array
   for (let i = 0; i < msgs.length; i++) {
-    if (msgs[i].role === 'system') continue; // Hide system messages
-    container.appendChild(createMessageEl(msgs[i], i));
+    if (msgs[i].role !== 'system') {
+      visibleMsgs.push(msgs[i]);
+      indexMap.push(i);
+    }
   }
+  // Pass indexMap so data-index attributes use original indices (critical for edit/delete)
+  container.appendChild(renderAgentConversation('root', visibleMsgs, 0, indexMap));
   scrollToBottom();
 }
 
-function createMessageEl(msg, index) {
+// ── Unification Helper Functions ──────────────────────────────────────────────
+// These helpers abstract the root vs sub-agent distinction for CSS classes and labels.
+// All messages now use the same base CSS classes — differentiation is via data-agent-type attribute.
+
+/** Return the combined CSS class string for a message element — same base class for both root and sub-agent */
+function msgClass(role, isRoot) {
+    return `message msg-${role}`;  // Differentiate via data-agent-type attribute only
+}
+
+/** Return the CSS class for a message header element — same class for both root and sub-agent */
+function headerClass(isRoot) {
+    return 'msg-header';
+}
+
+/** Return the CSS class for a message content element — same class for both root and sub-agent */
+function contentClass(isRoot) {
+    return 'msg-content';
+}
+
+/** Return the CSS class for the role name/label element — same class for both root and sub-agent */
+function nameLabelClass(isRoot) {
+    return 'msg-name';
+}
+
+/** Return the display label for a role, depending on whether it's root or sub-agent */
+function roleName(role, isRoot, msg) {
+    if (!isRoot) {
+        if (role === 'user') return '📤 Task';
+        if (role === 'assistant') return 'Agent';
+        if (role === 'tool') return 'result';
+        return role;
+    }
+    // Root labels — existing behavior
+    if (role === 'user') return 'You';
+    if (role === 'assistant') return 'Assistant';
+    if (role === 'tool') return 'Tool Result';
+    return role;
+}
+
+/** Get config object for root-agent rendering */
+function getRootAgentConfig() {
+    return { isRoot: true };
+}
+
+/** Get config object for sub-agent rendering (name = instance name) */
+function getSubAgentConfig(name) {
+    return { isRoot: false, instanceName: name };
+}
+
+/**
+ * Render a complete agent conversation as a DOM document fragment.
+ * This is the unified rendering entry point — uses createMessageEl with config
+ * to handle both root and sub-agent conversations through a single code path.
+ * 
+ * @param {string} instanceName - "root" for main chat, or agent name (e.g., "coder")
+ * @param {Array}  messages     - array of message objects
+ * @param {number} depth        - nesting level (0=root, 1=direct sub-agent, etc.)
+ * @param {Array}  [indexMap]   - optional mapping from filtered-index → original-index
+ *                                (needed when messages have been pre-filtered, e.g., system msgs removed)
+ * @returns {DocumentFragment}  fragment containing all rendered message elements
+ */
+function renderAgentConversation(instanceName, messages, depth, indexMap) {
+    if (!messages || messages.length === 0) return document.createDocumentFragment();
+
+    const isRoot = (instanceName === 'root');
+    const config = isRoot ? getRootAgentConfig() : getSubAgentConfig(instanceName);
+
+    const fragment = document.createDocumentFragment();
+
+    for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        // Use original index from indexMap if provided, otherwise use the loop index
+        const origIndex = indexMap ? indexMap[i] : i;
+        const el = createMessageEl(msg, origIndex, config);
+
+        fragment.appendChild(el);
+    }
+
+    return fragment;
+}
+
+function createMessageEl(msg, index, config) {
+  // Default to root agent config if not provided (backward compatible)
+  if (!config) config = getRootAgentConfig();
+  const isRoot = config.isRoot;
+
   const div = document.createElement('div');
-  div.className = `message msg-${msg.role || 'unknown'}`;
+  div.className = msgClass(msg.role || 'unknown', isRoot);
   div.dataset.index = index;
+  
+  // Data attributes for CSS unification (allow .message[data-agent-type="root"] selectors)
+  div.dataset.agentType = isRoot ? 'root' : 'sub';
+  if (!isRoot && config.instanceName) {
+      div.dataset.instanceName = config.instanceName;
+  }
 
   const isEditable = !msg.function_call && msg.role !== 'function' && msg.role !== 'system';
+  
+  // Extract instanceName from config for sub-agent edit/delete operations
+  const instName = config.instanceName || null;
 
   // Header
   const header = document.createElement('div');
-  header.className = 'msg-header';
+  header.className = headerClass(isRoot);
+  
   const nameSpan = document.createElement('span');
-  nameSpan.className = 'msg-name';
-  if (msg.role === 'user') {
-    nameSpan.textContent = 'You';
-  } else if (msg.role === 'function') {
-    nameSpan.textContent = msg.name || 'Tool Result';
-  } else {
-    nameSpan.textContent = msg.name || 'Assistant';
-  }
+  nameSpan.className = nameLabelClass(isRoot);
+  nameSpan.textContent = roleName(msg.role || 'unknown', isRoot, msg);
   header.appendChild(nameSpan);
 
   // Actions
@@ -1182,7 +1504,7 @@ function createMessageEl(msg, index) {
     editBtn.className = 'msg-action-btn';
     editBtn.textContent = '✏️';
     editBtn.title = 'Edit message';
-    editBtn.onclick = (e) => { e.stopPropagation(); startEdit(index); };
+    editBtn.onclick = (e) => { e.stopPropagation(); startEdit(index, '', 0, instName); };
     actions.appendChild(editBtn);
   }
 
@@ -1190,7 +1512,7 @@ function createMessageEl(msg, index) {
   delBtn.className = 'msg-action-btn msg-action-delete';
   delBtn.textContent = '🗑️';
   delBtn.title = 'Delete message';
-  delBtn.onclick = (e) => { e.stopPropagation(); deleteMessage(index); };
+  delBtn.onclick = (e) => { e.stopPropagation(); deleteMessage(index, instName); };
   actions.appendChild(delBtn);
 
   header.appendChild(actions);
@@ -1206,9 +1528,9 @@ function createMessageEl(msg, index) {
     let selectedText = sel.toString().trim();
     if (!selectedText) return;
 
-    if (e.target.closest('.msg-header')) return;
+    if (e.target.closest('.' + headerClass(isRoot))) return;
 
-    const contentDiv = div.querySelector('.msg-content');
+    const contentDiv = div.querySelector('.' + contentClass(isRoot));
     if (!contentDiv) return;
 
     const range = sel.getRangeAt(0);
@@ -1220,12 +1542,12 @@ function createMessageEl(msg, index) {
 
     const proportion = renderedLength > 0 ? renderedOffset / renderedLength : 0;
 
-    startEdit(index, selectedText, proportion);
+    startEdit(index, selectedText, proportion, instName);
   });
 
   // Content
   const contentDiv = document.createElement('div');
-  contentDiv.className = 'msg-content';
+  contentDiv.className = contentClass(isRoot);
 
   let html = '';
   const isGenerating = state.generating && index === state.messages.length - 1;
@@ -1267,12 +1589,95 @@ function createMessageEl(msg, index) {
   return div;
 }
 
-function updateBubbleContent(bubble, msg) {
-  const contentDiv = bubble.querySelector('.msg-content');
+// ── Shared streaming-delta helper ─────────────────────────────────────────────
+
+/**
+ * Append a raw-text delta during LLM streaming without re-parsing through marked.
+ * 
+ * Why raw text: calling marked.parse() on each delta wraps it in <p> tags, breaking
+ * mid-paragraph runs into separate blocks with visible gaps (the "chunked lines" bug).
+ * 
+ * Strategy: find the deepest block-level container and append raw text as a sibling
+ * text node so it flows visually within existing structure. Inline formatting elements
+ * (<code>, <strong>, <em>, <a>) are skipped to prevent trapping raw text inside them.
+ * Pre blocks trigger fallback to full re-render (incremental append diverges from parsing).
+ * 
+ * Tradeoffs: markdown characters (backticks, asterisks) in deltas appear as literal text
+ * until the next full re-render tick (~300ms throttled). This is acceptable — the full
+ * re-render restores proper formatting within that window.
+ * 
+ * @param {HTMLElement} container - The .msg-content div
+ * @param {string} newText - The delta text to append
+ * @returns {boolean} true if appended successfully, false if caller should fall back to full re-render
+ */
+function appendStreamingDelta(container, newText) {
+  if (!newText || typeof newText !== 'string') return false;
+
+  let target = container.lastElementChild;
+  while (target && target.lastElementChild) {
+    const child = target.lastElementChild;
+    // Don't descend into inline formatting elements — they could trap raw text.
+    // Also skip if target itself is inside a <pre> block, or child is/will be inside one.
+    if (target.closest('pre') || ['code', 'strong', 'em', 'a'].includes(child.tagName.toLowerCase()) || child.closest('pre')) {
+      break;
+    }
+    target = child;
+  }
+  if (!target) return false; // Edge case: empty container → caller falls through to full re-render
+  try {
+    target.insertAdjacentText('beforeend', newText);
+    return true;
+  } catch (e) {
+    // Fallback: append as a text node directly to the container (safe, preserves existing content)
+    container.appendChild(document.createTextNode(newText));
+    return true;
+  }
+}
+
+function updateBubbleContent(bubble, msg, config) {
+  if (!config) config = getRootAgentConfig();
+  const isRoot = config.isRoot;
+
+  const contentDiv = bubble.querySelector('.' + contentClass(isRoot));
   if (!contentDiv) return;
 
+  // PERFORMANCE: During streaming, only render the delta (new text appended)
+  // instead of re-rendering the entire message. This avoids O(N) marked.parse()
+  // on every tick when N is large (thousands of words).
+  const prevContent = bubble.dataset.prevContent;
+  const curContent = msg.content || '';
+  
+  // Use config.isGenerating if provided (for sub-agent streaming), otherwise check state.generating
+  const isGenerating = config.isGenerating !== undefined ? config.isGenerating : state.generating;
+  
+  if (isGenerating && prevContent !== undefined && !msg.function_call && msg.role !== 'function') {
+    // Force full re-render if reasoning_content changed — incremental path only handles plain content
+    const prevReasoning = bubble.dataset.prevReasoning;
+    const curReasoning = msg.reasoning_content || '';
+    if (prevReasoning !== curReasoning) {
+      delete bubble.dataset.prevContent;
+      delete bubble.dataset.prevReasoning;
+    } else if (curContent.startsWith(prevContent)) {
+      // Incremental streaming update: only render the new portion
+      const newText = curContent.slice(prevContent.length);
+      if (newText) {
+        if (appendStreamingDelta(contentDiv, newText)) {
+          bubble.dataset.prevContent = curContent;
+          return;
+        }
+        // No suitable target — fall through to full re-render below
+      } else {
+        bubble.dataset.prevContent = curContent;
+        return;
+      }
+    }
+  }
+  
+  // Fallback: full re-render (content changed non-incrementally, or not generating)
+  delete bubble.dataset.prevContent;
+  delete bubble.dataset.prevReasoning;
+
   let html = '';
-  const isGenerating = state.generating;
 
   if (msg.reasoning_content) {
     html += renderThinkingBlock(msg.reasoning_content, isGenerating);
@@ -1294,9 +1699,14 @@ function updateBubbleContent(bubble, msg) {
             }
         }
     }
-    html += renderMarkdown(text, !isGenerating);
+    html += renderMarkdown(text, false); // Skip thinking block parsing — reasoning_content is already rendered separately via renderThinkingBlock
   }
   setInnerHtmlWithState(contentDiv, html);
+  
+  // Restore prevContent/prevReasoning after full re-render so the next tick
+  // can use the incremental path if only plain content grew.
+  bubble.dataset.prevContent = curContent;
+  bubble.dataset.prevReasoning = msg.reasoning_content || '';
 }
 
 function setInnerHtmlWithState(el, html) {
@@ -1391,6 +1801,38 @@ function renderMarkdown(text, allowThinking = true) {
 
 function renderToolCall(msg) {
   const fc = msg.function_call;
+
+  // Special rendering for call_agent — show a human-readable delegation summary
+  if (fc.name === 'call_agent') {
+    let parsed;
+    try {
+      parsed = JSON.parse(fc.arguments);
+    } catch {
+      parsed = null;
+    }
+    const agentClass = parsed ? (parsed.agent_class || 'unknown') : 'unknown';
+    const instanceName = parsed ? (parsed.instance_name || '') : '';
+    const task = parsed ? (parsed.task || '') : '';
+
+    let summaryLabel;
+    if (task) {
+      // Truncate long tasks for the summary line
+      const shortTask = task.length > 120 ? task.substring(0, 120) + '…' : task;
+      summaryLabel = `🤖 Delegated to <strong>${escapeHtml(agentClass)}</strong>: ${escapeHtml(shortTask)}`;
+    } else {
+      summaryLabel = `🤖 Delegated to <strong>${escapeHtml(agentClass)}</strong>`;
+    }
+
+    const argsHtml = parsed ? escapeHtml(JSON.stringify(parsed, null, 2)) : escapeHtml(fc.arguments || '');
+    return `
+      <details class="tool-call" open>
+        <summary>${summaryLabel}</summary>
+        <pre><code>${argsHtml}</code></pre>
+      </details>
+    `;
+  }
+
+  // Generic rendering for all other tool calls
   let argsHtml;
   try {
     const parsed = JSON.parse(fc.arguments);
@@ -1435,13 +1877,33 @@ function renderToolResult(msg) {
   const isFail = isToolFailure(msg);
   const icon = isFail ? '❌' : '📋';
   const shouldTruncate = settingTruncateTools ? settingTruncateTools.checked : true;
-  const truncated = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
 
-  let contentHtml = `<pre><code>${escapeHtml(truncated)}</code></pre>`;
+  // Determine rendering strategy based on tool type and content characteristics.
+  // Some tools return prose/markdown (web_extractor, ddg_search, calculate) that should be formatted.
+  // Others return code-like output (code_interpreter, read_file, shell_cmd, grep, list_dir, write_file, python_compiler) that should stay in <pre><code>.
+  const isCodeTool = ['code_interpreter', 'read_file', 'shell_cmd', 'grep', 'list_dir', 'write_file', 'python_compiler'].includes(msg.name);
+  
+  let contentHtml;
   if (msg.name === 'view_image' || content.match(/!\[.*?\]\(.*?\)/)) {
-    // Rewrite file:/// URLs to use our backend proxy to avoid browser security restrictions
-    const proxiedContent = truncated.replace(/!\[(.*?)\]\((?:file:\/\/\/|file:\/\/)(.*?)\)/g, '![image](/api/file?path=$2)');
-    contentHtml = `<div class="tool-image-wrapper" style="padding-top: 8px;">${renderMarkdown(proxiedContent)}</div>`;
+    // Image content: process through markdown to render images, rewriting file:/// URLs via backend proxy
+    const truncatedForImage = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
+    const proxiedContent = truncatedForImage.replace(/!\[(.*?)\]\((?:file:\/\/\/|file:\/\/)(.*?)\)/g, '![image](/api/file?path=$2)');
+    contentHtml = `<div class="tool-image-wrapper" style="padding-top: 8px;">${renderMarkdown(proxiedContent, false)}</div>`;
+  } else if (!isCodeTool) {
+    // Prose/markdown tools: process through renderMarkdown for proper formatting.
+    // Do NOT truncate before rendering — truncating raw markdown mid-block produces malformed HTML.
+    // The <details> element naturally keeps large content collapsed until expanded by the user.
+    // If rendering fails (e.g., extremely large content), fall back to truncated <pre><code>.
+    try {
+      contentHtml = `<div class="tool-rendered-content">${renderMarkdown(content, false)}</div>`;
+    } catch {
+      const truncatedFallback = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
+      contentHtml = `<pre><code>${escapeHtml(truncatedFallback)}</code></pre>`;
+    }
+  } else {
+    // Code-like tools: truncate before escaping to keep <pre><code> from bloating
+    const truncated = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
+    contentHtml = `<pre><code>${escapeHtml(truncated)}</code></pre>`;
   }
 
   return `
@@ -1470,6 +1932,7 @@ function appendSystemBubble(text) {
 }
 
 function scrollToBottom() {
+  if (!isAutoScrollLocked) return; // Respect user's scroll position
   requestAnimationFrame(() => {
     messagesEl.scrollTop = messagesEl.scrollHeight;
   });
@@ -1511,7 +1974,7 @@ function startEdit(index, selectedText = '', proportion = 0, instanceName = null
   const scrollContainer = document.querySelector(containerSelector);
   if (!scrollContainer) return;
 
-  const bubbleSelector = instanceName ? '.sub-msg' : '.message';
+  const bubbleSelector = '.message';
   const bubbles = scrollContainer.querySelectorAll(bubbleSelector);
   const bubble = Array.from(bubbles).find(b => b.dataset.index == index);
   if (!bubble) return;
@@ -1641,17 +2104,14 @@ function finishEdit(index, newContent, instanceName = null) {
   const scrollContainer = document.querySelector(containerSelector);
   if (!scrollContainer) return;
 
-  const bubbleSelector = instanceName ? '.sub-msg' : '.message';
+  const bubbleSelector = '.message';
   const bubbles = scrollContainer.querySelectorAll(bubbleSelector);
   const bubble = Array.from(bubbles).find(b => b.dataset.index == index);
   if (!bubble) return;
 
-  bubble.querySelector('.sub-msg-content, .msg-content').classList.remove('editing');
-  if (instanceName) {
-    updateSubBubbleContent(bubble, msgs[index]);
-  } else {
-    updateBubbleContent(bubble, msgs[index]);
-  }
+  const config = instanceName ? getSubAgentConfig(instanceName) : getRootAgentConfig();
+  bubble.querySelector('.' + contentClass(config.isRoot)).classList.remove('editing');
+  updateBubbleContent(bubble, msgs[index], config);
 }
 
 function cancelEdit(index, instanceName = null) {
@@ -1665,18 +2125,15 @@ function cancelEdit(index, instanceName = null) {
   const scrollContainer = document.querySelector(containerSelector);
   if (!scrollContainer) return;
 
-  const bubbleSelector = instanceName ? '.sub-msg' : '.message';
+  const bubbleSelector = '.message';
   const bubbles = scrollContainer.querySelectorAll(bubbleSelector);
   const bubble = Array.from(bubbles).find(b => b.dataset.index == index);
   if (!bubble) return;
 
-  bubble.querySelector('.sub-msg-content, .msg-content').classList.remove('editing');
+  const config = instanceName ? getSubAgentConfig(instanceName) : getRootAgentConfig();
+  bubble.querySelector('.' + contentClass(config.isRoot)).classList.remove('editing');
   const msgs = instanceName ? (state.subAgents[instanceName] ? state.subAgents[instanceName].messages : []) : state.messages;
-  if (instanceName) {
-    updateSubBubbleContent(bubble, msgs[index]);
-  } else {
-    updateBubbleContent(bubble, msgs[index]);
-  }
+  updateBubbleContent(bubble, msgs[index], config);
 }
 
 
@@ -1703,6 +2160,20 @@ function deleteMessage(index, instanceName = null) {
 
 function renderApprovals() {
   const bar = approvalBar;
+
+  // Clean up activeSecurityChecks and securityResponses for any IDs that are no longer in state.approvals
+  const approvalIds = new Set((state.approvals || []).map(ap => ap.request_id));
+  for (const rid of state.activeSecurityChecks) {
+    if (!approvalIds.has(rid)) {
+      state.activeSecurityChecks.delete(rid);
+    }
+  }
+  for (const rid in state.securityResponses) {
+    if (!approvalIds.has(rid)) {
+      delete state.securityResponses[rid];
+    }
+  }
+
   if (!state.approvals || state.approvals.length === 0) {
     bar.style.display = 'none';
     return;
@@ -1710,13 +2181,13 @@ function renderApprovals() {
 
   // Auto-security check (Auto-Ask) takes priority
   if (state.autoSecurity) {
-    const pending = [...state.approvals];
-    state.approvals = [];
-    bar.style.display = 'none';
-    
+    const pending = (state.approvals || []).filter(ap => !state.activeSecurityChecks.has(ap.request_id));
     pending.forEach(ap => {
+      state.activeSecurityChecks.add(ap.request_id);
       send({ type: 'ask_security', request_id: ap.request_id, auto_apply: true });
     });
+    state.approvals = [];
+    bar.style.display = 'none';
     return;
   }
 
@@ -1751,6 +2222,18 @@ function renderApprovals() {
       argsHtml = escapeHtml(String(ap.tool_args));
     }
 
+    const isChecking = state.activeSecurityChecks.has(ap.request_id);
+    const checkBtnText = isChecking ? '⏳ Checking...' : '🛡️ Ask Security';
+    const checkBtnDisabled = isChecking ? 'disabled' : '';
+
+    const secResp = state.securityResponses[ap.request_id];
+    let securityHtml = '';
+    if (secResp) {
+       securityHtml = `<div class="security-response-box" style="margin-top: 8px; padding: 8px; background: rgba(255,193,7,0.15); border-left: 3px solid #ffc107; font-size: 13px; color: var(--text-color);">
+         <strong>🛡️ Security Expert:</strong><div style="margin-top:4px;">${renderMarkdown(secResp.response)}</div>
+       </div>`;
+    }
+
     card.innerHTML = `
       <div class="approval-header">
         <span class="approval-icon">🛡️</span>
@@ -1765,9 +2248,10 @@ function renderApprovals() {
         <summary>Raw Arguments</summary>
         <pre><code>${argsHtml}</code></pre>
       </details>
+      ${securityHtml}
       <div class="approval-actions">
         <button class="btn btn-primary btn-sm" onclick="approveRequest('${ap.request_id}')">✅ Approve</button>
-        <button class="btn btn-warning btn-sm ask-security-btn" onclick="askSecurity('${ap.request_id}', this)">🛡️ Ask Security</button>
+        <button class="btn btn-warning btn-sm ask-security-btn" ${checkBtnDisabled} onclick="askSecurity('${ap.request_id}', this)">${checkBtnText}</button>
         <button class="btn btn-danger btn-sm" onclick="showRejectInput('${ap.request_id}', this)">❌ Reject</button>
       </div>
     `;
@@ -1781,6 +2265,8 @@ window.approveRequest = function (requestId) {
 };
 
 window.askSecurity = function (requestId, btn) {
+  state.activeSecurityChecks.add(requestId);
+  delete state.securityResponses[requestId];
   const originalHtml = btn.innerHTML;
   btn.innerHTML = '⏳ Checking...';
   btn.disabled = true;
@@ -1866,7 +2352,12 @@ function renderSubAgents() {
     // Update tab content safely (preserves handlers on closeBtn)
     const iconSpan = tabBtn.querySelector('.tab-icon-container');
     if (iconSpan) {
-      iconSpan.innerHTML = isActive ? '<span class="sub-tab-pulse"></span>' : '<span class="main-tab-icon">🤖</span>';
+      // Only update icon innerHTML when active state actually changed to avoid GPU churn
+      const prevActive = tabBtn.dataset.isActive === 'true';
+      if (prevActive !== isActive) {
+        iconSpan.innerHTML = isActive ? '<span class="sub-tab-pulse"></span>' : '<span class="main-tab-icon">🤖</span>';
+      }
+      tabBtn.dataset.isActive = String(isActive);
     }
     const labelSpan = tabBtn.querySelector('.tab-label');
     if (labelSpan) {
@@ -1917,6 +2408,9 @@ function renderSubAgents() {
       }
     }
   }
+
+  // Toggle pulse dim class for JS-driven animation at ~1Hz throttle rate
+  togglePulseElements();
 }
 
 function renderSubAgentPanel(panel, agentData, name) {
@@ -1962,8 +2456,9 @@ function renderSubAgentPanel(panel, agentData, name) {
           const resp = await fetch(`/api/halt/${encodeURIComponent(name)}`, { method: 'POST' });
           if (resp.ok) pauseBtn.textContent = '▶️ Resume';
         } else {
-          const resp = await fetch(`/api/resume/${encodeURIComponent(name)}`, { method: 'POST' });
-          if (resp.ok) pauseBtn.textContent = '⏸ Pause';
+          // Send a WebSocket resume message so the server clears the halt flag AND restarts generation
+          send({ type: 'resume', instance_name: name });
+          pauseBtn.textContent = '⏸ Pause';
         }
       } catch(e) { console.error('Pause/Resume failed:', e); }
     });
@@ -2012,11 +2507,7 @@ function renderSubAgentPanel(panel, agentData, name) {
   // 3. LAZY RENDERING: Skip expensive message work if the tab isn't visible
   if (!isVisible) return;
 
-
-
-  const wasAtBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 50;
-
-  // 5. Check Content Key to skip redundant renders
+  // 4. Check Content Key EARLY to skip all layout reads and DOM work when nothing changed
   const lastMsgTextLen = (() => {
     if (!lastMsg) return 0;
     if (Array.isArray(lastMsg.content)) {
@@ -2028,9 +2519,11 @@ function renderSubAgentPanel(panel, agentData, name) {
   const contentKey = msgs.length + ':' + lastMsgTextLen + ':' + (lastMsg ? String(lastMsg.reasoning_content || '').length : 0) + ':' + funcCallLen + ':' + agentData.active;
   
   if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === msgs.length) {
-    if (wasAtBottom) scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    // Nothing changed — skip scrollHeight read and all DOM updates
     return;
   }
+
+  const wasAtBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 50;
   panel.dataset.contentKey = contentKey;
 
   // 6. Incremental Rendering
@@ -2039,128 +2532,31 @@ function renderSubAgentPanel(panel, agentData, name) {
 
   if (currentCount < lastCount || lastCount === 0) {
     scrollContainer.innerHTML = '';
-    for (let i = 0; i < currentCount; i++) {
-      const el = createSubMsgEl(msgs[i], i, name, agentData.active && i === currentCount - 1);
-      scrollContainer.appendChild(el);
-    }
+    // Use unified rendering path for sub-agent full re-render
+    scrollContainer.appendChild(renderAgentConversation(name, msgs, 1));
     const fillEl = document.getElementById('subContextFill-' + name);
     if (fillEl) updateContextBar(fillEl, msgs, agentData.total_tokens, agentData.max_tokens);
   } else {
-    // Append new messages
+    // Append new messages using unified rendering with indexMap to preserve indices
+    const newMsgs = [];
+    const newIndexMap = [];
     for (let i = lastCount; i < currentCount; i++) {
-      const el = createSubMsgEl(msgs[i], i, name, agentData.active && i === currentCount - 1);
-      scrollContainer.appendChild(el);
+      newMsgs.push(msgs[i]);
+      newIndexMap.push(i);
     }
+    scrollContainer.appendChild(renderAgentConversation(name, newMsgs, 1, newIndexMap));
     const fillEl = document.getElementById('subContextFill-' + name);
     if (fillEl) updateContextBar(fillEl, msgs, agentData.total_tokens, agentData.max_tokens);
-    // Update the last message if it's still being generated
+    // Use unified bubble content update with isGenerating passed via config
     if (scrollContainer.lastElementChild) {
-      updateSubBubbleContent(scrollContainer.lastElementChild, msgs[currentCount - 1], agentData.active);
+      const subConfig = getSubAgentConfig(name);
+      subConfig.isGenerating = agentData.active;
+      updateBubbleContent(scrollContainer.lastElementChild, msgs[currentCount - 1], subConfig);
     }
   }
   panel.dataset.lastRenderedCount = currentCount;
 
   if (wasAtBottom) scrollContainer.scrollTop = scrollContainer.scrollHeight;
-}
-
-function createSubMsgEl(msg, index, instanceName, isGenerating) {
-  const div = document.createElement('div');
-  div.className = `sub-msg sub-msg-${msg.role || 'unknown'}`;
-  div.dataset.index = index;
-
-  const isEditable = !msg.function_call && msg.role !== 'function' && msg.role !== 'system';
-
-  const header = document.createElement('div');
-  header.className = 'sub-msg-header';
-  header.style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;";
-
-  const label = document.createElement('div');
-  label.className = 'sub-msg-label';
-  label.style = "margin-bottom: 0;";
-  
-  label.textContent = msg.role === 'user' ? '📤 Task' :
-    msg.role === 'function' ? `${msg.name || 'result'}` :
-      msg.name || 'Agent';
-
-  header.appendChild(label);
-
-  // Actions
-  const actions = document.createElement('div');
-  actions.className = 'msg-actions';
-
-  if (isEditable) {
-    const editBtn = document.createElement('button');
-    editBtn.className = 'msg-action-btn';
-    editBtn.textContent = '✏️';
-    editBtn.title = 'Edit message';
-    editBtn.onclick = (e) => { e.stopPropagation(); startEdit(index, '', 0, instanceName); };
-    actions.appendChild(editBtn);
-  }
-
-  const delBtn = document.createElement('button');
-  delBtn.className = 'msg-action-btn msg-action-delete';
-  delBtn.textContent = '🗑️';
-  delBtn.title = 'Delete message';
-  delBtn.onclick = (e) => { e.stopPropagation(); deleteMessage(index, instanceName); };
-  actions.appendChild(delBtn);
-
-  header.appendChild(actions);
-  div.appendChild(header);
-
-  const content = document.createElement('div');
-  content.className = 'sub-msg-content';
-
-  div.appendChild(content);
-
-  // Double click edit
-  div.addEventListener('dblclick', (e) => {
-    if (state.generating || !isEditable) return;
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) return;
-
-    let selectedText = sel.toString().trim();
-    if (!selectedText) return;
-
-    if (e.target.closest('.sub-msg-header')) return;
-
-    const contentDiv = div.querySelector('.sub-msg-content');
-    if (!contentDiv) return;
-
-    const range = sel.getRangeAt(0);
-    const preCaretRange = range.cloneRange();
-    preCaretRange.selectNodeContents(contentDiv);
-    preCaretRange.setEnd(range.startContainer, range.startOffset);
-    const renderedOffset = preCaretRange.toString().length;
-    const renderedLength = contentDiv.textContent.length;
-
-    const proportion = renderedLength > 0 ? renderedOffset / renderedLength : 0;
-
-    startEdit(index, selectedText, proportion, instanceName);
-  });
-
-  updateSubBubbleContent(div, msg, isGenerating);
-  return div;
-}
-
-
-function updateSubBubbleContent(bubble, msg, isGenerating) {
-  const content = bubble.querySelector('.sub-msg-content');
-  if (!content) return;
-
-  let html = '';
-  if (msg.reasoning_content) {
-    html += renderThinkingBlock(msg.reasoning_content, isGenerating);
-  }
-
-  if (msg.function_call) {
-    html += renderToolCall(msg);
-  } else if (msg.role === 'function') {
-    html += renderToolResult(msg);
-  } else {
-    html += renderMarkdown(msg.content || '', !isGenerating);
-  }
-
-  setInnerHtmlWithState(content, html);
 }
 
 function switchMainTab(tabId) {
@@ -2190,6 +2586,10 @@ function switchMainTab(tabId) {
   
   // Trigger immediate render of the newly visible content
   if (tabId === 'chat') {
+    // Reset lastRenderedCount to force a full re-render sync on visibility return.
+    // Without this, switching away during streaming and back causes duplicate messages
+    // because lastRenderedCount was stale from before the user switched tabs.
+    lastRenderedCount = Infinity;
     renderMessages();
   } else {
     renderSubAgents();
@@ -2305,19 +2705,39 @@ document.querySelectorAll('.settings-tab').forEach(btn => {
 
 // ── Controls ─────────────────────────────────────────────────────────────────
 
+// Toggle dim class on animated elements to create pulse effect at ~1Hz throttle rate
+// Instead of infinite CSS animation running at 60fps — massive GPU savings
+let _lastPulseToggle = 0;
+const PULSE_THROTTLE_MS = 800; // ~1.25Hz for a smooth pulse cadence
+
+function togglePulseElements() {
+  const now = performance.now();
+  if (now - _lastPulseToggle < PULSE_THROTTLE_MS) return;
+  _lastPulseToggle = now;
+
+  const pulses = document.querySelectorAll('.sub-tab-pulse, .activity-dot, .activity-queued, .btn-stop, .send-btn.inject-mode');
+  pulses.forEach(el => el.classList.toggle('dimmed'));
+}
+
 function updateControls() {
-  if (state.generating) {
-    sendBtn.classList.add('inject-mode');
-    sendBtn.title = 'Inject message into active agent (Enter)';
-    if (mainTabChat) mainTabChat.innerHTML = '<span class="sub-tab-pulse"></span> Chat';
-    resetBtn.disabled = true;
-    document.body.classList.add('is-generating');
-  } else {
-    sendBtn.classList.remove('inject-mode');
-    sendBtn.title = 'Send (Enter)';
-    if (mainTabChat) mainTabChat.innerHTML = '<span class="main-tab-icon">💬</span> Chat';
-    resetBtn.disabled = false;
-    document.body.classList.remove('is-generating');
+  const isGenerating = state.generating;
+  
+  // Only do destructive innerHTML/body classList changes when generating state actually changes
+  if (state._lastIsGenerating !== isGenerating) {
+    if (isGenerating) {
+      sendBtn.classList.add('inject-mode');
+      sendBtn.title = 'Inject message into active agent (Enter)';
+      if (mainTabChat) mainTabChat.innerHTML = '<span class="sub-tab-pulse"></span> Chat';
+      resetBtn.disabled = true;
+      document.body.classList.add('is-generating');
+    } else {
+      sendBtn.classList.remove('inject-mode');
+      sendBtn.title = 'Send (Enter)';
+      if (mainTabChat) mainTabChat.innerHTML = '<span class="main-tab-icon">💬</span> Chat';
+      resetBtn.disabled = false;
+      document.body.classList.remove('is-generating');
+    }
+    state._lastIsGenerating = isGenerating;
   }
   stopBtn.style.opacity = state.generating ? '1' : '0.4';
   sendBtn.disabled = !state.connected;
@@ -2425,6 +2845,12 @@ function resetGenStats() {
     // Reset throttle timestamps at generation start for fresh timing windows
     lastGenStatsUpdate: 0,
     lastSubAgentRender: 0,
+    lastChatRender: 0,
+    lastContextBarUpdate: 0,
+    lastUiUpdate: 0,
+    lastControlsUpdate: 0,
+    lastTelemetryUpdate: 0,
+    lastChatContentKey: '',
   };
   if (statusTokensSec) statusTokensSec.textContent = '— t/s';
   if (statusGenInfo) statusGenInfo.textContent = 'Starting...';
@@ -2763,8 +3189,10 @@ function createPauseButton(btn, instanceSource) {
         const resp = await fetch(`/api/halt/${encodeURIComponent(sessionName)}`, { method: 'POST' });
         if (resp.ok) { btn.textContent = '▶️ Resume'; state.instance_halted = true; }
       } else {
-        const resp = await fetch(`/api/resume/${encodeURIComponent(sessionName)}`, { method: 'POST' });
-        if (resp.ok) { btn.textContent = '⏸ Pause'; state.instance_halted = false; }
+        // Send a WebSocket resume message so the server clears the halt flag AND restarts generation
+        send({ type: 'resume', instance_name: sessionName });
+        btn.textContent = '⏸ Pause';
+        state.instance_halted = false;
       }
     } catch(e) { console.error('Pause/Resume failed:', e); }
   });
@@ -2837,7 +3265,8 @@ function getGenerateCfg() {
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
   if ($('#setting-max-rollbacks')) cfg.max_auto_rollbacks = parseInt($('#setting-max-rollbacks').value);
   if ($('#setting-tool-result-max-chars')) cfg.tool_result_max_chars = parseInt($('#setting-tool-result-max-chars').value) || 10000;
-  if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value);
+  if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value) || -1;
+  if ($('#setting-grep-spillover')) cfg.grep_spillover = $('#setting-grep-spillover').checked;
   if ($('#setting-shell-char-limit')) cfg.shell_char_limit = parseInt($('#setting-shell-char-limit').value);
   if ($('#setting-code-char-limit')) cfg.code_char_limit = parseInt($('#setting-code-char-limit').value);
 

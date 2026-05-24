@@ -19,17 +19,17 @@ class AgentInstanceLogger:
     """Handles persistent logging for an agent instance."""
     
     def __init__(self, agent_class: str, instance_name: str, log_dir: str, base_metadata: Optional[Dict] = None):
-        self.agent_class = agent_class
+        self.agent_class = (agent_class or '').strip().lower()  # Normalize for case-insensitive tracking
         self.instance_name = instance_name
         self.start_time = datetime.datetime.now()
         
         timestamp = self.start_time.strftime("%Y%m%d_%H%M%S")
-        filename = f"{agent_class}_{instance_name}_{timestamp}.jsonl"
+        filename = f"{self.agent_class}_{instance_name}_{timestamp}.jsonl"
         self.log_path = os.path.join(log_dir, filename)
         
         self.data = {
             "metadata": {
-                "agent_class": agent_class,
+                "agent_class": self.agent_class,  # Already normalized to lowercase
                 "instance_name": instance_name,
                 "start_timestamp": self.start_time.isoformat(),
                 "last_update": self.start_time.isoformat(),
@@ -51,20 +51,34 @@ class AgentInstanceLogger:
         self._initial_save()
 
     def _format_message(self, message: Union[Dict, Any]) -> Dict:
-        """Ensure message is a dict and has a timestamp. Mutates input to preserve timestamp."""
+        """Ensure message is a dict and has a timestamp. Mutates input to preserve timestamp.
+        
+        CRITICAL DESIGN NOTE — Timestamps as Identity Markers:
+        The timestamp field is NOT just metadata; it serves as the PRIMARY KEY for message
+        identity in the deduplication logic of update_history(). Two messages with the same
+        timestamp are considered the "same slot" and will be treated as an update rather than
+        a duplicate. DO NOT remove or randomize timestamps — doing so would break dedup and
+        cause message duplication on every sync cycle.
+        """
         if hasattr(message, 'model_dump'):  # For Pydantic-based Message
-            # If it already has a timestamp, just use it
-            if getattr(message, 'timestamp', None):
-                return message.model_dump()
-            
             msg_dict = message.model_dump()
-            # Generate and try to inject back into object so future calls are stable
-            ts = datetime.datetime.now().isoformat()
-            try:
-                message.timestamp = ts
-            except Exception:
-                pass
-            msg_dict['timestamp'] = ts
+            
+            # If it already has a timestamp (from a prior call to this method), reuse it.
+            # CRITICAL: We must include the timestamp in the dict even though 'timestamp' is NOT
+            # a Pydantic field of Message — model_dump() silently drops it, which causes
+            # update_history matching to fail and duplicate entries to be logged.
+            ts = getattr(message, 'timestamp', None)
+            if ts:
+                msg_dict['timestamp'] = ts
+            else:
+                # Generate timestamp and inject back into object so future calls are stable
+                ts = datetime.datetime.now().isoformat()
+                try:
+                    message.timestamp = ts
+                except Exception:
+                    pass
+                msg_dict['timestamp'] = ts
+            
             return msg_dict
 
         if isinstance(message, dict):
@@ -175,6 +189,16 @@ class AgentInstanceLogger:
         Additive sync for persistent logs (JSONL). 
         Only appends new messages found in `history` that aren't in the log yet.
         Handles context compression by identifying the most advanced sync point.
+        
+        CRITICAL DESIGN NOTE — Timestamp Identity Matching:
+        Deduplication uses timestamps as the primary matching key. When a message from
+        `history` has the same timestamp as the next expected entry in self.data["history"],
+        it's treated as an UPDATE to that slot (content may differ) rather than a new message.
+        This is intentional: timestamps are assigned at message creation time and persist
+        across pool mutations. DO NOT change this matching logic without ensuring the logger
+        sync after compression events also uses timestamp-based identity.
+        Note: insert_compression_marker() also depends on stable timestamps for correct
+        positional insertion of summary markers into the log.
         """
         self.update_timestamp()
         old_history = self.data["history"]

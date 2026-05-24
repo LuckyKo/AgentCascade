@@ -27,6 +27,7 @@ WebSocket protocol (all JSON):
 
 import asyncio
 import copy
+import glob
 import json
 import os
 import re
@@ -48,8 +49,14 @@ from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_MAX_INPUT_TOKENS
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX
-from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_BASELINE_TEMPLATE, COMPRESSION_MARKER
+from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_MARKER
 from agent_cascade.llm.base import _truncate_input_messages_roughly
+
+# Timeout constants for security advisor checks
+from operation_manager import SECURITY_ADVISOR_TIMEOUT_SECONDS, SECURITY_ADVISOR_WARNING_SECONDS
+
+# Unified architecture feature flags (module-level to avoid repeated local imports)
+from config.unified import USE_UNIFIED_STATE, USE_UNIFIED_ARCHITECTURE
 
 from agent_cascade.utils.thinking_block import (
     _THINK_BLOCK_RE, _THINK_BLOCK_UNCLOSED_RE, _THINK_BLOCK_BRACKET_RE,
@@ -455,6 +462,77 @@ def create_app(agents, agent_pool, config=None):
             logger.error(f"Failed to load session history: {e}")
         return [], ""
 
+    def get_session_history(session, instance_name='root', use_unified=None):
+        """Dual-read wrapper for session history — supports both legacy and unified state stores.
+        
+        Returns messages from either session['history'] (legacy) or agent_pool.sub_agent_state
+        (unified), depending on the feature flag.
+        
+        Args:
+            session: Flask session dict
+            instance_name: Agent instance name ('root' for main chat, or agent name for sub-agents)
+            use_unified: Override the global flag for this call. None = use global flag.
+        
+        Returns:
+            list of message objects
+        """
+        # Priority check: explicit argument > global flag > default (False)
+        effective_unified = use_unified if use_unified is not None else USE_UNIFIED_STATE
+        
+        if effective_unified:
+            # Read from unified store
+            if instance_name == 'root':
+                # Root agent history lives in sub_agent_state['root']['messages']
+                store = agent_pool.sub_agent_state.get('root', {}) if agent_pool else {}
+                msgs = store.get('messages', [])
+                # Edge case: unified store not populated yet, fall back to legacy for root only
+                if not msgs and session.get('history'):
+                    logger.debug(f"Unified store empty for root, falling back to legacy session['history']")
+                    msgs = list(session['history'])
+                return msgs
+            else:
+                # Sub-agent history from unified store
+                state = agent_pool.sub_agent_state.get(instance_name, {}) if agent_pool else {}
+                return state.get('messages', [])
+        else:
+            # Legacy read path
+            if instance_name == 'root':
+                return list(session.get('history', []))
+            else:
+                # Sub-agent history from legacy store (instance_conversations)
+                return agent_pool.instance_conversations.get(instance_name, []) if agent_pool else []
+
+    def get_agent_state(instance_name):
+        """Get state for any agent instance, including root.
+        
+        Replaces the dual-track where root used session['history'] and sub-agents
+        used agent_pool.get_sub_agent_state(). In unified mode, both come from
+        agent_pool.sub_agent_state.
+        
+        Args:
+            instance_name: Agent instance name ('root' for main chat, or agent name)
+        
+        Returns:
+            dict with 'messages', 'active', etc. or None if not found
+        """
+        if USE_UNIFIED_STATE:
+            # Unified path: all agents including root in sub_agent_state
+            if not agent_pool:
+                return None
+            state = agent_pool.sub_agent_state.get(instance_name)
+            return state.copy() if state else None
+        else:
+            # Legacy path: root is special-cased
+            if instance_name == 'root':
+                msgs = list(session.get('history', []))
+                return {
+                    'messages': msgs,
+                    'active': True,
+                    'agent_name': 'Maine (OrchestratorAgent)',
+                }
+            else:
+                return agent_pool.sub_agent_state.get(instance_name)
+
     # ── Shared session state ──────────────────────────────────────────────
     default_session_name = config.get('session_name', 'Maine')
     session: Dict[str, Any] = {
@@ -472,6 +550,9 @@ def create_app(agents, agent_pool, config=None):
         agent_pool.instance_conversations[default_session_name] = session['history']
         agent_pool.instance_summaries[default_session_name] = session['summary']
 
+    # ── Unified token cache (coexists with old _cached_hist_stats during transition) ──
+    from config.token_cache import AgentTokenCache
+    unified_token_cache = AgentTokenCache(ttl=300)
 
     # ── E2E Encryption State ─────────────────────────────────────────────
     server_private_key = x25519.X25519PrivateKey.generate()
@@ -539,6 +620,8 @@ def create_app(agents, agent_pool, config=None):
                 # Incremental token counting for sub-agents.
                 # During streaming, sub-agent histories are mostly static — they only change
                 # when a new message arrives from that sub-agent (rare during main agent ticks).
+                # NOTE: slice_history_for_llm only appends/removes messages (never mutates in-place),
+                # so if active_count == last_active_count the cached stats are guaranteed valid.
                 cache_key = '_sa_stats_' + name
                 last_active_count = session.get(cache_key + '_count', -1)
                 
@@ -561,18 +644,22 @@ def create_app(agents, agent_pool, config=None):
                         stats = get_history_stats(active_msgs)
                     
                     session[cache_key + '_count'] = active_count
+                    session[cache_key] = stats.copy()  # FIX: Store stats so next call can use the cache
                 elif active_count < last_active_count:
                     # FIX2 (history shrank due to compression): Recompute from scratch.
                     # slice_history_for_llm may have dropped older messages after a context_summary,
                     # so the cached stats would overcount tokens if we reused them.
                     stats = get_history_stats(active_msgs)
                     session[cache_key + '_count'] = active_count
+                    session[cache_key] = stats.copy()  # FIX: Store stats so next call can use the cache
                 elif cache_key in session:
                     # Same active count AND cache exists — use cached stats (avoids tiktoken.encode per tick)
                     stats = session.get(cache_key, {'tokens': 0, 'words': 0}).copy()
                 else:
                     # First access or cache missing — compute stats to populate the cache
                     stats = get_history_stats(active_msgs)
+                    session[cache_key + '_count'] = active_count  # FIX: Also store count for next comparison
+                    session[cache_key] = stats.copy()  # FIX: Store stats so next call can use the cache
                 
                 # Dynamically extract summary from messages if missing from tracker (e.g. after restart)
                 summary = agent_pool.instance_summaries.get(name, "")
@@ -597,7 +684,8 @@ def create_app(agents, agent_pool, config=None):
                 # Optimization: During streaming, we only send the tail of the message list
                 # to avoid O(N^2) JSON traffic and parsing lag in the browser.
                 if streaming and state.get('active') and len(msgs) > 5:
-                    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-3:])]
+                    start_idx = max(0, len(msgs) - 3)
+                    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-3:], start_idx)]
                     is_partial = True
                 else:
                     serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
@@ -640,16 +728,25 @@ def create_app(agents, agent_pool, config=None):
 
     def build_state(responses=None, generating=None):
         """Build a full state snapshot for the frontend."""
-        msgs = list(session['history'])
+        if USE_UNIFIED_STATE:
+            root_state = get_agent_state('root')
+            msgs = root_state['messages'] if root_state else []
+        else:
+            msgs = list(session.get('history', []))
+
         if responses:
             msgs.extend(responses)
 
         # Calculate tokens for the main session
         orch_agent = get_agent()
         max_tokens = get_agent_max_tokens(orch_agent)
-        
+
         # Calculate tokens for the active 'working set' (after compression)
-        active_h = agent_pool.slice_history_for_llm(session['history']) if agent_pool else session['history']
+        if USE_UNIFIED_STATE and root_state:
+            raw_history = msgs  # already from unified store
+        else:
+            raw_history = session.get('history', [])
+        active_h = agent_pool.slice_history_for_llm(raw_history) if agent_pool else raw_history
         
         # When show_active_only mode is enabled, only send the active working set to the frontend
         ui_cfg = session.get('generate_cfg', {})
@@ -692,6 +789,10 @@ def create_app(agents, agent_pool, config=None):
             session['_cached_hist_stats'] = h_stats.copy()
             session['_cached_hist_stats_count'] = hist_count
         
+        # Write to unified token cache when in unified mode (mirrors the legacy _cached_hist_stats)
+        if USE_UNIFIED_STATE:
+            unified_token_cache.set('root', len(active_h), h_stats['tokens'])
+        
         r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
         
         total_tokens = h_stats['tokens'] + r_stats['tokens']
@@ -701,7 +802,9 @@ def create_app(agents, agent_pool, config=None):
 
         # Sync session summary from history if it was just compressed
         current_summary = session.get('summary', '')
-        for msg in reversed(session['history']):
+        # In unified mode, scan the unified messages; otherwise scan legacy session['history']
+        hist_to_scan = msgs if USE_UNIFIED_STATE else session['history']
+        for msg in reversed(hist_to_scan):
             content = msg.get(CONTENT, '')
             if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                 import re
@@ -793,6 +896,8 @@ def create_app(agents, agent_pool, config=None):
             # We cache the stats of ALL PREVIOUS messages, excluding the current growing one
             prev_responses = responses[:-1] if len(responses) > 1 else []
             session['_cached_r_stats'] = get_history_stats(prev_responses)
+            # Reset content length baseline — old message's length is no longer relevant
+            session['_last_resp_content_len'] = 0
         else:
             # Same messages, just growing text — use cached stats + quick estimate for the last message
             cached_r_stats = session.get('_cached_r_stats', {'tokens': 0, 'words': 0})
@@ -803,20 +908,28 @@ def create_app(agents, agent_pool, config=None):
                     content = " ".join([str(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')) for item in content])
                 else:
                     content = str(content)
-                # Simple word/token estimation (approx 4 chars per token)
-                est_words = len(content.split())
-                est_tokens = len(content) // 4
-                r_stats = {
-                    'tokens': cached_r_stats['tokens'] + est_tokens,
-                    'words': cached_r_stats['words'] + est_words
-                }
+                # FIX: Only estimate the delta (new chars since last tick) to avoid cumulative drift.
+                # Previously this added the full content length each tick on top of cached_r_stats,
+                # causing token counts to inflate by hundreds over long streaming sessions.
+                prev_len = session.get('_last_resp_content_len', 0)
+                delta_len = len(content) - prev_len
+                session['_last_resp_content_len'] = len(content)
+                if delta_len > 0:
+                    est_words = max(1, delta_len // 5)  # approx 5 chars per word
+                    est_tokens = max(1, delta_len // 4)  # approx 4 chars per token
+                    r_stats = {
+                        'tokens': cached_r_stats['tokens'] + est_tokens,
+                        'words': cached_r_stats['words'] + est_words
+                    }
+                else:
+                    r_stats = cached_r_stats.copy()
             else:
                 r_stats = cached_r_stats.copy()
 
         return {
             'history_count': history_count,
             'response_messages': response_msgs,
-            'sub_agents': sub_agents if sub_agents is not None else get_sub_agent_state(streaming=True),
+            'sub_agents': sub_agents,  # None means "no update this tick" — frontend reuses cached state
             'active_stack': get_active_stack(),
             'approvals': get_approvals(),
             'generating': True,
@@ -852,6 +965,10 @@ def create_app(agents, agent_pool, config=None):
         Runs agent.run() in a background thread.
         Pushes state updates onto the async send_queue.
         """
+        # Set event loop reference for dismissal callback to use
+        if agent_pool:
+            agent_pool._ws_loop = loop
+        
         try:
             with session_lock:
                 session['generating'] = True
@@ -897,12 +1014,13 @@ def create_app(agents, agent_pool, config=None):
             NON_LLM_KEYS = (
                 'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
                 'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-                'tool_result_max_chars', 'grep_char_limit', 'shell_char_limit', 'code_char_limit',
+                'tool_result_max_chars', 'grep_char_limit', 'grep_spillover', 'shell_char_limit', 'code_char_limit',
                 'disabled_tools'
             )
 
             if work_access_folders is not None and agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-                agent_pool.operation_manager.set_extra_work_folders(work_access_folders)
+                # Legacy format: work_access_folders is treated as RW folders (no RO)
+                agent_pool.operation_manager.set_extra_work_folders([], work_access_folders)
 
             has_llm = hasattr(agent_runner, 'llm') and agent_runner.llm
             old_cfg = None
@@ -1034,18 +1152,44 @@ def create_app(agents, agent_pool, config=None):
                         has_tool_event = False
                         if resp_len > 0:
                             last_m = responses[-1]
-                            if isinstance(last_m, dict):
-                                has_tool_event = last_m.get('function_call') or last_m.get(ROLE) == FUNCTION
-                            else:
-                                has_tool_event = getattr(last_m, 'function_call', None) or getattr(last_m, 'role', '') == FUNCTION
+                            has_tool_event = _get_msg_func_call(last_m) or _get_msg_role(last_m) == FUNCTION
 
                         if now - last_send > 0.15 or stack_changed or len_changed or has_tool_event:
                             session['_last_resp_len'] = resp_len
                             
-                            # Force sub-agent cache update if stack changed, tool event occurred, or any sub-agent is active
+                            # Sub-agent state update strategy:
+                            # - On stack changes or tool events: force a refresh immediately.
+                            # - When sub-agents are active: check if anything changed before computing state.
+                            #   Only call get_sub_agent_state when at least one agent's message count differs,
+                            #   OR the last message of an active agent has grown (streaming text).
+                            #   This avoids O(N*M) work on ticks where nothing happened.
                             any_sa_active = any(sa.get('active') for sa in agent_pool.sub_agent_state.values()) if (agent_pool and hasattr(agent_pool, 'sub_agent_state')) else False
-                            if tick_num % 5 == 0 or stack_changed or has_tool_event or any_sa_active:
-                                sub_agents_cache = get_sub_agent_state()
+                            
+                            # Quick change detection: compare current per-agent message counts + last msg sizes
+                            _sa_changed = stack_changed or has_tool_event
+                            if not _sa_changed and any_sa_active and tick_num % 2 == 0:
+                                # Check if any sub-agent's message count or last message size changed since last refresh
+                                _last_sa_counts = session.get('_last_sa_msg_counts', {})
+                                _cur_sa_counts = {}
+                                for sname, sstate in agent_pool.sub_agent_state.items():
+                                    msgs = sstate.get('messages', [])
+                                    msg_count = len(msgs)
+                                    # Also track the last active agent's last message size to detect streaming growth
+                                    is_waiting = sstate.get('is_waiting', False)
+                                    is_halted = sstate.get('is_halted', False)
+                                    has_queued = sstate.get('has_queued_messages', False)
+                                    if sstate.get('active') and msgs:
+                                        last_msg = msgs[-1]
+                                        content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
+                                        _cur_sa_counts[sname] = (msg_count, len(content), is_waiting, is_halted, has_queued)
+                                    else:
+                                        _cur_sa_counts[sname] = (msg_count, 0, is_waiting, is_halted, has_queued)
+                                if _cur_sa_counts != _last_sa_counts:
+                                    _sa_changed = True
+                                    session['_last_sa_msg_counts'] = _cur_sa_counts
+                            
+                            if _sa_changed or any_sa_active:
+                                sub_agents_cache = get_sub_agent_state(streaming=True)
                                 if agent_pool:
                                     agent_pool._last_seen_stack = current_stack
                             
@@ -1328,13 +1472,39 @@ def create_app(agents, agent_pool, config=None):
     async def startup():
         asyncio.create_task(_sender_loop())
         asyncio.create_task(_approval_loop())
+        
+        # Register dismissal callback for real-time UI tab removal when LLM calls dismiss_agent
+        if agent_pool and hasattr(agent_pool, 'on_dismissed'):
+            def _on_dismiss_callback(instance_name, log_path):
+                """Fire a state broadcast when an agent is dismissed (runs from tool thread).
+                
+                Uses agent_pool._ws_loop to access the event loop set by run_agent_thread.
+                Only triggers for LLM-initiated dismissals (during active generation cycle).
+                UI-initiated dismissals have their own direct broadcast in terminate_sub_agent handler.
+                """
+                ws_loop = getattr(agent_pool, '_ws_loop', None)
+                if ws_loop and not ws_loop.is_closed() and send_queue:
+                    try:
+                        msg = {'type': 'dismissal', 'instance_name': instance_name}
+                        asyncio.run_coroutine_threadsafe(send_queue.put(msg), ws_loop)
+                    except Exception:
+                        pass  # Never let callback errors disrupt agent execution
+            
+            agent_pool.on_dismissed(_on_dismiss_callback)
 
     async def _sender_loop():
         """Global loop: reads from send_queue → broadcasts to all clients."""
         while True:
             try:
                 data = await send_queue.get()
-                await broadcast(data)
+                # Handle dismissal signal: build full state and broadcast (real-time tab removal)
+                if data.get('type') == 'dismissal':
+                    try:
+                        await broadcast({'type': 'state', **build_state()})
+                    except Exception as e:
+                        logger.error(f"Failed to build state for dismissal broadcast: {e}")
+                else:
+                    await broadcast(data)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -1786,6 +1956,138 @@ def create_app(agents, agent_pool, config=None):
                     if agent_pool:
                         agent_pool.stopped = True
 
+                elif msg_type == 'resume':
+                    # Resume a halted instance and restart its generation from where it left off
+                    target_instance = data.get('instance_name', session['session_name'])
+                    with session_lock:
+                        is_generating = session['generating']
+                    
+                    was_halted = False
+                    if agent_pool:
+                        was_halted = agent_pool.is_halted(target_instance)
+                        agent_pool.resume_instance(target_instance)
+                        logger.info(f"Instance {target_instance} resumed by user. Was halted: {was_halted}")
+                    
+                    # For the main session: only restart generation if it was actually halted
+                    if target_instance == session['session_name']:
+                        if is_generating and was_halted:
+                            # Currently generating but was halted — signal stop first, then restart with continuation
+                            logger.info(f"Main session was still generating — signalling stop before resume.")
+                            with session_lock:
+                                session['stop_requested'] = True
+                            agent_pool.stopped = True
+                            # Brief delay to allow old thread to observe the stop signal
+                            await asyncio.sleep(0.1)
+                        
+                        if was_halted:
+                            # Was halted (regardless of generating state — we already handled the generating case above)
+                            # Inject continuation and start fresh generation
+                            cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
+                            parsed_content = _parse_multimodal_content(cont_msg)
+                            with session_lock:
+                                session['history'].append({'role': USER, 'content': parsed_content})
+                            _save_session_history()
+                            
+                            # Start agent generation
+                            with session_lock:
+                                session['stop_requested'] = False
+                            if agent_pool:
+                                agent_pool.stopped = False
+                                agent_pool.instance_conversations[session['session_name']] = session['history']
+                                
+                                # ── Fix 3: Restore sub-agent pools from JSONL logs if corrupted ──
+                                # After a failed forced compression cycle, sub-agent pools may be empty/corrupted.
+                                # Read directly from log files on disk to recover.
+                                try:
+                                    # Import validate_message_pool locally (defined in agent_orchestrator.py)
+                                    from agent_orchestrator import validate_message_pool
+                                    
+                                    for sa_name in list(agent_pool.instance_classes.keys()):
+                                        if sa_name == session['session_name']:
+                                            continue  # Already synced above
+                                        
+                                        try:
+                                            agent_class = agent_pool.instance_classes.get(sa_name, '')
+                                            
+                                            # Check if current pool data is valid before restoring
+                                            current_pool_data = agent_pool.instance_conversations.get(sa_name, [])
+                                            if validate_message_pool(current_pool_data, sa_name):
+                                                continue  # Pool is fine, no need to restore
+                                            
+                                            # Find the actual log file via existing logger or glob
+                                            recov = []
+                                            logger_inst = agent_pool.instance_loggers.get(sa_name)
+                                            
+                                            if logger_inst and hasattr(logger_inst, 'log_path') and logger_inst.log_path:
+                                                actual_log_path = logger_inst.log_path
+                                            else:
+                                                # Search for the most recent log file matching this sub-agent
+                                                if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
+                                                    log_dir = agent_pool.operation_manager.base_dir / 'logs'
+                                                else:
+                                                    log_dir = Path(DEFAULT_WORKSPACE) / 'logs'
+                                                pattern = f"{agent_class}_{sa_name}_*.jsonl"
+                                                matches = sorted(glob.glob(str(log_dir / pattern)), reverse=True)
+                                                actual_log_path = matches[0] if matches else None
+                                            
+                                            # Read messages from log file
+                                            if actual_log_path and os.path.exists(actual_log_path):
+                                                with open(actual_log_path, 'r', encoding='utf-8') as f:
+                                                    for line in f:
+                                                        line = line.strip()
+                                                        if not line:
+                                                            continue
+                                                        try:
+                                                            item = json.loads(line)
+                                                            if "metadata" not in item:  # Skip metadata lines
+                                                                recov.append(item)
+                                                        except json.JSONDecodeError:
+                                                            continue
+                                            
+                                            # Only overwrite pool if recovered data is valid
+                                            if recov and validate_message_pool(recov, sa_name):
+                                                logger.info(
+                                                    f"Restoring sub-agent {sa_name} pool from log during resume "
+                                                    f"({len(recov)} messages)"
+                                                )
+                                                agent_pool.instance_conversations[sa_name] = copy.deepcopy(recov)
+                                            else:
+                                                logger.warning(
+                                                    f"Could not restore sub-agent {sa_name} pool — "
+                                                    f"no valid recovery data found in logs"
+                                                )
+                                        except Exception as _e:
+                                            # Single agent failure shouldn't block resume for others
+                                            logger.warning(f"Failed to restore sub-agent {sa_name} pool: {_e}")
+                                except ImportError:
+                                    logger.warning("validate_message_pool not available — skipping sub-agent pool restoration")
+                                # ── End Fix 3 ──
+                            
+                            session['generation_id'] += 1
+                            gen_id = session['generation_id']
+                            agent_runner = get_agent()
+                            history_copy = copy.deepcopy(session['history'])
+                            loop = asyncio.get_event_loop()
+
+                            thread = threading.Thread(
+                                target=run_agent_thread,
+                                args=(history_copy, agent_runner, gen_id, loop),
+                                daemon=True,
+                            )
+                            thread.start()
+
+                            await broadcast({'type': 'state', **build_state(generating=True)})
+                        elif not is_generating:
+                            # Not halted and not generating — just update UI state (no-op from user's perspective)
+                            await broadcast({'type': 'state', **build_state()})
+                    
+                    # For sub-agents: inject a continuation message into their queue so when 
+                    # the orchestrator next calls them, they continue from where they left off
+                    elif target_instance != session['session_name'] and agent_pool and was_halted:
+                        cont_msg = f"[SYSTEM]: Agent {target_instance} was paused. Please continue from where you left off."
+                        agent_pool.enqueue_message(target_instance, cont_msg)
+                        logger.info(f"Injected continuation message into sub-agent {target_instance}'s queue.")
+
                 elif msg_type == 'terminate_sub_agent':
                     instance_name = data.get('instance_name')
                     if instance_name and agent_pool:
@@ -1971,8 +2273,20 @@ def create_app(agents, agent_pool, config=None):
                         pending = agent_pool.operation_manager.list_pending_approvals()
                         ap = next((a for a in pending if a['request_id'] == rid), None)
                         if ap:
+                            if not hasattr(app, 'active_security_checks_lock'):
+                                app.active_security_checks_lock = threading.Lock()
+                            if not hasattr(app, 'active_security_checks'):
+                                app.active_security_checks = set()
+                                
+                            with app.active_security_checks_lock:
+                                if rid in app.active_security_checks:
+                                    logger.warning(f"Security check already active for request {rid}, ignoring duplicate.")
+                                    continue
+                                app.active_security_checks.add(rid)
+
                             loop = asyncio.get_running_loop()
                             def _security_check():
+                                sec_state_key = None  # Defined early so finally can reference it directly (Fix #4)
                                 try:
                                     import platform
                                     import json
@@ -2021,7 +2335,7 @@ def create_app(agents, agent_pool, config=None):
                                         NON_LLM_KEYS = (
                                             'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
                                             'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-                                            'read_file_limit', 'grep_char_limit', 'shell_char_limit', 'code_char_limit',
+                                            'read_file_limit', 'grep_char_limit', 'grep_spillover', 'shell_char_limit', 'code_char_limit',
                                             'disabled_tools',
                                             # Exclude endpoint-identifying keys to let the agent use its own assigned API Router config
                                             'model', 'model_server', 'api_base', 'base_url', 'api_key', 'model_type'
@@ -2031,18 +2345,61 @@ def create_app(agents, agent_pool, config=None):
                                         
                                         final_msgs = []
                                         sec_first_broadcast = True
-                                        for partial in sec_agent.run(history, agent_instance_name='security_advisor', **llm_safe_cfg):
-                                            final_msgs = partial
-                                            # Update sub_agent_state with current message history during streaming
-                                            agent_pool.sub_agent_state[sec_state_key]['messages'] = list(history) + list(final_msgs) if isinstance(final_msgs, list) else [history[0]] + list(final_msgs)
-                                            agent_pool.instance_conversations[sec_state_key] = list(agent_pool.sub_agent_state[sec_state_key]['messages'])
-                                            # Only broadcast at start and end of security check (not every token)
-                                            if sec_first_broadcast:
-                                                asyncio.run_coroutine_threadsafe(
-                                                    send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
-                                                    loop
+                                        
+                                        # ── Timeout protection: prevent AFK rejection cascades ──
+                                        sec_start_time = time.monotonic()
+                                        sec_timeout_reached = False
+                                        sec_elapsed_at_timeout = None  # Fix #5: store elapsed at the moment of timeout
+                    
+                                        # Fix #1: Extract generator to close it on timeout (prevents resource leak)
+                                        run_gen = sec_agent.run(history, agent_instance_name='security_advisor', **llm_safe_cfg)
+                                        
+                                        # Schedule warning AFTER generator creation so timer is only created if gen succeeded
+                                        def _sec_warning_injector():
+                                            try:
+                                                agent_pool.enqueue_message(
+                                                    'security_advisor',
+                                                    "[SYSTEM WARNING] Your analysis is taking longer than expected. "
+                                                    "Please provide a verdict as soon as possible — the approval request may timeout soon."
                                                 )
-                                                sec_first_broadcast = False
+                                            except Exception:
+                                                pass  # Best-effort warning, don't fail the security check
+                                        
+                                        sec_warning_timer = threading.Timer(SECURITY_ADVISOR_WARNING_SECONDS, _sec_warning_injector)
+                                        sec_warning_timer.daemon = True
+                                        sec_warning_timer.start()
+                                        try:
+                                            for partial in run_gen:
+                                                # ── Check if we've exceeded the timeout ──
+                                                elapsed = time.monotonic() - sec_start_time
+                                                if elapsed > SECURITY_ADVISOR_TIMEOUT_SECONDS:
+                                                    sec_timeout_reached = True
+                                                    sec_elapsed_at_timeout = elapsed  # Fix #5: capture exact elapsed at break point
+                                                    logger.warning(
+                                                        f"[SECURITY] Timeout reached after {elapsed:.0f}s for request {rid}. "
+                                                        f"Terminating security advisor to prevent AFK rejection."
+                                                    )
+                                                    break
+                                                
+                                                final_msgs = partial
+                                                # Update sub_agent_state with current message history during streaming
+                                                agent_pool.sub_agent_state[sec_state_key]['messages'] = list(history) + list(final_msgs) if isinstance(final_msgs, list) else [history[0]] + list(final_msgs)
+                                                agent_pool.instance_conversations[sec_state_key] = list(agent_pool.sub_agent_state[sec_state_key]['messages'])
+                                                # Only broadcast at start and end of security check (not every token)
+                                                if sec_first_broadcast:
+                                                    asyncio.run_coroutine_threadsafe(
+                                                        send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
+                                                        loop
+                                                    )
+                                                    sec_first_broadcast = False
+                                        finally:
+                                            # Cancel the warning timer if we finished before it fires
+                                            sec_warning_timer.cancel()
+                                            # Fix #1: Close the generator to abort any active LLM call / HTTP connection
+                                            try:
+                                                run_gen.close()
+                                            except Exception:
+                                                pass  # Best-effort close; don't fail security check if cleanup throws
 
                                     display_response = ""
                                     parsing_response = ""
@@ -2162,7 +2519,51 @@ def create_app(agents, agent_pool, config=None):
                                         is_yes = False
                                         is_no = False
                                     
-                                    if is_yes or is_no:
+                                    # ── Handle security advisor timeout ──
+                                    if sec_timeout_reached:
+                                        elapsed = sec_elapsed_at_timeout  # Guaranteed non-None since timeout was just hit
+                                        logger.info(f"[SECURITY] Timeout after {elapsed:.0f}s for request {rid}. Auto-rejecting to prevent AFK rejection cascade.")
+                                        
+                                        # Halt the security advisor instance to stop it cleanly.
+                                        # Note: This is best-effort — only works between turns, not during active LLM calls.
+                                        # The actual timeout enforcement happens inside the for loop via `break` + generator.close().
+                                        agent_pool.halt_instance('security_advisor')
+                                        
+                                        # Common timeout handling for BOTH modes: reject and notify UI
+                                        reject_msg = (
+                                            "SECURITY ADVISOR TIMEOUT: The security check took too long to complete. "
+                                            "This may indicate an overly complex request or insufficient justification. "
+                                            "Please resubmit the request with a clearer, more specific justification "
+                                            "to help the security advisor reach a verdict faster."
+                                        )
+                                        agent_pool.operation_manager.user_reject(rid, reject_msg)
+
+                                        # Build response text — manual mode adds extra guidance for UI display
+                                        response_text = f"[TIMEOUT] Security check exceeded {SECURITY_ADVISOR_TIMEOUT_SECONDS}s limit after {elapsed:.0f}s."
+                                        if not auto_apply:
+                                            response_text += " Please resubmit with clearer justification if needed."
+
+                                        # Notify UI about the timeout
+                                        asyncio.run_coroutine_threadsafe(
+                                            send_queue.put({
+                                                'type': 'security_response',
+                                                'request_id': rid,
+                                                'response': response_text,
+                                                'verdict': 'TIMEOUT'
+                                            }),
+                                            loop
+                                        )
+
+                                        # Broadcast updated approval list so stale card is removed from frontend after timeout rejection
+                                        asyncio.run_coroutine_threadsafe(
+                                            send_queue.put({
+                                                'type': 'approvals',
+                                                'approvals': agent_pool.operation_manager.list_pending_approvals()
+                                            }),
+                                            loop
+                                        )
+
+                                    elif is_yes or is_no:
                                         if auto_apply:
                                             if is_yes:
                                                 logger.info(f"[SECURITY] Automatic Approval for {rid} with justification: {justification[:50]}...")
@@ -2214,11 +2615,14 @@ def create_app(agents, agent_pool, config=None):
                                         )
                                 finally:
                                     # Always clean up security advisor state when done
-                                    sec_key = locals().get('sec_state_key')
-                                    if sec_key and sec_key in agent_pool.sub_agent_state:
-                                        agent_pool.sub_agent_state[sec_key]['active'] = False
-                                        if sec_key in agent_pool.active_stack:
-                                            agent_pool.active_stack.remove(sec_key)
+                                    # sec_state_key is defined at function scope (as 'security_advisor'), so direct reference is safe
+                                    if sec_state_key and sec_state_key in agent_pool.sub_agent_state:
+                                        agent_pool.sub_agent_state[sec_state_key]['active'] = False
+                                        if sec_state_key in agent_pool.active_stack:
+                                            agent_pool.active_stack.remove(sec_state_key)
+                                    if hasattr(app, 'active_security_checks') and rid:
+                                        with app.active_security_checks_lock:
+                                            app.active_security_checks.discard(rid)
                             
                             threading.Thread(target=_security_check, daemon=True).start()
 
@@ -2449,6 +2853,12 @@ if __name__ == "__main__":
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=12345, help="Port to bind to")
     parser.add_argument("--workspace", type=str, default=str(DEFAULT_WORKSPACE), help="Workspace directory")
+    parser.add_argument("--idle-timeout", type=float, default=None,
+                        help="Seconds of inactivity before auto-dismissing an idle agent (default: 300). "
+                             "Also settable via QWEN_AGENT_IDLE_TIMEOUT env var.")
+    parser.add_argument("--idle-check-interval", type=float, default=None,
+                        help="Seconds between idle-check sweeps (default: 60). "
+                             "Also settable via QWEN_AGENT_IDLE_CHECK_INTERVAL env var.")
     args = parser.parse_args()
 
     # Initialize the global agent_pool
@@ -2458,7 +2868,16 @@ if __name__ == "__main__":
         'api_key': os.getenv('QWEN_AGENT_API_KEY', 'EMPTY'),
     }
     
-    agent_pool = AgentPool(llm_cfg=initial_llm_cfg, workspace_dir=args.workspace)
+    # Resolve idle timeout settings: CLI > env var > default
+    idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
+    idle_check_interval = args.idle_check_interval if args.idle_check_interval is not None else float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
+    
+    agent_pool = AgentPool(
+        llm_cfg=initial_llm_cfg, 
+        workspace_dir=args.workspace,
+        idle_timeout_seconds=idle_timeout,
+        idle_check_interval=idle_check_interval,
+    )
     
     # Pre-load agents
     orch_agent = agent_pool.get_instance('Maine', 'Orchestrator')

@@ -242,27 +242,70 @@ class DismissAgent(BaseTool):
                                  set(self.agent_pool.instance_conversations.keys()))
             
             dismissed = []
+            # Capture log paths BEFORE clearing (clear_conversation removes the logger)
             for inst in all_instances:
                 if inst not in active_set and inst != 'Maine':
+                    # Get log path before it gets cleared
+                    log_path = None
+                    logger_inst = self.agent_pool.instance_loggers.get(inst)
+                    if logger_inst:
+                        log_path = getattr(logger_inst, 'log_path', None)
+                    elif inst in self.agent_pool.instance_conversations:
+                        from agent_cascade.log import logger
+                        logger.warning(f"Log path not found for instance '{inst}' — may affect resurrection")
+                    
                     self.agent_pool.clear_conversation(inst)
                     if hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
                         self.agent_pool.operation_manager.cleanup_backups(inst)
-                    dismissed.append(inst)
+                    dismissed.append({'agent': inst, 'log_path': log_path})
+                    
+                    # Fire real-time callback for UI tab removal
+                    if hasattr(self.agent_pool, '_fire_on_dismissed'):
+                        self.agent_pool._fire_on_dismissed(inst, log_path)
             
             if not dismissed:
-                return "No idle agents found to dismiss."
-            return f"Successfully dismissed {len(dismissed)} idle agents: {', '.join(dismissed)}"
+                return json.dumps({"status": "no_idle_agents", "message": "No idle agents found to dismiss."})
+            
+            return json.dumps({
+                "status": "dismissed_all_idle",
+                "agents": dismissed,
+                "count": len(dismissed),
+                "message": f"Successfully dismissed {len(dismissed)} idle agents: {', '.join(d['agent'] for d in dismissed)}"
+            })
 
         if not instance_name:
-            return "Error: Please provide 'instance_name' or set 'all_idle' to true."
+            return json.dumps({"status": "error", "message": "Please provide 'instance_name' or set 'all_idle' to true."})
 
         if instance_name not in self.agent_pool.instance_conversations:
-            return f"Error: Instance '{instance_name}' not found."
+            return json.dumps({
+                "status": "not_found",
+                "agent": instance_name,
+                "message": f"Instance '{instance_name}' not found."
+            })
+
+        # Capture log path BEFORE clearing (clear_conversation removes the logger)
+        log_path = None
+        logger_inst = self.agent_pool.instance_loggers.get(instance_name)
+        if logger_inst:
+            log_path = getattr(logger_inst, 'log_path', None)
+        else:
+            from agent_cascade.log import logger
+            logger.warning(f"Log path not found for instance '{instance_name}' — may affect resurrection")
 
         self.agent_pool.clear_conversation(instance_name)
         if hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
             self.agent_pool.operation_manager.cleanup_backups(instance_name)
-        return f"Agent instance '{instance_name}' dismissed — conversation context cleared and backups removed."
+        
+        # Fire real-time callback for UI tab removal (triggers WebSocket broadcast)
+        if hasattr(self.agent_pool, '_fire_on_dismissed'):
+            self.agent_pool._fire_on_dismissed(instance_name, log_path)
+
+        return json.dumps({
+            "status": "dismissed",
+            "agent": instance_name,
+            "log_path": log_path,
+            "message": f"Agent instance '{instance_name}' dismissed — conversation context cleared and backups removed."
+        })
 
 
 @register_tool('list_agents', allow_overwrite=True)

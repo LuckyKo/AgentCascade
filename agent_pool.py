@@ -8,6 +8,7 @@ context compression, and streaming state for the WebUI.
 import copy
 import json
 import os
+import time
 import datetime
 import threading
 from pathlib import Path
@@ -18,19 +19,28 @@ from agent_cascade.log import logger
 from agent_cascade.llm.schema import (
     ASSISTANT, CONTENT, FUNCTION, ROLE, SYSTEM, USER, Message,
 )
-from agent_cascade.utils.utils import extract_text_from_message
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
 from agent_logger import AgentInstanceLogger
 from telemetry import TelemetryCollector
-from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE, COMPRESSION_MARKER
+from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from api_router import APIRouter
 
 
 class AgentPool:
     """Manages a pool of specialized sub-agents."""
     
-    def __init__(self, llm_cfg: dict, agents_dir: str = 'agents', workspace_dir: Optional[str] = None):
+    def __init__(self, llm_cfg: dict, agents_dir: str = 'agents', workspace_dir: Optional[str] = None,
+                 idle_timeout_seconds: float = 300.0, idle_check_interval: float = 60.0):
+        """Initialize the AgentPool.
+
+        Args:
+            llm_cfg: LLM configuration dictionary.
+            agents_dir: Path to the agents directory.
+            workspace_dir: Path to the workspace directory.
+            idle_timeout_seconds: Seconds of inactivity before auto-dismissing an agent (default 300 = 5 min).
+            idle_check_interval: Seconds between idle-check sweeps (default 60 = 1 min).
+        """
         self.llm_cfg = llm_cfg
         self.agents_dir = Path(agents_dir)
         self.workspace_dir = Path(workspace_dir) if workspace_dir else Path(DEFAULT_WORKSPACE)
@@ -84,6 +94,9 @@ class AgentPool:
         # Key = instance_name, Value = bool (True = halted)
         self._instance_halted: Dict[str, bool] = {}
         
+        # Lock for thread-safe access to _instance_halted (used across WebSocket handler and agent threads)
+        self._halt_lock = threading.Lock()
+        
         # Track which instances were halted by forced compression specifically,
         # so resume_all_instances only clears those (not manual halts from /api/halt).
         self._compression_halted: set = set()
@@ -101,12 +114,36 @@ class AgentPool:
         self._state_lock = threading.Lock()           # Protects sub_agent_state, active_stack
         self._conversation_lock = threading.Lock()    # Protects instance_conversations writes
         
+        # ── Idle agent auto-dismissal ──────────────────────────────────────────
+        # Configurable timeout and interval for idle agent cleanup
+        self.idle_timeout_seconds = max(30.0, float(idle_timeout_seconds))  # Minimum 30s guard
+        self.idle_check_interval = max(10.0, float(idle_check_interval))
+        
+        # Per-instance last-activity timestamp (seconds since epoch via time.monotonic)
+        # Key = instance_name, Value = float (monotonic timestamp)
+        self._last_activity: Dict[str, float] = {}
+        
+        # Lock for thread-safe access to _last_activity
+        self._activity_lock = threading.Lock()
+        
+        # Background thread that periodically checks for and dismisses idle agents
+        self._idle_checker_thread: Optional[threading.Thread] = None
+        # Event used by the background thread to signal it should stop
+        self._idle_checker_stop_event = threading.Event()
+        
         # Initialize Parallel Agent Manager
         from agent_orchestrator import ParallelAgentManager
         self.parallel_manager = ParallelAgentManager(self, max_workers=llm_cfg.get('max_parallel_agents', 3))
         
+        # Callback hooks for dismissal events (used by api_server to broadcast real-time tab removal)
+        # Each callback receives: callback(instance_name: str, log_path: Optional[str])
+        self._on_dismissed_callbacks: list = []
+        
         # Auto-load all agents from the agents directory
         self._discover_agents()
+        
+        # Start background idle checker thread
+        self._start_idle_checker()
 
     # ── stopped property (Event-backed for cross-thread visibility) ───────
     @property
@@ -120,18 +157,37 @@ class AgentPool:
         else:
             self._stopped_event.clear()
 
+    # ── Dismiss callback hooks (for real-time UI tab removal) ────────────────
+    def on_dismissed(self, callback):
+        """Register a callback invoked when an agent instance is dismissed.
+        
+        Callback signature: callback(instance_name: str, log_path: Optional[str])
+        """
+        self._on_dismissed_callbacks.append(callback)
+    
+    def _fire_on_dismissed(self, instance_name: str, log_path: Optional[str] = None):
+        """Fire all registered dismissal callbacks for a dismissed agent."""
+        for cb in self._on_dismissed_callbacks:
+            try:
+                cb(instance_name, log_path)
+            except Exception as e:
+                logger.error(f"Error in on_dismissed callback for {instance_name}: {e}")
+
     # ── Per-instance halt for forced compression ──────────────────────────
     def is_halted(self, instance_name: str) -> bool:
         """Check if a specific agent instance has been halted (e.g. during forced compression)."""
-        return self._instance_halted.get(instance_name, False)
+        with self._halt_lock:
+            return self._instance_halted.get(instance_name, False)
 
     def halt_instance(self, instance_name: str):
         """Halt a specific agent instance while allowing others to continue."""
-        self._instance_halted[instance_name] = True
+        with self._halt_lock:
+            self._instance_halted[instance_name] = True
 
     def resume_instance(self, instance_name: str):
         """Resume a previously halted agent instance."""
-        self._instance_halted[instance_name] = False
+        with self._halt_lock:
+            self._instance_halted[instance_name] = False
 
     def halt_all_instances(self, except_instance: str = None, except_instances: List[str] = None):
         """Halt all active instances except the given one(s) (used before forced compression)."""
@@ -146,7 +202,7 @@ class AgentPool:
         all_instances = set(self.message_queues.keys()) | set(self.active_stack) | set(self.instance_conversations.keys())
         for inst in all_instances:
             if inst not in skip:
-                was_already_halted = self._instance_halted.get(inst, False)
+                was_already_halted = self.is_halted(inst)
                 self.halt_instance(inst)
                 # Only track instances that weren't already halted — preserves manual halts
                 if not was_already_halted:
@@ -174,7 +230,7 @@ class AgentPool:
                 if len(parts) < 3: continue
                 
                 # Handling names with underscores
-                agent_class = parts[0]
+                agent_class = parts[0].strip().lower()  # Normalize for case-insensitive lookup
                 timestamp = parts[-2] + "_" + parts[-1]
                 instance_name = "_".join(parts[1:-2])
                 
@@ -208,6 +264,10 @@ class AgentPool:
         if target not in self.message_queues:
             self.message_queues[target] = []
         self.message_queues[target].append(text)
+        
+        # Mark activity: someone is sending messages to this agent
+        if hasattr(self, '_mark_activity'):
+            self._mark_activity(target)
 
     def drain_queue(self, target: str) -> List[str]:
         """Pop and return all pending messages for a specific agent.
@@ -254,12 +314,21 @@ class AgentPool:
             self._stopped_event.set()
 
     def dismiss_instance(self, instance_name: str):
-        """Remove an instance from the pool. If it's active, it will be stopped and cleared upon completion."""
+        """Remove an instance from the pool. If it's active, it will be stopped and cleared upon completion.
+        
+        NOTE: This method is called for UI-initiated termination (terminate_sub_agent WebSocket message).
+        The UI handler already broadcasts state after calling this, so we do NOT fire the dismissal
+        callback here — that would cause a double-broadcast. Only LLM-initiated dismissals via
+        DismissAgent.call() should fire callbacks for real-time tab removal.
+        """
         if instance_name in self.active_stack:
             self.terminated_instances.add(instance_name)
             self._stopped_event.set()
         else:
             self.clear_conversation(instance_name)
+            # Clean up activity tracking to prevent memory leak (Issue #1)
+            with self._activity_lock:
+                self._last_activity.pop(instance_name, None)
 
     def capture_snapshots(self) -> Dict[str, int]:
         """Capture the current history lengths of all active sub-agent instances."""
@@ -437,8 +506,10 @@ rules:
         return agent
     
     def get_agent(self, agent_name: str) -> Optional[Assistant]:
-        """Get an agent by name."""
-        return self.agents.get(agent_name)
+        """Get an agent by name (case-insensitive)."""
+        if not agent_name:
+            return None
+        return self.agents.get(agent_name.strip().lower())
     
     def update_llm_cfg(self, new_cfg: dict):
         """Update the global LLM config and propagate it to all loaded agents."""
@@ -448,7 +519,7 @@ rules:
         EXCLUDE_KEYS = {
             'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
             'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-            'tool_result_max_chars', 'grep_char_limit', 'shell_char_limit', 'code_char_limit'
+            'tool_result_max_chars', 'grep_char_limit', 'grep_spillover', 'shell_char_limit', 'code_char_limit'
         }
         
         for agent_name, agent in self.agents.items():
@@ -517,6 +588,29 @@ rules:
             self.instance_conversations[instance_name] = []
         return self.instance_conversations[instance_name]
 
+    @staticmethod
+    def find_last_marker(history: List[Union[dict, Message]]) -> int:
+        """
+        Scan backwards through the history for a message whose content starts with
+        COMPRESSION_MARKER (USER role). Returns the index of that message, or -1 if none.
+
+        Shared helper used by slice_history_for_llm and get_compression_target_set
+        to avoid duplicating the backward-scan logic.
+
+        Args:
+            history: List of messages (dicts or Message objects).
+
+        Returns:
+            Index of the latest compression marker message, or -1 if not found.
+        """
+        for i in range(len(history) - 1, -1, -1):
+            msg = history[i]
+            role = msg.get(ROLE) if isinstance(msg, dict) else getattr(msg, ROLE, '')
+            content = msg.get(CONTENT, '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+            if role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                return i
+        return -1
+
     def slice_history_for_llm(self, history: List[Union[dict, Message]]) -> List[Union[dict, Message]]:
         """
         Extract the 'working set' from a full conversation history.
@@ -524,31 +618,49 @@ rules:
         """
         if not history:
             return []
-            
-        latest_summary_idx = -1
-        for i in range(len(history) - 1, -1, -1):
-            msg = history[i]
-            role = msg.get(ROLE) if isinstance(msg, dict) else getattr(msg, 'role', '')
-            content = msg.get(CONTENT, '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-            if role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                latest_summary_idx = i
-                break
+        
+        latest_summary_idx = self.find_last_marker(history)
                 
         if latest_summary_idx == -1:
             return history
             
         system_msg = None
-        first_role = history[0].get(ROLE) if isinstance(history[0], dict) else getattr(history[0], 'role', '')
+        first_role = history[0].get(ROLE) if isinstance(history[0], dict) else getattr(history[0], ROLE, '')
         if first_role == SYSTEM:
             system_msg = history[0]
             
         sliced = history[latest_summary_idx:]
         
         # Ensure system message is at the top
-        if system_msg and (sliced[0].get(ROLE) if isinstance(sliced[0], dict) else getattr(sliced[0], 'role', '')) != SYSTEM:
+        if system_msg and (sliced[0].get(ROLE) if isinstance(sliced[0], dict) else getattr(sliced[0], ROLE, '')) != SYSTEM:
             return [system_msg] + list(sliced)
             
         return list(sliced)
+
+    def get_compression_target_set(self, agent_name: str) -> tuple[Optional[int], List[Union[dict, Message]], int]:
+        """
+        Returns the compression target set for an agent: 
+        (active_start_idx, messages_to_compress, latest_summary_idx).
+        Shared helper used by compress_context() in core.py.
+        
+        active_start_idx: The index where the active (uncompressed) set begins.
+        messages_to_compress: The list of active messages eligible for compression.
+        latest_summary_idx: The index of the most recent compression marker (-1 if none).
+        """
+        history = self.get_conversation(agent_name)
+        if not history:
+            return None, [], -1
+        
+        # Determine start index (skip system message if present)
+        start_idx = 1 if (history[0].get(ROLE) == SYSTEM if isinstance(history[0], dict) else getattr(history[0], ROLE, '') == SYSTEM) else 0
+        
+        # Find the latest compression marker using shared helper
+        latest_summary_idx = self.find_last_marker(history)
+        
+        active_start_idx = latest_summary_idx + 1 if latest_summary_idx != -1 else start_idx
+        messages_to_compress = history[active_start_idx:]
+        
+        return active_start_idx, messages_to_compress, latest_summary_idx
 
     def clear_conversation(self, instance_name: str):
         """Clear an agent instance's conversation history."""
@@ -559,6 +671,9 @@ rules:
 
     def reset(self):
         """Full reset of all sub-agent instances and persistent data."""
+        # Stop the idle checker first to avoid race conditions during reset (Issue #5)
+        self._stop_idle_checker()
+        
         self.instance_conversations.clear()
         self.instance_classes.clear()
         self.instance_loggers.clear()
@@ -568,8 +683,174 @@ rules:
         self.terminated_instances.clear()
         self._instance_halted.clear()
         self._compression_halted.clear()
+        # Also clear activity tracking on reset
+        with self._activity_lock:
+            self._last_activity.clear()
+        
         logger.info("AgentPool reset — all instances and loggers cleared.")
+        # Restart the idle checker after reinitialization
+        self._start_idle_checker()
     
+    # ── Idle agent auto-dismissal ───────────────────────────────────────
+
+    def _mark_activity(self, instance_name: str) -> None:
+        """Record the current time as the last activity timestamp for an agent.
+        
+        Thread-safe; calls from any context (orchestrator loop, message injection, etc.)
+        are safe because we hold the _activity_lock.
+        """
+        with self._activity_lock:
+            self._last_activity[instance_name] = time.monotonic()
+    
+    def _get_idle_seconds(self, instance_name: str) -> Optional[float]:
+        """Return how many seconds an agent has been idle (None if no record)."""
+        with self._activity_lock:
+            last = self._last_activity.get(instance_name)
+        if last is None:
+            return None
+        return time.monotonic() - last
+    
+    def _is_agent_idle(self, instance_name: str) -> bool:
+        """Determine whether an agent is idle and eligible for auto-dismissal.
+        
+        An agent is considered idle when ALL of the following hold:
+        1. It is NOT in the active_stack (not currently executing).
+        2. It has conversation history or a class mapping (i.e., it exists as a sub-agent).
+        3. Its last activity was more than idle_timeout_seconds ago.
+        4. It is NOT the main orchestrator ("Maine").
+        5. It is NOT currently halted (halted agents are intentionally paused).
+        
+        Thread-safety: Reads active_stack under _state_lock and halted status under _halt_lock
+        to avoid TOCTOU races where an agent starts running between checks.
+        """
+        # Never auto-dismiss the main orchestrator
+        if instance_name == 'Maine':
+            return False
+        
+        # Must be a sub-agent with conversation history or class mapping
+        has_history = (instance_name in self.instance_conversations or 
+                       instance_name in self.instance_classes)
+        if not has_history:
+            return False
+        
+        # Must NOT be actively running — check atomically under state_lock (Issue #4)
+        with self._state_lock:
+            is_active = instance_name in self.active_stack
+        if is_active:
+            return False
+        
+        # Must NOT be halted (halted agents are intentionally paused, e.g. during compression)
+        if self.is_halted(instance_name):
+            return False
+        
+        # Must have exceeded the idle timeout threshold
+        idle_secs = self._get_idle_seconds(instance_name)
+        if idle_secs is None or idle_secs < self.idle_timeout_seconds:
+            return False
+        
+        return True
+    
+    def _start_idle_checker(self) -> None:
+        """Start the background thread that periodically checks for idle agents."""
+        # Guard against double-start: don't start a new thread if one is already alive
+        if self._idle_checker_thread is not None and self._idle_checker_thread.is_alive():
+            return  # Already running
+        self._idle_checker_stop_event.clear()
+        self._idle_checker_thread = threading.Thread(
+            target=self._idle_checker_loop,
+            name="IdleAgentChecker",
+            daemon=True,  # Daemon so it doesn't block interpreter shutdown
+        )
+        self._idle_checker_thread.start()
+        logger.info(
+            f"Idle agent checker started: timeout={self.idle_timeout_seconds:.0f}s, "
+            f"interval={self.idle_check_interval:.0f}s"
+        )
+    
+    def _stop_idle_checker(self) -> None:
+        """Signal the idle checker to stop and wait for it to exit."""
+        if self._idle_checker_thread is not None and self._idle_checker_thread.is_alive():
+            self._idle_checker_stop_event.set()
+            self._idle_checker_thread.join(timeout=self.idle_check_interval + 5.0)
+            if self._idle_checker_thread.is_alive():
+                logger.warning("Idle agent checker thread did not exit in time, forcing shutdown.")
+        self._idle_checker_thread = None
+    
+    def _idle_checker_loop(self) -> None:
+        """Background loop that periodically checks for and dismisses idle agents."""
+        while not self._idle_checker_stop_event.is_set():
+            try:
+                # Snapshot the set of known instances to avoid holding locks during check
+                with self._activity_lock:
+                    all_instances = set(self._last_activity.keys())
+                
+                dismissed_this_round = []
+                
+                for inst in all_instances:
+                    if self._idle_checker_stop_event.is_set():
+                        break
+                    
+                    try:
+                        if self._is_agent_idle(inst):
+                            self._auto_dismiss_idle_agent(inst)
+                            dismissed_this_round.append(inst)
+                    except Exception as e:
+                        # Never let a single bad instance crash the whole checker
+                        logger.error(
+                            f"Idle checker error processing '{inst}': {e}", exc_info=True
+                        )
+                
+                if dismissed_this_round:
+                    logger.info(
+                        f"[idle_checker] Auto-dismissed {len(dismissed_this_round)} idle agent(s): "
+                        f"{', '.join(dismissed_this_round)}"
+                    )
+            
+            except Exception as e:
+                # Catch-all: a crash in the loop shouldn't bring down the system
+                logger.error(f"[idle_checker] Loop error: {e}", exc_info=True)
+            
+            # Wait for next check interval (or until stop event fires)
+            self._idle_checker_stop_event.wait(timeout=self.idle_check_interval)
+    
+    def _auto_dismiss_idle_agent(self, instance_name: str) -> None:
+        """Dismiss a single idle agent and clean up its resources.
+        
+        Uses the existing clear_conversation and _fire_on_dismissed mechanism
+        so UI tabs close in real-time (leveraging the callback hooks).
+        """
+        # Capture log path BEFORE clearing (clear_conversation removes the logger)
+        log_path = None
+        logger_inst = self.instance_loggers.get(instance_name)
+        if logger_inst:
+            log_path = getattr(logger_inst, 'log_path', None)
+        
+        idle_secs = self._get_idle_seconds(instance_name) or 0.0
+        
+        logger.info(
+            f"[idle_checker] Auto-dismissing idle agent '{instance_name}' "
+            f"(idle for {idle_secs:.0f}s, threshold={self.idle_timeout_seconds:.0f}s)"
+        )
+        
+        # Clear the conversation (removes instance_conversations, instance_classes, etc.)
+        self.clear_conversation(instance_name)
+        
+        # Clean up any pending operation backups
+        if hasattr(self, 'operation_manager') and self.operation_manager:
+            self.operation_manager.cleanup_backups(instance_name)
+        
+        # Remove from activity tracking
+        with self._activity_lock:
+            self._last_activity.pop(instance_name, None)
+        
+        # Fire dismissal callbacks for real-time UI tab removal
+        if hasattr(self, '_fire_on_dismissed'):
+            self._fire_on_dismissed(instance_name, log_path)
+    
+    def stop(self):
+        """Shut down the AgentPool gracefully (including background threads)."""
+        self._stop_idle_checker()
+
     def load_session_from_log(self, log_input: str, target_instance: Optional[str] = None) -> str:
         """
         Load session history from a log entry (JSON string) or a log file path.
@@ -648,7 +929,7 @@ rules:
 
         # Determine instance and class
         instance_name = target_instance or metadata.get("instance_name") or "RecoveredSession"
-        agent_class = metadata.get("agent_class") or "Orchestrator"
+        agent_class = (metadata.get("agent_class") or "Orchestrator").strip().lower()  # Normalize for case-insensitive lookup
 
         # Filter out event markers and ensure role/content exist
         cleaned_messages = []
@@ -806,142 +1087,6 @@ rules:
             i += 1
         
         self.instance_conversations[instance_name] = messages
-    
-    def _apply_context_compression(self, agent_name: str, summary: str, fraction: float, num_to_remove: int = None, agent_obj=None):
-        """
-        Actually replace the oldest messages in an agent's history with a summary.
-        Called by OperationManager after approval.
-        """
-        history = self.get_conversation(agent_name)
-        if not history:
-            return
-            
-        # Keep the first message if it's SYSTEM
-        system_msg = None
-        start_idx = 0
-        first_role = history[0].get('role') if isinstance(history[0], dict) else getattr(history[0], 'role', '')
-        if first_role == SYSTEM:
-            system_msg = history[0]
-            start_idx = 1
-            
-        # Find latest summary to only compress the active set
-        latest_summary_idx = -1
-        for i in range(len(history) - 1, -1, -1):
-            msg = history[i]
-            content = msg.get('content', '') if isinstance(history[i], dict) else getattr(history[i], 'content', '')
-            if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                latest_summary_idx = i
-                break
-                
-        active_start_idx = latest_summary_idx + 1 if latest_summary_idx != -1 else start_idx
-        messages_to_compress = history[active_start_idx:]
-        
-        # DEBUG: verify last summary content in pool
-        _pool_last_summary_preview = ""
-        _pool_post_summary_preview = ""
-        if latest_summary_idx != -1:
-            _sm = history[latest_summary_idx]
-            _sc = _sm.get('content', '') if isinstance(_sm, dict) else getattr(_sm, 'content', '')
-            _pool_last_summary_preview = str(_sc)[:300]
-            # Also preview the message right AFTER the summary (first active message)
-            if latest_summary_idx + 1 < len(history):
-                _pm = history[latest_summary_idx + 1]
-                _pc = _pm.get('content', '') if isinstance(_pm, dict) else getattr(_pm, 'content', '')
-                _pool_post_summary_preview = str(_pc)[:300]
-        
-        from agent_cascade.utils.tokenization_qwen import count_tokens
-        
-        if num_to_remove is None:
-            # Fallback: Calculate total tokens to find the actual fraction of content to compress
-            total_tokens = 0
-            token_counts = []
-            for msg in messages_to_compress:
-                tokens = agent_obj._count_message_tokens(msg) if agent_obj and hasattr(agent_obj, '_count_message_tokens') else 0
-                if not tokens:
-                    # Fallback if agent_obj isn't provided
-                    from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
-                    if isinstance(msg, dict):
-                        role = msg.get('role', '')
-                        function_call = msg.get('function_call')
-                        if role == ASSISTANT and function_call:
-                            tokens = qwen_count(f'{function_call}')
-                        else:
-                            content = extract_text_from_message(Message(**msg), add_upload_info=True)
-                            tokens = qwen_count(content)
-                    else:
-                        if msg.role == ASSISTANT and msg.function_call:
-                            tokens = qwen_count(f'{msg.function_call}')
-                        else:
-                            content = extract_text_from_message(msg, add_upload_info=True)
-                            tokens = qwen_count(content)
-                            
-                token_counts.append(tokens)
-                total_tokens += tokens
-                
-            target_tokens = int(total_tokens * fraction)
-            
-            tokens_seen = 0
-            num_to_remove = 0
-            for count in token_counts:
-                tokens_seen += count
-                num_to_remove += 1
-                if tokens_seen >= target_tokens and num_to_remove < len(messages_to_compress) - 1:
-                    break
-                
-        # Ensure we remove at least 1 message if possible
-        num_to_remove = max(1, num_to_remove)
-        
-        # Safety clamp: don't compress more messages than exist in the active set.
-        # This can happen if compression_tools passes an inflated num_to_summarize
-        # (e.g., when there are already compressed summaries in the history).
-        num_to_remove = min(num_to_remove, len(messages_to_compress))
-        
-        # The compression summary marker itself acts as a safe starting point 
-        # for the active context, so we don't need to scan for non-FUNCTION roles.
-        # This ensures the exact fraction requested by the user is respected.
-        pass
-            
-        if num_to_remove <= 0:
-            return
-            
-        # Create the summary text
-        summary_text = COMPRESSION_BASELINE_TEMPLATE.format(
-            header=f"{int(fraction * 100)}% of history summarized",
-            summary=summary
-        )
-        
-        # New history baseline marker
-        is_dict = isinstance(system_msg, dict) if system_msg else isinstance(messages_to_compress[0], dict)
-        summary_msg = {'role': USER, 'content': str(summary_text)} if is_dict else Message(role=USER, content=str(summary_text))
-        
-        # 1. CUMULATIVE: Insert summary marker at the boundary position.
-        #    The boundary is right after the summarized messages (active_start_idx + num_to_remove).
-        #    We do NOT pop the summarized messages to provide full visibility in the UI.
-        #    The slice_history_for_llm method handles actual LLM truncation by scanning
-        #    for the COMPRESSION_MARKER.
-        insert_pos = active_start_idx + num_to_remove
-        history.insert(insert_pos, summary_msg)
-        
-        # 2. Track the active summary
-        self.instance_summaries[agent_name] = summary
-        
-        # 3. Notify the logger that a compression event happened.
-        #    Pass tail_count (number of messages AFTER the summary marker in the pool)
-        #    so the logger can compute insert_pos = len(log_history) - tail_count.
-        #    This avoids problems from pool/log divergence: the log may have extra
-        #    incrementally-logged messages that shift absolute positions, but the
-        #    number of tail messages is stable and comparable.
-        tail_count = len(messages_to_compress) - num_to_remove
-        logger.info(f"[COMPRESSION DEBUG] Agent={agent_name}, pool_summary_idx={latest_summary_idx}, active_start={active_start_idx}, active_set={len(messages_to_compress)}, num_to_remove={num_to_remove}, insert_pos={insert_pos}, tail={tail_count}")
-        logger.info(f"[COMPRESSION DEBUG] Pool summary preview: {_pool_last_summary_preview[:100]}")
-        logger.info(f"[COMPRESSION DEBUG] Pool post-summary preview: {_pool_post_summary_preview[:100]}")
-        
-        if agent_name in self.instance_loggers:
-            self.instance_loggers[agent_name].insert_compression_marker(
-                summary_msg, tail_count
-            )
-        
-        logger.info(f"Cumulative compression: Inserted summary after {num_to_remove} messages for agent '{agent_name}'. Full history preserved in memory.")
     
     def get_agent_info(self, agent_name: str) -> Optional[dict]:
         """Get info about a specific agent."""

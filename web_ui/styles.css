@@ -277,77 +277,43 @@ body {
   gap: 8px;
 }
 
-.sub-msg {
-  margin-bottom: 8px;
-}
-
-.sub-msg-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  font-weight: 600;
-  margin-bottom: 2px;
-}
-
-.sub-msg-content {
-  padding: 10px 14px;
-  background: var(--bg-tertiary);
-  border-radius: var(--radius-sm);
-  font-size: var(--font-size-base, 14px);
-  line-height: 1.6;
-  overflow-x: auto;
-  border-left: 3px solid var(--bg-elevated);
-  color: var(--text-primary);
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-}
-
-/* Unified markdown styles for both message types */
-.msg-content p,
-.sub-msg-content p {
+/* Unified markdown styles for both message types — single .msg-content selector replaces .msg-content/.sub-msg-content pairs */
+.msg-content p {
   margin: 0 0 8px;
 }
 
-.msg-content p:last-child,
-.sub-msg-content p:last-child {
+.msg-content p:last-child {
   margin-bottom: 0;
 }
 
 .msg-content ul,
-.msg-content ol,
-.sub-msg-content ul,
-.sub-msg-content ol {
+.msg-content ol {
   margin: 4px 0 8px 20px;
 }
 
-.msg-content li,
-.sub-msg-content li {
+.msg-content li {
   margin: 2px 0;
 }
 
-.msg-content strong,
-.sub-msg-content strong {
+.msg-content strong {
   font-weight: 600;
 }
 
-.msg-content em,
-.sub-msg-content em {
+.msg-content em {
   font-style: italic;
   color: var(--text-secondary);
 }
 
-.msg-content a,
-.sub-msg-content a {
+.msg-content a {
   color: var(--accent);
   text-decoration: none;
 }
 
-.msg-content a:hover,
-.sub-msg-content a:hover {
+.msg-content a:hover {
   text-decoration: underline;
 }
 
-.msg-content code,
-.sub-msg-content code {
+.msg-content code {
   background: var(--bg-primary);
   padding: 2px 5px;
   border-radius: 3px;
@@ -355,8 +321,7 @@ body {
   font-size: 12.5px;
 }
 
-.msg-content pre,
-.sub-msg-content pre {
+.msg-content pre {
   background: var(--bg-primary);
   padding: 12px;
   border-radius: var(--radius-sm);
@@ -366,46 +331,39 @@ body {
   word-break: break-word;
 }
 
-.msg-content pre code,
-.sub-msg-content pre code {
+.msg-content pre code {
   background: none;
   padding: 0;
   font-size: 12px;
   line-height: 1.5;
 }
 
-.msg-content blockquote,
-.sub-msg-content blockquote {
+.msg-content blockquote {
   border-left: 3px solid var(--accent-dim);
   padding-left: 12px;
   color: var(--text-secondary);
   margin: 8px 0;
 }
 
-.msg-content table,
-.sub-msg-content table {
+.msg-content table {
   border-collapse: collapse;
   margin: 8px 0;
   width: 100%;
 }
 
 .msg-content th,
-.sub-msg-content th,
-.msg-content td,
-.sub-msg-content td {
+.msg-content td {
   padding: 6px 12px;
   border: 1px solid var(--bg-elevated);
   text-align: left;
 }
 
-.msg-content th,
-.sub-msg-content th {
+.msg-content th {
   background: var(--bg-tertiary);
   font-weight: 600;
 }
 
-.msg-content hr,
-.sub-msg-content hr {
+.msg-content hr {
   border: none;
   border-top: 1px solid var(--bg-elevated);
   margin: 12px 0;
@@ -466,12 +424,11 @@ body {
   border-radius: 50%;
   background: var(--success);
   display: none;
-  box-shadow: 0 0 4px var(--success);
 }
 
 .main-tab.agent-active .activity-dot {
   display: block;
-  animation: activity-pulse 1s ease-in-out infinite;
+  box-shadow: 0 0 4px var(--success);
 }
 
 .main-tab:hover {
@@ -524,22 +481,17 @@ body {
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
-  animation: subtab-pulse 1.5s ease-in-out infinite;
-  box-shadow: 0 0 6px var(--accent);
+  opacity: 1;
+  transition: opacity 0.3s ease-in-out;
 }
 
-@keyframes subtab-pulse {
+.sub-tab-pulse.dimmed {
+  opacity: 0.2;
+}
 
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-
-  50% {
-    opacity: 0.5;
-    transform: scale(0.8);
-  }
+/* Move glow effect to parent to avoid GPU filter compositing on animated element */
+.main-tab-bar .main-tab:not(#mainTabChat).agent-active .tab-icon-container {
+  filter: drop-shadow(0 0 6px var(--accent));
 }
 
 /* ─── Tab Panels ──────────────────────────────────────────────────────────── */
@@ -590,6 +542,10 @@ body {
   color: var(--text-primary);
   min-height: 40px;
   z-index: 10;
+}
+
+.main-activity-bar.active,
+.sub-agent-activity-bar.active {
   box-shadow: 0 -2px 8px rgba(0,0,0,0.2);
 }
 
@@ -613,12 +569,17 @@ body {
   height: 8px;
   border-radius: 50%;
   background: var(--text-muted);
+  opacity: 1;
+  transition: opacity 0.3s ease-in-out;
 }
 
 .active .activity-dot {
   background: var(--success);
   box-shadow: 0 0 6px var(--success);
-  animation: activity-pulse 1s ease-in-out infinite;
+}
+
+.activity-dot.dimmed {
+  opacity: 0.2;
 }
 
 .activity-text {
@@ -639,13 +600,13 @@ body {
   border-radius: 4px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  animation: pulse 1.5s ease-in-out infinite;
+  opacity: 1;
+  transition: opacity 0.3s ease-in-out;
   white-space: nowrap;
 }
 
-@keyframes activity-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.6; transform: scale(0.8); }
+.activity-queued.dimmed {
+  opacity: 0.7;
 }
 
 /* ─── Right Panel ─────────────────────────────────────────────────────────── */
@@ -985,10 +946,6 @@ body {
   opacity: 1;
 }
 
-.sub-msg:hover .msg-actions {
-  opacity: 1;
-}
-
 .msg-user {
   background: var(--user-bg);
   border-color: var(--user-border);
@@ -1073,6 +1030,21 @@ body {
 /* Markdown inside messages */
 /* Existing msg-content styles are now handled by unified blocks above */
 
+/* === Tab Unification: Data-Attribute Based Selectors === */
+/* Sub-agent specific visual hierarchy via indentation/border — applied via [data-agent-type="sub"] */
+
+[data-agent-type="sub"] {
+    border-left: 2px solid var(--border-color, #333);
+    margin-left: 16px;
+}
+
+[data-agent-type="sub"] .msg-name {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 2px;
+}
+
 /* ─── Tool calls & results ────────────────────────────────────────────────── */
 
 .tool-call,
@@ -1107,6 +1079,85 @@ body {
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Markdown-rendered tool results (prose tools like web_extractor, ddg_search) 
+   — scoped to .tool-rendered-content wrapper so they don't affect code-tool <pre><code> */
+.tool-result .tool-rendered-content p {
+  margin: 0 0 8px;
+}
+.tool-result .tool-rendered-content p:last-child {
+  margin-bottom: 0;
+}
+.tool-result .tool-rendered-content ul,
+.tool-result .tool-rendered-content ol {
+  margin: 4px 0 8px 20px;
+}
+.tool-result .tool-rendered-content li {
+  margin: 2px 0;
+}
+.tool-result .tool-rendered-content strong {
+  font-weight: 600;
+}
+.tool-result .tool-rendered-content em {
+  font-style: italic;
+  color: var(--text-secondary);
+}
+.tool-result .tool-rendered-content a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.tool-result .tool-rendered-content a:hover {
+  text-decoration: underline;
+}
+.tool-result .tool-rendered-content code:not(pre code) {
+  background: var(--bg-primary);
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.tool-result .tool-rendered-content blockquote {
+  border-left: 3px solid var(--accent-dim);
+  padding-left: 12px;
+  color: var(--text-secondary);
+  margin: 8px 0;
+}
+
+/* Tables in prose tool results — match .msg-content table styling */
+.tool-result .tool-rendered-content table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+}
+.tool-result .tool-rendered-content th,
+.tool-result .tool-rendered-content td {
+  padding: 6px 12px;
+  border: 1px solid var(--bg-elevated);
+  text-align: left;
+}
+.tool-result .tool-rendered-content th {
+  background: var(--bg-tertiary);
+  font-weight: 600;
+}
+
+/* Code blocks inside prose tool results — match .msg-content pre styling.
+   Targets <pre> elements inside the .tool-rendered-content wrapper (prose tools),
+   not the direct <pre><code> children used for code-tool output (styled at line ~1102). */
+.tool-result .tool-rendered-content pre {
+  background: var(--bg-primary);
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  margin: 8px 0;
+  font-size: 12px;
+}
+
+/* Inline horizontal rules in prose tool results */
+.tool-result .tool-rendered-content hr {
+  border: none;
+  border-top: 1px solid var(--bg-elevated);
+  margin: 12px 0;
 }
 
 .truncation-hint {
@@ -1227,6 +1278,7 @@ body {
   max-height: 45vh;
   overflow-y: auto;
   z-index: 50;
+  flex-shrink: 0;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
   animation: slide-down 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -1328,6 +1380,7 @@ body {
 /* ─── Input area ──────────────────────────────────────────────────────────── */
 
 .input-area {
+  flex-shrink: 0;
   padding: 16px 24px;
   border-top: 1px solid var(--bg-elevated);
   background: var(--bg-secondary);
@@ -1454,7 +1507,12 @@ body {
   background: var(--danger-dim);
   color: var(--danger);
   border-color: var(--danger);
-  animation: pulse 1.5s ease-in-out infinite;
+  opacity: 1;
+  transition: opacity 0.3s ease-in-out;
+}
+
+.btn-stop.dimmed {
+  opacity: 0.7;
 }
 
 .btn-stop:hover {
@@ -1465,18 +1523,6 @@ body {
 .btn-sm {
   padding: 4px 10px;
   font-size: 12px;
-}
-
-@keyframes pulse {
-
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.7;
-  }
 }
 
 /* ─── Sidebar Utils ───────────────────────────────────────────────────────── */
@@ -1833,7 +1879,12 @@ body {
   background: var(--accent-glow);
   color: var(--accent);
   border-color: var(--accent);
-  animation: pulse 1.5s ease-in-out infinite;
+  opacity: 1;
+  transition: opacity 0.3s ease-in-out;
+}
+
+.send-btn.inject-mode.dimmed {
+  opacity: 0.7;
 }
 .send-btn.inject-mode:hover {
   background: var(--accent);
@@ -2250,4 +2301,12 @@ body {
   font-style: italic;
   margin-left: 90px;
   padding: 4px 0;
+}
+
+/* ─── GPU Savings: Pause infinite animations when NOT generating ──────────── */
+body:not(.is-generating) .sub-tab-pulse,
+body:not(.is-generating) .activity-dot,
+body:not(.is-generating) .activity-queued,
+body:not(.is-generating) .waiting-spin {
+  animation-play-state: paused !important;
 }

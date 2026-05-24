@@ -1,0 +1,3 @@
+Total backticks: 165
+Lines with exactly 1 backtick: 37
+WARNING: Odd number of single-backtick lines (37) - this indicates unbalanced template literals!
