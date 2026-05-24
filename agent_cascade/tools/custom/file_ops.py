@@ -40,9 +40,9 @@ class ReadFile(BaseTool):
     parameters = {
         'type': 'object',
         'properties': {
-            'absolute_path': {
+            'path': {
                 'type': 'string',
-                'description': TOOL_METADATA['read_file']['parameters']['absolute_path']
+                'description': TOOL_METADATA['read_file']['parameters']['path']
             },
             'offset': {
                 'type': 'integer',
@@ -59,7 +59,7 @@ class ReadFile(BaseTool):
                 'default': False
             }
         },
-        'required': ['absolute_path'],
+        'required': ['path'],
     }
 
     def __init__(self, cfg=None, **kwargs):
@@ -73,25 +73,23 @@ class ReadFile(BaseTool):
     def call(self, params: str, **kwargs) -> str:
         from agent_cascade.utils.utils import json_loads
         import json
-        # Mapping for backward compatibility
+        # Normalize legacy parameter names to current schema
         try:
             if isinstance(params, str):
                 p = json_loads(params)
-                if 'path' in p and 'absolute_path' not in p:
-                    p['absolute_path'] = p['path']
                 if 'start_line' in p and 'offset' not in p:
                     p['offset'] = p['start_line'] - 1
                 params = json.dumps(p)
             elif isinstance(params, dict):
-                if 'path' in params and 'absolute_path' not in params:
-                    params['absolute_path'] = params['path']
                 if 'start_line' in params and 'offset' not in params:
                     params['offset'] = params['start_line'] - 1
         except:
             pass
 
         params = self._verify_json_format_args(params)
-        path = params.get('absolute_path')
+        path = params.get('path')
+        if not path:
+            return "ERROR: Missing 'path' parameter."
         offset = params.get('offset', 0)
         start_line = params.get('start_line', offset + 1)
         limit = params.get('limit')
@@ -353,9 +351,9 @@ class WriteFile(BaseTool):
     parameters = {
         'type': 'object',
         'properties': {
-            'file_path': {
+            'path': {
                 'type': 'string',
-                'description': "Path to the file, relative to the workspace root (e.g., 'src/main.py', 'output/result.txt')."
+                'description': TOOL_METADATA['write_file']['parameters']['path']
             },
             'content': {
                 'type': 'string',
@@ -363,10 +361,10 @@ class WriteFile(BaseTool):
             },
             'justification': {
                 'type': 'string',
-                'description': 'Why you need to create this file'
+                'description': TOOL_METADATA['write_file']['parameters']['justification']
             }
         },
-        'required': ['file_path', 'content'],
+        'required': ['path', 'content'],
     }
 
     def __init__(self, cfg=None, **kwargs):
@@ -395,22 +393,9 @@ class WriteFile(BaseTool):
                     agent_name=self.agent_name,
                 )
 
-        # Mapping for backward compatibility
-        try:
-            if isinstance(params, str):
-                p = json_loads(params)
-                if 'path' in p and 'file_path' not in p:
-                    p['file_path'] = p['path']
-                params = json.dumps(p)
-            elif isinstance(params, dict):
-                if 'path' in params and 'file_path' not in params:
-                    params['file_path'] = params['path']
-        except:
-            pass
-
         # --- Standard JSON Path ---
         params_json = self._verify_json_format_args(params)
-        path = params_json.get('file_path')
+        path = params_json.get('path')
         content = params_json.get('content', '')
 
         # Only strip markdown wrappers if content looks like it was JSON-embedded
@@ -434,9 +419,9 @@ class EditFile(BaseTool):
     parameters = {
         'type': 'object',
         'properties': {
-            'file_path': {
+            'path': {
                 'type': 'string',
-                'description': "Path to the file, relative to the workspace root (e.g., 'src/main.py')."
+                'description': TOOL_METADATA['edit_file']['parameters']['path']
             },
             'old_content': {
                 'type': 'string',
@@ -457,7 +442,7 @@ class EditFile(BaseTool):
                 'description': 'Why you need to edit this file'
             }
         },
-        'required': ['file_path', 'old_content', 'new_content'],
+        'required': ['path', 'old_content', 'new_content'],
     }
 
     def __init__(self, cfg=None, **kwargs):
@@ -472,20 +457,16 @@ class EditFile(BaseTool):
         import json
         from agent_cascade.utils.utils import extract_code, json_loads
         
-        # Mapping for backward compatibility
+        # Normalize legacy parameter names to current schema
         try:
             if isinstance(params, str):
                 p = json_loads(params)
-                if 'path' in p and 'file_path' not in p:
-                    p['file_path'] = p['path']
                 if 'old_string' in p and 'old_content' not in p:
                     p['old_content'] = p['old_string']
                 if 'new_string' in p and 'new_content' not in p:
                     p['new_content'] = p['new_string']
                 params = json.dumps(p)
             elif isinstance(params, dict):
-                if 'path' in params and 'file_path' not in params:
-                    params['file_path'] = params['path']
                 if 'old_string' in params and 'old_content' not in params:
                     params['old_content'] = params['old_string']
                 if 'new_string' in params and 'new_content' not in params:
@@ -494,7 +475,7 @@ class EditFile(BaseTool):
             pass
 
         params_json = self._verify_json_format_args(params)
-        path = params_json.get('file_path')
+        path = params_json.get('path')
         old_content = params_json.get('old_content')
         new_content = params_json.get('new_content')
         match_mode = params_json.get('match_mode', 'exact')
@@ -511,7 +492,7 @@ class EditFile(BaseTool):
             new_content = extract_code(new_content)
 
         if not path:
-            return "ERROR: Missing 'file_path'."
+            return "ERROR: Missing 'path'."
         if not old_content:
             return "ERROR: Missing 'old_content'. Please provide the exact text you want to replace."
         if new_content is None:
