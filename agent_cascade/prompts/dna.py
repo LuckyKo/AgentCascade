@@ -60,7 +60,7 @@ SECURITY_ADVISOR_PROMPT = (
     "System limitations:\n"
     "- Operating System: {os_info}\n"
     "- Working directory and any file paths must be within the allowed workspaces.\n"
-    "Allowed workspaces:\n{workspace_info}\n\n"
+    "Allowed folders:\n{workspace_info}\n\n"
     "Evaluate this command against your security rules. You may use your tools to investigate further if needed.\n"
     "CRITICAL: Once you have made a decision, the final line of your output MUST be formatted as follows:\n"
     "[YES] Reason: ...\n"
@@ -101,11 +101,10 @@ TOOL_METADATA = {
             'if truncation has occurred and will provide details on how to read more '
             'of the file using the \'offset\' and \'limit\' parameters. Handles text, '
             'images (PNG, JPG, GIF, WEBP, SVG, BMP), and PDF files. For text files, '
-            'it can read specific line ranges.\n'
-            'NOTE: All paths are relative to the workspace root.'
+            'it can read specific line ranges.'
         ),
         'parameters': {
-            'absolute_path': "Path to the file, relative to the workspace root (e.g., 'src/main.py', 'data/input.csv').",
+            'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py', 'data/input.csv').",
             'offset': "Optional: For text files, the 0-based line number to start reading from. Use for paginating through large files.",
             'limit': "Optional: For text files, maximum number of lines to read. Use with 'offset' to paginate through large files.",
             'full_read': 'Set to true to read the entire file (bypasses truncation limit). Default is false.'
@@ -114,7 +113,7 @@ TOOL_METADATA = {
     'view_image': {
         'description': 'View an image file in the workspace. Returns the image for the model to see. Supports PNG, JPG, GIF, WEBP, SVG (auto-converted to PNG), and BMP formats.',
         'parameters': {
-            'path': 'Path to the image file relative to workspace directory'
+            'path': 'Path to the image file, absolute or relative to workspace directory'
         }
     },
     'write_file': {
@@ -122,11 +121,10 @@ TOOL_METADATA = {
             'Creates a new file or overwrites an existing one with full content. '
             'If the file already exists, a backup is automatically created. '
             'This is auto-approved for new files. Overwriting an existing file '
-            'requires user approval if you do not own it.\n'
-            'NOTE: All paths are relative to the workspace root.'
+            'requires user approval if you do not own it.'
         ),
         'parameters': {
-            'file_path': "Path to the file, relative to the workspace root (e.g., 'src/main.py').",
+            'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
             'content': 'The full content to write to the file.',
             'justification': 'Why you need to create or overwrite this file'
         }
@@ -138,11 +136,10 @@ TOOL_METADATA = {
             'as it is safer and preserves the rest of the content. '
             'Requires user approval if you do not own the file. '
             'Always read the file content before attempting an edit.\n'
-            'Include at least 3 lines of context matching whitespace and indentation precisely.\n'
-            'NOTE: All paths are relative to the workspace root.'
+            'Include at least 3 lines of context matching whitespace and indentation precisely.'
         ),
         'parameters': {
-            'file_path': "Path to the file, relative to the workspace root.",
+            'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
             'old_content': 'The EXACT literal text to replace. Include at least 3 lines of context with matching whitespace and indentation.',
             'new_content': 'The exact literal text to replace old_content with.',
             'match_mode': "Optional: Match mode for old_content. Can be 'exact' (default) or 'heuristic'. Heuristic mode is useful when matching tricky bits of code with subtle whitespace or line ending differences.",
@@ -151,11 +148,10 @@ TOOL_METADATA = {
     },
     'list_dir': {
         'description': (
-            'Lists the names of files and subdirectories directly within a specified directory path.\n'
-            'NOTE: All paths are relative to the workspace root. Use "." for the workspace root itself. Use absolute paths for directories in the aditional work folders.'
+            'Lists the names of files and subdirectories directly within a specified directory path.'
         ),
         'parameters': {
-            'path': "Path to the directory, relative to the workspace root (e.g., '.', 'src', 'data/images')"
+            'path': "Path to the directory, absolute or relative to the workspace root (e.g., '.', 'src', 'data/images')"
         }
     },
     'grep': {
@@ -170,7 +166,7 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'pattern': 'Text or regex pattern to search for (Python regex syntax)',
-            'path': 'Directory to search in, relative to workspace root (default: ".")',
+            'path': 'Directory to search in, absolute or relative to workspace root (default: ".")',
             'include': 'File glob pattern to include (e.g., "*.py", "*.md"). Default: "*"',
             'exclude': 'File glob pattern to exclude (e.g., "*_test.py", "docs/*"). Default: ""',
             'ignore_vcs': 'When True (default), skip .git/ and other VCS/build directories. Set False to search everything.',
@@ -181,42 +177,39 @@ TOOL_METADATA = {
     'delete_file': {
         'description': (
             'Delete a file. Requires user approval before deletion for any files not '
-            'owned by the current agent. Deleting files you created in this session is auto-approved.\n'
-            'NOTE: All paths are relative to the workspace root.'
+            'owned by the current agent. Deleting files you created in this session is auto-approved.'
         ),
         'parameters': {
-            'path': "Path to the file, relative to the workspace root (e.g., 'temp/scratch.py')"
+            'path': "Path to the file, absolute or relative to the workspace root (e.g., 'temp/scratch.py')"
         }
     },
     'copy_file': {
         'description': (
             'Copy a file or directory to a new location. This is auto-approved if the destination is new. '
-            'You become the owner of the copied file, allowing you to edit it freely without user approval.\n'
-            'NOTE: All paths are relative to the workspace root.'
+            'You become the owner of the copied file, allowing you to edit it freely without user approval.'
         ),
         'parameters': {
-            'source': "Path to the source file/directory, relative to workspace root (e.g., 'src/old.py')",
-            'destination': "Path to the destination, relative to workspace root (e.g., 'src/new.py')"
+            'source': "Path to the source file/directory, absolute or relative to workspace root (e.g., 'src/old.py')",
+            'destination': "Path to the destination, absolute or relative to workspace root (e.g., 'src/new.py')"
         }
     },
     'move_file': {
         'description': (
             'Move a file or directory to a new location. Requires user approval for any files not owned '
-            'by the current agent. Moving files you created in this session is auto-approved.\n'
-            'NOTE: All paths are relative to the workspace root.'
+            'by the current agent. Moving files you created in this session is auto-approved.'
         ),
         'parameters': {
-            'source': "Path to the source file/directory, relative to workspace root",
-            'destination': "Path to the destination, relative to workspace root"
+            'source': "Path to the source file/directory, absolute or relative to workspace root",
+            'destination': "Path to the destination, absolute or relative to workspace root"
         }
     },
     'code_interpreter': {
         'description': (
             'Python code sandbox (Docker-based). The workspace directory is mounted into the container. '
-            'PATH MAPPING: Files that host tools (read_file, write_file, etc.) access as '
-            '"foo/bar.py" are available inside this container at "/workspace/foo/bar.py". '
-            'The container working directory is /workspace, so you can also just use '
-            'relative paths like "foo/bar.py" in your code. '
+            'PATH MAPPING: Any path used with file tools (read_file, write_file, etc.) outside this tool '
+            'maps to "/workspace/<path>" inside the container. For example, "src/main.py" becomes '
+            '"/workspace/src/main.py". The container working directory is /workspace, so relative paths '
+            '"src/main.py" also work directly in your code. Use system_info to find exact folder mapping. '
             'You can use write_file to create .py files and then import them here. '
             'To access services on the host machine (like local APIs), use "host.docker.internal" instead of "localhost".'
         ),
@@ -241,7 +234,7 @@ TOOL_METADATA = {
         'parameters': {
             'command': 'The exact shell command to execute.',
             'justification': 'Why you need to execute this command.',
-            'cwd': 'Optional working directory, relative to workspace root.'
+            'cwd': 'Optional working directory, absolute or relative to workspace root.'
         }
     },
     'system_info': {
@@ -261,7 +254,7 @@ TOOL_METADATA = {
             'to prevent context overflow while retaining the beginning and end of the message.'
         ),
         'parameters': {
-            'log_file': 'The path to the log file (relative to workspace root, e.g., "logs/orchestrator_main.jsonl").',
+            'log_file': 'The path to the log file, absolute or relative to workspace root (e.g., "logs/orchestrator_main.jsonl").',
             'max_chars_per_message': 'Maximum characters to keep for each message content. Defaults to 1000.',
             'last_n_messages': 'Only read the last N messages. Can be used instead of start_index/nr_of_entries.',
             'start_index': 'The starting index of the log entries to read (0-indexed).',
@@ -358,7 +351,8 @@ TOOL_METADATA = {
             'fraction': 'The fraction of history to summarize (e.g. 0.5 for 50%). Max 1.0.',
             'mode': "Compression mode: 'auto' (default) or 'manual'.",
             'justification': 'Why compression is needed now.',
-            'summary_text': 'Your own summary of the conversation history. Required when mode=manual.'
+            'summary_text': 'Your own summary of the conversation history. Required when mode=manual.',
+            'force': 'Bypass validation guards (e.g., minimum message count). Used for critical threshold compression.'
         }
     },
     'calculate': {
@@ -378,7 +372,7 @@ TOOL_METADATA = {
             'Use this for an overview of large files before performing targeted reads.'
         ),
         'parameters': {
-            'path': 'Path to the file to map (relative to workspace root).',
+            'path': 'Path to the file to map, absolute or relative to workspace root.',
             'force_as': 'Optional. Force parsing as a specific language (e.g., "python", "javascript", "cpp", "java").'
         }
     }

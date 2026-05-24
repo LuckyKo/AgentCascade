@@ -677,7 +677,7 @@ class OrchestratorAgent(Assistant):
         # For grep, operation_manager handles spillover writes (it knows char_limit and writes before truncating)
         is_read_file = tool_name == 'read_file'
         # is_grep already set above in Wild Read Detection section
-        file_path = (tool_args or {}).get('absolute_path', 'unknown') if is_read_file else None
+        file_path = (tool_args or {}).get('path', 'unknown') if is_read_file else None
         
         spill_rel = None  # Defensive init — only set inside the spillover block below
         
@@ -2231,6 +2231,10 @@ class OrchestratorAgent(Assistant):
                         self.agent_pool.active_stack.pop(i)
                         removed = True
                         break
+            
+            # Mark activity on completion so agents aren't auto-dismissed right after long runs (Issue #3)
+            if hasattr(self.agent_pool, '_mark_activity'):
+                self.agent_pool._mark_activity(instance_name)
             
             # Mark activity on completion so agents aren't auto-dismissed right after long runs (Issue #3)
             if hasattr(self.agent_pool, '_mark_activity'):

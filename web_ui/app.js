@@ -1003,7 +1003,7 @@ function handleServerMessage(data) {
         state.genStats.lastChatRender = now;
       }
 
-      // Throttle control updates to ~1Hz during streaming; always update when generating state changes
+// Throttle control updates to ~1Hz during streaming; always update when generating state changes
       const wasGenerating = state.generating;
       if (wasGenerating !== state.generating || now - state.genStats.lastControlsUpdate > 1000) {
         updateControls();
@@ -1199,7 +1199,7 @@ function renderMessages() {
     return;
   }
 
-  // Skip rendering during tool execution if only function_call arguments grew and no visible text is streaming
+// Skip rendering during tool execution if only function_call arguments grew and no visible text is streaming
   const isToolExecuting = lastMsg && lastMsg.function_call && !lastMsg.content && !lastMsg.reasoning_content;
   if (isToolExecuting && currentCount === lastRenderedCount) {
     return; // Tool arguments streaming but no visible content to update
@@ -1223,7 +1223,7 @@ function renderMessages() {
 
   // Append new messages — only create bubbles when the previous message has content (done streaming)
   if (currentCount > lastRenderedCount) {
-    const readyMsgs = [];
+const readyMsgs = [];
     const readyIndexMap = [];
     for (let i = lastRenderedCount; i < currentCount; i++) {
       const msg = msgs[i];
@@ -1606,7 +1606,7 @@ function createMessageEl(msg, index, config) {
  * until the next full re-render tick (~300ms throttled). This is acceptable — the full
  * re-render restores proper formatting within that window.
  * 
- * @param {HTMLElement} container - The .msg-content div
+* @param {HTMLElement} container - The .msg-content div
  * @param {string} newText - The delta text to append
  * @returns {boolean} true if appended successfully, false if caller should fall back to full re-render
  */
@@ -2557,6 +2557,156 @@ function renderSubAgentPanel(panel, agentData, name) {
   panel.dataset.lastRenderedCount = currentCount;
 
   if (wasAtBottom) scrollContainer.scrollTop = scrollContainer.scrollHeight;
+}
+
+function createSubMsgEl(msg, index, instanceName, isGenerating) {
+  const div = document.createElement('div');
+  div.className = `sub-msg sub-msg-${msg.role || 'unknown'}`;
+  div.dataset.index = index;
+
+  const isEditable = !msg.function_call && msg.role !== 'function' && msg.role !== 'system';
+
+  const header = document.createElement('div');
+  header.className = 'sub-msg-header';
+  header.style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;";
+
+  const label = document.createElement('div');
+  label.className = 'sub-msg-label';
+  label.style = "margin-bottom: 0;";
+  
+  label.textContent = msg.role === 'user' ? '📤 Task' :
+    msg.role === 'function' ? `${msg.name || 'result'}` :
+      msg.name || 'Agent';
+
+  header.appendChild(label);
+
+  // Actions
+  const actions = document.createElement('div');
+  actions.className = 'msg-actions';
+
+  if (isEditable) {
+    const editBtn = document.createElement('button');
+    editBtn.className = 'msg-action-btn';
+    editBtn.textContent = '✏️';
+    editBtn.title = 'Edit message';
+    editBtn.onclick = (e) => { e.stopPropagation(); startEdit(index, '', 0, instanceName); };
+    actions.appendChild(editBtn);
+  }
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'msg-action-btn msg-action-delete';
+  delBtn.textContent = '🗑️';
+  delBtn.title = 'Delete message';
+  delBtn.onclick = (e) => { e.stopPropagation(); deleteMessage(index, instanceName); };
+  actions.appendChild(delBtn);
+
+  header.appendChild(actions);
+  div.appendChild(header);
+
+  const content = document.createElement('div');
+  content.className = 'sub-msg-content';
+
+  div.appendChild(content);
+
+  // Double click edit
+  div.addEventListener('dblclick', (e) => {
+    if (state.generating || !isEditable) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+
+    let selectedText = sel.toString().trim();
+    if (!selectedText) return;
+
+    if (e.target.closest('.sub-msg-header')) return;
+
+    const contentDiv = div.querySelector('.sub-msg-content');
+    if (!contentDiv) return;
+
+    const range = sel.getRangeAt(0);
+    const preCaretRange = range.cloneRange();
+    preCaretRange.selectNodeContents(contentDiv);
+    preCaretRange.setEnd(range.startContainer, range.startOffset);
+    const renderedOffset = preCaretRange.toString().length;
+    const renderedLength = contentDiv.textContent.length;
+
+    const proportion = renderedLength > 0 ? renderedOffset / renderedLength : 0;
+
+    startEdit(index, selectedText, proportion, instanceName);
+  });
+
+  updateSubBubbleContent(div, msg, isGenerating);
+  return div;
+}
+
+
+function updateSubBubbleContent(bubble, msg, isGenerating) {
+  const content = bubble.querySelector('.sub-msg-content');
+  if (!content) return;
+
+  // PERFORMANCE: During streaming, only render the delta (new text appended)
+  // instead of re-rendering the entire message. This avoids O(N) marked.parse()
+  // on every tick when N is large (thousands of words).
+  const prevContent = bubble.dataset.prevSubContent;
+  const curContent = msg.content || '';
+  
+  if (isGenerating && prevContent !== undefined && !msg.function_call && msg.role !== 'function') {
+    // Force full re-render if reasoning_content changed — incremental path only handles plain content
+    const prevReasoning = bubble.dataset.prevSubReasoning;
+    const curReasoning = msg.reasoning_content || '';
+    if (prevReasoning !== curReasoning) {
+      delete bubble.dataset.prevSubContent;
+      delete bubble.dataset.prevSubReasoning;
+    } else if (curContent.startsWith(prevContent)) {
+      // Incremental streaming update: only render the new portion.
+      const newText = curContent.slice(prevContent.length);
+      if (newText) {
+        if (appendStreamingDelta(content, newText)) {
+          bubble.dataset.prevSubContent = curContent;
+          return;
+        }
+        // No suitable target — fall through to full re-render below
+      } else {
+        bubble.dataset.prevSubContent = curContent;
+        return;
+      }
+    }
+  }
+  
+  // Fallback: full re-render (content changed non-incrementally, or not generating)
+  delete bubble.dataset.prevSubContent;
+  delete bubble.dataset.prevSubReasoning;
+
+  let html = '';
+  if (msg.reasoning_content) {
+    html += renderThinkingBlock(msg.reasoning_content, isGenerating);
+  }
+
+  if (msg.function_call) {
+    html += renderToolCall(msg);
+  } else if (msg.role === 'function') {
+    html += renderToolResult(msg);
+  } else {
+    let text = msg.content || '';
+    // Deduplicate: If content starts with a thinking block that matches reasoning_content, strip it
+    if (msg.reasoning_content) {
+        const thinkMatch = text.match(_THINK_BLOCK_ANCHORED_RE) || text.match(_THINK_BLOCK_BRACKET_ANCHORED_RE);
+        if (thinkMatch) {
+            const embedded = thinkMatch[2].trim();
+            const reasoning = msg.reasoning_content.trim();
+            if (reasoning.includes(embedded) || embedded.includes(reasoning)) {
+                text = text.substring(thinkMatch[0].length).trim();
+            }
+        }
+    }
+    html += renderMarkdown(text, false); // Skip thinking block parsing — reasoning_content is already rendered separately via renderThinkingBlock
+  }
+
+  setInnerHtmlWithState(content, html);
+  
+  // Restore prevSubContent/prevSubReasoning after full re-render so the next tick
+  // can use the incremental path if only plain content grew.
+  bubble.dataset.prevSubContent = curContent;
+  bubble.dataset.prevSubReasoning = msg.reasoning_content || '';
 }
 
 function switchMainTab(tabId) {
