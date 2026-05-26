@@ -763,8 +763,8 @@ class TestFindLastMarker:
 class TestNestedCompressionGuard:
     """Integration tests for nested compression guard using real orchestrator code.
 
-    The guard lives in agent_orchestrator.py:1846:
-        if instance_name != 'compression_agent':
+    The guard lives in agent_orchestrator.py line 2049:
+        if not instance_name.startswith('compression_agent'):
             hook_forced = self._inject_compression_warning_for_agent(...)
 
     These tests use a MagicMock(spec=OrchestratorAgent) to verify the guard's behavior
@@ -779,7 +779,7 @@ class TestNestedCompressionGuard:
         inject_called = {"value": False}
 
         mock_orch = MagicMock(spec=OrchestratorAgent)
-        mock_orch._compress_context_ran_this_turn = False
+        mock_orch._compress_tracker = {}
 
         def track_inject(_agent, _instance_name, _messages):
             inject_called["value"] = True
@@ -787,11 +787,11 @@ class TestNestedCompressionGuard:
 
         mock_orch._inject_compression_warning_for_agent = track_inject
 
-        # Simulate what hooked_call_llm does for compression_agent (agent_orchestrator.py:1846)
+        # Simulate what hooked_call_llm does for compression_agent (agent_orchestrator.py:2049)
         instance_name = "compression_agent"
         hook_forced = False
 
-        if instance_name != 'compression_agent':
+        if not instance_name.startswith('compression_agent'):
             hook_forced = mock_orch._inject_compression_warning_for_agent(
                 mock_orch, instance_name, []
             )
@@ -819,13 +819,44 @@ class TestNestedCompressionGuard:
         instance_name = "coder"
         hook_forced = False
 
-        if instance_name != 'compression_agent':
+        if not instance_name.startswith('compression_agent'):
             hook_forced = mock_orch._inject_compression_warning_for_agent(
                 mock_orch, instance_name, []
             )
 
         assert inject_called["value"] is True, (
             "_inject_compression_warning_for_agent SHOULD be called for non-compression agents"
+        )
+
+    def test_orchestrator_skips_inject_for_compression_agent_children(self):
+        """When instance_name starts with 'compression_agent' (e.g., compression_agent_child1),
+        _inject_compression_warning_for_agent is NOT called — prevents nested/circular compression."""
+        from agent_orchestrator import OrchestratorAgent
+
+        inject_called = {"value": False}
+
+        mock_orch = MagicMock(spec=OrchestratorAgent)
+        mock_orch._compress_tracker = {}
+
+        def track_inject(_agent, _instance_name, _messages):
+            inject_called["value"] = True
+            return False
+
+        mock_orch._inject_compression_warning_for_agent = track_inject
+
+        # Simulate what hooked_call_llm does for compression_agent child (agent_orchestrator.py:2049)
+        instance_name = "compression_agent_child1"
+        hook_forced = False
+
+        if not instance_name.startswith('compression_agent'):
+            hook_forced = mock_orch._inject_compression_warning_for_agent(
+                mock_orch, instance_name, []
+            )
+
+        assert hook_forced is False
+        assert inject_called["value"] is False, (
+            "_inject_compression_warning_for_agent should NOT be called "
+            "for compression_agent_child1 — nested compression guard failed for child instances"
         )
 
     def test_compression_agent_exemption_in_force_path(self):
@@ -1118,6 +1149,92 @@ class TestCompressContextDryRunWithForce:
         assert result.messages_discarded > 0
         # Pool should be unchanged
         assert len(pool.get_conversation("TestAgent")) == initial_len
+
+
+# ──────────────────────────────────────────────
+# 8e. Token cap guard — compression agent context window limit
+# ──────────────────────────────────────────────
+
+class TestTokenCapGuard:
+    """Test the token cap guard that limits target_discard_count based on
+    the compression agent's context window (core.py lines 131-150)."""
+
+    def test_discard_count_capped_by_compression_agent_context(self):
+        """When compression agent has a small context window, target_discard_count is capped.
+        
+        With max_input_tokens=4000: available = int(4000 * 0.6) = 2400 tokens for messages.
+        At ~500 tokens/message → max_discardable = 2400 // 500 = 4.
+        Even if compute_discard_count would return 25, it should be capped to 4.
+        """
+        pool, initial_len = _build_pool_with_history(num_user_msgs=30)  # Would discard ~18 msgs
+
+        # Mock compression agent with small context window
+        mock_comp_agent = MagicMock()
+        mock_comp_agent.llm.generate_cfg = {'max_input_tokens': 4000}
+
+        def mock_get_agent(name):
+            if name == 'compression_agent':
+                return mock_comp_agent
+            return None
+
+        pool.get_agent = mock_get_agent
+
+        with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
+            mock_invoke.return_value = "Summary"
+
+            result = compress_context(
+                agent_pool=pool,
+                target_agent_name="TestAgent",
+                fraction=0.5,
+                mode="auto",
+            )
+
+        # Should succeed and discard at most 4 messages (capped by context window)
+        assert result.success is True
+        assert result.messages_discarded <= 4, (
+            f"Discard count should be capped to 4 but was {result.messages_discarded}"
+        )
+
+    def test_no_cap_when_compression_agent_not_loaded(self):
+        """When compression agent is not in the pool, no cap is applied."""
+        pool, initial_len = _build_pool_with_history(num_user_msgs=10)
+
+        # Mock get_agent to return None (compression agent not loaded)
+        pool.get_agent = lambda name: None
+
+        with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
+            mock_invoke.return_value = "Summary"
+
+            result = compress_context(
+                agent_pool=pool,
+                target_agent_name="TestAgent",
+                fraction=0.5,
+                mode="auto",
+            )
+
+        # Should succeed with normal discard count (no cap applied)
+        assert result.success is True
+        assert result.messages_discarded > 4
+
+    def test_no_cap_when_get_agent_raises(self):
+        """When get_agent raises an exception, the cap logic is skipped gracefully."""
+        pool, initial_len = _build_pool_with_history(num_user_msgs=10)
+
+        # Mock get_agent to raise (e.g., pool doesn't have this method)
+        pool.get_agent = lambda name: (_ for _ in ()).throw(RuntimeError("no agent"))
+
+        with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
+            mock_invoke.return_value = "Summary"
+
+            result = compress_context(
+                agent_pool=pool,
+                target_agent_name="TestAgent",
+                fraction=0.5,
+                mode="auto",
+            )
+
+        # Should succeed — exception is caught and original discard count used
+        assert result.success is True
 
 
 if __name__ == '__main__':

@@ -4,6 +4,7 @@ Previous implementation (338 lines) with _generate_summary(), token counting, di
 calculation, and pool sync logic has been replaced by direct delegation to
 agent_cascade.compression.compress_context(). See core.py for full compression logic.
 """
+import copy
 import json
 import logging
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -79,6 +80,30 @@ class CompressContext(BaseTool):
             self.agent_name or
             'orchestrator'
         )
+
+        # Before compressing, ensure the pool has the current state of the conversation.
+        # When a sub-agent calls compress_context mid-turn, its local 'messages' list contains
+        # messages from this turn that haven't been written back to the pool yet (pool is only
+        # updated after the turn ends via conv.extend(final_resp)). Without this sync,
+        # compress_context reads stale data from the pool and fails with "Not enough messages".
+        if 'messages' in kwargs and agent_name != 'orchestrator' and not dry_run:
+            try:
+                # Resolve the correct key in instance_conversations (case-insensitive fallback)
+                pool_key = agent_name
+                if pool_key not in self.agent_pool.instance_conversations:
+                    for key in self.agent_pool.instance_conversations:
+                        if key.lower() == pool_key.lower():
+                            pool_key = key
+                            break
+                # Use in-place mutation to preserve list references held by _stream_sub_agent_call
+                pool_list = self.agent_pool.instance_conversations.get(pool_key)
+                if pool_list is not None:
+                    pool_list.clear()
+                    pool_list.extend(copy.deepcopy(kwargs['messages']))
+                else:
+                    self.agent_pool.instance_conversations[pool_key] = copy.deepcopy(kwargs['messages'])
+            except Exception as e:
+                logger.warning(f"Failed to sync messages to pool before compression for '{agent_name}': {e}")
 
         # Delegate to the unified compress_context function
         # Note: orchestrator param not passed — agent-triggered compression uses

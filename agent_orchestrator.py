@@ -423,6 +423,10 @@ class OrchestratorAgent(Assistant):
         if 'tool_result_max_chars' in kwargs:
             self.tool_result_max_chars = kwargs['tool_result_max_chars']
 
+        # Per-agent compression tracking (replaces single boolean _compress_context_ran_this_turn)
+        self._compress_tracker = {}    # instance_name -> bool (compression ran this turn)
+        self._compress_fail_count = {}  # instance_name -> int (consecutive forced compression failures)
+
     def _call_llm(
         self,
         messages: List[Message],
@@ -766,12 +770,26 @@ class OrchestratorAgent(Assistant):
 
         # ── Forced compression at >95% ──
         if usage_pct > 95.0:
-            # Prevent double-compression in same turn
-            if getattr(self, '_compress_context_ran_this_turn', False):
-                logger.debug(f"Skipping forceful compression for {instance_name} — already ran this turn.")
-                return True  # Still signal halt — something already compressed this turn
+            # Prevent double-compression in same turn (per-agent tracking)
+            if self._compress_tracker.get(instance_name, False):
+                logger.debug(f"Skipping forceful compression for {instance_name} — already ran this cycle.")
+                return False  # Let LLM call through — forced compression already ran, agent needs to make progress
 
-            self._compress_context_ran_this_turn = True
+            # FIX 2: Check retry counter — if forced compression has failed 3+ times, skip it
+            fail_count = self._compress_fail_count.get(instance_name, 0)
+            if fail_count >= 3:
+                logger.warning(
+                    f"Forced compression for {instance_name} has failed {fail_count} times — "
+                    f"skipping forced compression and letting LLM call through with warning."
+                )
+                notification = (
+                    f"[SYSTEM NOTIFICATION: Context at {usage_pct:.1f}% but forced compression "
+                    f"failed repeatedly. Proceeding with LLM call which may fail due to length.]"
+                )
+                self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context at", notification)
+                return False  # Let LLM call through instead of halting forever
+
+            self._compress_tracker[instance_name] = True
             try:
                 # Halt other agents (exempt the target, compression_agent, and orchestrator)
                 exempt = [instance_name, 'compression_agent', self.session_name]
@@ -801,6 +819,11 @@ class OrchestratorAgent(Assistant):
                     self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
                     # compress_context() already modified the pool with compressed data — just rebuild working set from it
                     rebuild_working_set(messages, self.agent_pool, instance_name)
+                    # Reset fail counter on success
+                    self._compress_fail_count[instance_name] = 0
+                    # Don't reset tracker on success — keep it True so next iteration lets LLM call through
+                    # (agent needs to make progress with the compressed context, not compress again)
+                    return False  # Let agent try LLM call with compressed context
                 else:
                     logger.error(f"Forced compression failed for {instance_name}: {result.error}")
                     notification = (
@@ -809,11 +832,14 @@ class OrchestratorAgent(Assistant):
                         f"The upcoming API call will likely fail due to length.]"
                     )
                     self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
-                    # No compression happened — write notification-containing messages to pool
-                    self.agent_pool.instance_conversations[instance_name] = copy.deepcopy(messages)
-                    rebuild_working_set(messages, self.agent_pool, instance_name)
+                    # FIX 3: Don't overwrite pool with stale local messages on failure
+                    # The notification was appended to `messages` for display purposes but won't persist to the pool
+                    # Increment fail counter
+                    self._compress_fail_count[instance_name] = self._compress_fail_count.get(instance_name, 0) + 1
+                    # Reset tracker on failure so next iteration can try forced compression again
+                    self._compress_tracker[instance_name] = False
 
-                return True  # Halt current turn — let next iteration use compressed context
+                return True  # Halt current turn on failure — let next iteration retry
 
             except Exception as e:
                 logger.error(f"Forced compression raised exception for {instance_name}: {e}")
@@ -823,14 +849,17 @@ class OrchestratorAgent(Assistant):
                 )
                 self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
                 
-                # Write working set to pool and rebuild so the exception notification persists.
-                self.agent_pool.instance_conversations[instance_name] = copy.deepcopy(messages)
-                rebuild_working_set(messages, self.agent_pool, instance_name)
+                # FIX 3: Don't overwrite pool with stale local messages on failure
+                # Increment fail counter
+                self._compress_fail_count[instance_name] = self._compress_fail_count.get(instance_name, 0) + 1
                 
-                return True  # Still halt — let next iteration proceed
+                # Reset tracker on exception so next iteration can try forced compression again
+                self._compress_tracker[instance_name] = False
+
+                return True  # Halt current turn — let next iteration retry
 
             finally:
-                self._compress_context_ran_this_turn = False
+                # Only resume other agents in finally — tracker reset is handled per-branch above
                 self.agent_pool.resume_all_instances()
 
         # ── Warning at >85% ──
@@ -997,7 +1026,7 @@ class OrchestratorAgent(Assistant):
             # Use update_history to avoid duplicates if api_server.py already logged it during a retry.
             # Skip if compression ran last turn — the log is already in sync via
             # insert_compression_marker + individual log_message calls.
-            if not getattr(self, '_compress_context_ran_this_turn', False):
+            if not self._compress_tracker.get(self.session_name, False):
                 logger_inst.update_history([messages[-1]])
 
         # --- Check for manual commands ---
@@ -1081,7 +1110,7 @@ class OrchestratorAgent(Assistant):
 
         # Initialize/Reset turn state
         self.turn_final_messages = None
-        self._compress_context_ran_this_turn = False  # prevent double-compression this turn
+        self._compress_tracker[self.session_name] = False  # prevent double-compression this turn (per-agent)
         
         # Robustness: Read turn limit and auto-continue settings
         # These may be set on the instance by api_server.py or passed in kwargs
@@ -1126,7 +1155,8 @@ class OrchestratorAgent(Assistant):
             # Inject warning or force compression (only for the LLM call, doesn't affect saved history)
             forced_compression_ran = self._inject_compression_warning(llm_messages)
 
-            # If forced compression ran, halt this turn — don't proceed with the LLM call.
+            # If forced compression FAILED (returned True/halt), re-sync from pool and retry next iteration.
+            # On success, _inject_compression_warning_for_agent returns False — LLM call proceeds with compressed context.
             # The agent must not add more content on top of a just-compressed context in the same turn;
             # otherwise we risk still being over 95% after compression + new LLM output.
             # Re-sync both `messages` and `llm_messages` from the compressed pool state before continuing.
@@ -1174,7 +1204,8 @@ class OrchestratorAgent(Assistant):
                                      f"Pool may desync — manual intervention required.")
                 yield response
                 # Reset flag so BUG-7 block below doesn't redundantly re-sync every iteration
-                self._compress_context_ran_this_turn = False
+                # Note: This only executes on forced compression FAILURE (success returns False, skipping this block)
+                self._compress_tracker[self.session_name] = False
                 
                 # Note: If compression didn't reduce tokens enough, the next iteration will
                 # attempt forced compression again. Each attempt discards messages until either
@@ -1188,7 +1219,7 @@ class OrchestratorAgent(Assistant):
             # NOTE: cumulative compression INSERTS a summary marker (pool grows), so we check
             # the flag rather than comparing lengths. `messages` stays as full cumulative history;
             # `llm_messages` is synced to the sliced working set by the compression tool itself.
-            if getattr(self, '_compress_context_ran_this_turn', False):
+            if self._compress_tracker.get(self.session_name, False):
                 compressed = self.agent_pool.get_conversation(self.session_name)
                 if compressed:
                     # Validate pool integrity after agent-triggered compression
@@ -1593,7 +1624,7 @@ class OrchestratorAgent(Assistant):
 
                 # Track that compress_context ran this turn to prevent _inject_compression_warning from triggering a second one
                 if tool_name == 'compress_context':
-                    self._compress_context_ran_this_turn = True
+                    self._compress_tracker[self.session_name] = True
                     # Sync llm_messages from the pool immediately so subsequent operations 
                     # in this turn see the compressed state (prevents desync).
                     # Use slice_history_for_llm to get the working set — NOT the full cumulative history.
@@ -2013,8 +2044,9 @@ class OrchestratorAgent(Assistant):
 
                             # Skip compression checks during Compression Agent execution
                             # Prevents nested compression (circular dependency)
+                            # Exempt ALL compression agent instances (including spawned children like compression_agent_child1)
                             hook_forced = False
-                            if instance_name != 'compression_agent':
+                            if not instance_name.startswith('compression_agent'):
                                 hook_forced = self._inject_compression_warning_for_agent(self_agent, instance_name, messages)
                             
                             # If forced compression ran, halt this LLM call — don't proceed.
@@ -2077,6 +2109,14 @@ class OrchestratorAgent(Assistant):
                     
                     # Removed base_len logic as it interferes with legitimate external edits.
                     
+                    # Initialize per-agent compression tracking for this sub-agent session (per-agent, not shared).
+                    # setdefault only sets to False if the key doesn't exist — once forced compression
+                    # runs in any iteration, it stays True for the entire sub-agent execution (across all
+                    # agent.run() iterations) to prevent forced compression from firing again.
+                    # The main orchestrator loop resets its tracker explicitly at line 1113 per iteration;
+                    # sub-agents use setdefault here so a new sub-agent turn starts fresh.
+                    self._compress_tracker.setdefault(instance_name, False)
+                    
                     # Pass instance name through kwargs so tools (like compress_context) know who they are contextually
                     for resp in agent.run(working_history, agent_instance_name=instance_name):
                         if self.agent_pool.stopped:
@@ -2116,7 +2156,17 @@ class OrchestratorAgent(Assistant):
                             if role_check:
                                 # Incremental logging via log_message (already called in agent loop)
                                 # ensures history is persistent. update_history is redundant here.
-                                pass
+                                
+                                # FIX 4: Track sub-agent self-compression via compress_context tool call
+                                compress_func_name = None
+                                if isinstance(last_resp, dict):
+                                    compress_func_name = last_resp.get('name') or last_resp.get('function_name')
+                                else:
+                                    compress_func_name = getattr(last_resp, 'name', None) or getattr(last_resp, 'function_name', None)
+                                
+                                if compress_func_name == 'compress_context':
+                                    self._compress_tracker[instance_name] = True
+                                    self._compress_fail_count[instance_name] = 0
                     
                     # Turn successfully completed
                     break

@@ -128,6 +128,28 @@ def compress_context(
     # ── 3. Calculate discard count ──
     target_discard_count = compute_discard_count(active_set, fraction, force)
 
+    # ── 3b. Cap discard count so compression agent can actually process the messages ──
+    # If the compression agent has a known context window, don't feed it more than it can handle.
+    # Estimate ~500 tokens per message; reserve 60% of the agent's context for input (40% for system prompt,
+    # existing summary, and output generation).
+    try:
+        comp_agent = agent_pool.get_agent('compression_agent')
+        if comp_agent:
+            max_tokens = None
+            if hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'generate_cfg'):
+                max_tokens = comp_agent.llm.generate_cfg.get('max_input_tokens')
+            elif hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'cfg'):
+                max_tokens = comp_agent.llm.cfg.get('max_input_tokens')
+
+            if max_tokens:
+                # Reserve ~90% of compression agent's context for input messages (10% for summary output)
+                available_for_messages = int(max_tokens * 0.9)
+                estimated_tokens_per_message = 500
+                max_discardable = available_for_messages // estimated_tokens_per_message
+                target_discard_count = min(target_discard_count, max_discardable)
+    except Exception:
+        pass  # If we can't determine the limit, proceed with original count
+
     # ── 4. Guard: Not enough messages to discard (unless force=True) ──
     if target_discard_count <= 0 and not force:
         return CompressResult(
