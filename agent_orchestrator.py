@@ -908,7 +908,7 @@ class OrchestratorAgent(Assistant):
     ) -> Iterator[List[Message]]:
         # Clear active stack only for the root turn to avoid state leakage
         if not kwargs.get('agent_instance_name'):
-            self.agent_pool.active_stack.clear()
+            self.agent_pool.active_stack_clear()  # active_stack returns defensive copy; use mutation method
             
         instance = kwargs.get('agent_instance_name') or self.session_name
         self.session_name = instance # Track current instance name
@@ -1944,7 +1944,7 @@ class OrchestratorAgent(Assistant):
         logger_inst.log_message(user_msg)
         
         # Track this call in the active stack for UI context switching
-        self.agent_pool.active_stack.append(instance_name)
+        self.agent_pool.active_stack_append(instance_name)  # active_stack returns defensive copy; use mutation method
         
         # Mark activity: this agent is now actively being used
         if hasattr(self.agent_pool, '_mark_activity'):
@@ -2228,7 +2228,7 @@ class OrchestratorAgent(Assistant):
                 removed = False
                 for i in range(len(self.agent_pool.active_stack) - 1, -1, -1):
                     if self.agent_pool.active_stack[i] == instance_name:
-                        self.agent_pool.active_stack.pop(i)
+                        self.agent_pool.active_stack_pop_at(i)  # active_stack returns defensive copy; use mutation method
                         removed = True
                         break
             

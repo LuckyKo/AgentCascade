@@ -73,6 +73,29 @@ except ImportError:
 # Pre-compiled regexes moved to agent_cascade.utils.thinking_block
 
 
+def _get_main_history(agent_pool, session_name):
+    """Get the main agent's conversation history from the pool.
+    
+    Replaces reads of session['history']. Returns a defensive copy of the
+    conversation list from the pool instance, or an empty list if not found.
+    
+    Args:
+        agent_pool: The AgentPool instance (may be None in legacy mode)
+        session_name: Name of the main session/instance
+        
+    Returns:
+        list of message objects
+    """
+    if not agent_pool:
+        return []
+    inst = agent_pool.get_instance(session_name)
+    if inst is not None:
+        with inst._compression_lock:
+            return list(inst.conversation)
+    # Fallback: try instance_conversations mapping directly
+    return list(agent_pool.instance_conversations.get(session_name, []))
+
+
 def _get_msg_role(msg):
     """Extract the 'role' field from a message, handling both dict and Message object types."""
     if isinstance(msg, dict):
@@ -370,6 +393,15 @@ def create_app(agents, agent_pool, config=None):
         allow_headers=["*"],
     )
 
+    # ── Unified architecture imports (Phase 5) ───────────────────────────
+    from agent_cascade.run_agent_unified import run_agent_thread_unified
+    from agent_cascade.api_integration import (
+        build_state_from_pool,
+        build_stream_update_from_pool,
+        create_main_agent_instance,
+        _apply_ui_config,
+    )
+
     # ── Helpers ───────────────────────────────────────────────────────────
     def get_agent_max_tokens(agent) -> int:
         """Resolve the effective max_input_tokens from agent LLM config."""
@@ -407,7 +439,13 @@ def create_app(agents, agent_pool, config=None):
                 return
                 
             name = session.get('session_name', 'Maine')
-            history = session.get('history', [])
+            # Phase 6: Read history directly from pool instance instead of session['history']
+            inst = agent_pool.get_instance(name)
+            if inst is not None:
+                with inst._compression_lock:
+                    history = list(inst.conversation)
+            else:
+                history = list(agent_pool.instance_conversations.get(name, []))
             
             # Use the standardized logger to ensure append-only behavior
             logger_inst = agent_pool.get_logger(name, 'Orchestrator')
@@ -426,9 +464,14 @@ def create_app(agents, agent_pool, config=None):
             logger.error(f"Failed to save session history: {e}")
 
     def _load_session_history(name):
+        """Load session history into the pool from log files.
+        
+        Returns True on success, False on failure. The pool already has the data
+        after load_session_from_log(), so returning the tuples is redundant.
+        """
         try:
             if not agent_pool:
-                return [], ""
+                return False
                 
             if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
                 log_dir = agent_pool.operation_manager.base_dir / 'logs'
@@ -445,28 +488,24 @@ def create_app(agents, agent_pool, config=None):
                     path = potential[0]
 
             if not path.exists():
-                return [], ""
+                return False
 
             # Use the AgentPool's standardized loading logic to handle slicing
             # and system message preservation
             status = agent_pool.load_session_from_log(str(path), target_instance=name)
             if status.startswith("Error"):
                 logger.error(f"Failed to load session {name} via pool: {status}")
-                return [], ""
+                return False
             
-            loaded_history = agent_pool.instance_conversations.get(name, [])
-            loaded_summary = agent_pool.instance_summaries.get(name, "")
-            
-            return loaded_history, loaded_summary
+            return True
         except Exception as e:
             logger.error(f"Failed to load session history: {e}")
-        return [], ""
+        return False
 
     def get_session_history(session, instance_name='root', use_unified=None):
-        """Dual-read wrapper for session history — supports both legacy and unified state stores.
+        """Read session history from the pool (unified single source of truth).
         
-        Returns messages from either session['history'] (legacy) or agent_pool.sub_agent_state
-        (unified), depending on the feature flag.
+        Phase 6: Always reads from agent_pool. Legacy fallback removed.
         
         Args:
             session: Flask session dict
@@ -480,24 +519,23 @@ def create_app(agents, agent_pool, config=None):
         effective_unified = use_unified if use_unified is not None else USE_UNIFIED_STATE
         
         if effective_unified:
-            # Read from unified store
+            # Read from unified store — always read from pool.instances for live data.
+            # sub_agent_state is a legacy shim that can go stale; instances[name].conversation
+            # is the single source of truth during execution (Fix #9).
             if instance_name == 'root':
-                # Root agent history lives in sub_agent_state['root']['messages']
-                store = agent_pool.sub_agent_state.get('root', {}) if agent_pool else {}
-                msgs = store.get('messages', [])
-                # Edge case: unified store not populated yet, fall back to legacy for root only
-                if not msgs and session.get('history'):
-                    logger.debug(f"Unified store empty for root, falling back to legacy session['history']")
-                    msgs = list(session['history'])
-                return msgs
+                inst = agent_pool.get_instance(session['session_name']) if agent_pool else None
+                if inst is not None:
+                    with inst._compression_lock:
+                        return list(inst.conversation)
+                return []
             else:
-                # Sub-agent history from unified store
+                # Sub-agent history from unified store (sub_agent_state is updated during streaming)
                 state = agent_pool.sub_agent_state.get(instance_name, {}) if agent_pool else {}
                 return state.get('messages', [])
         else:
-            # Legacy read path
+            # Legacy read path — Phase 6: still reads from pool, not session dict
             if instance_name == 'root':
-                return list(session.get('history', []))
+                return _get_main_history(agent_pool, session['session_name'])
             else:
                 # Sub-agent history from legacy store (instance_conversations)
                 return agent_pool.instance_conversations.get(instance_name, []) if agent_pool else []
@@ -522,9 +560,9 @@ def create_app(agents, agent_pool, config=None):
             state = agent_pool.sub_agent_state.get(instance_name)
             return state.copy() if state else None
         else:
-            # Legacy path: root is special-cased
+            # Legacy path: root reads from pool (Phase 6)
             if instance_name == 'root':
-                msgs = list(session.get('history', []))
+                msgs = _get_main_history(agent_pool, session['session_name'])
                 return {
                     'messages': msgs,
                     'active': True,
@@ -536,19 +574,17 @@ def create_app(agents, agent_pool, config=None):
     # ── Shared session state ──────────────────────────────────────────────
     default_session_name = config.get('session_name', 'Maine')
     session: Dict[str, Any] = {
-        'history': [], # Will be loaded below
         'agent_index': 0,
         'session_name': default_session_name,
         'generating': False,
         'stop_requested': False,
         'generation_id': 0,         # Increment on each run to prevent stale appends
-        'summary': "",
     }
-    # Initial load
-    session['history'], session['summary'] = _load_session_history(default_session_name)
+    # Initial load — pool is the single source of truth for conversation state (Phase 6)
     if agent_pool:
-        agent_pool.instance_conversations[default_session_name] = session['history']
-        agent_pool.instance_summaries[default_session_name] = session['summary']
+        _load_session_history(default_session_name)
+        # Note: _load_session_history calls agent_pool.load_session_from_log() internally,
+        # which already populates instance_conversations/instance_summaries. No need to write again.
 
     # ── Unified token cache (coexists with old _cached_hist_stats during transition) ──
     from config.token_cache import AgentTokenCache
@@ -570,7 +606,8 @@ def create_app(agents, agent_pool, config=None):
     send_queue: asyncio.Queue = asyncio.Queue()
 
     # Lock for session state accessed across threads (asyncio loop + agent thread).
-    # Protects: session['generating'], session['stop_requested'], session['history'] mutations.
+    # Protects: session['generating'], session['stop_requested'].
+    # Phase 6: session['history'] removed — pool is the single source of truth.
     session_lock = threading.Lock()
 
 
@@ -727,218 +764,69 @@ def create_app(agents, agent_pool, config=None):
         return None
 
     def build_state(responses=None, generating=None):
-        """Build a full state snapshot for the frontend."""
-        if USE_UNIFIED_STATE:
-            root_state = get_agent_state('root')
-            msgs = root_state['messages'] if root_state else []
-        else:
-            msgs = list(session.get('history', []))
-
-        if responses:
-            msgs.extend(responses)
-
-        # Calculate tokens for the main session
-        orch_agent = get_agent()
-        max_tokens = get_agent_max_tokens(orch_agent)
-
-        # Calculate tokens for the active 'working set' (after compression)
-        if USE_UNIFIED_STATE and root_state:
-            raw_history = msgs  # already from unified store
-        else:
-            raw_history = session.get('history', [])
-        active_h = agent_pool.slice_history_for_llm(raw_history) if agent_pool else raw_history
+        """Build a full state snapshot for the frontend.
         
-        # When show_active_only mode is enabled, only send the active working set to the frontend
-        ui_cfg = session.get('generate_cfg', {})
-        show_active_only = ui_cfg.get('show_active_only', False)
-        display_msgs = list(active_h) if show_active_only else msgs
-        if responses:
-            display_msgs = display_msgs + list(responses)
+        Delegates to build_state_from_pool which reads from pool.instances
+        instead of session['history']. This is the unified single-source path.
+        """
+        instance_name = session['session_name']
+        gen = generating if generating is not None else session['generating']
         
-        # FIX3: Cache main history stats at session level to avoid re-tokenizing on every build_state() call
-        hist_count = len(active_h)
-        cached_hist_count = session.get('_cached_hist_stats_count', -1)
-        if hist_count > cached_hist_count:
-            # History grew — compute incrementally (only new messages)
-            if cached_hist_count >= 0 and cached_hist_count < len(active_h):
-                cached_h_stats = session.get('_cached_hist_stats', {'tokens': 0, 'words': 0})
-                new_msgs = active_h[cached_hist_count:]
-                new_stats = get_history_stats(new_msgs)
-                h_stats = {
-                    'tokens': cached_h_stats['tokens'] + new_stats['tokens'],
-                    'words': cached_h_stats['words'] + new_stats['words']
-                }
-            else:
-                # First access or cache missing — compute full stats
-                h_stats = get_history_stats(active_h)
-            session['_cached_hist_stats'] = h_stats.copy()
-            session['_cached_hist_stats_count'] = hist_count
-        elif hist_count < cached_hist_count:
-            # FIX2 (history shrank due to compression): Recompute from scratch.
-            # slice_history_for_llm may have dropped older messages after a context_summary,
-            # so the cached stats would overcount tokens if we reused them.
-            h_stats = get_history_stats(active_h)
-            session['_cached_hist_stats'] = h_stats.copy()
-            session['_cached_hist_stats_count'] = hist_count
-        elif '_cached_hist_stats' in session:
-            # Same messages — use cached stats
-            h_stats = session['_cached_hist_stats'].copy()
-        else:
-            # First access — compute and cache
-            h_stats = get_history_stats(active_h)
-            session['_cached_hist_stats'] = h_stats.copy()
-            session['_cached_hist_stats_count'] = hist_count
+        result = build_state_from_pool(
+            pool=agent_pool,
+            instance_name=instance_name,
+            responses=responses,
+            generating=gen,
+        )
         
-        # Write to unified token cache when in unified mode (mirrors the legacy _cached_hist_stats)
-        if USE_UNIFIED_STATE:
-            unified_token_cache.set('root', len(active_h), h_stats['tokens'])
+        # If unified build returned None (instance not yet created), return minimal state
+        if result is None:
+            return {
+                'messages': [],
+                'sub_agents': {},
+                'active_stack': [],
+                'approvals': [],
+                'generating': gen,
+                'session_name': instance_name,
+                'agent_index': session.get('agent_index', 0),
+                'total_tokens': 0,
+                'total_words': 0,
+                'max_tokens': DEFAULT_MAX_INPUT_TOKENS,
+            }
         
-        r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
-        
-        total_tokens = h_stats['tokens'] + r_stats['tokens']
-        total_words = h_stats['words'] + r_stats['words']
-        
-        # (max_tokens is already calculated above)
-
-        # Sync session summary from history if it was just compressed
-        current_summary = session.get('summary', '')
-        # In unified mode, scan the unified messages; otherwise scan legacy session['history']
-        hist_to_scan = msgs if USE_UNIFIED_STATE else session['history']
-        for msg in reversed(hist_to_scan):
-            content = msg.get(CONTENT, '')
-            if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                import re
-                # Only match content INSIDE the tags, allowing optional newlines/whitespace
-                match = _CONTEXT_SUMMARY_RE.search(content)
-                if match:
-                    current_summary = match.group(1).strip()
-                break
-        session['summary'] = current_summary
-        if agent_pool:
-            agent_pool.instance_summaries[session['session_name']] = current_summary
-
-        return {
-            'messages': [serialize_message(m, i) for i, m in enumerate(display_msgs)],
-            'sub_agents': get_sub_agent_state(),
-            'active_stack': get_active_stack(),
-            'approvals': get_approvals(),
-            'generating': generating if generating is not None else session['generating'],
-            'session_name': session['session_name'],
-            'agent_index': session['agent_index'],
-            'total_tokens': total_tokens,
-            'total_words': total_words,
-            'max_tokens': max_tokens,
-            'summary': current_summary,
-            'telemetry': _safe_get_telemetry(),
-            'agents': [
-                {'name': getattr(a, 'name', f'Agent-{i}'), 'index': i,
-                 'agent_type': getattr(a, 'agent_type', 'orchestrator').lower(),
-                 'description': getattr(a, 'description', ''),
-                 'tools': list(a.function_map.keys()) if hasattr(a, 'function_map') else [],
-                 'default_tools': getattr(a, 'default_tools', list(a.function_map.keys()) if hasattr(a, 'function_map') else [])}
-                for i, a in enumerate(agents)
-            ],
-            'current_model': getattr(get_agent().llm, 'model', 'Unknown') if hasattr(get_agent(), 'llm') and get_agent().llm else 'Unknown',
-            'default_workspace': str(agent_pool.operation_manager.base_dir) if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager else str(DEFAULT_WORKSPACE),
-            'has_queued_messages': agent_pool.has_messages(session['session_name']) if agent_pool else False,
-            'is_waiting': agent_pool.api_router.is_waiting(session['session_name']) if agent_pool and hasattr(agent_pool, 'api_router') else False,
-            'api_router': agent_pool.api_router.to_dict() if agent_pool and hasattr(agent_pool, 'api_router') else {'endpoints': [], 'agent_priorities': {}},
-        }
+        # Add legacy-compatible fields that frontend expects
+        result['agent_index'] = session.get('agent_index', 0)
+        return result
 
     def build_stream_update(responses, cached_h_stats=None, sub_agents=None, telemetry=None):
         """Build a lightweight streaming delta (skips re-serializing stable history).
-
-        Args:
-            responses: Current partial response messages from the agent runner.
-            cached_h_stats: Pre-computed history stats to avoid O(n) recalculation each tick.
-                           If None, falls back to get_history_stats(session['history']).
-            sub_agents: Pre-serialized sub-agent state. Only recompute every ~5 ticks;
-                       on intermediate ticks the client tolerates slight staleness.
-            telemetry: Pre-serialized session telemetry summary. Only recompute every ~20 ticks
-                       (approx 3 seconds) to avoid heavy re-aggregation during streaming.
+        
+        Delegates to build_stream_update_from_pool which reads from pool.instances.
+        Legacy parameters are accepted for backward compatibility but ignored.
         """
-        history_count = len(session['history'])
-
-        # Only serialize the changing response messages (history is already on the client)
-        active_h = agent_pool.slice_history_for_llm(session['history']) if agent_pool else session['history']
-
-        # When show_active_only, only send the active window + new responses
-        ui_cfg = session.get('generate_cfg', {})
-        show_active_only = ui_cfg.get('show_active_only', False)
-        history_count = len(active_h) if show_active_only else history_count
-
-        response_msgs = [serialize_message(m, history_count + i) for i, m in enumerate(responses)] if responses else []
+        instance_name = session['session_name']
         
-        orch_agent = get_agent()
-        max_tokens = get_agent_max_tokens(orch_agent)
+        result = build_stream_update_from_pool(
+            pool=agent_pool,
+            instance_name=instance_name,
+            responses=responses,
+        )
         
-        if cached_h_stats is None:
-            # Try session-level cache first (avoids full re-tokenization)
-            hist_count = len(active_h)
-            cached_hist_count = session.get('_cached_hist_stats_count', -1)
-            if hist_count <= cached_hist_count and '_cached_hist_stats' in session:
-                h_stats = session['_cached_hist_stats'].copy()
-            else:
-                # Use the raw active history just like build_state, matching base.py's "ALL tokens"
-                h_stats = get_history_stats(active_h)
-                session['_cached_hist_stats'] = h_stats.copy()
-                session['_cached_hist_stats_count'] = len(active_h)
-        else:
-            h_stats = cached_h_stats
-            
-        # FIX1: Only recompute full response stats when new messages are added, not during streaming growth.
-        # But we do estimate the tokens of the growing message to keep the UI responsive!
-        resp_len_stats = len(responses) if responses else 0
-        if resp_len_stats > session.get('_last_resp_len_stats', 0):
-            # New message(s) added — compute full stats via tiktoken
-            r_stats = get_history_stats(responses)
-            session['_last_resp_len_stats'] = resp_len_stats
-            # We cache the stats of ALL PREVIOUS messages, excluding the current growing one
-            prev_responses = responses[:-1] if len(responses) > 1 else []
-            session['_cached_r_stats'] = get_history_stats(prev_responses)
-            # Reset content length baseline — old message's length is no longer relevant
-            session['_last_resp_content_len'] = 0
-        else:
-            # Same messages, just growing text — use cached stats + quick estimate for the last message
-            cached_r_stats = session.get('_cached_r_stats', {'tokens': 0, 'words': 0})
-            if responses:
-                last_msg = responses[-1]
-                content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
-                if isinstance(content, list):
-                    content = " ".join([str(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')) for item in content])
-                else:
-                    content = str(content)
-                # FIX: Only estimate the delta (new chars since last tick) to avoid cumulative drift.
-                # Previously this added the full content length each tick on top of cached_r_stats,
-                # causing token counts to inflate by hundreds over long streaming sessions.
-                prev_len = session.get('_last_resp_content_len', 0)
-                delta_len = len(content) - prev_len
-                session['_last_resp_content_len'] = len(content)
-                if delta_len > 0:
-                    est_words = max(1, delta_len // 5)  # approx 5 chars per word
-                    est_tokens = max(1, delta_len // 4)  # approx 4 chars per token
-                    r_stats = {
-                        'tokens': cached_r_stats['tokens'] + est_tokens,
-                        'words': cached_r_stats['words'] + est_words
-                    }
-                else:
-                    r_stats = cached_r_stats.copy()
-            else:
-                r_stats = cached_r_stats.copy()
-
-        return {
-            'history_count': history_count,
-            'response_messages': response_msgs,
-            'sub_agents': sub_agents,  # None means "no update this tick" — frontend reuses cached state
-            'active_stack': get_active_stack(),
-            'approvals': get_approvals(),
-            'generating': True,
-            'total_tokens': h_stats['tokens'] + r_stats['tokens'],
-            'total_words': h_stats['words'] + r_stats['words'],
-            'max_tokens': get_agent_max_tokens(orch_agent),
-            'current_model': getattr(orch_agent.llm, 'model', 'Unknown') if hasattr(orch_agent, 'llm') and orch_agent.llm else 'Unknown',
-            'telemetry': telemetry,
-        }
+        # Fallback to minimal state if unified build failed
+        if result is None:
+            return {
+                'history_count': len(_get_main_history(agent_pool, instance_name)),
+                'response_messages': [serialize_message(m, i) for i, m in enumerate(responses or [])],
+                'sub_agents': {},
+                'active_stack': [],
+                'approvals': [],
+                'generating': True,
+                'total_tokens': 0,
+                'total_words': 0,
+                'max_tokens': DEFAULT_MAX_INPUT_TOKENS,
+            }
+        
+        return result
 
     async def broadcast(data):
         """Send JSON to all connected WebSocket clients.
@@ -962,509 +850,58 @@ def create_app(agents, agent_pool, config=None):
 
     def run_agent_thread(history_for_agent, agent_runner, gen_id, loop):
         """
-        Runs agent.run() in a background thread.
-        Pushes state updates onto the async send_queue.
-        """
-        # Set event loop reference for dismissal callback to use
-        if agent_pool:
-            agent_pool._ws_loop = loop
+        Unified agent execution entry point. Delegates to run_agent_thread_unified
+        which uses ExecutionEngine and pool.instances instead of session['history'].
         
-        try:
-            with session_lock:
-                session['generating'] = True
-            if agent_pool:
-                agent_pool.stopped = False
-                if hasattr(agent_pool, 'active_stack'):
-                    agent_pool.active_stack.clear()
+        Signature preserved for backward compatibility with existing call sites.
+          - history_for_agent → used to extract system message content (can be None if instance exists in pool)
+          - agent_runner → not used (engine is stateless, reads from pool)
+          - gen_id → tracked in session for stop detection
+          - loop → asyncio event loop for send_queue
+        """
+        with session_lock:
+            session['generation_id'] = gen_id
 
-            if hasattr(agent_runner, 'session_name'):
-                agent_runner.session_name = session['session_name']
+        # Extract system message content for instance creation.
+        # Priority: history_for_agent arg > existing pool instance > None
+        system_message_content = None
+        if history_for_agent and len(history_for_agent) > 0:
+            first_msg = history_for_agent[0]
+            if isinstance(first_msg, dict):
+                if first_msg.get(ROLE) == SYSTEM:
+                    system_message_content = str(first_msg.get(CONTENT, '') or '')
+            elif hasattr(first_msg, 'role'):
+                if getattr(first_msg, 'role', None) == SYSTEM:
+                    system_message_content = str(getattr(first_msg, 'content', '') or '')
 
-            # Inject ui sampling params securely
-            ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
-            
-            def sanitize_cfg(cfg: dict):
-                floats = ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'repetition_penalty', 'repeat_penalty', 'repeatPenalty', 'min_p']
-                ints = ['max_tokens', 'max_completion_tokens', 'top_k', 'seed', 'max_input_tokens', 'max_turns', 'read_file_limit', 'tool_result_max_chars', 'grep_char_limit', 'shell_char_limit', 'code_char_limit']
-                new_cfg = {}
-                for k, v in cfg.items():
-                    try:
-                        if k in floats and v is not None:
-                            new_cfg[k] = float(v)
-                        elif k in ints and v is not None:
-                            new_cfg[k] = int(float(v))
-                        else:
-                            new_cfg[k] = v
-                    except (ValueError, TypeError):
-                        new_cfg[k] = v
-                if 'repeat_penalty' in new_cfg:
-                    pen = new_cfg['repeat_penalty']
-                    new_cfg['repetition_penalty'] = pen
-                    new_cfg['repeatPenalty'] = pen
-                if 'maxTokens' in new_cfg:
-                    new_cfg['max_tokens'] = new_cfg.pop('maxTokens')
-                return new_cfg
-
-            ui_cfg = sanitize_cfg(ui_cfg)
-            mcp_servers = ui_cfg.get('mcpServers')
-            disabled_tools = ui_cfg.get('disabled_tools')
-            work_access_folders = ui_cfg.get('work_access_folders')
-
-            # Keys that should not be passed to the underlying LLM chat API
-            NON_LLM_KEYS = (
-                'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
-                'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-                'tool_result_max_chars', 'grep_char_limit', 'grep_spillover', 'shell_char_limit', 'code_char_limit',
-                'disabled_tools'
-            )
-
-            if work_access_folders is not None and agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-                # Legacy format: work_access_folders is treated as RW folders (no RO)
-                agent_pool.operation_manager.set_extra_work_folders([], work_access_folders)
-
-            has_llm = hasattr(agent_runner, 'llm') and agent_runner.llm
-            old_cfg = None
-            if has_llm:
-                old_cfg = copy.deepcopy(agent_runner.llm.generate_cfg)
-                agent_runner.llm.generate_cfg.pop('mcpServers', None)
-                pure_llm_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
-                agent_max_turns = ui_cfg.get('max_turns')
-                agent_auto_continue = ui_cfg.get('auto_continue')
-
-                # Remove any existing keys that should not be passed to LLM
-                for key in NON_LLM_KEYS:
-                    agent_runner.llm.generate_cfg.pop(key, None)
-
-                agent_runner.llm.generate_cfg.update(pure_llm_cfg)
-                if disabled_tools is not None:
-                    agent_runner.llm.generate_cfg['disabled_tools'] = disabled_tools
-                
-                # Propagate tool limits to the agent runner for the orchestrator to use
-                tool_result_max_chars = ui_cfg.get('tool_result_max_chars')
-                if tool_result_max_chars is not None:
-                    agent_runner.tool_result_max_chars = tool_result_max_chars
-                
-                if agent_pool:
-                    agent_pool.update_llm_cfg(ui_cfg)
-                if agent_max_turns is not None:
-                    agent_runner.max_turns = agent_max_turns
-                if agent_auto_continue is not None:
-                    agent_runner.auto_continue_enabled = agent_auto_continue
-
-            # Load MCP tools if requested
-            if mcp_servers:
-                try:
-                    from agent_cascade.tools.mcp_manager import MCPManager
-                    mcp_tools = MCPManager().initConfig({'mcpServers': mcp_servers})
-                    for tool in mcp_tools:
-                        for agent_inst in agents:
-                            if tool.name not in agent_inst.function_map:
-                                agent_inst.function_map[tool.name] = tool
-                except Exception as e:
-                    logger.warning(f"[MCP] Failed to initialize MCP tools: {e}")
-
-            # ── Retry Loop for Auto-Rollback ──
-            retry_count = 0
-            max_auto_retries = ui_cfg.get('max_auto_rollbacks', 3)
-            # -1 means infinity
-            if max_auto_retries == -1:
-                max_auto_retries = 999999
-            
-            auto_rollback_enabled = ui_cfg.get('auto_rollback_on_loop', True)
-            current_history = history_for_agent # Start with the copy provided
-
-            # ── Telemetry: Record turn start with config fingerprint ──
-            _telem = agent_pool.telemetry if agent_pool and hasattr(agent_pool, 'telemetry') else None
-            try:
-                if _telem:
-                    from telemetry import TelemetryCollector
-                    _model_name = getattr(agent_runner.llm, 'model', 'unknown') if has_llm else 'unknown'
-                    _tool_names = list(agent_runner.function_map.keys()) if hasattr(agent_runner, 'function_map') else []
-                    _sys_prompt = ''
-                    if current_history and current_history[0]:
-                        first_msg = current_history[0]
-                        if isinstance(first_msg, dict):
-                            if first_msg.get(ROLE) == SYSTEM:
-                                _sys_prompt = str(first_msg.get(CONTENT, '') or '')[:2000]
-                        elif hasattr(first_msg, 'role'):
-                            if getattr(first_msg, 'role', None) == SYSTEM:
-                                _sys_prompt = str(getattr(first_msg, 'content', '') or '')[:2000]
-                    _cfg_fp = TelemetryCollector.fingerprint_config(
-                        model=_model_name,
-                        generate_cfg=ui_cfg,
-                        system_prompt=_sys_prompt,
-                        tools=_tool_names,
-                    )
-                    _cfg_desc = TelemetryCollector.describe_config(
-                        model=_model_name,
-                        generate_cfg=ui_cfg,
-                        tools=_tool_names,
-                    )
-                    _telem.record_turn_start(
-                        session['session_name'],
-                        config_fingerprint=_cfg_fp,
-                        config_description=_cfg_desc,
-                    )
-            except Exception:
-                pass  # Telemetry must never block agent execution
-            
-            while retry_count <= max_auto_retries:
-                should_retry = False
-                responses = []
-                session['_last_resp_len'] = 0
-                last_send = 0
-                tick_num = 0
-                
-                # Capture snapshots of sub-agent states before starting the run
-                pool_snapshots = {}
-                if agent_pool:
-                    pool_snapshots = agent_pool.capture_snapshots()
-
-                # Pre-compute history stats for streaming updates (based on active slice)
-                # Also use as the sliced working set — no need to call twice
-                working_history = agent_pool.slice_history_for_llm(current_history) if agent_pool else current_history
-                cached_h_stats = get_history_stats(working_history)
-                sub_agents_cache = None
-
-                try:
-                    
-                    # LLM safe config: filter out UI-only or Orchestrator-specific keys
-                    llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
-
-                    # Run the agent on the working set
-                    for partial in agent_runner.run(working_history, **llm_safe_cfg):
-                        if session['stop_requested'] or session['generation_id'] != gen_id:
-                            if agent_pool:
-                                agent_pool.stopped = True
-                            break
-
-                        responses = partial
-                        now = time.time()
-                        
-                        current_stack = list(get_active_stack())
-                        stack_changed = (current_stack != getattr(agent_pool, '_last_seen_stack', None))
-                        
-                        # Detect if a new message was added or a tool is being called/returned
-                        resp_len = len(responses)
-                        last_resp_len = session.get('_last_resp_len', 0)
-                        len_changed = (resp_len != last_resp_len)
-                        
-                        has_tool_event = False
-                        if resp_len > 0:
-                            last_m = responses[-1]
-                            has_tool_event = _get_msg_func_call(last_m) or _get_msg_role(last_m) == FUNCTION
-
-                        if now - last_send > 0.15 or stack_changed or len_changed or has_tool_event:
-                            session['_last_resp_len'] = resp_len
-                            
-                            # Sub-agent state update strategy:
-                            # - On stack changes or tool events: force a refresh immediately.
-                            # - When sub-agents are active: check if anything changed before computing state.
-                            #   Only call get_sub_agent_state when at least one agent's message count differs,
-                            #   OR the last message of an active agent has grown (streaming text).
-                            #   This avoids O(N*M) work on ticks where nothing happened.
-                            any_sa_active = any(sa.get('active') for sa in agent_pool.sub_agent_state.values()) if (agent_pool and hasattr(agent_pool, 'sub_agent_state')) else False
-                            
-                            # Quick change detection: compare current per-agent message counts + last msg sizes
-                            _sa_changed = stack_changed or has_tool_event
-                            if not _sa_changed and any_sa_active and tick_num % 2 == 0:
-                                # Check if any sub-agent's message count or last message size changed since last refresh
-                                _last_sa_counts = session.get('_last_sa_msg_counts', {})
-                                _cur_sa_counts = {}
-                                for sname, sstate in agent_pool.sub_agent_state.items():
-                                    msgs = sstate.get('messages', [])
-                                    msg_count = len(msgs)
-                                    # Also track the last active agent's last message size to detect streaming growth
-                                    is_waiting = sstate.get('is_waiting', False)
-                                    is_halted = sstate.get('is_halted', False)
-                                    has_queued = sstate.get('has_queued_messages', False)
-                                    if sstate.get('active') and msgs:
-                                        last_msg = msgs[-1]
-                                        content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
-                                        _cur_sa_counts[sname] = (msg_count, len(content), is_waiting, is_halted, has_queued)
-                                    else:
-                                        _cur_sa_counts[sname] = (msg_count, 0, is_waiting, is_halted, has_queued)
-                                if _cur_sa_counts != _last_sa_counts:
-                                    _sa_changed = True
-                                    session['_last_sa_msg_counts'] = _cur_sa_counts
-                            
-                            if _sa_changed or any_sa_active:
-                                sub_agents_cache = get_sub_agent_state(streaming=True)
-                                if agent_pool:
-                                    agent_pool._last_seen_stack = current_stack
-                            
-                            # Throttle telemetry to ~3s (every 20 ticks) to keep it lightweight
-                            _telem_payload = None
-                            if tick_num % 20 == 0:
-                                _telem_payload = _safe_get_telemetry()
-
-                            # UI expects history count to match current_history
-                            delta = build_stream_update(responses, cached_h_stats=cached_h_stats, sub_agents=sub_agents_cache, telemetry=_telem_payload)
-                            # Override history_count in delta for consistency (unless show_active_only is enabled)
-                            if not ui_cfg.get('show_active_only', False):
-                                delta['history_count'] = len(current_history)
-                            
-                            asyncio.run_coroutine_threadsafe(
-                                send_queue.put({'type': 'stream_update', **delta}), loop
-                            )
-                            last_send = now
-                            
-                            # Loop Detection — throttled to every 10th tick to reduce overhead
-                            if tick_num % 10 == 0:
-                                loop_info = detect_loop(current_history + responses)
-                                if loop_info:
-                                    loop_reason, pop_count = loop_info
-                                    if auto_rollback_enabled and retry_count < max_auto_retries:
-                                        logger.warning(f"Loop detected: {loop_reason}. Surgical rollback enabled (Retry {retry_count+1}/{max_auto_retries}).")
-
-                                        # 1. Surgical Rollback
-                                        # pop_count is relative to full_history (current_history + responses)
-                                        full_h = current_history + responses
-                                        refined_pop = _refine_pop_count(full_h, pop_count)
-
-                                        if refined_pop > len(responses):
-                                            # Loop started in previous history turns
-                                            excess = refined_pop - len(responses)
-                                            if len(current_history) >= excess:
-                                                del current_history[-excess:]
-                                            responses = []
-                                        else:
-                                            # Loop is entirely within current response
-                                            del responses[-refined_pop:]
-
-                                        # 1b. Record the soft rollback in the persistent log for the main session
-                                        if agent_pool:
-                                            orch_logger = agent_pool.get_logger(session['session_name'], 'Orchestrator')
-                                            orch_logger.rollback(refined_pop, soft=True, reason=loop_reason)
-
-                                        # 2. Inject a hint to avoid the loop in the next attempt
-                                        loop_hint = f"[SYSTEM]: A repetitive loop was detected ({loop_reason}). Please try a different approach."
-                                        current_history.append({ROLE: USER, CONTENT: loop_hint})
-
-                                        # 3. Notify UI that we are retrying
-                                        asyncio.run_coroutine_threadsafe(
-                                            send_queue.put({
-                                                'type': 'error',
-                                                'message': f"🔄 Loop detected. Surgically rolling back and retrying ({retry_count+1}/{max_auto_retries})..."
-                                            }), loop
-                                        )
-
-                                        should_retry = True
-                                        session['stop_requested'] = False
-                                        break
-                                    else:
-                                        logger.warning(f"Loop detected: {loop_reason}. Stopping generation.")
-
-                                        # Rollback even on final stop to keep history clean for user intervention
-                                        if agent_pool:
-                                            agent_pool.rollback_to_snapshots(pool_snapshots, soft=True, reason=loop_reason)
-                                        if current_history:
-                                            current_history.pop()
-                                    
-                                    # Clear responses so the loop garbage isn't appended to history
-                                    responses = []
-                                    
-                                    session['stop_requested'] = True
-                                    if agent_pool:
-                                        agent_pool.stopped = True
-                                    
-                                    asyncio.run_coroutine_threadsafe(
-                                        send_queue.put({
-                                            'type': 'error', 
-                                            'message': f"🔄 {loop_reason}. The agent has been stopped to prevent an infinite loop. History has been rolled back to the last stable state."
-                                        }), loop
-                                    )
-                                    break
-
-                            last_send = now
-                            tick_num += 1
-                except Exception as e:
-                    from agent_orchestrator import LoopDetectedError
-                    if isinstance(e, LoopDetectedError):
-                        loop_reason = e.reason
-                        agent_name = e.agent_name
-                        pop_count = e.pop_count
-                        turn_pop_count = getattr(e, 'turn_pop_count', 0)
-                        is_sub_agent = agent_pool and agent_name in agent_pool.instance_conversations
-                        
-                        if auto_rollback_enabled and retry_count < max_auto_retries:
-                            logger.warning(f"Loop detected for {agent_name}: {loop_reason}. Surgical rollback enabled (Retry {retry_count+1}/{max_auto_retries}).")
-                            
-                            # 1. Surgical Rollback
-                            if is_sub_agent:
-                                # Sub-agent loop that exhausted internal retries.
-                                # The internal retry loop in _stream_sub_agent_call already
-                                # performed surgical rollbacks on the sub-agent's conv.
-                                # Do NOT rollback again — just inject hints below.
-                                logger.info(f"Sub-agent {agent_name} loop escalated to main. Internal retries already rolled back sub-agent history.")
-                            elif agent_pool and pop_count:
-                                # Orchestrator itself looped — rollback main history.
-                                # pop_count is relative to the orchestrator's messages (which
-                                # includes uncommitted turn output), so subtract turn_pop_count.
-                                main_pop = max(0, pop_count - turn_pop_count)
-                                if main_pop > 0:
-                                    refined_pop = _refine_pop_count(current_history, main_pop)
-                                    if len(current_history) >= refined_pop:
-                                        del current_history[-refined_pop:]
-                                        logger.info(f"Surgically rolled back main history by {refined_pop} messages.")
-                                        
-                                        # Record soft rollback in orchestrator log
-                                        orch_logger = agent_pool.get_logger(session['session_name'], 'Orchestrator')
-                                        orch_logger.rollback(refined_pop, soft=True, reason=loop_reason)
-                            elif agent_pool:
-                                # Fallback to snapshots if pop_count is missing
-                                agent_pool.rollback_to_snapshots(pool_snapshots, soft=True, reason=loop_reason)
-                                
-                            # 1b. Inject a hint directly into the sub-agent's history so it knows it looped
-                            if is_sub_agent:
-                                sub_hint = f"[SYSTEM]: Your last actions resulted in a repetitive loop ({loop_reason}). Please try a different approach to solve the task."
-                                agent_pool.instance_conversations[agent_name].append({ROLE: USER, CONTENT: sub_hint})
-                                
-                            # 2. Inject hint into main orchestrator history
-                            loop_hint = f"[SYSTEM]: A repetitive loop was detected for {agent_name} ({loop_reason}). Please try a different approach."
-                            current_history.append({ROLE: USER, CONTENT: loop_hint})
-                            if agent_pool:
-                                agent_pool.instance_conversations[session['session_name']].append({ROLE: USER, CONTENT: loop_hint})
-                            
-                            # 3. Notify UI that we are retrying
-                            asyncio.run_coroutine_threadsafe(
-                                send_queue.put({
-                                    'type': 'error', 
-                                    'message': f"🔄 Loop detected for {agent_name}. Surgically rolling back and retrying ({retry_count+1}/{max_auto_retries})..."
-                                }), loop
-                            )
-                            
-                            should_retry = True
-                            session['stop_requested'] = False
-                        else:
-                            logger.warning(f"Loop detected for {agent_name}: {loop_reason}. Stopping generation.")
-                            if agent_pool:
-                                # For sub-agents, we should NOT blunt-rollback to start of turn
-                                # if we already have surgical information or if it's already rolled back.
-                                if is_sub_agent:
-                                    logger.info(f"Sub-agent {agent_name} loop stop: keeping surgical state.")
-                                    # We still pop the last orchestrator message if it was the call that failed
-                                    if current_history:
-                                        current_history.pop()
-                                else:
-                                    agent_pool.rollback_to_snapshots(pool_snapshots, soft=True, reason=loop_reason)
-                                    if current_history:
-                                        current_history.pop()
-                            responses = []
-                            session['stop_requested'] = True
-                            if agent_pool:
-                                agent_pool.stopped = True
-                            
-                            asyncio.run_coroutine_threadsafe(
-                                send_queue.put({
-                                    'type': 'error', 
-                                    'message': f"🔄 {loop_reason} in {agent_name}. The agent has been stopped. History rolled back."
-                                }), loop
-                            )
+        # If no history provided but instance exists in pool, extract system message from it
+        if system_message_content is None and agent_pool:
+            inst = agent_pool.get_instance(session['session_name'])
+            if inst:
+                with inst._compression_lock:
+                    if inst.conversation:
+                        first_msg = inst.conversation[0]
                     else:
-                        traceback.print_exc()
-                        asyncio.run_coroutine_threadsafe(
-                            send_queue.put({'type': 'error', 'message': f"Generation error: {str(e)}"}), loop
-                        )
+                        first_msg = None
+                    if first_msg is not None and isinstance(first_msg, dict):
+                        if first_msg.get(ROLE) == SYSTEM:
+                            system_message_content = str(first_msg.get(CONTENT, '') or '')
+                    elif first_msg is not None and hasattr(first_msg, 'role'):
+                        if getattr(first_msg, 'role', None) == SYSTEM:
+                            system_message_content = str(getattr(first_msg, 'content', '') or '')
+        instance_name = session['session_name']
+        ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
 
-                if should_retry:
-                    retry_count += 1
-                    continue
-                else:
-                    break
+        # Delegate to the unified execution thread (handles everything internally)
+        run_agent_thread_unified(
+            pool=agent_pool,
+            instance_name=instance_name,
+            system_message_content=system_message_content,
+            ui_cfg=ui_cfg,
+            send_queue=send_queue,
+            loop=loop,
+        )
 
-            # ── Finalize ──
-            if session['generation_id'] != gen_id:
-                return
-
-            # If we retried or rolled back, or if a tool like compress_context mutated the pool,
-            # we MUST sync session['history'] from the authoritative pool state.
-            with session_lock:
-                if agent_pool and session['session_name'] in agent_pool.instance_conversations:
-                    session['history'] = copy.deepcopy(agent_pool.instance_conversations[session['session_name']])
-                else:
-                    session['history'] = current_history
-
-                if responses:
-                    for r in responses:
-                        c = r.get(CONTENT) if isinstance(r, dict) else getattr(r, 'content', '')
-                        if c == PENDING_USER_INPUT:
-                            continue
-                        if isinstance(r, dict):
-                            session['history'].append(r)
-                        elif hasattr(r, 'model_dump'):
-                            session['history'].append(r.model_dump())
-                        else:
-                            session['history'].append({ROLE: str(getattr(r, 'role', '')), CONTENT: str(getattr(r, 'content', ''))})
-
-                if agent_pool:
-                    # CRITICAL: Sync back to pool so tools like CompressionTool see the current history
-                    agent_pool.instance_conversations[session['session_name']] = session['history']
-
-            if hasattr(agent_runner, 'turn_final_messages') and agent_runner.turn_final_messages:
-                tfm = agent_runner.turn_final_messages
-                
-                # Check if this is just a sliced view (starts with SYSTEM + summary marker)
-                is_slice = False
-                if len(tfm) > 0 and len(tfm) < len(session['history']):
-                    # Robust check: if ANY of the first few messages contain the compression marker, it's a slice.
-                    # This handles cases where System messages might be duplicated or shifted.
-                    from agent_cascade.prompts.dna import COMPRESSION_MARKER
-                    for m in tfm[:5]:
-                        content = m.get(CONTENT, '') if isinstance(m, dict) else getattr(m, 'content', '')
-                        if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                            is_slice = True
-                            break
-                    
-                    # Fallback: if we just started a turn and the number of messages returned 
-                    # matches our working set (plus any new responses), it's likely a slice.
-                    if not is_slice and 'working_history' in locals():
-                        if len(tfm) >= len(working_history):
-                            is_slice = True
-
-                if not is_slice and len(tfm) < len(session['history']):
-                    logger.info(f"Syncing history from agent state ({len(tfm)} vs {len(session['history'])} messages).")
-                    session['history'].clear()
-                    for res in tfm:
-                        msg = res.model_dump() if hasattr(res, 'model_dump') else (res if isinstance(res, dict) else {})
-                        if msg.get(ROLE) != SYSTEM:
-                            session['history'].append(msg)
-                agent_runner.turn_final_messages = None
-
-            _save_session_history()
-
-            # ── Telemetry: Record turn end ──
-            try:
-                if _telem:
-                    _telem.record_turn_end(session['session_name'])
-            except Exception:
-                pass
-
-            final = build_state(generating=False)
-            halted = agent_pool.is_halted(session['session_name']) if (agent_pool and hasattr(agent_pool, 'is_halted')) else False
-            asyncio.run_coroutine_threadsafe(send_queue.put({'type': 'done', **final, 'instance_halted': halted}), loop)
-
-        except Exception as e:
-            traceback.print_exc()
-            asyncio.run_coroutine_threadsafe(send_queue.put({'type': 'error', 'message': str(e)}), loop)
-        finally:
-            with session_lock:
-                session['generating'] = False
-                session['stop_requested'] = False
-            # FIX1: Reset cached response stats so next generation starts fresh
-            session.pop('_last_resp_len_stats', None)
-            session.pop('_cached_r_stats', None)
-            # FIX3: Invalidate history stats caches — messages may have been added/removed during run
-            session.pop('_cached_hist_stats', None)
-            session.pop('_cached_hist_stats_count', None)
-            # FIX2: Invalidate sub-agent stats caches — their histories may have changed
-            for key in list(session.keys()):
-                if key.startswith('_sa_stats_'):
-                    session.pop(key, None)
-            if agent_pool:
-                agent_pool.stopped = False
-            if has_llm and old_cfg:
-                agent_runner.llm.generate_cfg = old_cfg
 
     # ── Background tasks ──────────────────────────────────────────────────
 
@@ -1638,8 +1075,14 @@ def create_app(agents, agent_pool, config=None):
 
     @app.post("/api/reset")
     async def api_reset():
-        session['history'] = []
-        _save_session_history() # Ensure persistent file is cleared
+        # Clear pool instance conversation (unified path)
+        if agent_pool:
+            inst = agent_pool.get_instance(session['session_name'])
+            if inst is not None:
+                with inst._compression_lock:
+                    inst.conversation.clear()
+        
+        # Phase 6: No need to clear session['history'] — pool is the source of truth
         session['generating'] = False
         session['generation_id'] += 1
         if agent_pool:
@@ -1905,45 +1348,62 @@ def create_app(agents, agent_pool, config=None):
                             except ValueError:
                                 pass
                         
-                        # Rollback N messages
-                        for _ in range(n):
-                            if session['history']:
-                                session['history'].pop()
-                        
-                        # Record soft rollback in orchestrator log to keep internal state in sync
+                        # Rollback N messages using pool's surgical_rollback (unified path)
                         if agent_pool:
-                            try:
-                                agent_runner_for_log = get_agent()
-                                main_logger = agent_pool.get_logger(session['session_name'], agent_runner_for_log.__class__.__name__)
-                                main_logger.truncate_to(len(session['history']), soft=True, reason="Manual /rollback command")
-                            except Exception:
-                                pass
-                            agent_pool.reset()
+                            inst = agent_pool.get_instance(session['session_name'])
+                            if inst is not None and len(inst.conversation) > 0:
+                                agent_pool.surgical_rollback(
+                                    session['session_name'], n, soft=True, reason="Manual /rollback command"
+                                )
+                            else:
+                                await broadcast({'type': 'error', 'message': 'Nothing to roll back — no conversation yet'})
+                                continue
                         await broadcast({'type': 'state', **build_state()})
                         continue
 
-                    # Add user message to history (parsed for multimodal items)
+                    # Add user message to the pool instance's conversation (unified path).
+                    # This replaces: session['history'].append(...) + sync to pool.
                     parsed_content = _parse_multimodal_content(text)
-                    with session_lock:
-                        session['history'].append({ROLE: USER, CONTENT: parsed_content})
+                    instance_name = session['session_name']
+                    
+                    # Ensure the main agent instance exists before adding the message.
+                    # If it doesn't, create it with the system message from the agent runner.
+                    if agent_pool:
+                        inst = agent_pool.get_instance(instance_name)
+                        if inst is None:
+                            # Extract system message content from the active agent runner
+                            sys_content = None
+                            agent_runner = get_agent()
+                            if hasattr(agent_runner, 'system_prompt') and agent_runner.system_prompt:
+                                sys_content = str(agent_runner.system_prompt)
+                            elif hasattr(agent_runner, 'llm') and hasattr(agent_runner.llm, 'cfg'):
+                                sys_content = agent_runner.llm.cfg.get('system', '') or agent_runner.llm.cfg.get('system_message', '')
+                            
+                            if sys_content:
+                                create_main_agent_instance(
+                                    pool=agent_pool,
+                                    instance_name=instance_name,
+                                    system_message_content=sys_content,
+                                )
+                        
+                        # Now add the user message (instance guaranteed to exist)
+                        user_msg = Message(role=USER, content=parsed_content)
+                        agent_pool.add_message(instance_name, user_msg)
 
                     # Start agent generation
                     with session_lock:
                         session['stop_requested'] = False
                     if agent_pool:
                         agent_pool.stopped = False
-                        # Sync history to pool so tools can see it
-                        agent_pool.instance_conversations[session['session_name']] = session['history']
                     
                     session['generation_id'] += 1
                     gen_id = session['generation_id']
                     agent_runner = get_agent()
-                    history_copy = copy.deepcopy(session['history'])
                     loop = asyncio.get_event_loop()
 
                     thread = threading.Thread(
                         target=run_agent_thread,
-                        args=(history_copy, agent_runner, gen_id, loop),
+                        args=(None, agent_runner, gen_id, loop),
                         daemon=True,
                     )
                     thread.start()
@@ -1981,38 +1441,41 @@ def create_app(agents, agent_pool, config=None):
                         
                         if was_halted:
                             # Was halted (regardless of generating state — we already handled the generating case above)
-                            # Inject continuation and start fresh generation
+                            # Inject continuation message into pool instance conversation (unified path)
                             cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
                             parsed_content = _parse_multimodal_content(cont_msg)
-                            with session_lock:
-                                session['history'].append({'role': USER, 'content': parsed_content})
-                            _save_session_history()
+                            if agent_pool:
+                                cont_user_msg = Message(role=USER, content=parsed_content)
+                                agent_pool.add_message(target_instance, cont_user_msg)
                             
                             # Start agent generation
                             with session_lock:
                                 session['stop_requested'] = False
                             if agent_pool:
                                 agent_pool.stopped = False
-                                agent_pool.instance_conversations[session['session_name']] = session['history']
                                 
-                                # ── Fix 3: Restore sub-agent pools from JSONL logs if corrupted ──
+                                # ── Fix 3: Restore sub-agent conversations from JSONL logs if corrupted ──
                                 # After a failed forced compression cycle, sub-agent pools may be empty/corrupted.
                                 # Read directly from log files on disk to recover.
                                 try:
                                     # Import validate_message_pool locally (defined in agent_orchestrator.py)
                                     from agent_orchestrator import validate_message_pool
                                     
-                                    for sa_name in list(agent_pool.instance_classes.keys()):
+                                    for sa_name, agent_class in list(agent_pool.instance_classes.items()):
                                         if sa_name == session['session_name']:
-                                            continue  # Already synced above
+                                            continue  # Skip main session — already synced above
+                                        
+                                        # Skip orphaned or root instances (only recover sub-agents)
+                                        sa_inst = agent_pool.get_instance(sa_name)
+                                        if sa_inst is None:
+                                            continue  # Instance not found, skip
                                         
                                         try:
-                                            agent_class = agent_pool.instance_classes.get(sa_name, '')
-                                            
-                                            # Check if current pool data is valid before restoring
-                                            current_pool_data = agent_pool.instance_conversations.get(sa_name, [])
-                                            if validate_message_pool(current_pool_data, sa_name):
-                                                continue  # Pool is fine, no need to restore
+                                            # Check if current conversation is valid before restoring
+                                            with sa_inst._compression_lock:
+                                                conv_snapshot = list(sa_inst.conversation)
+                                            if validate_message_pool(conv_snapshot, sa_name):
+                                                continue  # Conversation is fine, no need to restore
                                             
                                             # Find the actual log file via existing logger or glob
                                             recov = []
@@ -2047,10 +1510,13 @@ def create_app(agents, agent_pool, config=None):
                                             # Only overwrite pool if recovered data is valid
                                             if recov and validate_message_pool(recov, sa_name):
                                                 logger.info(
-                                                    f"Restoring sub-agent {sa_name} pool from log during resume "
+                                                    f"Restoring sub-agent {sa_name} conversation from log during resume "
                                                     f"({len(recov)} messages)"
                                                 )
-                                                agent_pool.instance_conversations[sa_name] = copy.deepcopy(recov)
+                                                sa_inst = agent_pool.get_instance(sa_name)
+                                                if sa_inst is not None:
+                                                    with sa_inst._compression_lock:
+                                                        sa_inst.conversation[:] = recov  # Replace in-place under lock
                                             else:
                                                 logger.warning(
                                                     f"Could not restore sub-agent {sa_name} pool — "
@@ -2066,12 +1532,11 @@ def create_app(agents, agent_pool, config=None):
                             session['generation_id'] += 1
                             gen_id = session['generation_id']
                             agent_runner = get_agent()
-                            history_copy = copy.deepcopy(session['history'])
                             loop = asyncio.get_event_loop()
 
                             thread = threading.Thread(
                                 target=run_agent_thread,
-                                args=(history_copy, agent_runner, gen_id, loop),
+                                args=(None, agent_runner, gen_id, loop),
                                 daemon=True,
                             )
                             thread.start()
@@ -2098,26 +1563,35 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'retry':
                     if session['generating']:
                         continue
-                    # Remove trailing assistant/function messages
-                    while (session['history']
-                           and _get_msg_role(session['history'][-1]) in (ASSISTANT, FUNCTION)):
-                        session['history'].pop()
+                    
+                    instance_name = session['session_name']
+                    
+                    # Remove trailing assistant/function messages from the pool instance's conversation (unified path)
+                    if agent_pool:
+                        inst = agent_pool.get_instance(instance_name)
+                        if inst is not None:
+                            with inst._compression_lock:
+                                while inst.conversation and _get_msg_role(inst.conversation[-1]) in (ASSISTANT, FUNCTION):
+                                    inst.conversation.pop()
+                    # TODO(Phase 7): Remove legacy fallback — agent_pool should always exist
 
                     # Roll back one more (the user message) to allow a clean re-trigger
-                    # and ensure consistency with the last_turn_snapshots.
                     last_user_msg = None
-                    if session['history'] and _get_msg_role(session['history'][-1]) == USER:
-                        last_user_msg = session['history'].pop()
+                    if agent_pool:
+                        inst = agent_pool.get_instance(instance_name)
+                        with inst._compression_lock:
+                            if inst.conversation and _get_msg_role(inst.conversation[-1]) == USER:
+                                last_user_msg = inst.conversation.pop()
+                    # TODO(Phase 7): Remove legacy fallback — agent_pool should always exist
 
-                    if not session['history'] and not last_user_msg:
+                    if not (agent_pool and agent_pool.get_instance(instance_name)) and not _get_main_history(agent_pool, instance_name) and not last_user_msg:
                         _save_session_history()
                         await broadcast({'type': 'state', **build_state()})
                         continue
                     
-                    _save_session_history()
+                    # Clear active tools/agent stack since we are retrying from the main input level
                     if agent_pool:
-                        # Clear active tools/agent stack since we are retrying from the main input level
-                        agent_pool.active_stack.clear()
+                        agent_pool.active_stack_clear()  # active_stack property returns defensive copy; use mutation method
                         agent_pool.last_tool_args.clear()
 
                         # 1. Rollback sub-agents to the start of the last turn
@@ -2125,32 +1599,29 @@ def create_app(agents, agent_pool, config=None):
                             agent_pool.rollback_to_snapshots(session['last_turn_snapshots'], soft=True, reason="User retry")
                             
                             # Sync sub_agent_state so build_state() sees the rolled-back histories
-                            # (sub_agent_state[name]['messages'] is a deep copy and won't reflect truncation)
                             for name in session['last_turn_snapshots']:
                                 if name != session['session_name'] and name in agent_pool.sub_agent_state:
-                                    agent_pool.sub_agent_state[name]['messages'] = list(agent_pool.instance_conversations.get(name, []))
-                        
-                        # 2. Rollback the main orchestrator log to match the shortened history
-                        # This now points to the state before the user message we just popped.
-                        try:
-                            agent_runner_for_log = get_agent()
-                            main_logger = agent_pool.get_logger(session['session_name'], agent_runner_for_log.__class__.__name__)
-                            main_logger.truncate_to(len(session['history']), soft=True, reason="User retry")
-                        except Exception:
-                            pass
-                    
-                    # Now "send it again": re-append the user message.
-                    # This ensures the agent has the correct input to respond to, 
-                    # but the system state is now cleanly positioned as if the message was just sent.
-                    if last_user_msg:
-                        session['history'].append(last_user_msg)
-                        # Re-log it to keep the persistent log file in sync with history
-                        try:
-                            agent_runner_for_log = get_agent()
-                            main_logger = agent_pool.get_logger(session['session_name'], agent_runner_for_log.__class__.__name__)
-                            main_logger.log_message(last_user_msg)
-                        except Exception:
-                            pass
+                                    sa_inst = agent_pool.get_instance(name)
+                                    if sa_inst is not None:
+                                        with sa_inst._compression_lock:
+                                            conv_snapshot = list(sa_inst.conversation)
+                                        agent_pool.sub_agent_state[name]['messages'] = conv_snapshot
+
+                    # Now "send it again": re-append the user message to pool instance (unified path)
+                    if last_user_msg and agent_pool:
+                        inst = agent_pool.get_instance(instance_name)
+                        if inst is not None:
+                            with inst._compression_lock:
+                                inst.conversation.append(last_user_msg)
+                        else:
+                            # Fallback: create the instance first, then add the message
+                            create_main_agent_instance(
+                                pool=agent_pool,
+                                instance_name=instance_name,
+                                system_message_content="",
+                            )
+                            agent_pool.add_message(instance_name, last_user_msg)
+
                     if 'generate_cfg' in data:
                         session['generate_cfg'] = data['generate_cfg']
 
@@ -2161,24 +1632,29 @@ def create_app(agents, agent_pool, config=None):
                         agent_pool.stopped = False
                     gen_id = session['generation_id']
                     agent_runner = get_agent()
-                    history_copy = copy.deepcopy(session['history'])
                     loop = asyncio.get_event_loop()
 
                     thread = threading.Thread(
                         target=run_agent_thread,
-                        args=(history_copy, agent_runner, gen_id, loop),
+                        args=(None, agent_runner, gen_id, loop),
                         daemon=True,
                     )
                     thread.start()
                     await broadcast({'type': 'state', **build_state(generating=True)})
 
                 elif msg_type == 'reset':
+                    # Clear pool instance conversation (unified path)
+                    if agent_pool:
+                        inst = agent_pool.get_instance(session['session_name'])
+                        if inst is not None:
+                            with inst._compression_lock:
+                                inst.conversation.clear()
+                    
                     with session_lock:
-                        session['history'] = []
+                        # Phase 6: No need to clear session['history'] — pool is the source of truth
                         session['generating'] = False
                         session['stop_requested'] = False
                         session['generation_id'] += 1
-                    _save_session_history()
                     if agent_pool:
                         agent_pool.stopped = True
                         agent_pool.reset()
@@ -2325,7 +1801,7 @@ def create_app(agents, agent_pool, config=None):
                                         }
                                         agent_pool.instance_conversations[sec_state_key] = list(history)
                                         if sec_state_key not in agent_pool.active_stack:
-                                            agent_pool.active_stack.append(sec_state_key)
+                                            agent_pool.active_stack_append(sec_state_key)  # active_stack returns defensive copy; use mutation method
                                         # Broadcast initial state so the tab appears immediately
                                         asyncio.run_coroutine_threadsafe(
                                             send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
@@ -2619,7 +2095,7 @@ def create_app(agents, agent_pool, config=None):
                                     if sec_state_key and sec_state_key in agent_pool.sub_agent_state:
                                         agent_pool.sub_agent_state[sec_state_key]['active'] = False
                                         if sec_state_key in agent_pool.active_stack:
-                                            agent_pool.active_stack.remove(sec_state_key)
+                                            agent_pool.active_stack_remove(sec_state_key)  # active_stack returns defensive copy; use mutation method
                                     if hasattr(app, 'active_security_checks') and rid:
                                         with app.active_security_checks_lock:
                                             app.active_security_checks.discard(rid)
@@ -2631,12 +2107,18 @@ def create_app(agents, agent_pool, config=None):
                     content = data.get('content', '')
                     target_name = data.get('instance_name') or session['session_name']
                     
+                    # Get the conversation from pool instance (unified path)
                     history = []
-                    if target_name == session['session_name']:
-                        history = session['history']
-                    elif agent_pool and target_name in agent_pool.instance_conversations:
-                        history = agent_pool.instance_conversations[target_name]
-                        
+                    if agent_pool:
+                        inst = agent_pool.get_instance(target_name)
+                        if inst is not None:
+                            with inst._compression_lock:
+                                history = list(inst.conversation)  # Defensive copy under lock
+                        elif target_name in agent_pool.instance_conversations:
+                            history = agent_pool.instance_conversations[target_name]
+                    
+                    # Phase 6: No fallback to session['history'] — pool is the source of truth
+                    
                     if (idx is not None
                             and not session['generating']
                             and 0 <= idx < len(history)):
@@ -2669,6 +2151,12 @@ def create_app(agents, agent_pool, config=None):
                             msg.content = new_parsed_content
                         
                         if agent_pool:
+                            # Write back the edited history under lock to prevent data race
+                            inst = agent_pool.get_instance(target_name)
+                            if inst is not None:
+                                with inst._compression_lock:
+                                    inst.conversation[:] = history  # In-place replace under lock
+                            
                             logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
                             logger_inst.reset_history(history, rewrite=True)
                             
@@ -2679,7 +2167,7 @@ def create_app(agents, agent_pool, config=None):
                                 agent_pool.sub_agent_state[target_name]['messages'] = list(history)
                             
                             # Also sync main session back to pool so next generation doesn't
-                            # overwrite the edit (line 1180 does copy.deepcopy from pool)
+                            # overwrite the edit (pool is source of truth)
                             if target_name == session['session_name']:
                                 agent_pool.instance_conversations[target_name] = list(history)
                     await broadcast({'type': 'state', **build_state()})
@@ -2689,17 +2177,29 @@ def create_app(agents, agent_pool, config=None):
                         continue
                     target_name = data.get('instance_name') or session['session_name']
                     
+                    # Get the conversation from pool instance (unified path)
                     history = []
-                    if target_name == session['session_name']:
-                        history = session['history']
-                    elif agent_pool and target_name in agent_pool.instance_conversations:
-                        history = agent_pool.instance_conversations[target_name]
-                        
+                    if agent_pool:
+                        inst = agent_pool.get_instance(target_name)
+                        if inst is not None:
+                            with inst._compression_lock:
+                                history = list(inst.conversation)  # Defensive copy under lock
+                        elif target_name in agent_pool.instance_conversations:
+                            history = agent_pool.instance_conversations[target_name]
+                    
+                    # Phase 6: No fallback to session['history'] — pool is the source of truth
+                    
                     indices = sorted(data.get('indices', []), reverse=True)
                     for idx in indices:
                         if 0 <= idx < len(history):
                             history.pop(idx)
                     if agent_pool:
+                        # Write back the pruned history under lock to prevent data race
+                        inst = agent_pool.get_instance(target_name)
+                        if inst is not None:
+                            with inst._compression_lock:
+                                inst.conversation[:] = history  # In-place replace under lock
+                        
                         logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
                         logger_inst.reset_history(history, rewrite=True)
                         
@@ -2708,7 +2208,7 @@ def create_app(agents, agent_pool, config=None):
                             agent_pool.sub_agent_state[target_name]['messages'] = list(history)
                         
                         # Also sync main session back to pool so next generation doesn't
-                        # re-deep-copy the un-deleted version (line 1180 does copy.deepcopy from pool)
+                        # re-deep-copy the un-deleted version (pool is source of truth)
                         if target_name == session['session_name']:
                             agent_pool.instance_conversations[target_name] = list(history)
                     await broadcast({'type': 'state', **build_state()})
@@ -2739,11 +2239,10 @@ def create_app(agents, agent_pool, config=None):
                         if status.startswith("Error"):
                             await websocket.send_text(json.dumps({"type": "error", "message": status}, ensure_ascii=False))
                         else:
-                            # Successfully loaded. Update history in session
+                            # Phase 6: Pool is already loaded by load_session_from_log — no need to sync to session
                             instance_name = session.get('session_name', 'Maine')
-                            if instance_name in agent_pool.instance_conversations:
-                                session['history'] = copy.deepcopy(agent_pool.instance_conversations[instance_name])
-                                session['summary'] = agent_pool.instance_summaries.get(instance_name, "")
+                            inst = agent_pool.get_instance(instance_name)
+                            if inst is not None:
                                 session['generating'] = False
                                 session['stop_requested'] = False
                                 if agent_pool:
@@ -2847,7 +2346,7 @@ def create_app(agents, agent_pool, config=None):
 if __name__ == "__main__":
     import uvicorn
     import argparse
-    from agent_pool import AgentPool
+    from agent_cascade.agent_pool import AgentPool
 
     parser = argparse.ArgumentParser(description="AgentCascade API Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
@@ -2874,13 +2373,19 @@ if __name__ == "__main__":
     
     agent_pool = AgentPool(
         llm_cfg=initial_llm_cfg, 
+        agents_dir='agents',
         workspace_dir=args.workspace,
-        idle_timeout_seconds=idle_timeout,
-        idle_check_interval=idle_check_interval,
     )
     
-    # Pre-load agents
-    orch_agent = agent_pool.get_instance('Maine', 'Orchestrator')
+    # Set idle timeout settings via PoolSettings (new pool uses PoolSettings instead of constructor args)
+    agent_pool.settings.idle_timeout_seconds = idle_timeout
+    agent_pool.settings.idle_check_interval = idle_check_interval
+    
+    # Create the root orchestrator instance in the new pool (use lowercase to match template key)
+    agent_pool.create_instance('Maine', 'orchestrator')
+    
+    # Get the orchestrator agent template for create_app (new pool separates instances from templates)
+    orch_agent = agent_pool.get_agent('orchestrator')
     
     app = create_app(agents=[orch_agent], agent_pool=agent_pool)
     

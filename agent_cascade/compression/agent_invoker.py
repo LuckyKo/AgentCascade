@@ -190,7 +190,7 @@ def invoke_compression_agent(
                 'messages': list(comp_history),
             }
             if comp_state_key not in agent_pool.active_stack:
-                agent_pool.active_stack.append(comp_state_key)
+                agent_pool.active_stack_append(comp_state_key)
             agent_pool.instance_conversations[comp_state_key] = list(comp_history)
 
             final_msgs = []
@@ -265,4 +265,4 @@ def invoke_compression_agent(
         if comp_state_key in agent_pool.sub_agent_state:
             agent_pool.sub_agent_state[comp_state_key]['active'] = False
             if comp_state_key in agent_pool.active_stack:
-                agent_pool.active_stack.remove(comp_state_key)
+                agent_pool.active_stack_remove(comp_state_key)

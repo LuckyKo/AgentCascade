@@ -1,0 +1,1039 @@
+"""
+Execution Engine — Phase 1 of the AgentCascade Architecture Rewrite.
+
+Stateless execution coordinator that drives ALL agent instances through a single
+unified loop. Replaces both api_server.run_agent_thread() and
+OrchestratorAgent._stream_sub_agent_call() — eliminating the structural duality.
+
+See DESIGN_REWRITE.md §3.1 for design rationale.
+
+Key design principle: Engine is stateless. It receives AgentInstance as a parameter
+and orchestrates phases. Each phase method (~20-60 lines) is independently testable.
+"""
+
+import json
+import time
+from typing import Any, Iterator, List, Tuple, Union
+
+from agent_cascade.llm.schema import (
+    ASSISTANT, FUNCTION, SYSTEM, USER, Message,
+)
+from agent_cascade.log import logger
+from agent_cascade.utils.utils import extract_text_from_message
+
+from .agent_instance import AgentInstance, LoopDetectedError
+
+
+class ExecutionEngine:
+    """
+    Coordinates execution of an AgentInstance through its turn loop.
+
+    Stateless in terms of turn-level state — receives AgentInstance as parameter.
+    Holds a pool reference for coordination (halt checks, tool delegation) but
+    tracks no per-turn variables between calls. This makes testing straightforward:
+    create an instance, set up state, call run(), inspect yields.
+
+    Every agent (including the "main" orchestrator) goes through this same engine.
+    There is no separate execution path for main vs sub-agents.
+    """
+
+    def __init__(self, pool):
+        """Initialize with a reference to the AgentPool.
+
+        Args:
+            pool: The AgentPool instance that manages all agent state.
+        """
+        self.pool = pool
+
+    def run(self, instance: AgentInstance) -> Iterator[List[Message]]:
+        """Execute the agent's turn loop as a generator yielding state updates.
+
+        This is THE execution entry point for ALL agents. No separate paths
+        for main vs sub-agents. The orchestrator is just the first instance
+        created in the pool.
+
+        Args:
+            instance: The AgentInstance to execute.
+
+        Yields:
+            List[Message]: Current conversation state after each phase.
+        """
+        instance.is_active = True  # Mark active before execution starts
+        try:
+            # ── Phase 1: Setup ─────────────────────────────────────────────
+            messages, llm_messages, response = self._setup_turn(instance)
+            if not messages:
+                return  # Manual command handled or error
+
+            max_turns = instance.max_turns or 50
+            turns_available = max_turns
+
+            while turns_available > 0:
+                # ── Phase 2: Pre-LLM Checks ────────────────────────────────
+                # Stop/halt checks, async message injection, compression check/force, loop detection
+                if self._pre_llm_checks(instance, messages, llm_messages, turns_available):
+                    yield response
+                    continue
+
+                turns_available -= 1
+
+                # ── Phase 3: LLM Call with Injection Points ────────────────
+                turn_output = list(self._call_llm_with_injection(instance, llm_messages))
+
+                if self.pool.stopped or self.pool.is_instance_halted(instance.instance_name):
+                    yield response
+                    continue
+
+                # ── Phase 4: Response Processing and Tool Execution ─────────
+                if self._process_response(instance, turn_output, messages, llm_messages, response):
+                    yield response
+                    continue
+
+                # ── Phase 5: Post-Turn Checks ───────────────────────────────
+                if not self._post_turn_checks(instance, messages):
+                    break
+
+            # ── Cleanup: Turn limit reached ────────────────────────────────
+            if turns_available <= 0:
+                msg = Message(
+                    role=ASSISTANT,
+                    content="\n\n[SYSTEM: Turn limit reached. Ask me to continue if incomplete.]",
+                )
+                response.append(msg)
+                yield response
+
+        except LoopDetectedError:
+            # Propagate to consumer-level recovery wrapper (DESIGN_REWRITE §7.2)
+            raise
+        except Exception as e:
+            # C4 fix: Catch unhandled exceptions — log and yield error state
+            logger.error(f"ExecutionEngine.run() failed for {instance.instance_name}: {e}")
+            error_msg = Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {e}]")
+            yield [error_msg]
+
+        finally:
+            # C4 fix: Always clean up — mark inactive regardless of how we exit
+            instance.is_active = False
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  Phase Methods — each ~20-60 lines, independently testable
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _setup_turn(self, instance: AgentInstance) -> tuple:
+        """Phase 1: Prepare messages and LLM input for the turn loop.
+
+        Builds the system message from template (for main agent), loads conversation history,
+        applies slice_history_for_llm to get working set, and sets up the response accumulator.
+
+        Returns:
+            Tuple of (messages, llm_messages, response) or (None, None, None) on error.
+        """
+        inst_name = instance.instance_name
+
+        # Load conversation from pool (single source of truth)
+        with instance._compression_lock:
+            conv = list(instance.conversation)
+        if not conv:
+            return None, None, None
+
+        # messages = full working set; llm_messages = what actually goes to LLM
+        # Apply slice to extract system + post-marker tail if markers exist
+        sliced = self.pool.slice_history_for_llm(conv)
+        llm_messages = list(sliced) if sliced else list(conv)
+        response: List[Message] = []
+
+        return conv, llm_messages, response
+
+    def _pre_llm_checks(
+        self, instance: AgentInstance, messages: List[Message],
+        llm_messages: List[Message], turns_available: int
+    ) -> bool:
+        """Phase 2: Stop/halt checks, async injection, compression check, loop detection.
+
+        Returns True if processing should continue to next iteration (yield + continue).
+        Handles: stop/halt guard, async message drain, forced compression with rebuild,
+        and loop detection (raises LoopDetectedError if found).
+        """
+        inst_name = instance.instance_name
+
+        # ── Stop/halt guard ────────────────────────────────────────────────
+        if self.pool.stopped or self.pool.is_instance_halted(inst_name):
+            return True  # Skip LLM call, yield and continue loop
+
+        # ── Async message injection (drain queue) ──────────────────────────
+        pending = self.pool.drain_queue(inst_name)
+        if pending:
+            for async_msg_text in pending:
+                if not async_msg_text.strip():
+                    continue  # Skip empty messages
+                async_msg = Message(role=USER, content=async_msg_text)
+                messages.append(async_msg)
+                llm_messages.append(async_msg)
+                with instance._compression_lock:
+                    instance.conversation.append(async_msg)
+            return True  # Yield and continue loop to process new messages
+
+        # ── COMPRESSION CHECK (the critical fix for sub-agents) ────────────
+        max_tokens = self._get_max_tokens(instance)
+        current_tokens = self._count_history_tokens(llm_messages)
+        usage_pct = (current_tokens / max_tokens * 100) if max_tokens > 0 else 0
+
+        # Forced compression at >95% — halts other agents, compresses, rebuilds
+        if usage_pct > self.pool.settings.compression_force_threshold:
+            return self._force_compression(instance, messages, llm_messages, usage_pct)
+
+        # Warning injection at >85%
+        if usage_pct > self.pool.settings.compression_warning_threshold:
+            self._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens)
+
+        # ── Loop detection ────────────────────────────────────────────────
+        loop_info = self._detect_loop(messages)
+        if loop_info:
+            reason, pop_count = loop_info
+            logger.warning(f"Loop detected for {inst_name}: {reason}")
+            raise LoopDetectedError(reason=reason, pop_count=pop_count)
+
+        return False  # Continue to LLM call normally
+
+    def _force_compression(
+        self, instance: AgentInstance, messages: List[Message],
+        llm_messages: List[Message], usage_pct: float
+    ) -> bool:
+        """Force compress when token usage exceeds critical threshold. Returns True (continue loop)."""
+        inst_name = instance.instance_name
+
+        # Halt other agents (exempt target, compression_agent, and orchestrator)
+        exempt = [inst_name, 'compression_agent']
+        if instance.parent_instance:
+            exempt.append(instance.parent_instance)
+        self.pool.halt_all_instances(except_instances=exempt)
+
+        try:
+            logger.info(
+                f"Context usage at {usage_pct:.1f}% for {inst_name} — "
+                f"forcing compression."
+            )
+
+            from agent_cascade.compression.core import compress_context as _compress
+            result = _compress(
+                agent_pool=self.pool,
+                target_agent_name=inst_name,
+                fraction=0.5,
+                mode='auto',
+                force=True,
+                justification=f'CRITICAL THRESHOLD ({usage_pct:.1f}%)',
+            )
+
+            if result.success:
+                # Rebuild working set from compressed pool state
+                self._rebuild_working_set(messages, llm_messages, inst_name)
+                # Use summary_text directly from CompressResult (P2 fix — no fragile tag parsing)
+                instance.compression_summary = result.summary_text
+                # Update latest_marker_index to point to the new marker in the conversation (P2 fix)
+                conv = self.pool.get_conversation(inst_name)
+                if conv:
+                    for idx, msg in enumerate(conv):
+                        role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                        c = msg.get('content') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                        if isinstance(c, str) and '<context_summary>' in c:
+                            instance.latest_marker_index = idx
+                notification = (
+                    f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%. "
+                    f"Forced compression applied.]"
+                )
+                self._append_system_notification(llm_messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
+            else:  # Compression failed or returned error
+                logger.error(f"Forced compression failed for {inst_name}: {result.error}")
+                notification = (
+                    f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%, "
+                    f"but automatic compression failed.]"
+                )
+                self._append_system_notification(llm_messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
+
+            return True  # Continue loop — don't make LLM call this turn
+
+        except Exception as e:
+            logger.error(f"Forced compression raised exception for {inst_name}: {e}")
+            return True
+
+        finally:
+            self.pool.resume_all_instances()
+
+    def _inject_compression_warning(
+        self, llm_messages: List[Message], usage_pct: float,
+        current_tokens: int, max_tokens: int
+    ):
+        """Inject a warning message when context is approaching limit."""
+        warning = (
+            f"[SYSTEM WARNING: Context window at {usage_pct:.1f}% capacity "
+            f"({current_tokens}/{max_tokens} tokens). "
+            f"Consider using compress_context to free space.]"
+        )
+        self._append_system_notification(llm_messages, "[SYSTEM WARNING: Context", warning)
+
+    def _rebuild_working_set(
+        self, messages: List[Message], llm_messages: List[Message], inst_name: str
+    ):
+        """Rebuild both working sets from pool state after compression.
+
+        With clean-trim model (DESIGN_REWRITE §2.4), the pool is already compact —
+        we just replace our references with deepcopies of the current pool content.
+        """
+        # Rebuild messages (full conversation) using shared helper
+        from agent_cascade.compression.helpers import rebuild_working_set as _rws
+        _rws(messages, self.pool, inst_name)
+
+        # Rebuild llm_messages (sliced working set) — apply slice_history_for_llm
+        conv = self.pool.get_conversation(inst_name)
+        if not conv:
+            return
+
+        sliced = self.pool.slice_history_for_llm(conv)
+        llm_messages.clear()
+        llm_messages.extend(list(sliced))  # Already a new list from slice_history_for_llm
+
+    def _call_llm_with_injection(
+        self, instance: AgentInstance, llm_messages: List[Message]
+    ) -> Iterator[Message]:
+        """Phase 3: LLM call with active function injection.
+
+        Makes the actual LLM API call via api_router, handling streaming.
+        Checks for stop/halt mid-stream.
+        """
+        inst_name = instance.instance_name
+        template = self.pool.templates.get(instance.agent_class)
+        if not template:
+            yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: No template for {instance.agent_class}]")
+            return
+
+        # Get active functions (tool schemas) from template
+        active_functions = template._get_active_functions() if hasattr(template, '_get_active_functions') else []
+
+        # Build the LLM call
+        try:
+            for output in self._execute_llm_call(instance, template, llm_messages, active_functions):
+                # Check stop/halt mid-stream
+                if self.pool.stopped or self.pool.is_instance_halted(inst_name):
+                    break
+                yield output
+        except Exception as e:
+            logger.error(f"LLM call failed for {inst_name}: {e}")
+            yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {e}]")
+
+    def _execute_llm_call(self, instance: AgentInstance, template, messages: List[Message], active_functions) -> Iterator[Message]:
+        """Execute the actual LLM API call via api_router with failover."""
+        if self.pool.api_router and hasattr(self.pool.api_router, 'call_with_fallback'):
+            # Route through API router for multi-endpoint failover
+            agent_type = instance.agent_class.lower()
+
+            def _do_call(llm_cfg: dict) -> Iterator[Message]:
+                merged_cfg = {}
+                if hasattr(template.llm, 'generate_cfg'):
+                    merged_cfg.update(template.llm.generate_cfg)
+                merged_cfg.update(llm_cfg)
+                merged_cfg['agent_name'] = template.name
+
+                return template.llm.chat(
+                    messages=messages,
+                    functions=active_functions,
+                    stream=True,
+                    delta_stream=False,
+                    extra_generate_cfg=merged_cfg,
+                )
+
+            agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'orchestrator'
+            return self.pool.api_router.call_with_fallback(agent_type, _do_call)
+        else:
+            # Direct call without router
+            return template.llm.chat(
+                messages=messages,
+                functions=active_functions,
+                stream=True,
+                delta_stream=False,
+            )
+
+    def _process_response(
+        self, instance: AgentInstance, turn_output: List[Message],
+        messages: List[Message], llm_messages: List[Message],
+        response: List[Message]
+    ) -> bool:
+        """Phase 4: Normalize response, handle auto-continue on truncation, execute tools.
+
+        Returns True if processing should continue to next iteration (tool was used or truncated).
+        """
+        inst_name = instance.instance_name
+
+        # ── Normalize and update history ────────────────────────────────────
+        is_truncated = False
+        for msg in turn_output:
+            # Strip thinking blocks from reasoning_content
+            if msg.get('reasoning_content'):
+                rc = msg.get('reasoning_content')
+                if isinstance(rc, str):
+                    msg['reasoning_content'] = self._strip_thinking_blocks(rc)
+
+            # Check for truncation (finish_reason == 'length')
+            extra = msg.get('extra') if isinstance(msg, dict) else getattr(msg, 'extra', None)
+            if extra and extra.get('finish_reason') == 'length':
+                is_truncated = True
+
+        # Append to all working sets
+        response.extend(turn_output)
+        messages.extend(turn_output)
+        llm_messages.extend(turn_output)
+        with instance._compression_lock:
+            instance.conversation.extend(turn_output)
+
+        # ── Auto-continue on truncation ─────────────────────────────────────
+        if is_truncated and not self.pool.stopped and not self.pool.is_instance_halted(inst_name):
+            logger.info(f"Detected message truncation for {inst_name}. Auto-continuing.")
+            cont_msg = Message(
+                role=USER,
+                content="[SYSTEM]: Your previous response was cut off. Continue from where you left off."
+            )
+            messages.append(cont_msg)
+            llm_messages.append(cont_msg)
+            with instance._compression_lock:
+                instance.conversation.append(cont_msg)
+            return True  # Continue to next LLM call
+
+        # ── Tool detection and execution ────────────────────────────────────
+        used_any_tool = False
+        for out in turn_output:
+            use_tool, tool_name, tool_args, _ = self._detect_tool(out)
+            if not use_tool:
+                continue
+
+            used_any_tool = True
+
+            # Stop/halt check BEFORE tool execution
+            if self.pool.stopped or self.pool.is_instance_halted(inst_name):
+                break
+
+            try:
+                tool_result = self._execute_tool(instance, tool_name, tool_args, llm_messages)
+            except Exception as e:
+                logger.error(f"Tool {tool_name} failed for {inst_name}: {e}")
+                tool_result = f"Error: {e}"
+
+            # Truncate if needed
+            tool_result = self._truncate_tool_result(
+                str(tool_result), tool_name, llm_messages, inst_name
+            )
+
+            # Track compress_context execution
+            if tool_name == 'compress_context':
+                self._rebuild_working_set(messages, llm_messages, inst_name)
+
+            # Build function result message
+            fn_msg = Message(role=FUNCTION, name=tool_name, content=tool_result)
+            messages.append(fn_msg)
+            llm_messages.append(fn_msg)
+            with instance._compression_lock:
+                instance.conversation.append(fn_msg)
+
+            # ── Mid-tool urgent injection ───────────────────────────────────
+            urgent = self.pool.drain_queue(inst_name)
+            if urgent:
+                for text in urgent:
+                    if text.strip():
+                        async_msg = Message(role=USER, content=text)
+                        messages.append(async_msg)
+                        llm_messages.append(async_msg)
+                        with instance._compression_lock:
+                            instance.conversation.append(async_msg)
+                break  # Stop executing remaining tools
+
+        return used_any_tool or is_truncated  # Continue loop if tool was used
+
+    def _post_turn_checks(self, instance: AgentInstance, messages: List[Message]) -> bool:
+        """Phase 5: Check for final answer, wait for parallel agents, drain post-generation queue.
+
+        Returns False when agent has truly completed (break from loop).
+        Handles: final answer detection, thinking-only detection, parallel agent wait,
+        and post-generation message drain.
+
+        Args:
+            instance: The agent being executed.
+            messages: Full working set of messages.
+
+        Returns:
+            True to continue the turn loop, False to break (agent complete).
+        """
+        inst_name = instance.instance_name
+
+        # Check if last assistant message had a tool call (still working)
+        has_tool_call = False
+        for msg in reversed(messages):
+            role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+            if role == ASSISTANT:
+                fc = msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None)
+                has_tool_call = fc is not None
+                break
+
+        # If tool was called — continue the loop (tool result will be in next turn)
+        if has_tool_call:
+            return True
+
+        # Check for real content vs pure thinking
+        last_msgs = [m for m in messages[-3:] if m.get('role') != FUNCTION]
+        has_real_content = any(
+            extract_text_from_message(m, add_upload_info=False).strip()
+            for m in last_msgs
+            if (m.get('role') == ASSISTANT or getattr(m, 'role', '') == ASSISTANT)
+        )
+
+        has_thinking = any(
+            m.get('thought') or m.get('reasoning_content')
+            for m in messages[-3:]
+        )
+
+        # Pure thinking turn — continue to next turn
+        if not has_real_content and has_thinking:
+            logger.info(f"Pure reasoning turn detected for {inst_name}. Continuing.")
+            return True
+
+        # If no real content at all — likely the agent is done
+        if not has_real_content:
+            # Wait for parallel agent results
+            if self.pool._execution.has_active_tasks(inst_name):
+                while (self.pool._execution.has_active_tasks(inst_name) and
+                       not self.pool.stopped and
+                       not self.pool.is_instance_halted(inst_name)):
+                    time.sleep(0.5)
+
+            # Post-generation queue drain
+            if self.pool.has_messages(inst_name):
+                logger.info(f"Queued messages for {inst_name} after turn completion. Looping back.")
+                return True  # Loop back to process injected messages
+
+            # Agent has truly completed
+            return False
+
+        return True  # Has real content — continue the loop
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  Tool Execution — unified path for ALL tools including call_agent
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _execute_tool(
+        self, instance: AgentInstance, tool_name: str,
+        tool_args, messages: List[Message]
+    ) -> str:
+        """Execute any tool. Including call_agent and dismiss_agent.
+
+        For call_agent/dismiss_agent: delegates to the pool's agent management.
+        For all other tools: calls through to the template's function_map.
+
+        Args:
+            instance: The agent calling the tool.
+            tool_name: Name of the tool to execute.
+            tool_args: Arguments for the tool (str or dict).
+            messages: Current conversation messages.
+
+        Returns:
+            Tool execution result as a string.
+        """
+        if tool_name == 'call_agent':
+            return self._handle_call_agent(tool_args, messages, instance)
+        elif tool_name == 'dismiss_agent':
+            return self._handle_dismiss_agent(tool_args, instance)
+        elif tool_name == 'compress_context':
+            return self._handle_compress_context(tool_args, messages, instance.instance_name)
+        else:
+            # Standard tool execution via template's function_map
+            template = self.pool.templates.get(instance.agent_class)
+            if not template:
+                raise ValueError(f"No template for agent class {instance.agent_class}")
+
+            # Resolve __USE_PREV_ARG__ placeholders
+            if isinstance(tool_args, dict):
+                from agent_cascade.tool_utils import resolve_prev_arg_placeholders
+                tool_args, prev_err = resolve_prev_arg_placeholders(
+                    tool_args, instance.instance_name, tool_name, self.pool
+                )
+                if prev_err:
+                    return prev_err
+
+            return template._call_tool(
+                tool_name, tool_args,
+                agent_instance_name=instance.instance_name,
+                agent_obj=self,
+                messages=messages,
+            )
+
+    def _handle_call_agent(self, args: dict, messages: List[Message], instance: AgentInstance) -> str:
+        """Handle call_agent tool call — the unified path replacing _stream_sub_agent_call.
+
+        Works the same whether called by main agent or sub-agent. No special path.
+
+        Args:
+            args: Tool arguments (instance_name, agent_class, task, parallel_launch).
+            messages: Caller's conversation messages.
+            instance: The calling agent instance.
+
+        Returns:
+            Result string from the called agent.
+        """
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                return f'Error: Invalid JSON arguments: {args}'
+
+        instance_name = args.get('instance_name', '')
+        agent_class = (args.get('agent_class') or '').strip().lower()
+
+        if not instance_name or not agent_class:
+            return "Error: call_agent requires instance_name and agent_class."
+
+        # Check concurrency limits
+        is_parallel_allowed = True
+        effective_concurrency = 0
+        if self.pool.api_router:
+            try:
+                effective_concurrency = self.pool.api_router.get_effective_concurrency(agent_class)
+            except Exception:
+                pass
+
+        if effective_concurrency == 0:
+            is_parallel_allowed = False
+        elif effective_concurrency > 0:
+            active_count = self.pool._execution.count_by_class(agent_class)
+            if active_count >= effective_concurrency:
+                is_parallel_allowed = False
+
+        # Parallel launch path
+        if is_parallel_allowed and args.get('parallel_launch') is True:
+            return self.pool.submit_parallel(
+                agent_class, instance_name, args, messages, instance.instance_name
+            )
+
+        # Synchronous execution — the unified path
+        return self._execute_agent_sync(agent_class, instance_name, args, messages, instance.instance_name)
+
+    def _handle_dismiss_agent(self, args: dict, instance: AgentInstance) -> str:
+        """Handle dismiss_agent tool call — removes sub-agent from pool.
+
+        Args:
+            args: Tool arguments (instance_name).
+            instance: The calling agent instance.
+
+        Returns:
+            Result string confirming dismissal.
+        """
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                return f'Error: Invalid JSON arguments: {args}'
+
+        target_name = args.get('instance_name', '')
+        if not target_name:
+            return "Error: dismiss_agent requires instance_name."
+
+        # Don't allow dismissing self or the main orchestrator
+        if target_name == instance.instance_name:
+            return f"Error: Cannot dismiss yourself ({target_name})."
+        if instance.parent_instance and target_name == instance.parent_instance:
+            return f"Error: Cannot dismiss your supervisor ({target_name})."
+
+        self.pool.dismiss_instance(target_name)
+        return f"[Agent '{target_name}' dismissed successfully.]"
+
+    def _handle_compress_context(
+        self, args: dict, messages: List[Message], target_agent_name: str
+    ) -> str:
+        """Handle compress_context tool call — delegates to compression module.
+
+        Args:
+            args: Compression arguments (fraction, mode).
+            messages: Messages to compress.
+            target_agent_name: Name of the agent whose context should be compressed.
+
+        Returns:
+            Result string with compression outcome.
+        """
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                return f'Error: Invalid JSON arguments: {args}'
+
+        fraction = args.get('fraction', 0.5)
+        mode = args.get('mode', 'auto')
+        summary_text = args.get('summary_text')
+        force = args.get('force', False)
+
+        # Acquire per-agent lock for thread safety
+        inst = self.pool.get_instance(target_agent_name)
+        if not inst:
+            return f"Error: Agent '{target_agent_name}' not found."
+
+        # NOTE: Do NOT wrap compress_context in _compression_lock — it internally
+        # calls agent_pool.get_conversation() which acquires the same lock.
+        # Holding the outer lock + inner lock = deadlock (non-reentrant Lock).
+        from agent_cascade.compression.core import compress_context as _compress
+        result = _compress(
+            agent_pool=self.pool,
+            target_agent_name=target_agent_name,
+            fraction=fraction,
+            mode=mode,
+            summary_text=summary_text,
+            force=force,
+            justification=args.get('justification', 'Agent-triggered compression'),
+        )
+
+        if result.success:
+            return (f"Compression successful. Discarded {result.messages_discarded} messages. "
+                    f"Tail count: {result.tail_count}.")
+        else:
+            return f"Compression failed: {result.error}"
+
+    def _create_and_run_agent(
+        self, agent_class: str, instance_name: str,
+        args: dict, caller: str
+    ) -> tuple:
+        """Create an AgentInstance and run it through the unified loop.
+
+        Shared helper used by both sync and parallel call_agent paths.
+        Creates the instance, builds system + task messages, logs them,
+        tracks in active_stack, and runs engine.run(inst).
+
+        Returns:
+            Tuple of (AgentInstance, conversation history).
+        """
+        # Create the instance
+        now = time.monotonic()
+        inst = AgentInstance(
+            instance_name=instance_name,
+            agent_class=agent_class,
+            conversation=[],
+            is_active=False,
+            max_turns=None,
+            parent_instance=caller,
+            created_at=now,
+            last_activity=now,
+            compression_summary=None,
+            latest_marker_index=-1,
+        )
+        self.pool.instances[instance_name] = inst
+
+        # Build system message for sub-agent
+        template = self.pool.templates.get(agent_class)
+        if not template:
+            raise ValueError(f"No template for agent class {agent_class}")
+
+        sys_content = getattr(template, 'base_system_message',
+                              getattr(template, 'system_message', ''))
+        lines = sys_content.strip().split('\n') if sys_content else []
+
+        # Replace identity line
+        if lines and f" {instance_name}" not in lines[0]:
+            lines[0] = f"You are {instance_name}."
+
+        # Insert session metadata
+        meta_block = [
+            "## Session Metadata",
+            f"- Supervisor: {caller}",
+        ]
+        insert_pos = 2 if len(lines) > 1 and not lines[1].startswith("#") else 1
+        for i, ml in enumerate(meta_block):
+            lines.insert(insert_pos + i, ml)
+
+        sys_msg = Message(role=SYSTEM, content="\n".join(lines))
+
+        # Build task message
+        task_text = args.get('task', '')
+        context_text = args.get('context', '')
+        if context_text:
+            task_text = f"{context_text}\n\n{task_text}"
+        task_msg = Message(role=USER, content=task_text)
+
+        # Build conversation: [system, task]
+        conv = [sys_msg, task_msg]
+        with inst._compression_lock:
+            inst.conversation = conv
+
+        # Track in active stack (thread-safe via RLock)
+        with self.pool._execution._state_lock:
+            self.pool._execution.active_stack.append(instance_name)
+
+        try:
+            # Execute through unified loop
+            final_resp = []
+            for resp in self.run(inst):
+                if self.pool.stopped or self.pool.is_instance_halted(instance_name):
+                    break
+                final_resp = resp
+
+            conv.extend(final_resp)
+        finally:
+            # Always clean up active stack — even on halt or error
+            with self.pool._execution._state_lock:
+                self.pool._execution.active_stack = [n for n in self.pool._execution.active_stack if n != instance_name]
+
+        return inst, conv
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  Helper methods — token counting, tool detection, truncation
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _execute_agent_sync(
+        self, agent_class: str, instance_name: str,
+        args: dict, caller_history: List[Message], caller: str
+    ) -> str:
+        """Execute an agent synchronously through the unified loop. Replaces _stream_sub_agent_call()."""
+        from agent_cascade.compression.helpers import extract_sub_agent_feedback
+
+        template = self.pool.templates.get(agent_class)
+        if not template:
+            return f"Error: Agent class '{agent_class}' not found."
+
+        # Create and run via shared helper
+        inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller)
+
+        # Note: _create_and_run_agent handles active_stack cleanup via its own finally block.
+        result_str = extract_sub_agent_feedback(conv, instance_name)
+        return f"[{instance_name}\'s output]:\n{result_str}"
+
+    def _get_max_tokens(self, instance: AgentInstance) -> int:
+        """Resolve the effective max_input_tokens from LLM config."""
+        # 1. Try API Router (handles per-endpoint MIN logic)
+        if self.pool.api_router:
+            try:
+                router_limit = self.pool.api_router.get_effective_max_tokens(instance.agent_class.lower())
+                if router_limit > 0:
+                    return router_limit
+            except Exception:
+                pass
+
+        # 2. Try template\'s LLM config
+        template = self.pool.templates.get(instance.agent_class)
+        if template and hasattr(template, 'llm'):
+            llm = template.llm
+            cfg = getattr(llm, 'cfg', {})
+            agent_max = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens')
+            if agent_max:
+                return int(agent_max)
+
+        # 3. Fallback to reasonable default
+        return 128000
+
+    def _count_history_tokens(self, messages: List[Message]) -> int:
+        """Calculate total tokens in a message list."""
+        try:
+            from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+
+            total = 0
+            for msg in messages:
+                role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                func_call = (msg.get('function_call') if isinstance(msg, dict)
+                             else getattr(msg, 'function_call', None))
+
+                # For assistant with function call, count only the function call string
+                if role == ASSISTANT and func_call:
+                    total += qwen_count(f'{func_call}')
+                    continue
+
+                msg_obj = Message(**msg) if isinstance(msg, dict) else msg
+                text = extract_text_from_message(msg_obj, add_upload_info=True)
+                total += qwen_count(text)
+
+            return total
+        except Exception:
+            # Fallback: rough estimate (4 chars per token)
+            total_chars = sum(
+                len(str(m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')))
+                for m in messages
+            )
+            return max(total_chars // 4, 100)
+
+    def _detect_loop(self, messages: List[Message]):
+        """Detect repetitive patterns in recent conversation. Returns (reason, pop_count) or None."""
+        if len(messages) < 6:
+            return None
+
+        # Extract features from non-system messages
+        def get_feature(m):
+            if hasattr(m, 'model_dump'):
+                m = m.model_dump()
+            elif not isinstance(m, dict):
+                m = {
+                    'role': getattr(m, 'role', ''),
+                    'content': getattr(m, 'content', ''),
+                    'reasoning_content': getattr(m, 'reasoning_content', getattr(m, 'thought', '')),
+                    'function_call': getattr(m, 'function_call', None),
+                }
+
+            role = m.get('role')
+            content = str(m.get('content', '') or '')
+            reasoning = str(m.get('reasoning_content', '') or m.get('thought', ''))
+            text_feature = f"{reasoning}\n{content}" if reasoning else (content or reasoning)
+
+            fc = m.get('function_call')
+            if fc:
+                name = fc.get('name') if isinstance(fc, dict) else getattr(fc, 'name', '')
+                args = fc.get('arguments') if isinstance(fc, dict) else getattr(fc, 'arguments', '')
+                return f"{role}:{name}:{args}"
+
+            return f"{role}:{text_feature[:3000]}"
+
+        # Check last 40 messages for repeated patterns
+        window = messages[-40:]
+        features = []
+        feature_to_window_idx = []
+        for i, m in enumerate(window):
+            role = m.get('role') if isinstance(m, dict) else getattr(m, 'role', '')
+            if role != SYSTEM:
+                features.append(get_feature(m))
+                feature_to_window_idx.append(i)
+
+        if len(features) < 4:
+            return None
+
+        # Generic loop detection: pattern of length L repeating K times
+        for L in range(1, 21):
+            K = 3 if L < 5 else 2
+            if len(features) < L * K:
+                continue
+
+            for i in range(len(features) - (L * K), -1, -1):
+                pattern = features[i : i + L]
+                is_loop = True
+                for k in range(1, K):
+                    if features[i + k * L : i + (k + 1) * L] != pattern:
+                        is_loop = False
+                        break
+
+                if is_loop and features[-L:] == pattern:
+                    roles = [p.split(':')[0] for p in pattern]
+                    # Skip false positives: single-function/single-user patterns
+                    if L == 1 and roles[0] in (FUNCTION, USER):
+                        continue
+
+                    second_rep_window_idx = feature_to_window_idx[i + L]
+                    pop_count = len(window) - second_rep_window_idx
+                    reason = f"Detected repeated sequence loop ({', '.join(roles)} repeating {K} times)"
+                    return reason, pop_count
+
+        return None
+
+    def _detect_tool(self, message: Message) -> Tuple[bool, str, Any, str]:
+        """Detect if a message contains a tool call. Returns (use_tool, tool_name, tool_args, text)."""
+        func_call = (message.get('function_call') if isinstance(message, dict)
+                     else getattr(message, 'function_call', None))
+        text = (message.get('content', '') if isinstance(message, dict)
+                else getattr(message, 'content', ''))
+
+        if func_call:
+            if isinstance(func_call, dict):
+                return True, func_call.get('name'), func_call.get('arguments'), text
+            else:
+                return True, getattr(func_call, 'name', ''), getattr(func_call, 'arguments', ''), text
+
+        return False, None, None, text or ''
+
+    def _strip_thinking_blocks(self, text: str) -> str:
+        """Remove thinking tags from reasoning content."""
+        import re
+        if not isinstance(text, str):
+            return text
+        # Remove standard think blocks
+        cleaned = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
+        # Also remove  blocks (common variant)
+        cleaned = re.sub(r'<thought>.*?</thought>', '', cleaned, flags=re.DOTALL)
+        return cleaned
+
+    def _append_system_notification(
+        self, messages: List[Message], guard_prefix: str, notification_text: str
+    ):
+        """Append a system notification to the last message, preventing duplicates."""
+        if not messages:
+            return
+
+        last_msg = messages[-1]
+        content = (last_msg.get('content') if isinstance(last_msg, dict)
+                   else getattr(last_msg, 'content', None))
+
+        if isinstance(content, str):
+            if guard_prefix not in content:
+                new_content = content + f"\n\n{notification_text}"
+                if isinstance(last_msg, dict):
+                    last_msg['content'] = new_content
+                else:
+                    last_msg.content = new_content
+        elif isinstance(content, list):
+            has_notification = any(
+                (isinstance(item, dict) and guard_prefix in str(item.get('text', '')))
+                or (isinstance(item, str) and guard_prefix in item)
+                for item in content
+            )
+            if not has_notification:
+                content.append({'type': 'text', 'text': notification_text})
+
+    def _truncate_tool_result(
+        self, tool_result: str, tool_name: str,
+        messages: List[Message], instance_name: str
+    ) -> str:
+        """Truncate a tool result if it would push context past 95% capacity."""
+        if not isinstance(tool_result, str):
+            return tool_result
+
+        if tool_name in ['compress_context']:
+            return tool_result
+
+        inst = self.pool.get_instance(instance_name)
+        max_tokens = self._get_max_tokens(inst) if inst else 128000
+        if max_tokens <= 0:
+            return tool_result
+
+        # Inline image content — skip truncation (compact markdown data)
+        if '![image/' in tool_result:
+            return tool_result
+
+        try:
+            from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+
+            system_tokens = 0
+            non_system_tokens = 0
+            for msg in messages:
+                role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                msg_obj = Message(**msg) if isinstance(msg, dict) else msg
+                text = extract_text_from_message(msg_obj, add_upload_info=True)
+                tokens = qwen_count(text)
+                if role == SYSTEM:
+                    system_tokens += tokens
+                else:
+                    non_system_tokens += tokens
+
+            available_tokens = max_tokens - system_tokens
+            if available_tokens <= 0:
+                available_tokens = max_tokens
+
+            total_threshold = int(available_tokens * 0.95)
+            per_tool_threshold = int(available_tokens * 0.25)
+            result_tokens = max(1, len(tool_result) // 3)
+
+            # Wild read detection
+            wild_read_limit = 10000
+            is_wild_read = len(tool_result) > wild_read_limit
+
+            if (result_tokens <= per_tool_threshold and
+                    non_system_tokens + result_tokens <= total_threshold and
+                    not is_wild_read):
+                return tool_result
+
+            # Truncation required
+            target_tokens = min(result_tokens, per_tool_threshold) if not is_wild_read else 500
+            if non_system_tokens + target_tokens > total_threshold:
+                target_tokens = max(200, total_threshold - non_system_tokens)
+
+            truncated = tool_result[:target_tokens * 3]
+            return f"{truncated}\n\n[TOOL RESPONSE TRUNCATED — reason: token budget exceeded]"
+
+        except Exception:
+            # Fallback: just truncate to a reasonable size
+            if len(tool_result) > 8000:
+                return f"{tool_result[:8000]}\n\n[TOOL RESPONSE TRUNCATED]"
+            return tool_result
