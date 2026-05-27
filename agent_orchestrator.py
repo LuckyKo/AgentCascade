@@ -800,6 +800,22 @@ class OrchestratorAgent(Assistant):
                     f"Halting other agents and triggering FORCEFUL compression."
                 )
 
+                # CRITICAL FIX: Sync working set to pool BEFORE compression.
+                # During sub-agent execution, the pool is stale — it only has initial messages
+                # (system + user prompt). The working set (messages) has accumulated tool calls
+                # and responses during the turn. Without this sync, compress_context() operates
+                # on the stale pool and discards everything because active_set is tiny
+                # (just 1-2 messages), resulting in tail_count=0 and total context loss.
+                # See: compression_forced_subagent_bug_analysis.md
+                pool_conv = self.agent_pool.get_conversation(instance_name)
+                if len(messages) > len(pool_conv):
+                    logger.info(
+                        f"Syncing {len(messages)} working-set messages to stale pool "
+                        f"(pool has {len(pool_conv)}) before forced compression for {instance_name}"
+                    )
+                    pool_conv.clear()
+                    pool_conv.extend(copy.deepcopy(messages))
+
                 result = compress_context(
                     agent_pool=self.agent_pool,
                     target_agent_name=instance_name,
