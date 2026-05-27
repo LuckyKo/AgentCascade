@@ -426,6 +426,7 @@ class OrchestratorAgent(Assistant):
         # Per-agent compression tracking (replaces single boolean _compress_context_ran_this_turn)
         self._compress_tracker = {}    # instance_name -> bool (compression ran this turn)
         self._compress_fail_count = {}  # instance_name -> int (consecutive forced compression failures)
+        self._forced_compression_ran = {}  # instance_name -> bool (forced compression ran during current turn — prevents stale message re-injection)
 
     def _call_llm(
         self,
@@ -837,6 +838,11 @@ class OrchestratorAgent(Assistant):
                     rebuild_working_set(messages, self.agent_pool, instance_name)
                     # Reset fail counter on success
                     self._compress_fail_count[instance_name] = 0
+                    # Mark that forced compression ran during this turn so _stream_sub_agent_call
+                    # knows NOT to extend conv with stale final_resp (which contains pre-compression
+                    # messages already synced to the pool at lines 810-817). See:
+                    # lessons_duplicate_consecutive_messages_analysis.md
+                    self._forced_compression_ran[instance_name] = True
                     # Don't reset tracker on success — keep it True so next iteration lets LLM call through
                     # (agent needs to make progress with the compressed context, not compress again)
                     return False  # Let agent try LLM call with compressed context
@@ -1127,6 +1133,7 @@ class OrchestratorAgent(Assistant):
         # Initialize/Reset turn state
         self.turn_final_messages = None
         self._compress_tracker[self.session_name] = False  # prevent double-compression this turn (per-agent)
+        self._forced_compression_ran[self.session_name] = False  # reset forced compression flag each turn
         
         # Robustness: Read turn limit and auto-continue settings
         # These may be set on the instance by api_server.py or passed in kwargs
@@ -2129,9 +2136,13 @@ class OrchestratorAgent(Assistant):
                     # setdefault only sets to False if the key doesn't exist — once forced compression
                     # runs in any iteration, it stays True for the entire sub-agent execution (across all
                     # agent.run() iterations) to prevent forced compression from firing again.
-                    # The main orchestrator loop resets its tracker explicitly at line 1113 per iteration;
-                    # sub-agents use setdefault here so a new sub-agent turn starts fresh.
+                    # Initialize per-agent compression tracking for this sub-agent session.
+                    # _compress_tracker: setdefault — prevents re-triggering forced compression across 
+                    #   iterations within a single turn. Reset explicitly by orchestrator at line 1136.
+                    # _forced_compression_ran: explicit reset each turn — tracks whether forced compression
+                    #   succeeded in THIS specific turn to prevent stale message re-injection only for that turn.
                     self._compress_tracker.setdefault(instance_name, False)
+                    self._forced_compression_ran[instance_name] = False
                     
                     # Pass instance name through kwargs so tools (like compress_context) know who they are contextually
                     for resp in agent.run(working_history, agent_instance_name=instance_name):
@@ -2253,7 +2264,25 @@ class OrchestratorAgent(Assistant):
             if final_resp:
                 # IMPORTANT: Update the persistent conversation instance with the FULL TURN result.
                 # This ensures the next turn (or next 'call_agent') sees the tool results.
-                conv.extend(final_resp)
+                # CRITICAL FIX: If forced compression ran during this turn, final_resp contains
+                # stale pre-compression messages AND new post-compression messages. Use conv length
+                # as cutoff — after rebuild_working_set synced the pool, len(conv) = messages already
+                # in the pool. Only extend with messages beyond that count (post-compression work).
+                if self._forced_compression_ran.get(instance_name, False):
+                    # Pool was synced via rebuild_working_set. Only extend with messages
+                    # beyond conv's length — these are post-compression results not yet in pool.
+                    conv_len = len(conv)
+                    if len(final_resp) > conv_len:
+                        conv.extend(final_resp[conv_len:])
+                        logger.debug(
+                            f"Extended {len(final_resp) - conv_len} post-compression messages for {instance_name}"
+                        )
+                    else:
+                        logger.debug(
+                            f"All {len(final_resp)} final_resp messages already in pool for {instance_name}"
+                        )
+                else:
+                    conv.extend(final_resp)
                 
                 # Messages were already logged incrementally via log_message in the turn loop.
                 # update_history(conv) is redundant here.
@@ -2304,6 +2333,10 @@ class OrchestratorAgent(Assistant):
             if removed and instance_name in self.agent_pool.terminated_instances:
                 self.agent_pool.clear_conversation(instance_name)
                 self.agent_pool.terminated_instances.discard(instance_name)
+            
+            # Clean up compression tracking state for this instance to avoid stale flags
+            self._compress_tracker.pop(instance_name, None)
+            self._forced_compression_ran.pop(instance_name, None)
 
 
 
