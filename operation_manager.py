@@ -1548,17 +1548,26 @@ class OperationManager:
             return False
 
         # Redirections that write to files (but not 2>/dev/null for suppressing errors)
-        # Match > or >> that are NOT part of /dev/null or NUL patterns
-        redirect_match = re.search(r'>[^>]', cmd)
-        if redirect_match:
+        # Match > or >> and capture the actual redirect target (not just 2 chars)
+        # Use finditer to check ALL redirects, not just the first one
+        for redirect_match in re.finditer(r'>+\s*([^>\s]+)', cmd):
+            redir_target = redirect_match.group(1)
+            # Skip file descriptor redirects like 2>&1 — these don't write to files
+            if redir_target.startswith('&'):
+                continue  # fd redirect is safe, skip this one
             # Check if it redirects to /dev/null or NUL (which is safe - just discards output)
-            redir_target = redirect_match.group(0)
-            if '/dev/null' not in redir_target and 'NUL' not in redir_target.upper():
+            if redir_target not in ('/dev/null', 'NUL', 'nul', 'CON'):
                 return False
 
-        # Background processes: & that's not part of && (already checked above)
-        # Simple check: if there's a standalone & not preceded by another &
-        if re.search(r'(?<!&)&(?!&)', cmd):
+        # Input redirections (<) — reject file input redirects except null devices
+        for input_redirect_match in re.finditer(r'<\s*([^<>\s]+)', cmd):
+            redir_target = input_redirect_match.group(1)
+            if redir_target not in ('/dev/null', 'NUL', 'nul', 'CON'):
+                return False
+
+        # Background processes: & that's not part of && or fd redirect (2>&1)
+        # Simple check: if there's a standalone & not preceded by another &, and not after >
+        if re.search(r'(?<!&)(?<!>)&(?!&)', cmd):
             return False
 
         # Extract the primary command(s) — split on pipe
@@ -1567,13 +1576,13 @@ class OperationManager:
         # Safe secondary commands in a pipe (sorting, filtering, paging)
         SAFE_PIPE_COMMANDS = {
             'grep', 'egrep', 'fgrep', 'head', 'tail', 'sort', 'uniq', 
-            'wc', 'cat', 'more', 'less', 'awk', 'sed', 'cut', 'tr',
-            'tee', 'xargs', 'comm', 'diff', 'nl', 'rev', 'fold'
+            'wc', 'cat', 'more', 'less', 'cut', 'tr',
+            'comm', 'diff', 'nl', 'rev', 'fold'
         }
 
         # Safe primary commands (read-only filesystem operations)
         SAFE_PRIMARY_COMMANDS = {
-            'find', 'dir', 'ls', 'tree', 'dir', 'directory',
+            'find', 'dir', 'ls', 'tree', 'directory',
             'vfd', 'where', 'whereis', 'locate', 'which', 'type',
             'pwd', 'stat', 'file', 'du', 'df',
         }
@@ -1617,12 +1626,16 @@ class OperationManager:
 
         return True
 
-    def execute_shell_command(self, command: str, justification: str, agent_name: str, cwd: str = ".", char_limit: int = 2000) -> str:
+    def execute_shell_command(self, command: str, justification: str, agent_name: str, cwd: str = ".", char_limit: int = 2048, timeout: Optional[int] = None) -> str:
         """Execute a shell command — auto-approved for safe read-only commands (find, dir, ls), requires user approval for everything else."""
         try:
             resolved_cwd = self._resolve_path(cwd, mode="rw") # shell commands usually need RW for artifacts
         except Exception as e:
             return f"ERROR: Invalid working directory: {str(e)}"
+
+        # Enforce maximum command length to prevent abuse via extremely long commands
+        if len(command) > char_limit:
+            return f"ERROR: Command exceeds maximum length of {char_limit} characters."
 
         # Check if this is a safe read-only command that can be auto-approved
         is_safe = self._is_safe_readonly_shell_command(command)
@@ -1653,7 +1666,11 @@ class OperationManager:
         try:
             import subprocess
 
-            SHELL_TIMEOUT = 120  # seconds — prevent hanging indefinitely
+            # Validate and set effective timeout — default 30s, override if specified
+            MAX_SHELL_TIMEOUT = 3600  # 1 hour max
+            if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0 or timeout > MAX_SHELL_TIMEOUT):
+                return f"ERROR: Invalid timeout value: {timeout}. Must be a positive integer between 1 and {MAX_SHELL_TIMEOUT}."
+            effective_timeout = timeout if timeout is not None else 30
 
             # Execute the command in the workspace directory.
             # On Windows, use CREATE_NEW_PROCESS_GROUP so we can kill the entire
@@ -1675,7 +1692,7 @@ class OperationManager:
             )
 
             try:
-                stdout, stderr = proc.communicate(timeout=SHELL_TIMEOUT)
+                stdout, stderr = proc.communicate(timeout=effective_timeout)
                 result_ok = True
             except subprocess.TimeoutExpired:
                 # ── Timeout: kill the ENTIRE process tree, not just cmd.exe ──
@@ -1824,7 +1841,7 @@ class OperationManager:
                     output += f"STDERR (partial):\n{stderr}\n"
 
                 timeout_msg = (
-                    f"ERROR: Command timed out after {SHELL_TIMEOUT} seconds. "
+                    f"ERROR: Command timed out after {effective_timeout} seconds. "
                     f"All child processes have been forcibly terminated. "
                     f"Command was: `{command[:200]}`. "
                     f"If the process is expected to take a long time, consider using a background command "

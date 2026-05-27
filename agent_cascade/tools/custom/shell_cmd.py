@@ -21,6 +21,11 @@ class ShellCmd(BaseTool):
             'cwd': {
                 'type': 'string',
                 'description': TOOL_METADATA['shell_cmd']['parameters']['cwd']
+            },
+            'timeout': {
+                'type': 'integer',
+                'minimum': 1,
+                'description': TOOL_METADATA['shell_cmd']['parameters']['timeout']
             }
         },
         'required': ['command', 'justification'],
@@ -49,9 +54,10 @@ class ShellCmd(BaseTool):
         command = params['command']
         justification = params.get('justification', 'No justification provided.')
         cwd = params.get('cwd', '.')
+        timeout = params.get('timeout')  # None means use default (30s)
 
         # Get the truncation limit from agent/tool options
-        char_limit = 2000
+        char_limit = 2048
         if hasattr(self, 'agent_pool') and self.agent_pool:
             llm_cfg = getattr(self.agent_pool, 'llm_cfg', {})
             char_limit = llm_cfg.get('shell_char_limit', char_limit)
@@ -66,4 +72,5 @@ class ShellCmd(BaseTool):
             agent_name=agent_name,
             cwd=cwd,
             char_limit=int(char_limit),
+            timeout=timeout,
         )

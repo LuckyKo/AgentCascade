@@ -233,7 +233,8 @@ TOOL_METADATA = {
         'parameters': {
             'command': 'The exact shell command to execute.',
             'justification': 'Why you need to execute this command.',
-            'cwd': 'Optional working directory, absolute or relative to workspace root.'
+            'cwd': 'Optional working directory, absolute or relative to workspace root.',
+            'timeout': 'Optional timeout in seconds (default: 30). Use a higher value for long-running commands.'
         }
     },
     'system_info': {
