@@ -11,7 +11,6 @@ See DESIGN_REWRITE.md §2.2 for design rationale.
 
 import time
 import threading
-import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -244,7 +243,7 @@ class AgentPool:
         # message routing are simple data structures that belong on the pool.
         self._execution = ParallelAgentManager(self)       # parallel execution, active_stack
         self._logger = LoggerManager(self, workspace_dir)  # logger lifecycle, recovery
-        # TODO: Implement IdleManager for idle detection and auto-dismissal (Phase 2)
+        self._idle = IdleManager(self)                      # idle detection and auto-dismissal
 
         # ── Simple state (owned directly by pool, no separate manager) ───────
         self._halted_instances: set = set()                # per-instance halt state
@@ -278,6 +277,10 @@ class AgentPool:
         self.agents_dir = Path(agents_dir)
         self._discover_agents(agents_dir)
 
+    def start(self):
+        """Start background services (idle checker, etc.). Call after pool initialization."""
+        self._idle.start()
+
     # ── Properties ───────────────────────────────────────────────────────────
 
     @property
@@ -289,6 +292,11 @@ class AgentPool:
     def stopped(self, value: bool):
         if value:
             self._stopped_event.set()
+            # Shut down background services when pool stops
+            try:
+                self._idle.stop()
+            except Exception:
+                pass  # Idle manager shutdown should never block pool stop
         else:
             self._stopped_event.clear()
 
@@ -355,6 +363,9 @@ class AgentPool:
                 del self._instance_conversations[instance_name]
             except KeyError:
                 pass  # Already removed or never existed
+        # Clean up logger entry for the instance
+        with self._logger._lock:
+            self._logger._loggers.pop(instance_name, None)
         self._fire_on_dismissed(instance_name)
 
     def halt_all_instances(self, except_instance: str = None,
@@ -420,7 +431,7 @@ class AgentPool:
         return list(self.templates.keys())
 
     def reset(self):
-        """Full reset of sub-agent state (halted, active stack, tool args, terminated).
+        """Full reset of agent state (halted, active stack, tool args, terminated).
 
         Clears all per-instance state including halted instances, compression halts,
         terminated instances, active stack, last_tool_args, and sub_agent_state.
@@ -974,7 +985,7 @@ class AgentPool:
     def submit_parallel(
         self, agent_class: str, instance_name: str, args: dict, history: List[Message], caller: str
     ):
-        """Submit a parallel sub-agent task."""
+        """Submit a parallel agent task."""
         return self._execution.submit_task(agent_class, instance_name, args, history, caller)
 
     # ── Logger delegation ──────────────────────────────────────────────────
@@ -1015,7 +1026,7 @@ class AgentPool:
 # ── Placeholder manager classes (to be implemented in later phases) ─────
 
 class ParallelAgentManager:
-    """Manages parallel sub-agent execution via thread pool. Active_stack, task lifecycle."""
+    """Manages parallel agent execution via thread pool. Active_stack, task lifecycle."""
 
     def __init__(self, pool: AgentPool):
         self.pool = pool
@@ -1043,7 +1054,7 @@ class ParallelAgentManager:
                        self.pool.get_instance(name).agent_class.lower() == agent_class.lower())
 
     def submit_task(self, agent_class, instance_name, args, history, caller):
-        """Submit a sub-agent to run in the background thread pool. Returns immediately."""
+        """Submit an agent to run in the background thread pool. Returns immediately."""
         from agent_cascade.log import logger
 
         if not self.executor:
@@ -1064,11 +1075,11 @@ class ParallelAgentManager:
 
                 # Notify caller via async message queue
                 result = extract_sub_agent_feedback(conv, instance_name)
-                completion_msg = f"[Parallel Sub-Agent '{instance_name}' Finished]:\n{result}"
+                completion_msg = f"[Parallel Agent '{instance_name}' Finished]:\n{result}"
                 self.pool.send_message(instance_name, caller, completion_msg)
 
             except Exception as e:
-                error_msg = f"[Parallel Sub-Agent '{instance_name}' Failed]:\n{str(e)}"
+                error_msg = f"[Parallel Agent '{instance_name}' Failed]:\n{str(e)}"
                 self.pool.send_message(instance_name, caller, error_msg)
             finally:
                 # Clean up active stack and tasks
@@ -1089,66 +1100,149 @@ class ParallelAgentManager:
 
 
 class LoggerManager:
-    """Manages per-agent loggers. Returns NoOpLogger until full implementation is ready.
+    """Manages per-agent loggers. Returns real AgentInstanceLogger instances.
 
-    The NoOpLogger provides the same interface as AgentInstanceLogger but does nothing,
-    preventing compression from failing due to missing logger infrastructure.
     Thread-safe via _lock for concurrent access during parallel agent execution.
+    Log files are stored in <workspace_dir>/logs/ subdirectory.
     """
 
     def __init__(self, pool: AgentPool, workspace_dir: Optional[str]):
         self.pool = pool
         self.workspace_dir = Path(workspace_dir) if workspace_dir else Path(DEFAULT_WORKSPACE)
+        # Ensure log directory exists
+        self.log_dir = self.workspace_dir / "logs"
+        self.log_dir.mkdir(parents=True, exist_ok=True)
         self._loggers: Dict[str, Any] = {}  # instance_name → logger instance
         self._lock = threading.Lock()  # Protects _loggers dict access
 
     def get_logger(self, instance_name: str, agent_class: str):
-        """Get or create a logger for an instance. Returns NoOpLogger as placeholder."""
+        """Get or create a real AgentInstanceLogger for an instance."""
         with self._lock:
             if instance_name not in self._loggers:
-                self._loggers[instance_name] = NoOpLogger(instance_name)
+                from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
+                self._loggers[instance_name] = AgentInstanceLogger(
+                    agent_class=agent_class,
+                    instance_name=instance_name,
+                    log_dir=str(self.log_dir),
+                )
             return self._loggers[instance_name]
 
 
-class NoOpLogger:
-    """No-operation logger that provides the same interface as AgentInstanceLogger.
+class IdleManager:
+    """Manages idle detection and auto-dismissal of agents.
 
-    Used by LoggerManager until full logging infrastructure is implemented.
-    All methods are no-ops that emit a one-time warning (via warnings.warn) so
-    callers know data is not being persisted — preventing silent masking of bugs.
+    Runs a background daemon thread that periodically checks for agents that have
+    been inactive longer than the configured timeout. Auto-dismissed agents have
+    their conversations cleared and dismissal callbacks fired for real-time UI tab removal.
+
+    Safety rules:
+    - Never dismisses the main orchestrator (parent_instance is None)
+    - Never dismisses active agents (in active_stack)
+    - Never dismisses halted agents (intentionally paused)
     """
 
-    def __init__(self, instance_name: str):
-        self.instance_name = instance_name
-        self.data = {'history': []}  # Empty history tracking for compatibility
-        self._warned: set = set()  # Track which methods have warned (one-time only)
+    def __init__(self, pool: AgentPool):
+        self.pool = pool
+        self._stop_event = threading.Event()
+        self._checker_thread: Optional[threading.Thread] = None
 
-    def _warn_once(self, method_name: str, msg: str):
-        """Emit a one-time warning per method per logger instance."""
-        if method_name not in self._warned:
-            warnings.warn(
-                f"NoOpLogger.{method_name} for '{self.instance_name}': {msg}",
-                RuntimeWarning, stacklevel=3
-            )
-            self._warned.add(method_name)
+    def start(self):
+        """Start the background idle checker thread."""
+        if self._checker_thread is not None and self._checker_thread.is_alive():
+            return  # Already running
+        self._stop_event.clear()
+        self._checker_thread = threading.Thread(
+            target=self._checker_loop,
+            name="IdleAgentChecker",
+            daemon=True,
+        )
+        self._checker_thread.start()
 
-    def insert_compression_marker(self, summary_msg=None, tail_count=0):
-        """No-op — compression marker not persisted to log."""
-        self._warn_once('insert_compression_marker',
-                       'Compression marker not persisted to disk. Session recovery after restart will lose compression state.')
+    def stop(self):
+        """Signal the checker to stop and wait for it to exit."""
+        if self._checker_thread is not None and self._checker_thread.is_alive():
+            self._stop_event.set()
+            timeout = self.pool.settings.idle_check_interval + 5.0
+            self._checker_thread.join(timeout=timeout)
+            if self._checker_thread.is_alive():
+                logger.warning("Idle checker thread did not exit in time, forcing shutdown.")
+        self._checker_thread = None
 
-    def log_message(self, message):
-        """No-op — message not persisted to log."""
-        self._warn_once('log_message', 'Message not logged to JSONL file.')
+    def _checker_loop(self):
+        """Background loop that periodically checks for and dismisses idle agents."""
+        while not self._stop_event.is_set():
+            try:
+                # Snapshot instance names to avoid holding locks during check
+                inst_names = list(self.pool.instances.keys())
+                dismissed_this_round = []
 
-    def update_history(self, history):
-        """No-op — history not synced to log."""
-        self._warn_once('update_history', 'History not synced to JSONL file.')
+                for name in inst_names:
+                    if self._stop_event.is_set():
+                        break
+                    try:
+                        if self._is_idle(name):
+                            self._auto_dismiss(name)
+                            dismissed_this_round.append(name)
+                    except Exception as e:
+                        logger.error(f"[idle_checker] Error processing '{name}': {e}", exc_info=True)
 
-    def truncate_to(self, n: int) -> None:
-        """No-op — log truncation not persisted. Interface stub for surgical_rollback."""
-        self._warn_once('truncate_to', f'Log truncation to {n} messages not persisted.')
+                if dismissed_this_round:
+                    logger.info(
+                        f"[idle_checker] Auto-dismissed {len(dismissed_this_round)} idle agent(s): "
+                        f"{', '.join(dismissed_this_round)}"
+                    )
+            except Exception as e:
+                logger.error(f"[idle_checker] Loop error: {e}", exc_info=True)
 
+            # Wait for next check interval (or until stop event fires)
+            self._stop_event.wait(timeout=self.pool.settings.idle_check_interval)
 
-# TODO: Implement IdleManager for idle detection and auto-dismissal (Phase 2)
-# Placeholder removed to avoid consuming memory with an empty class.
+    def _is_idle(self, instance_name: str) -> bool:
+        """Determine whether an agent is idle and eligible for auto-dismissal."""
+        inst = self.pool.instances.get(instance_name)
+        if not inst:
+            return False
+
+        # Never dismiss the main orchestrator (no parent)
+        if inst.parent_instance is None:
+            return False
+
+        # Must NOT be actively running
+        with self.pool._execution._state_lock:
+            if instance_name in self.pool._execution.active_stack:
+                return False
+
+        # Must NOT be halted (halted agents are intentionally paused, e.g. during compression)
+        if self.pool.is_instance_halted(instance_name):
+            return False
+
+        # Must have exceeded the idle timeout threshold
+        idle_secs = time.monotonic() - inst.last_activity
+        if idle_secs < self.pool.settings.idle_timeout_seconds:
+            return False
+
+        return True
+
+    def _auto_dismiss(self, instance_name: str):
+        """Dismiss a single idle agent and clean up its resources."""
+        inst = self.pool.instances.get(instance_name)
+        if not inst:
+            return
+
+        idle_secs = time.monotonic() - inst.last_activity
+
+        # Capture log path before clearing
+        log_path = None
+        try:
+            log_inst = self.pool._logger.get_logger(instance_name, inst.agent_class)
+            log_path = getattr(log_inst, 'log_path', None)
+        except Exception:
+            pass
+
+        logger.info(
+            f"[idle_checker] Auto-dismissing idle agent '{instance_name}' "
+            f"(idle for {idle_secs:.0f}s, threshold={self.pool.settings.idle_timeout_seconds:.0f}s)"
+        )
+
+        # Remove the instance (fires dismissal callbacks)
+        self.pool.dismiss_instance(instance_name)

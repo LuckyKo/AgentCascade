@@ -33,8 +33,8 @@ class ExecutionEngine:
     tracks no per-turn variables between calls. This makes testing straightforward:
     create an instance, set up state, call run(), inspect yields.
 
-    Every agent (including the "main" orchestrator) goes through this same engine.
-    There is no separate execution path for main vs sub-agents.
+    Every agent (including the root/top-level agent) goes through this same engine.
+    There is no separate execution path for any agent type.
     """
 
     def __init__(self, pool):
@@ -49,7 +49,7 @@ class ExecutionEngine:
         """Execute the agent's turn loop as a generator yielding state updates.
 
         This is THE execution entry point for ALL agents. No separate paths
-        for main vs sub-agents. The orchestrator is just the first instance
+        for any agent type. The root agent is just the first instance
         created in the pool.
 
         Args:
@@ -136,6 +136,98 @@ class ExecutionEngine:
         if not conv:
             return None, None, None
 
+        # P7: System prompt injection for root agent (first/top-level agent in the pool)
+        # Inject identity, session metadata, available resources, and argument reuse instructions
+        if instance.parent_instance is None and len(conv) > 0:
+            m0 = conv[0]
+            m0_role = m0.get('role') if isinstance(m0, dict) else getattr(m0, 'role', '')
+            if m0_role == SYSTEM:
+                m0_content = m0.get('content', '') if isinstance(m0, dict) else getattr(m0, 'content', '')
+                if isinstance(m0_content, str):
+                    import re as _re
+                    
+                    # 1. Update identity "You are [instance]."
+                    pattern = rf"(?i)You are\s+\w+\."
+                    if _re.search(pattern, m0_content):
+                        m0_content = _re.sub(pattern, f"You are {inst_name}.", m0_content, count=1)
+                    
+                    # 2. Insert Session Metadata section (if not present)
+                    if '## Session Metadata' not in m0_content:
+                        meta_lines = [
+                            "## Session Metadata",
+                            f"- Supervisor: User",  # Root agent's supervisor is always the user
+                        ]
+
+                        # Try to get logger metadata for paths; fall back to defaults on failure
+                        try:
+                            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                            working_dir = log_inst.data['metadata'].get('working_dir', 'Unknown')
+                            log_path = getattr(log_inst, 'log_path', 'Unknown')
+                            extra_ro = log_inst.data['metadata'].get('extra_paths_ro', [])
+                            extra_rw = log_inst.data['metadata'].get('extra_paths_rw', [])
+                        except Exception:
+                            working_dir = os.getcwd()
+                            log_path = "N/A"
+                            extra_ro = []
+                            extra_rw = []
+
+                        meta_lines.append(f"- Working Dir: {working_dir}")
+                        meta_lines.append(f"- Log Path: {log_path}")
+                        if extra_ro:
+                            meta_lines.append(f"- Extra Paths (Read-Only): {', '.join(extra_ro)}")
+                        if extra_rw:
+                            meta_lines.append(f"- Extra Paths (Read-Write): {', '.join(extra_rw)}")
+                        meta_lines.append("Use your logs to recall details from turns that were compressed.")
+
+                        content_lines = m0_content.split('\n')
+                        insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith("#") else 1
+                        for i, ml in enumerate(meta_lines):
+                            content_lines.insert(insert_pos + i, ml)
+                        m0_content = '\n'.join(content_lines)
+                    # 3. Inject available resources (other agent types and enabled tools)
+                    if '--- CURRENT AVAILABLE RESOURCES' not in m0_content:
+                        res_append = "\n\n--- CURRENT AVAILABLE RESOURCES (Auto-Injected) ---\n"
+                        res_append += "\nAvailable Agent Types (call via call_agent):\n"
+                        
+                        # List available templates
+                        has_agents = False
+                        for name in sorted(self.pool.templates.keys()):
+                            if name.lower() != inst_name.lower():
+                                agent_obj = self.pool.templates[name]
+                                tagline = getattr(agent_obj, 'description', 'No description provided')
+                                res_append += f"- **{name}**: {tagline}\n"
+                                has_agents = True
+                        if not has_agents:
+                            res_append += "- None currently available.\n"
+                        
+                        # List enabled tools (excluding disabled_tools)
+                        res_append += "\nEnabled Tools (can change per interaction):\n"
+                        template = self.pool.templates.get(instance.agent_class)
+                        if template and hasattr(template, 'function_map'):
+                            disabled_tools = getattr(template.llm, 'generate_cfg', {}).get('disabled_tools', [])
+                            for t_name in sorted(template.function_map.keys()):
+                                if t_name in disabled_tools:
+                                    continue
+                                desc = getattr(template.function_map[t_name], 'description', 'No description provided')
+                                res_append += f"- **{t_name}**: {desc}\n"
+                        else:
+                            res_append += "- None currently enabled.\n"
+                        m0_content += res_append
+                    
+                    # 4. Inject Argument Reuse instructions (static version for caching)
+                    if '### Advanced Feature: Argument Reuse' not in m0_content:
+                        m0_content += (
+                            "\n\n### Advanced Feature: Argument Reuse\n"
+                            "To reuse a LARGE argument value (like full file content or path) from any previous successful tool call in this session, "
+                            'use the exact placeholder: "__USE_PREV_ARG__". This saves tokens and processing time.'
+                        )
+                    
+                    # Update the message
+                    if isinstance(m0, dict):
+                        m0['content'] = m0_content
+                    else:
+                        m0.content = m0_content
+
         # messages = full working set; llm_messages = what actually goes to LLM
         # Apply slice to extract system + post-marker tail if markers exist
         sliced = self.pool.slice_history_for_llm(conv)
@@ -173,7 +265,7 @@ class ExecutionEngine:
                     instance.conversation.append(async_msg)
             return True  # Yield and continue loop to process new messages
 
-        # ── COMPRESSION CHECK (the critical fix for sub-agents) ────────────
+        # ── COMPRESSION CHECK (critical for long-running agents) ────────────
         max_tokens = self._get_max_tokens(instance)
         current_tokens = self._count_history_tokens(llm_messages)
         usage_pct = (current_tokens / max_tokens * 100) if max_tokens > 0 else 0
@@ -202,7 +294,7 @@ class ExecutionEngine:
         """Force compress when token usage exceeds critical threshold. Returns True (continue loop)."""
         inst_name = instance.instance_name
 
-        # Halt other agents (exempt target, compression_agent, and orchestrator)
+        # Halt other agents (exempt target, compression_agent, and root agent)
         exempt = [inst_name, 'compression_agent']
         if instance.parent_instance:
             exempt.append(instance.parent_instance)
@@ -341,7 +433,7 @@ class ExecutionEngine:
                     extra_generate_cfg=merged_cfg,
                 )
 
-            agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'orchestrator'
+            agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
             return self.pool.api_router.call_with_fallback(agent_type, _do_call)
         else:
             # Direct call without router
@@ -366,11 +458,30 @@ class ExecutionEngine:
         # ── Normalize and update history ────────────────────────────────────
         is_truncated = False
         for msg in turn_output:
-            # Strip thinking blocks from reasoning_content
+            # P4: Gemma thought tag normalization — prevent history pollution
+            # Check for Gemma-style <|channel>thought tags
+            content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+            if not msg.get('reasoning_content') and isinstance(content, str) and '<|channel>thought' in content.lower():
+                import re as _re
+                # Only strip if at very beginning to avoid matching tags inside file content
+                match = _re.search(r'^\s*<\|channel>thought\n?([\s\S]*?)(?:\n?<channel\|>|$)', content, _re.IGNORECASE)
+                if match:
+                    msg['reasoning_content'] = match.group(1).strip()
+                    msg['content'] = _re.sub(r'^\s*<\|channel>thought\n?[\s\S]*?(?:\n?<channel\|>|$)', '', content, count=1, flags=_re.IGNORECASE).strip()
+
+            # Strip thinking blocks from reasoning_content to prevent tag pollution in history
             if msg.get('reasoning_content'):
                 rc = msg.get('reasoning_content')
                 if isinstance(rc, str):
                     msg['reasoning_content'] = self._strip_thinking_blocks(rc)
+            
+            # Clean thinking blocks from function call arguments (P4 continuation)
+            func_call = msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None)
+            if func_call:
+                if isinstance(func_call, dict) and func_call.get('arguments'):
+                    func_call['arguments'] = self._strip_thinking_blocks(func_call['arguments'])
+                elif hasattr(func_call, 'arguments'):
+                    func_call.arguments = self._strip_thinking_blocks(func_call.arguments)
 
             # Check for truncation (finish_reason == 'length')
             extra = msg.get('extra') if isinstance(msg, dict) else getattr(msg, 'extra', None)
@@ -383,6 +494,14 @@ class ExecutionEngine:
         llm_messages.extend(turn_output)
         with instance._compression_lock:
             instance.conversation.extend(turn_output)
+
+        # Persist messages to JSONL log file (P1: LoggerManager migration)
+        try:
+            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+            for msg in turn_output:
+                log_inst.log_message(msg)
+        except Exception:
+            pass  # Logging failures must never break the execution loop
 
         # ── Auto-continue on truncation ─────────────────────────────────────
         if is_truncated and not self.pool.stopped and not self.pool.is_instance_halted(inst_name):
@@ -565,7 +684,7 @@ class ExecutionEngine:
     def _handle_call_agent(self, args: dict, messages: List[Message], instance: AgentInstance) -> str:
         """Handle call_agent tool call — the unified path replacing _stream_sub_agent_call.
 
-        Works the same whether called by main agent or sub-agent. No special path.
+        Works the same for any agent calling another agent. No special paths.
 
         Args:
             args: Tool arguments (instance_name, agent_class, task, parallel_launch).
@@ -586,6 +705,35 @@ class ExecutionEngine:
 
         if not instance_name or not agent_class:
             return "Error: call_agent requires instance_name and agent_class."
+
+        # P2: Recursive self-call cloning — prevent state corruption on self-delegation
+        with self.pool._execution._state_lock:
+            if instance_name in self.pool._execution.active_stack:
+                count = self.pool._execution.active_stack.count(instance_name)
+                original_instance = instance_name
+                instance_name = f"{instance_name}_child{count}"
+                logger.info(f"Recursive self-call detected for '{original_instance}'. Cloning to '{instance_name}'.")
+
+        # P5: Class mismatch detection — clear history if class differs on existing instance
+        existing_class = self.pool.instance_classes.get(instance_name)
+        if existing_class and agent_class and existing_class != agent_class:
+            logger.info(
+                f"Class mismatch for '{instance_name}': {existing_class} -> {agent_class}. "
+                f"Clearing history to prevent context mix-up."
+            )
+            self.pool.clear_conversation(instance_name) if hasattr(self.pool, 'clear_conversation') else None
+            # Reset logger's internal history tracking to prevent desync (reviewer Issue 3)
+            try:
+                log_inst = self.pool.get_logger(instance_name, agent_class)
+                log_inst.data["history"] = []
+            except Exception:
+                pass
+            # Update the instance's agent_class to the existing one (old behavior: keep existing class template)
+            existing_inst = self.pool.get_instance(instance_name)
+            if existing_inst:
+                existing_inst.agent_class = existing_class
+            # Reuse existing class — set agent_class back so we use the existing template
+            agent_class = existing_class
 
         # Check concurrency limits
         is_parallel_allowed = True
@@ -613,7 +761,7 @@ class ExecutionEngine:
         return self._execute_agent_sync(agent_class, instance_name, args, messages, instance.instance_name)
 
     def _handle_dismiss_agent(self, args: dict, instance: AgentInstance) -> str:
-        """Handle dismiss_agent tool call — removes sub-agent from pool.
+        """Handle dismiss_agent tool call — removes another agent from pool.
 
         Args:
             args: Tool arguments (instance_name).
@@ -632,7 +780,7 @@ class ExecutionEngine:
         if not target_name:
             return "Error: dismiss_agent requires instance_name."
 
-        # Don't allow dismissing self or the main orchestrator
+        # Don't allow dismissing self or the root agent
         if target_name == instance.instance_name:
             return f"Error: Cannot dismiss yourself ({target_name})."
         if instance.parent_instance and target_name == instance.parent_instance:
@@ -710,7 +858,7 @@ class ExecutionEngine:
             agent_class=agent_class,
             conversation=[],
             is_active=False,
-            max_turns=None,
+            max_turns=None,  # Will be set below via settings propagation (P6)
             parent_instance=caller,
             created_at=now,
             last_activity=now,
@@ -719,7 +867,7 @@ class ExecutionEngine:
         )
         self.pool.instances[instance_name] = inst
 
-        # Build system message for sub-agent
+        # Build system message for new agent
         template = self.pool.templates.get(agent_class)
         if not template:
             raise ValueError(f"No template for agent class {agent_class}")
@@ -755,6 +903,66 @@ class ExecutionEngine:
         with inst._compression_lock:
             inst.conversation = conv
 
+        # Log initial messages to agent's JSONL file (P1 continuation)
+        try:
+            log_inst = self.pool.get_logger(instance_name, agent_class)
+            log_inst.log_message(sys_msg)
+            log_inst.log_message(task_msg)
+            # Sync internal tracking to prevent drift if logger instance differs later
+            log_inst.data["history"] = [
+                log_inst._format_message(sys_msg),
+                log_inst._format_message(task_msg),
+            ]
+        except Exception:
+            pass  # Logging failures must never break execution
+
+        # P6: Settings propagation from caller agent
+        # Propagate max_turns, auto_continue_enabled, and max_input_tokens
+        if hasattr(self.pool, 'api_router') and self.pool.api_router:
+            try:
+                caller_inst = self.pool.get_instance(caller)
+                if caller_inst:
+                    caller_template = self.pool.templates.get(caller_inst.agent_class)
+                    if caller_template and hasattr(caller_template, 'llm'):
+                        llm_cfg = getattr(caller_template.llm, 'generate_cfg', {})
+
+                        # Propagate max_turns from caller's template config
+                        caller_max_turns = llm_cfg.get('max_turns') or 50
+                        inst.max_turns = caller_max_turns
+
+                        # Propagate max_input_tokens (context window limit) — thread-safe copy-write
+                        supervisor_max = llm_cfg.get('max_input_tokens')
+                        if supervisor_max:
+                            target_template = self.pool.templates.get(agent_class)
+                            if target_template and hasattr(target_template, 'llm'):
+                                with self.pool._execution._state_lock:
+                                    cfg = (target_template.llm.generate_cfg or {}).copy()
+                                    cfg['max_input_tokens'] = supervisor_max
+                                    target_template.llm.generate_cfg = cfg
+            except Exception:
+                pass  # Settings propagation failures should not break agent creation
+
+        # P3: Disabled tools propagation to other agents (security/UX) — thread-safe copy-write
+        if hasattr(self.pool, 'api_router') and self.pool.api_router:
+            try:
+                caller_inst = self.pool.get_instance(caller)
+                if caller_inst:
+                    caller_template = self.pool.templates.get(caller_inst.agent_class)
+                    if caller_template and hasattr(caller_template, 'llm'):
+                        caller_disabled_tools = getattr(caller_template.llm, 'generate_cfg', {}).get('disabled_tools')
+                        if caller_disabled_tools:
+                            target_template = self.pool.templates.get(agent_class)
+                            if target_template and hasattr(target_template, 'llm'):
+                                with self.pool._execution._state_lock:
+                                    cfg = (target_template.llm.generate_cfg or {}).copy()
+                                    cfg['disabled_tools'] = caller_disabled_tools
+                                    target_template.llm.generate_cfg = cfg
+                                logger.debug(
+                                    f"Propagated disabled_tools to agent '{instance_name}': {caller_disabled_tools}"
+                                )
+            except Exception:
+                pass  # Propagation failures should not break agent creation
+
         # Track in active stack (thread-safe via RLock)
         with self.pool._execution._state_lock:
             self.pool._execution.active_stack.append(instance_name)
@@ -771,7 +979,8 @@ class ExecutionEngine:
         finally:
             # Always clean up active stack — even on halt or error
             with self.pool._execution._state_lock:
-                self.pool._execution.active_stack = [n for n in self.pool._execution.active_stack if n != instance_name]
+                if instance_name in self.pool._execution.active_stack:
+                    self.pool._execution.active_stack.remove(instance_name)
 
         return inst, conv
 
