@@ -109,22 +109,6 @@ def compress_context(
         # Token counting is advisory — if it fails, skip the token guard
         total_tokens = 0
 
-    if not force and len(active_set) < 3 and total_tokens < 200:
-        # Only defer when NOT in force mode — force mode must attempt compression regardless
-        logger.debug(
-            f"Deferring compression for '{target_agent_name}': "
-            f"{len(active_set)} messages, ~{total_tokens} tokens"
-        )
-        return CompressResult(
-            success=False,
-            summary_text=None,
-            marker_message=None,
-            messages_discarded=0,
-            tail_count=0,
-            error="Already optimally compressed; deferring until more messages accumulate",
-            mode=mode,
-        )
-
     # ── 3. Calculate discard count ──
     target_discard_count = compute_discard_count(active_set, fraction, force)
 
@@ -150,17 +134,20 @@ def compress_context(
     except Exception:
         pass  # If we can't determine the limit, proceed with original count
 
-    # ── 4. Guard: Not enough messages to discard (unless force=True) ──
-    if target_discard_count <= 0 and not force:
-        return CompressResult(
-            success=False,
-            summary_text=None,
-            marker_message=None,
-            messages_discarded=0,
-            tail_count=0,
-            error="Not enough messages to compress; deferring until more accumulate",
-            mode=mode,
-        )
+    # ── 4. Guard: Not enough to compress (unless force=True) ──
+    # Combines the "already optimally compressed" check with the "not enough to discard" check.
+    # If fewer than 3 messages AND under 200 tokens, OR if nothing to discard — defer.
+    if not force:
+        if (len(active_set) < 3 and total_tokens < 200) or target_discard_count <= 0:
+            return CompressResult(
+                success=False,
+                summary_text=None,
+                marker_message=None,
+                messages_discarded=0,
+                tail_count=len(active_set),
+                error="Not enough messages to compress; deferring until more accumulate",
+                mode=mode,
+            )
 
     # ── 5. Force mode guard: if discard count is 0 in force mode, fail gracefully ──
     if force and target_discard_count < 1:
@@ -270,13 +257,6 @@ def compress_context(
     # NOTE: This is single-threaded by design — forced compression halts all other agents
     # before running, so no concurrent pool mutations can occur during this block.
     
-    # Snapshot pre-mutation state for rollback if anything goes wrong after the pool write.
-    # Without this, a failure between mutation and return would leave the pool in partial state.
-    import copy as _copy
-    pre_mutation_history = _copy.deepcopy(
-        agent_pool.instance_conversations.get(target_agent_name) or []
-    )
-    
     try:
         # NOTE: get_conversation returns the same list object as instance_conversations[].
         # We build new_history as a new list and replace the reference on the next line.
@@ -326,15 +306,11 @@ def compress_context(
                     "'insert_compression_marker' method — marker not logged to file"
                 )
     except Exception as e:
-        # Logger notification FAILURE is now fatal — pool and logger must stay in sync.
-        # Roll back the pool to pre-mutation state to avoid partial state inconsistency.
-        # The logger and pool should be in sync; if the logger couldn't record the
-        # compression, the pool shouldn't reflect it either.
+        # Logger notification failure: pool remains modified — logger can be resynced on next iteration.
         logger.error(
             f"Logger notification failed after compression for agent "
-            f"'{target_agent_name}': {e}. Rolling back pool to pre-mutation state."
+            f"'{target_agent_name}': {e}. Pool remains modified — logger can be resynced on next iteration."
         )
-        agent_pool.instance_conversations[target_agent_name] = pre_mutation_history
         return CompressResult(
             success=False,
             summary_text=generated_summary,

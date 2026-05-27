@@ -5,8 +5,6 @@ calculation, and pool sync logic has been replaced by direct delegation to
 agent_cascade.compression.compress_context(). See core.py for full compression logic.
 """
 import copy
-import hashlib
-import json
 import logging
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
@@ -104,31 +102,26 @@ class CompressContext(BaseTool):
                 local_messages = kwargs['messages']
                 
                 if pool_list and local_messages:
-                    # Build a set of (role, content_hash) signatures for pool messages to quickly check membership.
-                    # Use a deterministic hash on full content to avoid collisions while keeping O(1) lookups.
-                    def msg_signature(msg):
-                        role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-                        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                        # Deterministic hash of full content (stable across processes/Python versions)
-                        content_key = hashlib.md5(str(content).encode()).hexdigest() if content else ''
-                        return (role, content_key)
+                    # The sub-agent's local 'messages' = sliced working set (already in pool) + new tool calls/results.
+                    # Build a set of (role, content) signatures from the pool, then append only messages not in it.
+                    def _sig(msg):
+                        r = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                        c = str(msg.get('content', '')) if isinstance(msg, dict) else str(getattr(msg, 'content', ''))
+                        return (r, c)
                     
-                    pool_sigs = set()
-                    for msg in pool_list:
-                        pool_sigs.add(msg_signature(msg))
+                    pool_sigs = {sig for sig in map(_sig, pool_list)}
+                    new_start_idx = len(local_messages)  # default: nothing is new
                     
-                    # Find the first message from the end of local_messages that is NOT in the pool.
-                    # Everything before it is guaranteed to already be in the pool (since local is a contiguous subset + new tail).
-                    new_start_idx = 0
                     for i in range(len(local_messages) - 1, -1, -1):
-                        if msg_signature(local_messages[i]) not in pool_sigs:
+                        if _sig(local_messages[i]) not in pool_sigs:
                             new_start_idx = i
                         else:
-                            break  # This message is in the pool, so everything before it is too
+                            break
                     
-                    # Append only the new messages
-                    for i in range(new_start_idx, len(local_messages)):
-                        pool_list.append(copy.deepcopy(local_messages[i]))
+                    # Append only new messages beyond the overlap
+                    if new_start_idx < len(local_messages):
+                        for msg in local_messages[new_start_idx:]:
+                            pool_list.append(copy.deepcopy(msg))
                 elif not pool_list and local_messages:
                     # Pool doesn't exist yet — populate it with the local messages
                     self.agent_pool.instance_conversations[pool_key] = copy.deepcopy(local_messages)
