@@ -2140,11 +2140,6 @@ class OrchestratorAgent(Assistant):
                             
                         final_resp = resp
 
-                        # Sync stream state using the definitive 'conv' reference
-                        # If 'conv' was edited externally (UI/compression), it is already updated since it's a reference to instance_conversations.
-                        state['messages'] = list(conv) + list(resp)
-                        yield current_response
-                        
                         # Efficient logging: check if a tool call was just completed
                         if resp:
                             last_resp = resp[-1]
@@ -2167,6 +2162,15 @@ class OrchestratorAgent(Assistant):
                                 if compress_func_name == 'compress_context':
                                     self._compress_tracker[instance_name] = True
                                     self._compress_fail_count[instance_name] = 0
+                        
+                        # Re-sync conv if compression just ran — it replaces the pool list via copy-and-replace,
+                        # making our local 'conv' stale. Check tracker BEFORE updating UI state.
+                        if self._compress_tracker.get(instance_name, False):
+                            conv = self.agent_pool.get_conversation(instance_name)
+                        
+                        # Sync stream state using the conv reference.
+                        state['messages'] = list(conv) + list(resp)
+                        yield current_response
                     
                     # Turn successfully completed
                     break

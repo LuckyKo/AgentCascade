@@ -5,6 +5,7 @@ calculation, and pool sync logic has been replaced by direct delegation to
 agent_cascade.compression.compress_context(). See core.py for full compression logic.
 """
 import copy
+import hashlib
 import json
 import logging
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -105,7 +106,6 @@ class CompressContext(BaseTool):
                 if pool_list and local_messages:
                     # Build a set of (role, content_hash) signatures for pool messages to quickly check membership.
                     # Use a deterministic hash on full content to avoid collisions while keeping O(1) lookups.
-                    import hashlib
                     def msg_signature(msg):
                         role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
                         content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
