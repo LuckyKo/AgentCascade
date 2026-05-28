@@ -8,7 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 from agent_cascade.gui import WebUI
 from agent_cascade.tools.base import BaseTool, register_tool
-from soul_loader import create_agent_from_soul
+from agent_cascade.soul_loader import create_agent_from_soul
 
 # Register tools (must be done before loading soul)
 @register_tool('get_weather', allow_overwrite=True)

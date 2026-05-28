@@ -15,8 +15,15 @@
 __version__ = '0.0.34'
 from .agent import Agent
 from .multi_agent_hub import MultiAgentHub
+from .api_router import APIRouter, APIEndpoint
+from .telemetry import TelemetryCollector
+from .soul_loader import create_agent_from_soul
 
 __all__ = [
     'Agent',
     'MultiAgentHub',
+    'APIRouter',
+    'APIEndpoint',
+    'TelemetryCollector',
+    'create_agent_from_soul',
 ]

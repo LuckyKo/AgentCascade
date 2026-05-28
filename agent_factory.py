@@ -16,7 +16,7 @@ from agent_cascade.tools.custom import (
     ReadLogs, Calculate, CodeMap,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
-from soul_loader import create_agent_from_soul
+from agent_cascade.soul_loader import create_agent_from_soul
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
 

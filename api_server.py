@@ -1195,7 +1195,7 @@ def create_app(agents, agent_pool, config=None):
         if not agent_pool or not hasattr(agent_pool, 'api_router'):
             return JSONResponse(status_code=500, content={"message": "No API router"})
         
-        from api_router import APIEndpoint
+        from agent_cascade.api_router import APIEndpoint
         try:
             ep = APIEndpoint(
                 name=data.get('name', 'New Endpoint'),

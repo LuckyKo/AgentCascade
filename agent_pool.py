@@ -22,9 +22,9 @@ from agent_cascade.llm.schema import (
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
 from agent_logger import AgentInstanceLogger
-from telemetry import TelemetryCollector
+from agent_cascade.telemetry import TelemetryCollector
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
-from api_router import APIRouter
+from agent_cascade.api_router import APIRouter
 
 
 class AgentPool:
