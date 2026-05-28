@@ -40,7 +40,7 @@ from bs4 import BeautifulSoup
 from agent_cascade.gui import WebUI
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_pool import AgentPool
-from agent_factory import load_orchestrator_agent
+from agent_cascade.agent_factory import load_orchestrator_agent
 
 # Import built-in tools from agent_cascade
 from agent_cascade.tools import (

@@ -6,7 +6,7 @@ sys.path.insert(0, r"N:\work\WD\AgentCascade")
 
 def test_compile_grep_pattern_flags():
     """Test that _compile_grep_pattern accepts flags parameter."""
-    from operation_manager import _compile_grep_pattern
+    from agent_cascade.operation_manager import _compile_grep_pattern
     _compile_grep_pattern.cache_clear()
     pat = _compile_grep_pattern("Hello")
     assert not pat.search("hello"), "Should be case-sensitive by default"
@@ -22,7 +22,7 @@ def test_smart_case_logic():
 
 def test_list_dir_no_emoji():
     """Test that list_directory output uses ASCII markers, not emoji."""
-    from operation_manager import OperationManager
+    from agent_cascade.operation_manager import OperationManager
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "subdir").mkdir()
         Path(tmpdir, "test.txt").write_text("hello")
@@ -38,7 +38,7 @@ def test_list_dir_no_emoji():
 
 def test_grep_path_normalization():
     """Test that grep output uses forward slashes even on Windows."""
-    from operation_manager import OperationManager
+    from agent_cascade.operation_manager import OperationManager
     with tempfile.TemporaryDirectory() as tmpdir:
         subdir = Path(tmpdir) / "src" / "nested"
         subdir.mkdir(parents=True)
@@ -51,7 +51,7 @@ def test_grep_path_normalization():
 
 def test_grep_no_strip():
     """Test that grep preserves whitespace (no .strip())."""
-    from operation_manager import OperationManager
+    from agent_cascade.operation_manager import OperationManager
     with tempfile.TemporaryDirectory() as tmpdir:
         content = "  indented text  \nno indent\n"
         Path(tmpdir, "test.txt").write_text(content)
@@ -64,7 +64,7 @@ def test_grep_no_strip():
 
 def test_grep_context_lines():
     """Test that context lines are shown around matches."""
-    from operation_manager import OperationManager
+    from agent_cascade.operation_manager import OperationManager
     with tempfile.TemporaryDirectory() as tmpdir:
         content = "line 1\nline 2 MATCH\nline 3\nline 4\n"
         Path(tmpdir, "test.txt").write_text(content)
@@ -77,7 +77,7 @@ def test_grep_context_lines():
 
 def test_grep_exclude():
     """Test that exclude parameter filters files."""
-    from operation_manager import OperationManager
+    from agent_cascade.operation_manager import OperationManager
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "good.py").write_text("hello world")
         Path(tmpdir, "bad.txt").write_text("hello world")
@@ -89,7 +89,7 @@ def test_grep_exclude():
 
 def test_grep_vcs_skip():
     """Test that VCS/build directories are skipped in Python fallback."""
-    from operation_manager import OperationManager
+    from agent_cascade.operation_manager import OperationManager
     with tempfile.TemporaryDirectory() as tmpdir:
         pycache = Path(tmpdir, "__pycache__")
         pycache.mkdir()
@@ -102,7 +102,7 @@ def test_grep_vcs_skip():
 
 def test_backwards_compatibility():
     """Test that default behavior is preserved when new params aren't provided."""
-    from operation_manager import OperationManager
+    from agent_cascade.operation_manager import OperationManager
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "test.py").write_text("Hello World\nhello world")
         om = OperationManager(base_dir=tmpdir)
@@ -112,7 +112,7 @@ def test_backwards_compatibility():
 
 def test_context_match_count_not_inflated():
     """Test that context mode doesn't inflate match count."""
-    from operation_manager import OperationManager
+    from agent_cascade.operation_manager import OperationManager
     with tempfile.TemporaryDirectory() as tmpdir:
         content = "alpha\nMATCH1\nbravo\nMATCH2\ndelta\n"
         Path(tmpdir, "test.txt").write_text(content)
@@ -123,7 +123,7 @@ def test_context_match_count_not_inflated():
 
 def test_exclude_fnmatch():
     """Test that exclude uses fnmatch (supports **)."""
-    from operation_manager import OperationManager
+    from agent_cascade.operation_manager import OperationManager
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "good.py").write_text("hello")
         # Nested file that should be excluded by ** pattern
@@ -137,7 +137,7 @@ def test_exclude_fnmatch():
 
 def test_keyword_only_flags():
     """Test that _compile_grep_pattern flags parameter is keyword-only."""
-    from operation_manager import _compile_grep_pattern
+    from agent_cascade.operation_manager import _compile_grep_pattern
     _compile_grep_pattern.cache_clear()
     # Should work with keyword arg
     pat = _compile_grep_pattern("Hello", flags=re.IGNORECASE)

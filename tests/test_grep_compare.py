@@ -138,7 +138,7 @@ def shell_powershell_findstr(pattern, search_path, include="*.py", case_insensit
 def om_grep(pattern, path=".", include="*.py", ignore_vcs=True, context=0):
     """Call the operation_manager.grep tool and parse its output."""
     sys.path.insert(0, str(BASE_DIR))
-    from operation_manager import OperationManager
+    from agent_cascade.operation_manager import OperationManager
     
     om = OperationManager(base_dir=str(BASE_DIR), agent_name="grep_compare_test")
     

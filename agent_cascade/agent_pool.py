@@ -752,7 +752,7 @@ class AgentPool:
 
     def load_agent(self, name: str):
         """Load a single agent template by name (if not already loaded)."""
-        from agent_factory import load_sub_agent_with_tools
+        from agent_cascade.agent_factory import load_sub_agent_with_tools
         from agent_cascade.log import logger
 
         if name in self.templates:
@@ -1033,7 +1033,7 @@ class AgentPool:
         Mirrors the old AgentPool._discover_agents() — scans for *_soul.md files
         and loads each one via load_sub_agent_with_tools().
         """
-        from agent_factory import load_sub_agent_with_tools
+        from agent_cascade.agent_factory import load_sub_agent_with_tools
         from agent_cascade.log import logger
 
         agents_path = Path(agents_dir)

@@ -4,7 +4,7 @@
 import sys
 sys.path.insert(0, r'N:\work\WD\AgentCascade')
 
-from operation_manager import OperationManager
+from agent_cascade.operation_manager import OperationManager
 
 def test_safe_commands():
     """Commands that should be auto-approved (safe read-only)."""

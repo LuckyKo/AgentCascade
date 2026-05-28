@@ -3,7 +3,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from operation_manager import OperationManager
+from agent_cascade.operation_manager import OperationManager
 
 def test_edit_file_modes():
     with tempfile.TemporaryDirectory() as tmpdir:

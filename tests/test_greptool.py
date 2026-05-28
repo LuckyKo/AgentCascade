@@ -137,7 +137,7 @@ def test_simple_pattern():
     fixture = TestFixture()
     try:
         root = fixture.build()
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         om = OperationManager(base_dir=str(root))
         
         tool_output = om.grep(pattern="hello", path=".")
@@ -162,7 +162,7 @@ def test_case_sensitive_pattern():
     fixture = TestFixture()
     try:
         root = fixture.build()
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         om = OperationManager(base_dir=str(root))
         
         tool_output = om.grep(pattern="HELLO", path=".", smart_case=False)
@@ -199,7 +199,7 @@ def test_hidden_directory():
     fixture = TestFixture()
     try:
         root = fixture.build()
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         om = OperationManager(base_dir=str(root))
         
         tool_output = om.grep(pattern="SECRET_KEY", path=".")
@@ -220,7 +220,7 @@ def test_include_filter():
     fixture = TestFixture()
     try:
         root = fixture.build()
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         om = OperationManager(base_dir=str(root))
         
         tool_output = om.grep(pattern="def ", path=".", include="*.py")
@@ -246,7 +246,7 @@ def test_exclude_filter():
     fixture = TestFixture()
     try:
         root = fixture.build()
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         om = OperationManager(base_dir=str(root))
         
         tool_output = om.grep(pattern="hello", path=".", exclude="test*")
@@ -277,7 +277,7 @@ def test_special_regex_characters():
     fixture = TestFixture()
     try:
         root = fixture.build()
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         om = OperationManager(base_dir=str(root))
         
         tool_output = om.grep(pattern="def hello_world():", path=".")
@@ -298,7 +298,7 @@ def test_empty_directory():
     fixture = TestFixture()
     try:
         root = fixture.build()
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         
         (Path(root) / "empty_dir").mkdir(exist_ok=True)
         
@@ -322,7 +322,7 @@ def test_non_existent_path():
     fixture = TestFixture()
     try:
         root = fixture.build()
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         
         om = OperationManager(base_dir=str(root))
         tool_output = om.grep(pattern="hello", path="./does_not_exist")
@@ -344,7 +344,7 @@ def test_invalid_regex():
     fixture = TestFixture()
     try:
         root = fixture.build()
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         
         om = OperationManager(base_dir=str(root))
         tool_output = om.grep(pattern="[invalid(", path=".")
@@ -366,7 +366,7 @@ def test_context_lines():
     fixture = TestFixture()
     try:
         root = fixture.build()
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         
         om = OperationManager(base_dir=str(root))
         tool_output = om.grep(pattern="hello", path=".", context=1)
@@ -388,7 +388,7 @@ def test_smart_case_behavior():
     fixture = TestFixture()
     try:
         root = fixture.build()
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         
         om = OperationManager(base_dir=str(root))
         
@@ -414,7 +414,7 @@ def test_ignore_vcs_false():
     fixture = TestFixture()
     try:
         root = fixture.build()
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         
         (Path(root) / ".git").mkdir(exist_ok=True)
         (Path(root) / ".git" / "config.txt").write_text("hello world\n")

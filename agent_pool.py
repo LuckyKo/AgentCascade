@@ -50,7 +50,7 @@ class AgentPool:
         self.agent_configs: Dict[str, dict] = {}
         
         # Initialize OperationManager for blocking approvals
-        from operation_manager import OperationManager
+        from agent_cascade.operation_manager import OperationManager
         self.operation_manager = OperationManager(base_dir=str(self.workspace_dir), agent_pool=self)
         
         # Initialize Telemetry Collector for performance tracking
@@ -493,7 +493,7 @@ rules:
     
     def load_agent(self, agent_name: str) -> Assistant:
         """Load or reload a specific agent with file tools."""
-        from agent_factory import load_sub_agent_with_tools
+        from agent_cascade.agent_factory import load_sub_agent_with_tools
         
         soul_path = self.agents_dir / f'{agent_name}_soul.md'
         
