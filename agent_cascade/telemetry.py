@@ -1,7 +1,7 @@
 """
 Telemetry Collector — Performance & Usage Tracking for A/B Testing.
 
-Captures structured events (LLM calls, tool calls, sub-agent delegations,
+Captures structured events (LLM calls, tool calls, agent instance delegations,
 loop detections, compressions) and persists them as JSONL for offline analysis.
 
 Each event is tagged with a config fingerprint so different framework configurations
@@ -58,7 +58,7 @@ class TelemetryCollector:
             "tool_failures_by_name": defaultdict(int),
             "tool_latency_by_name": defaultdict(float),
             "llm_calls_by_model": defaultdict(int),
-            "sub_agent_calls": 0,
+            "agent_instance_calls": 0,
         }
 
         # Per-config aggregates for A/B comparison
@@ -331,16 +331,16 @@ class TelemetryCollector:
                 "truncated": truncated,
             })
 
-    def record_sub_agent_call(
+    def record_agent_instance_call(
         self,
         instance_name: str,
         agent_class: str,
         target_instance: str,
         latency_ms: float = 0,
     ):
-        """Record a sub-agent delegation."""
+        """Record an agent instance delegation."""
         event = {
-            "type": "sub_agent_call",
+            "type": "agent_instance_call",
             "instance": instance_name,
             "agent_class": agent_class,
             "target_instance": target_instance,
@@ -349,7 +349,7 @@ class TelemetryCollector:
         }
         self._write_event(event)
         self.events.append(event)
-        self._session_stats["sub_agent_calls"] += 1
+        self._session_stats["agent_instance_calls"] += 1
 
     def record_loop_detected(self, instance_name: str, reason: str, auto_rolled_back: bool = False, pop_count: int = 0):
         """Record a loop detection event."""
@@ -431,7 +431,7 @@ class TelemetryCollector:
             "total_loops_detected": stats["total_loops_detected"],
             "total_retries": stats["total_retries"],
             "total_compressions": stats["total_compressions"],
-            "sub_agent_calls": stats["sub_agent_calls"],
+            "agent_instance_calls": stats["agent_instance_calls"],
             "llm_calls_by_model": dict(stats["llm_calls_by_model"]),
             "tool_effectiveness": tool_success_rates,
         }

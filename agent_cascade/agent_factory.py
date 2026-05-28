@@ -32,10 +32,10 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
         agent_pool: The AgentPool instance (for file ops and approvals).
         agent_name: The role name (e.g. 'orchestrator', 'coder').
     """
-    from agent_cascade.orchestrator_agent import _SubAgentFunctionProxy, CALL_AGENT_SCHEMA
+    from agent_cascade.orchestrator_agent import _AgentInstanceFunctionProxy, CALL_AGENT_SCHEMA
 
     # ── Sub-agent management (intercepted in _run, not _call_tool) ──
-    agent.function_map['call_agent'] = _SubAgentFunctionProxy(CALL_AGENT_SCHEMA)
+    agent.function_map['call_agent'] = _AgentInstanceFunctionProxy(CALL_AGENT_SCHEMA)
     agent.function_map['dismiss_agent'] = DismissAgent(agent_pool=agent_pool)
     agent.function_map['list_agents'] = ListAgents(agent_pool=agent_pool)
 
@@ -234,14 +234,14 @@ def load_orchestrator_agent(agent_pool, llm_cfg: dict) -> Assistant:
     return load_agent(agent_pool, 'orchestrator', llm_cfg)
 
 
-def load_sub_agent_with_tools(agent_pool, agent_name: str, llm_cfg: dict) -> Assistant:
-    """Load a sub-agent. Delegates to load_agent()."""
+def load_agent_template(agent_pool, agent_name: str, llm_cfg: dict) -> Assistant:
+    """Load an agent template. Delegates to load_agent()."""
     return load_agent(agent_pool, agent_name, llm_cfg)
 
 
 def _default_agent_prompt(agent_pool, agent_name: str) -> str:
     """Fallback system prompt when no soul.md exists."""
-    prompt = f"""You are {agent_name.replace('_', ' ').title()}, an AI assistant that can coordinate with specialized sub-agents.
+    prompt = f"""You are {agent_name.replace('_', ' ').title()}, an AI assistant that can coordinate with specialized agent instances.
 
 Available sub-agents:
 """

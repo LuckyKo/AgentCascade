@@ -87,9 +87,9 @@ def rebuild_working_set(
     # deepcopy ensures callers don't accidentally mutate pool state through their references
 
 
-def extract_sub_agent_feedback(messages: List[Dict], instance_name: str) -> str:
+def extract_instance_output(messages: List[Dict], instance_name: str) -> str:
     """
-    Extracts text output from sub-agent messages.
+    Extracts text output from agent instance messages.
     Only includes text generated AFTER the last tool call ended.
     
     Args:

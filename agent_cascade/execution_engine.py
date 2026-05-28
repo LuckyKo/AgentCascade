@@ -1138,8 +1138,8 @@ class ExecutionEngine:
 
         # Item 9: Multimodal image propagation — scan caller's conversation for images
         # referenced in the task text and include them as multimodal content
-        sub_agent_msg_content: list = [{'type': 'text', 'text': task_text}]
-        added_to_sub = set()
+        agent_msg_content: list = [{'type': 'text', 'text': task_text}]
+        added_to_inst = set()
 
         def _safe_get_role(msg):
             return msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
@@ -1164,9 +1164,9 @@ class ExecutionEngine:
         # Include images that are referenced in the task text
         for img_url in seen_images.values():
             basename = img_url.split('/')[-1].split('?')[0] if '/' in img_url else img_url
-            if basename in task_text and img_url not in added_to_sub:
-                sub_agent_msg_content.append({'type': 'image', 'value': img_url})
-                added_to_sub.add(img_url)
+            if basename in task_text and img_url not in added_to_inst:
+                agent_msg_content.append({'type': 'image', 'value': img_url})
+                added_to_inst.add(img_url)
 
         # Also check the last user message for images even if not referenced in text
         if caller_conv:
@@ -1181,13 +1181,13 @@ class ExecutionEngine:
                     for item in content:
                         item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
                         item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
-                        if item_type == 'image' and item_value not in added_to_sub:
-                            sub_agent_msg_content.append({'type': 'image', 'value': item_value})
-                            added_to_sub.add(item_value)
+                        if item_type == 'image' and item_value not in added_to_inst:
+                            agent_msg_content.append({'type': 'image', 'value': item_value})
+                            added_to_inst.add(item_value)
 
         # Use multimodal content list if images found, otherwise plain text
-        if len(sub_agent_msg_content) > 1:
-            task_msg = Message(role=USER, content=sub_agent_msg_content)
+        if len(agent_msg_content) > 1:
+            task_msg = Message(role=USER, content=agent_msg_content)
         else:
             task_msg = Message(role=USER, content=task_text)
 
@@ -1272,7 +1272,7 @@ class ExecutionEngine:
                 'conversation_length_tokens': getattr(inst, '_cached_token_count', 0),
             }
             with self.pool._execution._state_lock:
-                self.pool.sub_agent_state[instance_name] = initial_state
+                self.pool.instance_state[instance_name] = initial_state
         except Exception:
             pass  # WebUI state updates must never break execution
 
@@ -1304,7 +1304,7 @@ class ExecutionEngine:
                             'conversation_length_tokens': getattr(inst, '_cached_token_count', 0),
                         }
                         with self.pool._execution._state_lock:
-                            self.pool.sub_agent_state[instance_name] = state
+                            self.pool.instance_state[instance_name] = state
                     except Exception:
                         pass  # WebUI state updates must never break execution
 
@@ -1327,7 +1327,7 @@ class ExecutionEngine:
                     'conversation_length_tokens': getattr(inst, '_cached_token_count', 0),
                 }
                 with self.pool._execution._state_lock:
-                    self.pool.sub_agent_state[instance_name] = final_state
+                    self.pool.instance_state[instance_name] = final_state
             except Exception:
                 pass  # WebUI state updates must never break execution
         finally:
@@ -1346,8 +1346,8 @@ class ExecutionEngine:
         self, agent_class: str, instance_name: str,
         args: dict, caller_history: List[Message], caller: str
     ) -> str:
-        """Execute an agent synchronously through the unified loop. Replaces _stream_sub_agent_call()."""
-        from agent_cascade.compression.helpers import extract_sub_agent_feedback
+        """Execute an agent synchronously through the unified loop. Replaces _stream_agent_instance_call()."""
+        from agent_cascade.compression.helpers import extract_instance_output
 
         template = self.pool.templates.get(agent_class)
         if not template:
@@ -1357,7 +1357,7 @@ class ExecutionEngine:
         inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller)
 
         # Note: _create_and_run_agent handles active_stack cleanup via its own finally block.
-        result_str = extract_sub_agent_feedback(conv, instance_name)
+        result_str = extract_instance_output(conv, instance_name)
         return f"[{instance_name}\'s output]:\n{result_str}"
 
     def _get_max_tokens(self, instance: AgentInstance) -> int:

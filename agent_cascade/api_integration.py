@@ -75,20 +75,20 @@ def create_main_agent_instance(
         conversation=conversation,
     )
 
-    # Populate sub_agent_state for the main instance so get_session_history() in
+    # Populate instance_state for the main instance so get_session_history() in
     # unified mode can read it. Register under both 'root' (what api_server expects)
-    # and the actual instance name for consistency with sub-agent registration.
+    # and the actual instance name for consistency with agent instance registration.
     agent_label = f"{instance_name} (OrchestratorAgent)"
     # Read conversation under lock for thread safety
     with instance._compression_lock:
         conv_snapshot = list(instance.conversation)
-    pool.sub_agent_state['root'] = {
+    pool.instance_state['root'] = {
         'active': False,
         'agent_name': agent_label,
         'messages': conv_snapshot,
     }
     if instance_name != 'root':
-        pool.sub_agent_state[instance_name] = pool.sub_agent_state['root'].copy()
+        pool.instance_state[instance_name] = pool.instance_state['root'].copy()
 
     logger.info(f"Created main agent instance: {instance_name}")
     return instance
@@ -342,7 +342,7 @@ def build_state_from_pool(
     return {
         'messages': [serialize_message(m, i) for i, m in enumerate(msgs)],
         'instances': all_instances,
-        'sub_agents': {
+        'agent_instances': {
             name: state for name, state in all_instances.items()
             if state.get('parent_instance') is not None
         },
@@ -431,7 +431,7 @@ def build_stream_update_from_pool(
         name: _serialize_instance(inst, pool)
         for name, inst in instance_snapshot_data.items()
     }
-    sub_agents_data = {
+    agent_instances_data = {
         name: state for name, state in all_instances.items()
         if state.get('parent_instance') is not None
     }
@@ -454,7 +454,7 @@ def build_stream_update_from_pool(
         'history_count': history_count,
         'response_messages': response_msgs,
         'instances': all_instances,
-        'sub_agents': sub_agents_data,
+        'agent_instances': agent_instances_data,
         'active_stack': active_stack,
         'approvals': _get_approvals(pool),
         'generating': True,
@@ -753,7 +753,7 @@ def get_agent_state_from_pool(
     """Get current state for any agent instance directly from the pool.
 
     Replaces get_agent_state() which had dual-track logic (root → session['history'],
-    sub-agent → pool.sub_agent_state). In unified mode, everything comes from
+    agent instance → pool.instance_state). In unified mode, everything comes from
     pool.instances[name].conversation.
 
     Args:

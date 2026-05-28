@@ -371,7 +371,7 @@ def create_app(agents, agent_pool, config=None):
     Create the FastAPI application.
 
     Args:
-        agents:     List of Agent objects (orchestrator first, then sub-agents)
+        agents:     List of Agent objects (orchestrator first, then agent instances)
         agent_pool: The AgentPool instance
         config:     Optional chatbot config dict
     """
@@ -475,7 +475,7 @@ def create_app(agents, agent_pool, config=None):
             else:
                 log_dir = Path(DEFAULT_WORKSPACE) / 'logs'
             
-            # Orchestrator logs might be named session_NAME.jsonl or follow the sub-agent pattern
+            # Orchestrator logs might be named session_NAME.jsonl or follow the agent instance pattern
             path = log_dir / f"session_{name}.jsonl"
             if not path.exists():
                 # Try finding a log with the Orchestrator pattern
@@ -506,13 +506,13 @@ def create_app(agents, agent_pool, config=None):
         
         Args:
             session: Flask session dict
-            instance_name: Agent instance name ('root' for main chat, or agent name for sub-agents)
+            instance_name: Agent instance name ('root' for main chat, or agent name for agent instances)
         
         Returns:
             list of message objects
         """
         # Read from unified store — always read from pool.instances for live data.
-        # sub_agent_state is a legacy shim that can go stale; instances[name].conversation
+        # instance_state is a legacy shim that can go stale; instances[name].conversation
         # is the single source of truth during execution (Fix #9).
         if instance_name == 'root':
             inst = agent_pool.get_instance(session['session_name']) if agent_pool else None
@@ -521,14 +521,14 @@ def create_app(agents, agent_pool, config=None):
                     return list(inst.conversation)
             return []
         else:
-            # Sub-agent history from unified store (sub_agent_state is updated during streaming)
-            state = agent_pool.sub_agent_state.get(instance_name, {}) if agent_pool else {}
+            # Agent instance history from unified store (instance_state is updated during streaming)
+            state = agent_pool.instance_state.get(instance_name, {}) if agent_pool else {}
             return state.get('messages', [])
 
     def get_agent_state(instance_name):
         """Get state for any agent instance, including root.
         
-        All agents including root come from agent_pool.sub_agent_state.
+        All agents including root come from agent_pool.instance_state.
         
         Args:
             instance_name: Agent instance name ('root' for main chat, or agent name)
@@ -538,7 +538,7 @@ def create_app(agents, agent_pool, config=None):
         """
         if not agent_pool:
             return None
-        state = agent_pool.sub_agent_state.get(instance_name)
+        state = agent_pool.instance_state.get(instance_name)
         return state.copy() if state else None
 
     # ── Shared session state ──────────────────────────────────────────────
@@ -588,10 +588,10 @@ def create_app(agents, agent_pool, config=None):
             return agents[idx]
         return agents[0]
 
-    def get_sub_agent_state(streaming=False):
+    def get_instance_state(streaming=False):
         result = {}
-        if agent_pool and hasattr(agent_pool, 'sub_agent_state'):
-            for name, state in agent_pool.sub_agent_state.items():
+        if agent_pool and hasattr(agent_pool, 'instance_state'):
+            for name, state in agent_pool.instance_state.items():
                 msgs = state.get('messages', [])
                 
                 # Extract the actual agent class from agent_name.
@@ -603,7 +603,7 @@ def create_app(agents, agent_pool, config=None):
                 else:
                     agent_class = raw_agent_name
                 
-                # Get max tokens for this sub-agent's own model/endpoint.
+                # Get max tokens for this agent instance's own model/endpoint.
                 # Try the agent template first, then fall back to querying the API Router
                 # directly by agent type (handles cases where the template wasn't loaded).
                 agent_template = agent_pool.get_agent(agent_class)
@@ -617,16 +617,16 @@ def create_app(agents, agent_pool, config=None):
                 else:
                     max_tokens = DEFAULT_MAX_INPUT_TOKENS
                 
-                # FIX1 (sub-agent index mismatch): Always compute from the sliced/active set.
+                # FIX1 (agent instance index mismatch): Always compute from the sliced/active set.
                 # slice_history_for_llm can reduce the message count during compression,
                 # so we track active_count (len of sliced history) instead of len(msgs).
                 # This ensures all indexing into active_msgs is consistent.
                 active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
                 active_count = len(active_msgs)
                 
-                # Incremental token counting for sub-agents.
-                # During streaming, sub-agent histories are mostly static — they only change
-                # when a new message arrives from that sub-agent (rare during main agent ticks).
+                # Incremental token counting for agent instances.
+                # During streaming, agent instance histories are mostly static — they only change
+                # when a new message arrives from that agent instance (rare during main agent ticks).
                 # NOTE: slice_history_for_llm only appends/removes messages (never mutates in-place),
                 # so if active_count == last_active_count the cached stats are guaranteed valid.
                 cache_key = '_sa_stats_' + name
@@ -753,7 +753,7 @@ def create_app(agents, agent_pool, config=None):
         if result is None:
             return {
                 'messages': [],
-                'sub_agents': {},
+                'agent_instances': {},
                 'active_stack': [],
                 'approvals': [],
                 'generating': gen,
@@ -768,7 +768,7 @@ def create_app(agents, agent_pool, config=None):
         result['agent_index'] = session.get('agent_index', 0)
         return result
 
-    def build_stream_update(responses, cached_h_stats=None, sub_agents=None, telemetry=None):
+    def build_stream_update(responses, cached_h_stats=None, agent_instances=None, telemetry=None):
         """Build a lightweight streaming delta (skips re-serializing stable history).
         
         Delegates to build_stream_update_from_pool which reads from pool.instances.
@@ -787,7 +787,7 @@ def create_app(agents, agent_pool, config=None):
             return {
                 'history_count': len(_get_main_history(agent_pool, instance_name)),
                 'response_messages': [serialize_message(m, i) for i, m in enumerate(responses or [])],
-                'sub_agents': {},
+                'agent_instances': {},
                 'active_stack': [],
                 'approvals': [],
                 'generating': True,
@@ -887,7 +887,7 @@ def create_app(agents, agent_pool, config=None):
                 
                 Uses agent_pool._ws_loop to access the event loop set by run_agent_thread.
                 Only triggers for LLM-initiated dismissals (during active generation cycle).
-                UI-initiated dismissals have their own direct broadcast in terminate_sub_agent handler.
+                UI-initiated dismissals have their own direct broadcast in terminate_agent_instance handler.
                 """
                 ws_loop = getattr(agent_pool, '_ws_loop', None)
                 if ws_loop and not ws_loop.is_closed() and send_queue:
@@ -1426,8 +1426,8 @@ def create_app(agents, agent_pool, config=None):
                             if agent_pool:
                                 agent_pool.stopped = False
                                 
-                                # ── Fix 3: Restore sub-agent conversations from JSONL logs if corrupted ──
-                                # After a failed forced compression cycle, sub-agent pools may be empty/corrupted.
+                                # ── Fix 3: Restore agent instance conversations from JSONL logs if corrupted ──
+                                # After a failed forced compression cycle, agent instance pools may be empty/corrupted.
                                 # Read directly from log files on disk to recover.
                                 try:
                                     # Import validate_message_pool locally (defined in execution_engine.py)
@@ -1437,7 +1437,7 @@ def create_app(agents, agent_pool, config=None):
                                         if sa_name == session['session_name']:
                                             continue  # Skip main session — already synced above
                                         
-                                        # Skip orphaned or root instances (only recover sub-agents)
+                                        # Skip orphaned or root instances (only recover agent instances)
                                         sa_inst = agent_pool.get_instance(sa_name)
                                         if sa_inst is None:
                                             continue  # Instance not found, skip
@@ -1456,7 +1456,7 @@ def create_app(agents, agent_pool, config=None):
                                             if logger_inst and hasattr(logger_inst, 'log_path') and logger_inst.log_path:
                                                 actual_log_path = logger_inst.log_path
                                             else:
-                                                # Search for the most recent log file matching this sub-agent
+                                                # Search for the most recent log file matching this agent instance
                                                 if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
                                                     log_dir = agent_pool.operation_manager.base_dir / 'logs'
                                                 else:
@@ -1482,7 +1482,7 @@ def create_app(agents, agent_pool, config=None):
                                             # Only overwrite pool if recovered data is valid
                                             if recov and validate_message_pool(recov, sa_name):
                                                 logger.info(
-                                                    f"Restoring sub-agent {sa_name} conversation from log during resume "
+                                                    f"Restoring agent instance {sa_name} conversation from log during resume "
                                                     f"({len(recov)} messages)"
                                                 )
                                                 sa_inst = agent_pool.get_instance(sa_name)
@@ -1491,14 +1491,14 @@ def create_app(agents, agent_pool, config=None):
                                                         sa_inst.conversation[:] = recov  # Replace in-place under lock
                                             else:
                                                 logger.warning(
-                                                    f"Could not restore sub-agent {sa_name} pool — "
+                                                    f"Could not restore agent instance {sa_name} pool — "
                                                     f"no valid recovery data found in logs"
                                                 )
                                         except Exception as _e:
                                             # Single agent failure shouldn't block resume for others
-                                            logger.warning(f"Failed to restore sub-agent {sa_name} pool: {_e}")
+                                            logger.warning(f"Failed to restore agent instance {sa_name} pool: {_e}")
                                 except ImportError:
-                                    logger.warning("validate_message_pool not available — skipping sub-agent pool restoration")
+                                    logger.warning("validate_message_pool not available — skipping agent instance pool restoration")
                                 # ── End Fix 3 ──
                             
                             session['generation_id'] += 1
@@ -1518,14 +1518,14 @@ def create_app(agents, agent_pool, config=None):
                             # Not halted and not generating — just update UI state (no-op from user's perspective)
                             await broadcast({'type': 'state', **build_state()})
                     
-                    # For sub-agents: inject a continuation message into their queue so when 
+                    # For agent instances: inject a continuation message into their queue so when 
                     # the orchestrator next calls them, they continue from where they left off
                     elif target_instance != session['session_name'] and agent_pool and was_halted:
                         cont_msg = f"[SYSTEM]: Agent {target_instance} was paused. Please continue from where you left off."
                         agent_pool.enqueue_message(target_instance, cont_msg)
-                        logger.info(f"Injected continuation message into sub-agent {target_instance}'s queue.")
+                        logger.info(f"Injected continuation message into agent instance {target_instance}'s queue.")
 
-                elif msg_type == 'terminate_sub_agent':
+                elif msg_type == 'terminate_agent_instance':
                     instance_name = data.get('instance_name')
                     if instance_name and agent_pool:
                         agent_pool.dismiss_instance(instance_name)
@@ -1566,18 +1566,18 @@ def create_app(agents, agent_pool, config=None):
                         agent_pool.active_stack_clear()  # active_stack property returns defensive copy; use mutation method
                         agent_pool.last_tool_args.clear()
 
-                        # 1. Rollback sub-agents to the start of the last turn
+                        # 1. Rollback agent instances to the start of the last turn
                         if session.get('last_turn_snapshots'):
                             agent_pool.rollback_to_snapshots(session['last_turn_snapshots'], soft=True, reason="User retry")
                             
-                            # Sync sub_agent_state so build_state() sees the rolled-back histories
+                            # Sync instance_state so build_state() sees the rolled-back histories
                             for name in session['last_turn_snapshots']:
-                                if name != session['session_name'] and name in agent_pool.sub_agent_state:
+                                if name != session['session_name'] and name in agent_pool.instance_state:
                                     sa_inst = agent_pool.get_instance(name)
                                     if sa_inst is not None:
                                         with sa_inst._compression_lock:
                                             conv_snapshot = list(sa_inst.conversation)
-                                        agent_pool.sub_agent_state[name]['messages'] = conv_snapshot
+                                        agent_pool.instance_state[name]['messages'] = conv_snapshot
 
                     # Now "send it again": re-append the user message to pool instance (unified path)
                     if last_user_msg and agent_pool:
@@ -1768,9 +1768,9 @@ def create_app(agents, agent_pool, config=None):
                                             {'role': USER, 'content': prompt},
                                         ]
                                         
-                                        # Register security advisor in sub_agent_state so it shows a tab
+                                        # Register security advisor in instance_state so it shows a tab
                                         sec_state_key = 'security_advisor'
-                                        agent_pool.sub_agent_state[sec_state_key] = {
+                                        agent_pool.instance_state[sec_state_key] = {
                                             'active': True,
                                             'agent_name': f"Security Advisor (security_advisor)",
                                             'messages': list(history),
@@ -1780,7 +1780,7 @@ def create_app(agents, agent_pool, config=None):
                                             agent_pool.active_stack_append(sec_state_key)  # active_stack returns defensive copy; use mutation method
                                         # Broadcast initial state so the tab appears immediately
                                         asyncio.run_coroutine_threadsafe(
-                                            send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
+                                            send_queue.put({'type': 'stream_update', **build_stream_update([], agent_instances=get_instance_state(streaming=True))}),
                                             loop
                                         )
                                         
@@ -1834,13 +1834,13 @@ def create_app(agents, agent_pool, config=None):
                                                     break
                                                 
                                                 final_msgs = partial
-                                                # Update sub_agent_state with current message history during streaming
-                                                agent_pool.sub_agent_state[sec_state_key]['messages'] = list(history) + list(final_msgs) if isinstance(final_msgs, list) else [history[0]] + list(final_msgs)
-                                                agent_pool.instance_conversations[sec_state_key] = list(agent_pool.sub_agent_state[sec_state_key]['messages'])
+                                                # Update instance_state with current message history during streaming
+                                                agent_pool.instance_state[sec_state_key]['messages'] = list(history) + list(final_msgs) if isinstance(final_msgs, list) else [history[0]] + list(final_msgs)
+                                                agent_pool.instance_conversations[sec_state_key] = list(agent_pool.instance_state[sec_state_key]['messages'])
                                                 # Only broadcast at start and end of security check (not every token)
                                                 if sec_first_broadcast:
                                                     asyncio.run_coroutine_threadsafe(
-                                                        send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
+                                                        send_queue.put({'type': 'stream_update', **build_stream_update([], agent_instances=get_instance_state(streaming=True))}),
                                                         loop
                                                     )
                                                     sec_first_broadcast = False
@@ -2068,8 +2068,8 @@ def create_app(agents, agent_pool, config=None):
                                 finally:
                                     # Always clean up security advisor state when done
                                     # sec_state_key is defined at function scope (as 'security_advisor'), so direct reference is safe
-                                    if sec_state_key and sec_state_key in agent_pool.sub_agent_state:
-                                        agent_pool.sub_agent_state[sec_state_key]['active'] = False
+                                    if sec_state_key and sec_state_key in agent_pool.instance_state:
+                                        agent_pool.instance_state[sec_state_key]['active'] = False
                                         if sec_state_key in agent_pool.active_stack:
                                             agent_pool.active_stack_remove(sec_state_key)  # active_stack returns defensive copy; use mutation method
                                     if hasattr(app, 'active_security_checks') and rid:
@@ -2136,11 +2136,11 @@ def create_app(agents, agent_pool, config=None):
                             logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
                             logger_inst.reset_history(history, rewrite=True)
                             
-                            # Sync sub_agent_state so build_state() sees the edit
-                            # (sub_agent_state[name]['messages'] may be a separate reference and won't
+                            # Sync instance_state so build_state() sees the edit
+                            # (instance_state[name]['messages'] may be a separate reference and won't
                             #  reflect in-place edits to instance_conversations)
-                            if target_name != session['session_name'] and target_name in agent_pool.sub_agent_state:
-                                agent_pool.sub_agent_state[target_name]['messages'] = list(history)
+                            if target_name != session['session_name'] and target_name in agent_pool.instance_state:
+                                agent_pool.instance_state[target_name]['messages'] = list(history)
                             
                             # Also sync main session back to pool so next generation doesn't
                             # overwrite the edit (pool is source of truth)
@@ -2179,9 +2179,9 @@ def create_app(agents, agent_pool, config=None):
                         logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
                         logger_inst.reset_history(history, rewrite=True)
                         
-                        # Sync sub_agent_state so build_state() sees the deletion
-                        if target_name != session['session_name'] and target_name in agent_pool.sub_agent_state:
-                            agent_pool.sub_agent_state[target_name]['messages'] = list(history)
+                        # Sync instance_state so build_state() sees the deletion
+                        if target_name != session['session_name'] and target_name in agent_pool.instance_state:
+                            agent_pool.instance_state[target_name]['messages'] = list(history)
                         
                         # Also sync main session back to pool so next generation doesn't
                         # re-deep-copy the un-deleted version (pool is source of truth)

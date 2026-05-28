@@ -155,8 +155,8 @@ You are a specialized agent instance.
                     logger_inst.update_history(messages)
 
                     # Accumulate refined text output
-                    from agent_cascade.compression.helpers import extract_sub_agent_feedback
-                    result_str = extract_sub_agent_feedback(response, instance_name)
+                    from agent_cascade.compression.helpers import extract_instance_output
+                    result_str = extract_instance_output(response, instance_name)
                     
                     return f"[{instance_name}'s output]:\n{result_str}"
                 

@@ -2,12 +2,12 @@
 OrchestratorAgent backward-compatibility stub.
 
 This class is a backward-compatibility stub. Its methods are NOT called at runtime —
-ExecutionEngine handles all execution. OrchestratorAgent._run() and _stream_sub_agent_call()
+ExecutionEngine handles all execution. OrchestratorAgent._run() and _stream_agent_instance_call()
 were never invoked at runtime; they existed as dead code paths alongside the ExecutionEngine.
 
 The compat module provides:
 - CALL_AGENT_SCHEMA       — tool schema dict used by agent_factory.register_standard_tools()
-- _SubAgentFunctionProxy  — proxy class registered in agent.function_map (inherits BaseTool)
+- _AgentInstanceFunctionProxy  — proxy class registered in agent.function_map (inherits BaseTool)
 - OrchestratorAgent       — stub class matching original constructor signatures for
                             create_agent_from_soul and fallback constructor calls,
                             plus stub methods that tests patch.
@@ -19,14 +19,14 @@ from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
 from agent_cascade.tools.base import BaseTool
 
 
-# ─── Sub-agent function schemas ────────────────────────────────────────────────
+# ─── Agent instance function schemas ────────────────────────────────────────────────
 # These are NOT called via _call_tool; ExecutionEngine intercepts them as streaming generators.
 # They exist only so the LLM sees them in the function list.
 
 CALL_AGENT_SCHEMA = {
     'name': 'call_agent',
     'description': (
-        'Delegate a task to a specialized sub-agent. '
+        'Delegate a task to a specialized agent instance. '
         'If the instance_name already exists, the session continues with the existing context. '
         'Otherwise, a new session is started using the specified agent_class.\n\n'
         'Example usage:\n'
@@ -49,7 +49,7 @@ CALL_AGENT_SCHEMA = {
             },
             'context': {
                 'type': 'string',
-                'description': 'Optional background context for the sub-agent'
+                'description': 'Optional background context for the agent instance'
             },
             'parallel_launch': {
                 'type': 'boolean',
@@ -65,9 +65,9 @@ CALL_AGENT_SCHEMA = {
 }
 
 
-class _SubAgentFunctionProxy(BaseTool):
+class _AgentInstanceFunctionProxy(BaseTool):
     """
-    Proxy for sub-agent call_agent function. Inherited from BaseTool so that
+    Proxy for agent instance call_agent function. Inherited from BaseTool so that
     agent.py:209 (self.function_map[].function) works correctly.
 
     Registered in agent.function_map so the LLM sees it, but actual execution
@@ -92,7 +92,7 @@ class OrchestratorAgent:
 
     This class is a backward-compatibility stub. Its methods are NOT called at runtime —
     ExecutionEngine handles all execution. The original OrchestratorAgent._run() and
-    _stream_sub_agent_call() were dead code paths alongside the ExecutionEngine.
+    _stream_agent_instance_call() were dead code paths alongside the ExecutionEngine.
 
     This stub exists to:
     1. Satisfy `create_agent_from_soul(agent_class=OrchestratorAgent, ...)` calls in agent_factory.

@@ -167,8 +167,8 @@ def invoke_compression_agent(
                         )
 
                     # The generator yields intermediate state for WebUI — capture final messages
-                    if comp_state_key in agent_pool.sub_agent_state:
-                        msgs = agent_pool.sub_agent_state[comp_state_key].get('messages', [])
+                    if comp_state_key in agent_pool.instance_state:
+                        msgs = agent_pool.instance_state[comp_state_key].get('messages', [])
                         if msgs:
                             final_msgs = list(msgs)
             except StopIteration as e:
@@ -183,8 +183,8 @@ def invoke_compression_agent(
                 "no orchestrator reference for call_agent pattern"
             )
 
-            # Initialize sub-agent state for WebUI visibility (direct path)
-            agent_pool.sub_agent_state[comp_state_key] = {
+            # Initialize agent instance state for WebUI visibility (direct path)
+            agent_pool.instance_state[comp_state_key] = {
                 'active': True,
                 'agent_name': f"Compression Agent (compression_agent)",
                 'messages': list(comp_history),
@@ -211,12 +211,12 @@ def invoke_compression_agent(
                         f"({poll_count} iterations in direct run path)"
                     )
 
-                # Update sub_agent_state during streaming so WebUI reflects progress
-                agent_pool.sub_agent_state[comp_state_key]['messages'] = (
+                # Update instance_state during streaming so WebUI reflects progress
+                agent_pool.instance_state[comp_state_key]['messages'] = (
                     list(comp_history) + (list(final_msgs) if isinstance(final_msgs, list) else [final_msgs])
                 )
                 agent_pool.instance_conversations[comp_state_key] = list(
-                    agent_pool.sub_agent_state[comp_state_key]['messages']
+                    agent_pool.instance_state[comp_state_key]['messages']
                 )
 
         # 2. Extract the summary from the last assistant message
@@ -239,7 +239,7 @@ def invoke_compression_agent(
 
         # Fallback: if final_msgs was empty but we got a return value from the generator,
         # try to extract the summary from that string. This handles edge cases where the
-        # sub_agent_state wasn't populated during streaming.
+        # instance_state wasn't populated during streaming.
         if not summary.strip() and subagent_return_value:
             if isinstance(subagent_return_value, str):
                 logger.info("Using subagent return value as fallback for summary extraction")
@@ -262,7 +262,7 @@ def invoke_compression_agent(
         raise RuntimeError(f"Exception occurred while generating summary: {e}") from e
     finally:
         # Always clean up compression agent state when done
-        if comp_state_key in agent_pool.sub_agent_state:
-            agent_pool.sub_agent_state[comp_state_key]['active'] = False
+        if comp_state_key in agent_pool.instance_state:
+            agent_pool.instance_state[comp_state_key]['active'] = False
             if comp_state_key in agent_pool.active_stack:
                 agent_pool.active_stack_remove(comp_state_key)

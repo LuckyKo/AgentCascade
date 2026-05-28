@@ -766,7 +766,7 @@ function handleServerMessage(data) {
           state.messages.push({ role: 'assistant', content: partialContent });
         }
       }
-      state.subAgents = data.sub_agents || {};
+      state.subAgents = data.agent_instances || {};
       state.activeStack = data.active_stack || [];
       state.generating = data.generating ?? false;
       if (data.agents) {
@@ -886,8 +886,8 @@ function handleServerMessage(data) {
       //     streaming content updates rely on the tiered throttle timer below.
       let subAgentNewVisibleMessage = false;
       let subAgentContentChanged = false;
-      if (data.sub_agents) {
-        for (const [name, sa] of Object.entries(data.sub_agents)) {
+      if (data.agent_instances) {
+               for (const [name, sa] of Object.entries(data.agent_instances)) {
           const existing = state.subAgents[name];
           const prevMsgCount = existing ? existing.messages.length : 0;
           
@@ -2341,7 +2341,7 @@ function renderSubAgents() {
       closeBtn.textContent = '\u00d7';
       closeBtn.onclick = (e) => {
         e.stopPropagation();
-        send({ type: 'terminate_sub_agent', instance_name: name });
+        send({ type: 'terminate_agent_instance', instance_name: name });
         switchMainTab('chat');
       };
       tabBtn.appendChild(closeBtn);
@@ -2444,7 +2444,7 @@ function renderSubAgentPanel(panel, agentData, name) {
     
     const terminateBtn = activityBar.querySelector('.terminate-btn');
     terminateBtn.onclick = () => {
-      send({ type: 'terminate_sub_agent', instance_name: name });
+      send({ type: 'terminate_agent_instance', instance_name: name });
       switchMainTab('chat');
     };
 

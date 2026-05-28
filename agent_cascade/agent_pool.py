@@ -264,10 +264,10 @@ class AgentPool:
         self.instance_summaries: Dict[str, str] = {}         # per-instance compression summaries
         self._ws_loop = None                                 # asyncio event loop ref (set by api_server at runtime, used by dismissal callback)
 # ── Backward compatibility shim for agent_invoker.py ────────────────
-        # The old model used sub_agent_state dict for WebUI visibility.
+        # The old model used instance_state dict for WebUI visibility.
         # In the new model, state lives in instances[name].conversation.
         # This shim is maintained only until agent_invoker is refactored.
-        self.sub_agent_state: Dict[str, dict] = {}
+        self.instance_state: Dict[str, dict] = {}
         self.message_queues: Dict[str, List[str]] = {}     # per-agent message queues
 
         # ── Global state ─────────────────────────────────────────────────────
@@ -374,9 +374,9 @@ class AgentPool:
         with self._logger._lock:
             log_inst = self._logger._loggers.pop(instance_name, None)
 
-        # Fix #3: Clean up stale sub_agent_state entries
-        if hasattr(self, 'sub_agent_state'):
-            self.sub_agent_state.pop(instance_name, None)
+        # Fix #3: Clean up stale instance_state entries
+        if hasattr(self, 'instance_state'):
+            self.instance_state.pop(instance_name, None)
 
         # Fix #1: Close the cached file handle for the logger if it exists
         if log_inst and hasattr(log_inst, 'close'):
@@ -428,7 +428,7 @@ class AgentPool:
     def dismiss_instance(self, instance_name: str):
         """Remove an instance from the pool. If active, terminate it; otherwise clean up.
 
-        This is the UI-initiated termination path (WebSocket terminate_sub_agent message).
+        This is the UI-initiated termination path (WebSocket terminate_agent_instance message).
         Mirrors old AgentPool.dismiss_instance() semantics.
         """
         if self.is_active(instance_name):
@@ -453,7 +453,7 @@ class AgentPool:
         """Full reset of agent state (halted, active stack, tool args, terminated).
 
         Clears all per-instance state including halted instances, compression halts,
-        terminated instances, active stack, last_tool_args, and sub_agent_state.
+        terminated instances, active stack, last_tool_args, and instance_state.
 
         IMPORTANT: Does NOT delete AgentInstances — only clears their conversations.
         The old reset() destroyed all instances via _instance_conversations.clear(),
@@ -464,7 +464,7 @@ class AgentPool:
         self.terminated_instances.clear()
         self.active_stack_clear()
         self.last_tool_args.clear()
-        self.sub_agent_state.clear()
+        self.instance_state.clear()
         # Fix #3: increment version since conversation state changed
         self._instances_version += 1
         # Clear conversations of all instances without deleting the instances
@@ -752,7 +752,7 @@ class AgentPool:
 
     def load_agent(self, name: str):
         """Load a single agent template by name (if not already loaded)."""
-        from agent_cascade.agent_factory import load_sub_agent_with_tools
+        from agent_cascade.agent_factory import load_agent_template
         from agent_cascade.log import logger
 
         if name in self.templates:
@@ -761,7 +761,7 @@ class AgentPool:
         llm_cfg = (getattr(self.api_router, 'default_llm_cfg', {})
                    if self.api_router else {})
         try:
-            template = load_sub_agent_with_tools(self, name, llm_cfg)
+            template = load_agent_template(self, name, llm_cfg)
             self.templates[name] = template
             logger.info("[OK] Loaded agent on demand: %s", name)
             return template
@@ -1031,9 +1031,9 @@ class AgentPool:
         """Load all agent templates from the agents directory.
 
         Mirrors the old AgentPool._discover_agents() — scans for *_soul.md files
-        and loads each one via load_sub_agent_with_tools().
+        and loads each one via load_agent_template().
         """
-        from agent_cascade.agent_factory import load_sub_agent_with_tools
+        from agent_cascade.agent_factory import load_agent_template
         from agent_cascade.log import logger
 
         agents_path = Path(agents_dir)
@@ -1047,7 +1047,7 @@ class AgentPool:
                 # Need llm_cfg from api_router or fall back to empty dict
                 llm_cfg = (getattr(self.api_router, 'default_llm_cfg', {})
                            if self.api_router else {})
-                template = load_sub_agent_with_tools(self, agent_name, llm_cfg)
+                template = load_agent_template(self, agent_name, llm_cfg)
                 self.templates[agent_name] = template
                 logger.info("[OK] Loaded agent: %s", agent_name)
             except Exception as e:
@@ -1130,14 +1130,14 @@ class ParallelAgentManager:
         def task_wrapper():
             try:
                 from agent_cascade.execution_engine import ExecutionEngine
-                from agent_cascade.compression.helpers import extract_sub_agent_feedback
+                from agent_cascade.compression.helpers import extract_instance_output
 
                 engine = ExecutionEngine(self.pool)
                 # Use shared helper for agent creation and execution
                 inst, conv = engine._create_and_run_agent(agent_class, instance_name, args, caller)
 
                 # Notify caller via async message queue
-                result = extract_sub_agent_feedback(conv, instance_name)
+                result = extract_instance_output(conv, instance_name)
                 completion_msg = f"[Parallel Agent '{instance_name}' Finished]:\n{result}"
                 self.pool.send_message(instance_name, caller, completion_msg)
 

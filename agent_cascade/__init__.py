@@ -20,7 +20,7 @@ from .telemetry import TelemetryCollector
 from .soul_loader import create_agent_from_soul
 from .operation_manager import OperationManager, OperationType, PendingApproval
 from .operation_manager import SECURITY_ADVISOR_TIMEOUT_SECONDS, SECURITY_ADVISOR_WARNING_SECONDS
-from .agent_factory import load_orchestrator_agent, load_sub_agent_with_tools
+from .agent_factory import load_orchestrator_agent, load_agent_template
 
 __all__ = [
     'Agent',
@@ -35,5 +35,5 @@ __all__ = [
     'SECURITY_ADVISOR_TIMEOUT_SECONDS',
     'SECURITY_ADVISOR_WARNING_SECONDS',
     'load_orchestrator_agent',
-    'load_sub_agent_with_tools',
+    'load_agent_template',
 ]
