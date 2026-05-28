@@ -233,7 +233,19 @@ class AgentPool:
             operation_manager: OperationManager for blocking approvals (injected, not owned).
         """
         # ── Injected dependencies (not owned by pool) ────────────────────────
-        self.api_router = api_router
+        # If api_router is not injected, create one (matches main branch behavior).
+        # This ensures agents loaded during _discover_agents() get their correct endpoints.
+        if api_router is not None:
+            self.api_router = api_router
+        else:
+            from agent_cascade.api_router import APIRouter
+            from agent_cascade.settings import DEFAULT_WORKSPACE
+            resolved_workspace = Path(workspace_dir) if workspace_dir else Path(DEFAULT_WORKSPACE)
+            config_dir = str(resolved_workspace / 'config')
+            self.api_router = APIRouter(
+                default_llm_cfg=llm_cfg,
+                config_dir=config_dir
+            )
         self.telemetry = telemetry
         self.operation_manager = operation_manager
 

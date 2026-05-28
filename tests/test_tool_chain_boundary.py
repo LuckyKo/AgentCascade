@@ -49,14 +49,16 @@ class TestToolChainBoundaryProtection:
     def test_adjustment_when_cut_is_on_function_result(self):
         """If the boundary falls on a FUNCTION result, walk back to include its tool call."""
         msgs = [
-            _make_msg(ASSISTANT, "thinking", function_call="shell_cmd"),  # tool call
-            _make_msg(FUNCTION, "tool output"),  # discard=2 lands here -> adjust to 3
-            _make_msg(USER, "next prompt"),
+            _make_msg(USER, "prompt"),
+            _make_msg(ASSISTANT, "thinking", function_call="shell_cmd"),  # tool call at index 1
+            _make_msg(FUNCTION, "tool output"),  # discard=2 lands here -> adjust
             _make_msg(ASSISTANT, "response"),
         ]
         # fraction=0.5 -> int(4*0.5)=2, not force -> min(2, 4-2)=2
-        # But msgs[2] is USER, not FUNCTION... let me restructure
-        pass
+        # msgs[2] is FUNCTION -> walk back to index 1 (tool call)
+        # extended=3 > tail_limit=2 -> can't extend -> reduce to i=1
+        discard = compute_discard_count(msgs, 0.5, False)
+        assert discard == 1
 
     def test_adjustment_with_function_at_boundary(self):
         """Boundary falls on FUNCTION result — should include paired tool call."""
@@ -68,8 +70,26 @@ class TestToolChainBoundaryProtection:
         ]
         # fraction=0.5 -> int(4*0.5)=2, not force -> min(2, 4-2)=2
         # msgs[2] = FUNCTION -> walk back to index 1 (ASSISTANT with function_call)
-        # discard becomes 3 (include both the tool call and result)
+        # extended=3 > tail_limit=2 -> can't extend -> reduce to i=1
         discard = compute_discard_count(msgs, 0.5, False)
+        assert discard == 1
+
+    def test_adjustment_extends_when_tail_guard_allows(self):
+        """When tail guard allows, extend discard to include the FUNCTION result."""
+        msgs = [
+            _make_msg(USER, "hello"),
+            _make_msg(ASSISTANT, "thinking", function_call="read_file"),  # tool call at index 1
+            _make_msg(FUNCTION, "file content"),  # boundary at index 2
+            _make_msg(ASSISTANT, "analysis"),     # index 3
+            _make_msg(USER, "next"),              # index 4
+            _make_msg(ASSISTANT, "response"),     # index 5
+        ]
+        # fraction=0.5 -> int(6*0.5)=3, tail guard min(3, 4)=3
+        # msgs[3] = ASSISTANT (no function_call) — not FUNCTION, no adjustment
+        # Need boundary at index 2 (FUNCTION). Use fraction=0.375:
+        # int(6*0.375) = int(2.25) = 2, tail guard min(2, 4)=2
+        # msgs[2] = FUNCTION -> walk back to index 1 -> extended=3, tail_limit=4 -> ok!
+        discard = compute_discard_count(msgs, 0.375, False)
         assert discard == 3
 
     def test_adjustment_skips_plain_assistant_messages(self):
@@ -95,10 +115,10 @@ class TestToolChainBoundaryProtection:
         ]
         # fraction=0.5 -> int(4*0.5)=2, not force -> min(2, 4-2)=2
         # msgs[2] = FUNCTION -> walk back: index 1 is FUNCTION (keep going)
-        # index 0 is ASSISTANT with function_call -> include both
-        # discard becomes 3
+        # index 0 is ASSISTANT with function_call -> i=0
+        # extended=3 > tail_limit=2 -> can't extend -> reduce to i=0
         discard = compute_discard_count(msgs, 0.5, False)
-        assert discard == 3
+        assert discard == 0
 
     def test_no_adjustment_at_end_of_active_set(self):
         """If discard equals len(active_set), there's no message at the boundary."""
@@ -120,7 +140,8 @@ class TestToolChainBoundaryProtection:
             {"role": "user", "content": "next"},
         ]
         discard = compute_discard_count(msgs, 0.5, False)
-        assert discard == 3
+        # raw=2, tail_limit=2, extended=3 > 2 -> can't extend -> reduce to i=1
+        assert discard == 1
 
     def test_force_mode_adjustment(self):
         """Force mode also respects tool chain boundaries."""
@@ -135,22 +156,15 @@ class TestToolChainBoundaryProtection:
         discard = compute_discard_count(msgs, 0.3, True)
         assert discard == 2
 
-    def test_adjustment_does_not_exceed_tail_guard(self):
-        """Adjustment respects the tail guard (keep at least 2 messages)."""
+    def test_adjustment_respects_tail_guard(self):
+        """When tail guard prevents extension, reduce discard to exclude FUNCTION result."""
         msgs = [
             _make_msg(ASSISTANT, "thinking", function_call="read_file"),
             _make_msg(FUNCTION, "result"),  # boundary would be here
             _make_msg(ASSISTANT, "done"),  # only 1 message left if we include this
         ]
-        # fraction=0.6 -> int(3*0.6)=2, not force -> min(2, 3-2)=1
-        # msgs[1] = FUNCTION -> walk back to index 0 (tool call)
-        # discard would become 2, but tail guard says max is 1
-        # Actually the boundary check happens AFTER the tail guard clamps...
-        # Let me trace: discard=1 after clamp. msgs[1]=FUNCTION. Walk back to 0.
-        # discard becomes 2. But that leaves only 1 message in tail (violates guard).
-        # The current code doesn't re-apply the tail guard after adjustment.
-        # This is a potential issue — but for now, test what actually happens.
+        # fraction=0.6: raw=int(3*0.6)=2, clamp=min(2,1)=1
+        # msgs[1]=FUNCTION -> walk back to 0 (tool call)
+        # extended=2 > tail_limit=1 -> can't extend -> reduce to i=0
         discard = compute_discard_count(msgs, 0.6, False)
-        # With fraction=0.6: raw=int(3*0.6)=2, clamp=min(2,1)=1
-        # msgs[1]=FUNCTION -> walk back to 0 -> discard=2
-        assert discard == 2
+        assert discard == 0

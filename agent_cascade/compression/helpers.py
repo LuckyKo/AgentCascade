@@ -53,11 +53,17 @@ def compute_discard_count(active_set, fraction, force):
                     prev_msg.get('function_call') if isinstance(prev_msg, dict)
                     else getattr(prev_msg, 'function_call', None)
                 ):
-                    # Found the tool call at index i — include both it AND the
-                    # FUNCTION result at index discard in the discard set.
-                    # discard was already past index i (i < discard), so we need
-                    # to extend discard to include the FUNCTION at position discard.
-                    discard = discard + 1
+                    # Found the tool call at index i. We have two options:
+                    # 1. Extend discard to include both (discard + 1), or
+                    # 2. Reduce discard to exclude the FUNCTION result (i).
+                    # Prefer extending, but only if it doesn't violate the tail guard.
+                    extended = discard + 1
+                    tail_limit = len(active_set) - 2 if not force else len(active_set)
+                    if extended <= tail_limit:
+                        discard = extended
+                    else:
+                        # Can't extend — reduce discard to exclude the FUNCTION result
+                        discard = i
                     break
                 elif prev_role != FUNCTION:
                     # Not a tool chain (e.g., plain assistant text) — stop walking

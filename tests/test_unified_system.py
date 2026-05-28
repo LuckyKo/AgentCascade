@@ -497,25 +497,25 @@ class TestCLIMode:
             'api_key': 'EMPTY',
         }
 
-        # No api_router passed — this is the CLI/testing path that was broken
+        # No api_router passed — pool now auto-creates one (matches main branch behavior)
         pool = AgentPool(llm_cfg, agents_dir=str(PROJECT_ROOT / 'agents'))
-        assert pool.api_router is None
+        assert pool.api_router is not None  # APIRouter is auto-created
 
         orch = load_orchestrator_agent(pool, pool.llm_cfg)
         assert orch is not None
         assert 'call_agent' in orch.function_map
 
     def test_llm_cfg_none_raises_value_error(self):
-        """Passing llm_cfg=None should give a clear error, not crash silently."""
+        """Passing llm_cfg=None should cause agent loading to fail with a clear error."""
         from agent_cascade.agent_pool import AgentPool
-        from agent_cascade.agent_factory import load_orchestrator_agent
+        from agent_cascade.agent_factory import load_agent_template
 
-        # Pool with None LLM config
+        # Pool with None LLM config — APIRouter is auto-created but has no default config
         pool = AgentPool(llm_cfg=None, agents_dir=str(PROJECT_ROOT / 'agents'))
-
-        # Loading an agent should raise ValueError with a clear message
+        
+        # Loading a NEW agent (not pre-loaded by _discover_agents) should raise ValueError
         try:
-            load_orchestrator_agent(pool, llm_cfg=None)
+            load_agent_template(pool, 'nonexistent_agent', llm_cfg=None)
             assert False, "Should have raised ValueError"
         except ValueError as e:
             msg = str(e).lower()
