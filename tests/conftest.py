@@ -82,6 +82,6 @@ def env_patch(monkeypatch):
 
 @pytest.fixture
 def clear_feature_env_vars(monkeypatch):
-    """Ensure all three feature-flag env vars are unset before the test."""
-    for var in ("AC_USE_UNIFIED_ARCHITECTURE", "AC_USE_UNIFIED_STATE", "AC_USE_UNIFIED_LOOP"):
+    """Ensure all feature-flag env vars are unset before the test."""
+    for var in ("AC_USE_UNIFIED_STATE", "AC_USE_UNIFIED_LOOP"):
         monkeypatch.delenv(var, raising=False)

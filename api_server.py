@@ -55,9 +55,6 @@ from agent_cascade.llm.base import _truncate_input_messages_roughly
 # Timeout constants for security advisor checks
 from operation_manager import SECURITY_ADVISOR_TIMEOUT_SECONDS, SECURITY_ADVISOR_WARNING_SECONDS
 
-# Unified architecture feature flags (module-level to avoid repeated local imports)
-from config.unified import USE_UNIFIED_STATE, USE_UNIFIED_ARCHITECTURE
-
 from agent_cascade.utils.thinking_block import (
     _THINK_BLOCK_RE, _THINK_BLOCK_UNCLOSED_RE, _THINK_BLOCK_BRACKET_RE,
     _THINK_SEARCH_RE, _TOOL_TRUNCATED_RE, _CONTEXT_SUMMARY_RE,
@@ -502,7 +499,7 @@ def create_app(agents, agent_pool, config=None):
             logger.error(f"Failed to load session history: {e}")
         return False
 
-    def get_session_history(session, instance_name='root', use_unified=None):
+    def get_session_history(session, instance_name='root'):
         """Read session history from the pool (unified single source of truth).
         
         Phase 6: Always reads from agent_pool. Legacy fallback removed.
@@ -510,42 +507,28 @@ def create_app(agents, agent_pool, config=None):
         Args:
             session: Flask session dict
             instance_name: Agent instance name ('root' for main chat, or agent name for sub-agents)
-            use_unified: Override the global flag for this call. None = use global flag.
         
         Returns:
             list of message objects
         """
-        # Priority check: explicit argument > global flag > default (False)
-        effective_unified = use_unified if use_unified is not None else USE_UNIFIED_STATE
-        
-        if effective_unified:
-            # Read from unified store — always read from pool.instances for live data.
-            # sub_agent_state is a legacy shim that can go stale; instances[name].conversation
-            # is the single source of truth during execution (Fix #9).
-            if instance_name == 'root':
-                inst = agent_pool.get_instance(session['session_name']) if agent_pool else None
-                if inst is not None:
-                    with inst._compression_lock:
-                        return list(inst.conversation)
-                return []
-            else:
-                # Sub-agent history from unified store (sub_agent_state is updated during streaming)
-                state = agent_pool.sub_agent_state.get(instance_name, {}) if agent_pool else {}
-                return state.get('messages', [])
+        # Read from unified store — always read from pool.instances for live data.
+        # sub_agent_state is a legacy shim that can go stale; instances[name].conversation
+        # is the single source of truth during execution (Fix #9).
+        if instance_name == 'root':
+            inst = agent_pool.get_instance(session['session_name']) if agent_pool else None
+            if inst is not None:
+                with inst._compression_lock:
+                    return list(inst.conversation)
+            return []
         else:
-            # Legacy read path — Phase 6: still reads from pool, not session dict
-            if instance_name == 'root':
-                return _get_main_history(agent_pool, session['session_name'])
-            else:
-                # Sub-agent history from legacy store (instance_conversations)
-                return agent_pool.instance_conversations.get(instance_name, []) if agent_pool else []
+            # Sub-agent history from unified store (sub_agent_state is updated during streaming)
+            state = agent_pool.sub_agent_state.get(instance_name, {}) if agent_pool else {}
+            return state.get('messages', [])
 
     def get_agent_state(instance_name):
         """Get state for any agent instance, including root.
         
-        Replaces the dual-track where root used session['history'] and sub-agents
-        used agent_pool.get_sub_agent_state(). In unified mode, both come from
-        agent_pool.sub_agent_state.
+        All agents including root come from agent_pool.sub_agent_state.
         
         Args:
             instance_name: Agent instance name ('root' for main chat, or agent name)
@@ -553,23 +536,10 @@ def create_app(agents, agent_pool, config=None):
         Returns:
             dict with 'messages', 'active', etc. or None if not found
         """
-        if USE_UNIFIED_STATE:
-            # Unified path: all agents including root in sub_agent_state
-            if not agent_pool:
-                return None
-            state = agent_pool.sub_agent_state.get(instance_name)
-            return state.copy() if state else None
-        else:
-            # Legacy path: root reads from pool (Phase 6)
-            if instance_name == 'root':
-                msgs = _get_main_history(agent_pool, session['session_name'])
-                return {
-                    'messages': msgs,
-                    'active': True,
-                    'agent_name': 'Maine (OrchestratorAgent)',
-                }
-            else:
-                return agent_pool.sub_agent_state.get(instance_name)
+        if not agent_pool:
+            return None
+        state = agent_pool.sub_agent_state.get(instance_name)
+        return state.copy() if state else None
 
     # ── Shared session state ──────────────────────────────────────────────
     default_session_name = config.get('session_name', 'Maine')

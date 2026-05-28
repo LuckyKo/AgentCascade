@@ -4,12 +4,16 @@ These tests verify that resolve_prev_arg_placeholders() from tool_utils is calle
 in both the streaming (sub-agent) and non-streaming paths of OrchestratorAgent._run,
 and that lock protection around last_tool_args reads/writes works correctly.
 
+After Phase 8 cleanup, USE_UNIFIED_LOOP is permanently True — resolution is always
+active in the streaming path. Tests no longer mock the flag.
+
 We mock the LLM and test the resolution logic in isolation from actual agent runs.
 """
 
 import copy
+import json
 import threading
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -46,78 +50,66 @@ def seeded_pool(mock_agent_pool):
 
 
 # ===========================================================================
-# Streaming path: __USE_PREV_ARG__ resolution gated by USE_UNIFIED_LOOP
+# Streaming path: __USE_PREV_ARG__ resolution (always active post-Phase 8)
 # ===========================================================================
 
 class TestStreamingPathResolution:
-    """Test that the streaming (sub-agent) path resolves placeholders when USE_UNIFIED_LOOP=True."""
+    """Test that the streaming (sub-agent) path resolves placeholders.
+    
+    After Phase 8, USE_UNIFIED_LOOP is permanently True — no flag mocking needed.
+    Resolution is unconditional in the streaming path.
+    """
 
-    def test_unified_loop_calls_resolver(self, seeded_pool):
-        """When USE_UNIFIED_LOOP is True, resolve_prev_arg_placeholders is called in the streaming path."""
-        with patch('agent_orchestrator.USE_UNIFIED_LOOP', True):
-            from agent_cascade.tool_utils import resolve_prev_arg_placeholders
+    def test_streaming_path_calls_resolver(self, seeded_pool):
+        """resolve_prev_arg_placeholders resolves placeholders in the streaming path."""
+        from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
-            tool_args_str = '{"instance_name": "__USE_PREV_ARG__"}'
-            parsed_args = {
-                "instance_name": "__USE_PREV_ARG__",
-            }
+        parsed_args = {
+            "instance_name": "__USE_PREV_ARG__",
+        }
 
-            resolved, err = resolve_prev_arg_placeholders(
-                parsed_args, "Maine", "call_agent", seeded_pool,
-                lock=seeded_pool._state_lock)
-            assert err is None
-            assert resolved["instance_name"] == "worker1"
-
-    def test_unified_loop_not_set_skips_resolution(self, seeded_pool):
-        """When USE_UNIFIED_LOOP is False, the streaming path does NOT resolve placeholders."""
-        with patch('agent_orchestrator.USE_UNIFIED_LOOP', False):
-            # The streaming path code at line ~1399 only calls the resolver when USE_UNIFIED_LOOP=True
-            # So parsed_args with __USE_PREV_ARG__ would remain unresolved
-            tool_args = {"instance_name": "__USE_PREV_ARG__"}
-            # Simulate the condition check: if not USE_UNIFIED_LOOP, prev_arg_error stays None
-            # and parsed_args is passed through unchanged
-            assert tool_args["instance_name"] == "__USE_PREV_ARG__"
+        resolved, err = resolve_prev_arg_placeholders(
+            parsed_args, "Maine", "call_agent", seeded_pool,
+            lock=seeded_pool._state_lock)
+        assert err is None
+        assert resolved["instance_name"] == "worker1"
 
     def test_resolver_error_prevents_sub_agent_call(self, mock_agent_pool):
         """If resolution fails in the streaming path, the error becomes the tool result."""
-        with patch('agent_orchestrator.USE_UNIFIED_LOOP', True):
-            from agent_cascade.tool_utils import resolve_prev_arg_placeholders
+        from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
-            # Empty cache — no previous calls
-            parsed_args = {"instance_name": "__USE_PREV_ARG__"}
-            resolved, err = resolve_prev_arg_placeholders(
-                parsed_args, "Maine", "call_agent", mock_agent_pool,
-                lock=mock_agent_pool._state_lock)
-            assert err is not None
-            assert "no previous call" in err.lower()
+        # Empty cache — no previous calls
+        parsed_args = {"instance_name": "__USE_PREV_ARG__"}
+        resolved, err = resolve_prev_arg_placeholders(
+            parsed_args, "Maine", "call_agent", mock_agent_pool,
+            lock=mock_agent_pool._state_lock)
+        assert err is not None
+        assert "no previous call" in err.lower()
 
     def test_string_tool_args_parsed_before_resolution(self, seeded_pool):
         """String tool args are JSON-parsed before resolution."""
-        with patch('agent_orchestrator.USE_UNIFIED_LOOP', True):
-            from agent_cascade.tool_utils import resolve_prev_arg_placeholders
+        from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
-            # Simulate: tool_args is a string, parsed to dict, then resolved
-            tool_args_str = '{"task": "__USE_PREV_ARG__"}'
-            import json
-            parsed_args = json.loads(tool_args_str)
-            resolved, err = resolve_prev_arg_placeholders(
-                parsed_args, "Maine", "call_agent", seeded_pool,
-                lock=seeded_pool._state_lock)
-            assert err is None
-            assert resolved["task"] == "Write a script"
+        # Simulate: tool_args is a string, parsed to dict, then resolved
+        tool_args_str = '{"task": "__USE_PREV_ARG__"}'
+        parsed_args = json.loads(tool_args_str)
+        resolved, err = resolve_prev_arg_placeholders(
+            parsed_args, "Maine", "call_agent", seeded_pool,
+            lock=seeded_pool._state_lock)
+        assert err is None
+        assert resolved["task"] == "Write a script"
 
     def test_global_fallback_in_streaming_path(self, seeded_pool):
         """__USE_PREV_ARG__ falls back to __GLOBAL__ in the streaming path."""
-        with patch('agent_orchestrator.USE_UNIFIED_LOOP', True):
-            from agent_cascade.tool_utils import resolve_prev_arg_placeholders
+        from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
-            # "common_arg" is not in call_agent's specific args, but is in __GLOBAL__
-            parsed_args = {"common_arg": "__USE_PREV_ARG__"}
-            resolved, err = resolve_prev_arg_placeholders(
-                parsed_args, "Maine", "call_agent", seeded_pool,
-                lock=seeded_pool._state_lock)
-            assert err is None
-            assert resolved["common_arg"] == "shared_value"
+        # "common_arg" is not in call_agent's specific args, but is in __GLOBAL__
+        parsed_args = {"common_arg": "__USE_PREV_ARG__"}
+        resolved, err = resolve_prev_arg_placeholders(
+            parsed_args, "Maine", "call_agent", seeded_pool,
+            lock=seeded_pool._state_lock)
+        assert err is None
+        assert resolved["common_arg"] == "shared_value"
 
 
 # ===========================================================================
@@ -147,7 +139,6 @@ class TestNonStreamingPathResolution:
         from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
         # Simulate: JSON string → dict → resolution
-        import json
         tool_args_str = '{"file_path": "__USE_PREV_ARG__"}'
         parsed = json.loads(tool_args_str)
         seeded_pool.last_tool_args["Maine"]["write_file"] = {

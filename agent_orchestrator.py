@@ -53,8 +53,6 @@ from agent_cascade.compression import compress_context, rebuild_working_set
 
 from agent_pool import AgentPool
 
-from config.unified import USE_UNIFIED_LOOP
-
 def _safe_get_role(msg):
     """Safely get the role from a message, handling both dict and Message objects."""
     return msg.get(ROLE) if isinstance(msg, dict) else getattr(msg, 'role', None)
@@ -1384,10 +1382,8 @@ class OrchestratorAgent(Assistant):
                 try:
                     if tool_name in self.STREAMING_TOOLS:
                         # ── Sub-agent call ──
-                        # NOTE: This branch replaces the inline __USE_PREV_ARG__ resolution
-                        # that exists in the else (non-streaming) path below. The shared
-                        # resolver is called here when USE_UNIFIED_LOOP=True, preventing
-                        # double-resolution if both paths were active simultaneously.
+                        # NOTE: This branch replaces the inline __USE_PREV_ARG__ resolution.
+                        # The shared resolver is called unconditionally (always active post-Phase 8).
                         parsed_args = tool_args
                         if isinstance(tool_args, str):
                             try:
@@ -1396,7 +1392,7 @@ class OrchestratorAgent(Assistant):
                                 parsed_args = {}
 
                         # ── Resolve __USE_PREV_ARG__ placeholders (Phase 3 unification) ──
-                        if USE_UNIFIED_LOOP and isinstance(parsed_args, dict):
+                        if isinstance(parsed_args, dict):
                             from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
                             instance_scope = self.session_name if hasattr(self, 'session_name') else 'root'
