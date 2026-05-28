@@ -18,9 +18,9 @@ import pytest
 def agent_pool():
     """Create an AgentPool with mocked dependencies so it can be instantiated."""
     # OperationManager is imported inside __init__, TelemetryCollector and APIRouter at module level
-    with patch('operation_manager.OperationManager') as mock_op_mgr, \
-         patch('telemetry.TelemetryCollector') as mock_telem, \
-         patch('api_router.APIRouter') as mock_router:
+    with patch('agent_cascade.operation_manager.OperationManager') as mock_op_mgr, \
+         patch('agent_cascade.telemetry.TelemetryCollector') as mock_telem, \
+         patch('agent_cascade.api_router.APIRouter') as mock_router:
 
         # Set up OperationManager mock
         op_mgr = MagicMock()
@@ -35,16 +35,19 @@ def agent_pool():
         router.get_effective_concurrency.return_value = 3
         mock_router.return_value = router
 
-        from agent_pool import AgentPool
+        from agent_cascade.agent_pool import AgentPool
         pool = AgentPool(
             llm_cfg={'max_parallel_agents': 2},
             agents_dir='/tmp/fake_agents',
             workspace_dir='/tmp/test_workspace',
-            idle_timeout_seconds=60.0,
-            idle_check_interval=30.0,
         )
-        # Stop the idle checker thread so tests finish cleanly
-        pool._idle_checker_stop_event.set()
+        # Configure pool settings (idle timeout, etc.) — applied after construction
+        if hasattr(pool, 'settings'):  # TODO: Remove hasattr guard once old pool files are fully removed
+            pool.settings.idle_timeout_seconds = 60.0
+            pool.settings.idle_check_interval = 30.0
+        # Start then immediately stop idle checker (exercises startup path for regression testing)
+        pool.start()
+        pool._idle.stop()
         return pool
 
 

@@ -39,7 +39,7 @@ if not WORKSPACE_DIR:
 from bs4 import BeautifulSoup
 from agent_cascade.gui import WebUI
 from agent_cascade.tools.base import BaseTool, register_tool
-from agent_pool import AgentPool
+from agent_cascade.agent_pool import AgentPool
 from agent_cascade.agent_factory import load_orchestrator_agent
 
 # Import built-in tools from agent_cascade
@@ -155,9 +155,15 @@ if __name__ == '__main__':
     # Create agent pool (auto-loads all agents from /agents directory)
     agent_pool = AgentPool(
         llm_cfg, 'agents', workspace_dir=WORKSPACE_DIR,
-        idle_timeout_seconds=idle_timeout,
-        idle_check_interval=idle_check_interval,
     )
+
+    # Configure pool settings before starting background services (avoids race window)
+    if hasattr(agent_pool, 'settings'):  # TODO: Remove hasattr guard once old pool files are fully removed
+        agent_pool.settings.idle_timeout_seconds = idle_timeout
+        agent_pool.settings.idle_check_interval = idle_check_interval
+
+    # Start background services (idle checker thread, etc.)
+    agent_pool.start()
 
     # Add tools to all agents based on their role
     for agent_name in agent_pool.list_agents():

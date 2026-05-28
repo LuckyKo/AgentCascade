@@ -34,7 +34,7 @@ if not WORKSPACE_DIR:
 
 from bs4 import BeautifulSoup
 from agent_cascade.tools.base import BaseTool, register_tool
-from agent_pool import AgentPool
+from agent_cascade.agent_pool import AgentPool
 from agent_cascade.agent_factory import load_orchestrator_agent
 
 from agent_cascade.tools import (
@@ -142,9 +142,15 @@ def initialize_agents():
 
     agent_pool = AgentPool(
         llm_cfg, 'agents', workspace_dir=WORKSPACE_DIR,
-        idle_timeout_seconds=idle_timeout,
-        idle_check_interval=idle_check_interval,
     )
+
+    # Configure pool settings before starting background services (avoids race window)
+    if hasattr(agent_pool, 'settings'):  # TODO: Remove hasattr guard once old pool files are fully removed
+        agent_pool.settings.idle_timeout_seconds = idle_timeout
+        agent_pool.settings.idle_check_interval = idle_check_interval
+
+    # Start background services (idle checker thread, etc.)
+    agent_pool.start()
 
     # Instantiate heavy tools ONCE to share across all agents and prevent OOM
     shared_tools = {}
@@ -233,7 +239,7 @@ if __name__ == '__main__':
     threading.Thread(target=async_input_listener, daemon=True).start()
 
     # Create and launch the API server
-    from api_server import create_app
+    from agent_cascade.api_server import create_app
     import uvicorn
 
     app = create_app(all_agents, agent_pool, chatbot_config)

@@ -654,7 +654,7 @@ class TestFindLastMarker:
 
     def test_no_marker_returns_minus_one(self):
         """History without any marker returns -1."""
-        from agent_pool import AgentPool
+        from agent_cascade.agent_pool import AgentPool
 
         history = [
             _make_msg(SYSTEM, "System"),
@@ -665,7 +665,7 @@ class TestFindLastMarker:
 
     def test_finds_single_marker(self):
         """Single marker in history is found."""
-        from agent_pool import AgentPool
+        from agent_cascade.agent_pool import AgentPool
 
         marker_content = f"{COMPRESSION_MARKER} (50%) ---\nSummary: old stuff"
         history = [
@@ -681,7 +681,7 @@ class TestFindLastMarker:
 
     def test_finds_latest_of_multiple_markers(self):
         """Multiple markers → returns the latest (last) one."""
-        from agent_pool import AgentPool
+        from agent_cascade.agent_pool import AgentPool
 
         m1 = f"{COMPRESSION_MARKER} (50%) ---\nSummary: first"
         m2 = f"{COMPRESSION_MARKER} (30%) ---\nSummary: second"
@@ -698,7 +698,7 @@ class TestFindLastMarker:
 
     def test_ignores_non_user_markers(self):
         """Marker in assistant role is ignored (must be USER role)."""
-        from agent_pool import AgentPool
+        from agent_cascade.agent_pool import AgentPool
 
         marker_content = f"{COMPRESSION_MARKER} (50%) ---\nSummary: fake"
         history = [
@@ -710,7 +710,7 @@ class TestFindLastMarker:
 
     def test_ignores_partial_match(self):
         """Content that merely contains the marker string but doesn't start with it is ignored."""
-        from agent_pool import AgentPool
+        from agent_cascade.agent_pool import AgentPool
 
         partial_content = f"Before: {COMPRESSION_MARKER} (50%) ---\nSummary: fake"
         history = [
@@ -721,13 +721,13 @@ class TestFindLastMarker:
 
     def test_empty_history(self):
         """Empty history returns -1."""
-        from agent_pool import AgentPool
+        from agent_cascade.agent_pool import AgentPool
 
         assert AgentPool.find_last_marker([]) == -1
 
     def test_dict_messages(self):
         """find_last_marker works with dict-style messages (not just Message objects)."""
-        from agent_pool import AgentPool
+        from agent_cascade.agent_pool import AgentPool
 
         marker_content = f"{COMPRESSION_MARKER} (50%) ---\nSummary: old"
         history = [
@@ -740,7 +740,7 @@ class TestFindLastMarker:
 
     def test_mock_pool_marker_consistency(self):
         """MockAgentPool.find_last_marker gives same results as AgentPool."""
-        from agent_pool import AgentPool
+        from agent_cascade.agent_pool import AgentPool
 
         marker_content = f"{COMPRESSION_MARKER} (50%) ---\nSummary: old"
         history = [
