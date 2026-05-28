@@ -1,0 +1,38 @@
+# ============================================================
+# AgentCascade Unified - Core Dependencies
+# Generated from setup.py + runtime discovery during import migration
+# ============================================================
+
+# ── Core LLM & Agent Framework ──────────────────────────────
+dashscope>=1.11.0          # Alibaba Cloud LLM SDK
+openai                     # OpenAI-compatible API client
+pydantic>=2.3.0            # Data validation for agent configs
+eval_type_backport         # Type evaluation backport
+
+# ── Tokenization & Text Processing ──────────────────────────
+tiktoken                   # Token counting for context management
+regex                      # Advanced regex (tiktoken dependency)
+
+# ── JSON Handling ───────────────────────────────────────────
+json5                      # Lenient JSON parsing
+jsonlines                  # Streaming JSONL format
+jsonschema                 # JSON Schema validation
+
+# ── HTTP & Networking ───────────────────────────────────────
+requests                   # HTTP client
+aiohttp                    # Async HTTP client
+
+# ── Web Server (API) ────────────────────────────────────────
+fastapi                    # ASGI web framework for API server
+uvicorn                    # ASGI server for FastAPI
+websockets                 # WebSocket support
+
+# ── Configuration & Environment ─────────────────────────────
+python-dotenv              # .env file loading
+pyyaml                     # YAML config parsing
+
+# ── Audio Processing ────────────────────────────────────────
+soundfile                  # Audio file I/O (for voice tools)
+
+# ── Image Processing ────────────────────────────────────────
+pillow                     # Image manipulation
