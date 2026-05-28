@@ -242,6 +242,7 @@ class AgentPool:
         self.templates: Dict[str, Assistant] = {}      # agent_class → template
 
         # ── Configuration ───────────────────────────────────────────────────
+        self.llm_cfg = llm_cfg                          # LLM config (used as fallback when no api_router)
         self.settings = PoolSettings()                  # Configurable thresholds and timeouts
 
         # ── Focused managers (delegation targets) ───────────────────────────

@@ -187,10 +187,17 @@ def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None) -> Assistant:
 
     # Ensure each agent gets its own distinct LLM instance config
     # to avoid state bleed across parallel threads.
-    if hasattr(agent_pool, 'api_router'):
+    if agent_pool.api_router is not None:
         agent_llm_cfg = agent_pool.api_router.get_llm_config(agent_name)
     else:
         agent_llm_cfg = llm_cfg or agent_pool.llm_cfg
+    
+    # Validate that we have a usable LLM config before proceeding
+    if agent_llm_cfg is None:
+        raise ValueError(
+            f"No LLM configuration available for agent '{agent_name}'. "
+            "Pass llm_cfg to load_orchestrator_agent()/load_agent_template() or provide it when constructing AgentPool."
+        )
         
     # Deepcopy to prevent shared references in the LLM object tree
     agent_llm_cfg = copy.deepcopy(agent_llm_cfg)
