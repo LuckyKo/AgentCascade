@@ -2,8 +2,8 @@
 Execution Engine — Phase 1 of the AgentCascade Architecture Rewrite.
 
 Stateless execution coordinator that drives ALL agent instances through a single
-unified loop. Replaces both api_server.run_agent_thread() and
-OrchestratorAgent._stream_sub_agent_call() — eliminating the structural duality.
+unified loop. Replaces both api_server.run_agent_thread() and the old sub-agent
+execution path — eliminating the structural duality.
 
 See DESIGN_REWRITE.md §3.1 for design rationale.
 
@@ -740,7 +740,7 @@ class ExecutionEngine:
             )
 
     def _handle_call_agent(self, args: dict, messages: List[Message], instance: AgentInstance) -> str:
-        """Handle call_agent tool call — the unified path replacing _stream_sub_agent_call.
+        """Handle call_agent tool call — the unified path replacing the old sub-agent execution.
 
         Works the same for any agent calling another agent. No special paths.
 

@@ -1,9 +1,8 @@
 """Compression Agent invocation wrapper.
 
-Uses the call_agent pattern (via _stream_sub_agent_call) when an orchestrator
-reference is available, providing session tracking, WebUI visibility, and
-consistent error handling. Falls back to direct comp_agent.run() when called
-outside the orchestrator context (e.g., from API server forced compression).
+Uses direct comp_agent.run() for session tracking, WebUI visibility, and
+consistent error handling. Called both from the orchestrator context and
+from the API server forced compression path.
 """
 import logging
 import time as _time
@@ -64,21 +63,20 @@ def invoke_compression_agent(
     agent_pool,
     target_messages,
     existing_summary=None,
-    orchestrator=None,   # Optional: the orchestrator instance (for call_agent pattern)
+    orchestrator=None,   # Unused — retained for backward compatibility
 ):
     """
     Invoke the Compression Agent to generate a summary of target messages.
 
-    When an orchestrator is provided and has _stream_sub_agent_call, uses the
-    call_agent pattern for session tracking, WebUI visibility, and consistent
-    error handling. When no orchestrator is available (e.g., forced compression
-    from API server), falls back to direct agent.run().
+    Uses direct comp_agent.run() for session tracking, WebUI visibility, and
+    consistent error handling. Called both from the orchestrator context and
+    from the API server forced compression path.
 
     Args:
         agent_pool: The AgentPool instance (provides agent loading and state management).
         target_messages: List of messages to summarize.
         existing_summary: Optional previous summary text to compound onto.
-        orchestrator: Optional orchestrator instance for call_agent pattern.
+        orchestrator: Unused — retained for backward compatibility.
 
     Returns:
         The raw summary string (with thinking blocks stripped).
@@ -124,100 +122,46 @@ def invoke_compression_agent(
 
     summary = ""
     try:
-        if orchestrator is not None and hasattr(orchestrator, '_stream_sub_agent_call'):
-            # ── call_agent pattern via _stream_sub_agent_call ──
-            # Build tool_args matching what call_agent expects
-            tool_args = {
-                'instance_name': comp_state_key,
-                'agent_class': 'compression_agent',
-                'task': summary_prompt,
-                'context': None,
-            }
-            # Use the orchestrator's _stream_sub_agent_call for full lifecycle management.
-            # Pass an empty current_response and manager_history since compression is a
-            # self-contained LLM call without tool use or async message injection needs.
-            current_response = []
-            manager_history = comp_history
+        # ── Direct comp_agent.run() path (always) ──
+        logger.info(
+            "Compression agent invoked via direct run()"
+        )
 
-            final_msgs = []
-            subagent_return_value = None  # Capture StopIteration.value as fallback
-            start_time = _time.monotonic()   # Monotonic clock — immune to NTP adjustments
-            max_poll_time = 300            # 5-minute timeout for large compression tasks
-            poll_count = 0
+        # Initialize agent instance state for WebUI visibility
+        agent_pool.instance_state[comp_state_key] = {
+            'active': True,
+            'agent_name': f"Compression Agent (compression_agent)",
+            'messages': list(comp_history),
+        }
+        if comp_state_key not in agent_pool.active_stack:
+            agent_pool.active_stack_append(comp_state_key)
+        agent_pool.instance_conversations[comp_state_key] = list(comp_history)
 
-            try:
-                gen = orchestrator._stream_sub_agent_call(
-                    'call_agent', tool_args, current_response, manager_history
+        final_msgs = []
+        start_time = _time.monotonic()   # Monotonic clock for timeout
+        max_poll_time = 300            # 5-minute timeout for large compression tasks
+        poll_count = 0
+
+        for partial in comp_agent.run(comp_history, agent_instance_name=comp_state_key):
+            final_msgs = partial
+            # Note: poll_count here counts run() yields (~1 per LLM turn), not token chunks
+            poll_count += 1
+
+            # Time-based check — adapts to any streaming chunk rate
+            elapsed = _time.monotonic() - start_time
+            if elapsed > max_poll_time:
+                raise RuntimeError(
+                    f"Compression agent timed out after {elapsed:.0f}s "
+                    f"({poll_count} iterations in direct run path)"
                 )
-                # Iterate the generator synchronously (same pattern as yield from).
-                # Each LLM streaming chunk produces one yield through the chain:
-                #   _original_call_llm → hooked_call_llm → _run → run() → _stream_sub_agent_call
-                # For large compression tasks (60K+ tokens of input), 1000+ chunks are common.
-                # We use a time-based timeout instead of iteration count to handle any task size.
-                while True:
-                    yielded = next(gen)
-                    poll_count += 1
 
-                    # Time-based check — adapts to any streaming chunk rate
-                    elapsed = _time.monotonic() - start_time
-                    if elapsed > max_poll_time:
-                        raise RuntimeError(
-                            f"Compression agent timed out after {elapsed:.0f}s "
-                            f"({poll_count} iterations) — further processing may have been incomplete"
-                        )
-
-                    # The generator yields intermediate state for WebUI — capture final messages
-                    if comp_state_key in agent_pool.instance_state:
-                        msgs = agent_pool.instance_state[comp_state_key].get('messages', [])
-                        if msgs:
-                            final_msgs = list(msgs)
-            except StopIteration as e:
-                # Normal termination of the generator — capture return value as fallback
-                if hasattr(e, 'value') and e.value is not None:
-                    subagent_return_value = e.value
-
-        else:
-            # ── Fallback: direct comp_agent.run() when no orchestrator or method available ──
-            logger.info(
-                "Compression agent invoked via direct run() — "
-                "no orchestrator reference for call_agent pattern"
+            # Update instance_state during streaming so WebUI reflects progress
+            agent_pool.instance_state[comp_state_key]['messages'] = (
+                list(comp_history) + (list(final_msgs) if isinstance(final_msgs, list) else [final_msgs])
             )
-
-            # Initialize agent instance state for WebUI visibility (direct path)
-            agent_pool.instance_state[comp_state_key] = {
-                'active': True,
-                'agent_name': f"Compression Agent (compression_agent)",
-                'messages': list(comp_history),
-            }
-            if comp_state_key not in agent_pool.active_stack:
-                agent_pool.active_stack_append(comp_state_key)
-            agent_pool.instance_conversations[comp_state_key] = list(comp_history)
-
-            final_msgs = []
-            start_time = _time.monotonic()   # Monotonic clock for timeout (same as call_agent path)
-            max_poll_time = 300            # 5-minute timeout for large compression tasks
-            poll_count = 0
-
-            for partial in comp_agent.run(comp_history, agent_instance_name=comp_state_key):
-                final_msgs = partial
-                # Note: poll_count here counts run() yields (~1 per LLM turn), not token chunks
-                poll_count += 1
-
-                # Time-based check — adapts to any streaming chunk rate (same as call_agent path)
-                elapsed = _time.monotonic() - start_time
-                if elapsed > max_poll_time:
-                    raise RuntimeError(
-                        f"Compression agent timed out after {elapsed:.0f}s "
-                        f"({poll_count} iterations in direct run path)"
-                    )
-
-                # Update instance_state during streaming so WebUI reflects progress
-                agent_pool.instance_state[comp_state_key]['messages'] = (
-                    list(comp_history) + (list(final_msgs) if isinstance(final_msgs, list) else [final_msgs])
-                )
-                agent_pool.instance_conversations[comp_state_key] = list(
-                    agent_pool.instance_state[comp_state_key]['messages']
-                )
+            agent_pool.instance_conversations[comp_state_key] = list(
+                agent_pool.instance_state[comp_state_key]['messages']
+            )
 
         # 2. Extract the summary from the last assistant message
         if final_msgs:
@@ -236,18 +180,6 @@ def invoke_compression_agent(
                     summary = summary[len(prefix):].strip()
                     summary = summary.lstrip(':\n \t')
                     lower_summary = summary.lower()
-
-        # Fallback: if final_msgs was empty but we got a return value from the generator,
-        # try to extract the summary from that string. This handles edge cases where the
-        # instance_state wasn't populated during streaming.
-        if not summary.strip() and subagent_return_value:
-            if isinstance(subagent_return_value, str):
-                logger.info("Using subagent return value as fallback for summary extraction")
-                rv = subagent_return_value
-                # Strip the "[instance_name's output]:\n" wrapper added by _stream_sub_agent_call
-                if ']:' in rv and '\n' in rv:
-                    rv = rv.split(']:\n', 1)[1]
-                summary = strip_thinking_blocks(rv)
 
         # Validate we got a usable summary
         if not summary.strip():

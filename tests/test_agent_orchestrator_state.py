@@ -24,25 +24,25 @@ class TestGetSessionHistoryLogic:
     use_unified=False path no longer exists.
     """
 
-    def test_unified_root_reads_from_sub_agent_state(self):
-        """In unified mode, root history comes from sub_agent_state['root']."""
-        sub_agent_state = {
+    def test_unified_root_reads_from_instance_state(self):
+        """In unified mode, root history comes from instance_state['root']."""
+        instance_state = {
             "root": {"messages": [{"role": "user", "content": "unified_hello"}]},
         }
 
-        store = sub_agent_state.get("root", {})
+        store = instance_state.get("root", {})
         msgs = store.get("messages", [])
 
         assert len(msgs) == 1
         assert msgs[0]["content"] == "unified_hello"
 
-    def test_unified_sub_agent_reads_from_sub_agent_state(self):
-        """In unified mode, sub-agent history also comes from sub_agent_state."""
-        sub_agent_state = {
+    def test_unified_sub_agent_reads_from_instance_state(self):
+        """In unified mode, sub-agent history also comes from instance_state."""
+        instance_state = {
             "worker1": {"messages": [{"role": "assistant", "content": "unified_work"}]},
         }
 
-        state = sub_agent_state.get("worker1", {})
+        state = instance_state.get("worker1", {})
         msgs = state.get("messages", [])
 
         assert len(msgs) == 1
@@ -52,7 +52,7 @@ class TestGetSessionHistoryLogic:
         """When agent_pool is None in unified mode, sub-agent reads return empty."""
         pool = None
 
-        state = pool.sub_agent_state.get("worker1", {}) if pool else {}
+        state = pool.instance_state.get("worker1", {}) if pool else {}
         msgs = state.get("messages", [])
 
         assert msgs == []
@@ -65,13 +65,13 @@ class TestGetSessionHistoryLogic:
 class TestBuildStateLogic:
     """Test the build_state logic pattern with unified mode permanently enabled."""
 
-    def test_build_state_unified_uses_sub_agent_state(self):
-        """In unified mode, root messages come from sub_agent_state."""
-        sub_agent_state = {
+    def test_build_state_unified_uses_instance_state(self):
+        """In unified mode, root messages come from instance_state."""
+        instance_state = {
             "root": {"messages": [{"role": "user", "content": "unified_msg"}]},
         }
 
-        root_state = sub_agent_state.get("root")
+        root_state = instance_state.get("root")
         msgs = root_state["messages"] if root_state else []
 
         assert len(msgs) == 1
@@ -98,13 +98,13 @@ class TestBuildStateLogic:
         assert cached["tokens"] == 5000
 
     def test_build_state_includes_sub_agents(self):
-        """build_state output includes sub_agent state."""
-        sub_agent_state = {
+        """build_state output includes instance state."""
+        instance_state = {
             "worker1": {"active": True, "agent_name": "worker1 (Coder)", "messages": []},
         }
-        # get_sub_agent_state iterates over pool.sub_agent_state
+        # Build sub-agent state from instance_state (no separate getter needed)
         result = {}
-        for name, state in sub_agent_state.items():
+        for name, state in instance_state.items():
             result[name] = {
                 "active": state.get("active", False),
                 "agent_name": name,
@@ -119,13 +119,13 @@ class TestBuildStateLogic:
 class TestGetAgentStateLogic:
     """Test the get_agent_state logic with unified mode permanently enabled."""
 
-    def test_unified_root_returns_sub_agent_state(self):
-        """In unified mode, root agent state comes from sub_agent_state."""
-        sub_agent_state = {
+    def test_unified_root_returns_instance_state(self):
+        """In unified mode, root agent state comes from instance_state."""
+        instance_state = {
             "root": {"messages": [{"role": "user", "content": "unified"}], "active": True},
         }
 
-        state = sub_agent_state.get("root")
+        state = instance_state.get("root")
         state = state.copy() if state else None
 
         assert state is not None
@@ -133,10 +133,10 @@ class TestGetAgentStateLogic:
         assert state["messages"][0]["content"] == "unified"
 
     def test_unified_missing_instance_returns_none(self):
-        """When instance is not in sub_agent_state, returns None."""
-        sub_agent_state = {}
+        """When instance is not in instance_state, returns None."""
+        instance_state = {}
 
-        state = sub_agent_state.get("nobody")
+        state = instance_state.get("nobody")
         state = state.copy() if state else None
 
         assert state is None
@@ -145,7 +145,7 @@ class TestGetAgentStateLogic:
         """When agent_pool is None in unified mode, returns None."""
         pool = None
 
-        state = pool.sub_agent_state.get("root") if pool else None
+        state = pool.instance_state.get("root") if pool else None
         state = state.copy() if state else None
 
         assert state is None

@@ -32,7 +32,7 @@ def compress_context(
     - Manual (user provides summary text): mode="manual" with summary_text
 
     Synchronous — uses generator iteration to invoke the Compression Agent
-    (matching the existing _stream_sub_agent_call pattern).
+    (matching the existing sub-agent execution pattern).
 
     Fail-safe: if compression fails at any point, pool is untouched.
 

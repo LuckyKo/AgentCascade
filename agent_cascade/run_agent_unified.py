@@ -3,7 +3,7 @@ Unified Agent Execution — Phase 4 of the AgentCascade Architecture Rewrite.
 
 Replaces the dual-path code in api_server.py where:
   - Main agent ran through run_agent_thread() → agent_runner.run() using session['history']
-  - Sub-agents ran through OrchestratorAgent._stream_sub_agent_call()
+  - Sub-agents ran through a separate execution path
 
 After Phase 4, ALL agents (including the main orchestrator) are instances in the
 pool, executed through ExecutionEngine.run(), with state read from

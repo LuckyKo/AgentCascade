@@ -2,7 +2,7 @@
 
 Issue #11: _InstanceConversationMapping keys()/items()/values() divergence
 Issue #13: _sync_instance_conversations only called once (and silent data loss)
-Issue #9: sub_agent_state not populated for main session
+Issue #9: instance_state not populated for main session
 """
 import pytest
 
@@ -154,10 +154,10 @@ class TestSyncInstanceConversations:
 
 
 class TestSubAgentStateMainSession:
-    """Test that sub_agent_state is populated for main session (Issue #9)."""
+    """Test that instance_state is populated for main session (Issue #9)."""
 
-    def test_create_main_agent_instance_populates_sub_agent_state(self):
-        """create_main_agent_instance should register root in sub_agent_state."""
+    def test_create_main_agent_instance_populates_instance_state(self):
+        """create_main_agent_instance should register root in instance_state."""
         from agent_cascade.api_integration import create_main_agent_instance
         
         # Minimal pool mock with required methods/attributes
@@ -166,7 +166,7 @@ class TestSubAgentStateMainSession:
         class MockAgentPool:
             def __init__(self):
                 self.instances = created_instances
-                self.sub_agent_state = {}
+                self.instance_state = {}
             
             def create_instance(self, instance_name, agent_class, parent_instance, max_turns, conversation):
                 from agent_cascade.agent_instance import AgentInstance
@@ -192,12 +192,12 @@ class TestSubAgentStateMainSession:
             system_message_content="You are Maine",
         )
         
-        # sub_agent_state should be populated under 'root'
-        assert 'root' in pool.sub_agent_state
-        assert pool.sub_agent_state['root']['active'] is False
-        assert 'Maine' in pool.sub_agent_state['root']['agent_name']
-        assert len(pool.sub_agent_state['root']['messages']) >= 1
+        # instance_state should be populated under 'root'
+        assert 'root' in pool.instance_state
+        assert pool.instance_state['root']['active'] is False
+        assert 'Maine' in pool.instance_state['root']['agent_name']
+        assert len(pool.instance_state['root']['messages']) >= 1
         
         # Should also be registered under actual instance name
-        assert 'Maine' in pool.sub_agent_state
-        assert pool.sub_agent_state['Maine']['active'] is False
+        assert 'Maine' in pool.instance_state
+        assert pool.instance_state['Maine']['active'] is False

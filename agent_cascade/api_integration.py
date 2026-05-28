@@ -4,7 +4,7 @@ API Server Integration — Phase 3 of the AgentCascade Architecture Rewrite.
 Thin bridge module between the API server (WebSocket/REST) and the new unified
 ExecutionEngine. Replaces the dual-path code in api_server.py where:
   - Main agent ran through run_agent_thread() → agent_runner.run() using session['history']
-  - Sub-agents ran through OrchestratorAgent._stream_sub_agent_call()
+  - Sub-agents ran through a separate execution path
 
 After Phase 3, ALL agents (including the main orchestrator) are instances in the
 pool, executed through ExecutionEngine.run(), with state read from
@@ -105,8 +105,8 @@ def run_agent_in_pool(
     """Run any agent through the unified ExecutionEngine.
 
     This is THE entry point for agent execution from the API server. It replaces
-    both run_agent_thread() → agent_runner.run() for main agents and
-    _stream_sub_agent_call() for sub-agents.
+    both run_agent_thread() → agent_runner.run() for main agents and the old
+    sub-agent execution path.
 
     The instance must already exist in the pool (created via create_main_agent_instance
     or via call_agent tool). The engine yields List[Message] on each phase transition,
