@@ -1081,6 +1081,8 @@ def create_app(agents, agent_pool, config=None):
             if inst is not None:
                 with inst._compression_lock:
                     inst.conversation.clear()
+                    # Invalidate token count cache — conversation cleared
+                    inst._last_token_count_conversation_length = -1
         
         # Phase 6: No need to clear session['history'] — pool is the source of truth
         session['generating'] = False
@@ -1613,6 +1615,8 @@ def create_app(agents, agent_pool, config=None):
                         if inst is not None:
                             with inst._compression_lock:
                                 inst.conversation.append(last_user_msg)
+                                # Invalidate token count cache — conversation length changed
+                                inst._last_token_count_conversation_length = -1
                         else:
                             # Fallback: create the instance first, then add the message
                             create_main_agent_instance(
@@ -1649,6 +1653,8 @@ def create_app(agents, agent_pool, config=None):
                         if inst is not None:
                             with inst._compression_lock:
                                 inst.conversation.clear()
+                                # Invalidate token count cache — conversation cleared
+                                inst._last_token_count_conversation_length = -1
                     
                     with session_lock:
                         # Phase 6: No need to clear session['history'] — pool is the source of truth

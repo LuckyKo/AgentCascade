@@ -1195,6 +1195,8 @@ class ExecutionEngine:
         conv = [sys_msg, task_msg]
         with inst._compression_lock:
             inst.conversation = conv
+            # Invalidate token count cache — conversation replaced
+            inst._last_token_count_conversation_length = -1
 
         # Log initial messages to agent's JSONL file (P1 continuation)
         try:

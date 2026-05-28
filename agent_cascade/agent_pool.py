@@ -534,6 +534,8 @@ class AgentPool:
         if inst:
             with inst._compression_lock:
                 inst.conversation.clear()
+                # Invalidate token count cache — conversation cleared
+                inst._last_token_count_conversation_length = -1
 
     def capture_snapshots(self) -> Dict[str, int]:
         """Capture current conversation lengths for all instances."""
@@ -556,6 +558,8 @@ class AgentPool:
                 with inst._compression_lock:
                     if len(inst.conversation) > target_len:
                         del inst.conversation[target_len:]
+                        # Invalidate token count cache — conversation length changed
+                        inst._last_token_count_conversation_length = -1
                 try:
                     log_inst = self._logger.get_logger(name, inst.agent_class)
                     log_inst.truncate_to(target_len)
@@ -689,6 +693,8 @@ class AgentPool:
         if existing:
             with existing._compression_lock:
                 existing.conversation = restored_messages
+                # Invalidate token count cache — conversation replaced
+                existing._last_token_count_conversation_length = -1
                 existing.agent_class = agent_class
         else:
             now = time.monotonic()
@@ -791,6 +797,8 @@ class AgentPool:
         if inst:
             with inst._compression_lock:
                 inst.conversation.append(message)
+                # Invalidate token count cache — conversation length changed
+                inst._last_token_count_conversation_length = -1
             self._mark_activity(instance_name)
 
     # ── Backward-compatible accessors for compression module ───────────────
@@ -993,6 +1001,8 @@ class AgentPool:
 
             new_len = max(keep_at_least, len(conv) - pop_count)
             del conv[new_len:]
+            # Invalidate token count cache — conversation length changed
+            inst._last_token_count_conversation_length = -1
 
             # Sync logger under lock to avoid stale reads
             try:

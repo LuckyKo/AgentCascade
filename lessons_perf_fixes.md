@@ -34,23 +34,32 @@ When caching file handles, always flush after writes and invalidate on error. Th
   - Forced compression success in `_force_compression`
   - `/compress` tool apply success in `_handle_compress_context`
   - `/compress` command handler in `_handle_compress_command`
-  - Conversation replacement via `_InstanceConversationMapping.__setitem__`
   - Pool reset in `AgentPool.reset()`
+  - `AgentPool.add_message()` — was missing, added (C1)
+  - `AgentPool.surgical_rollback()` — was missing, added (C2)
+  - Loop recovery hint append in `api_integration.py` — was missing, added (C3)
+  - `/api/reset` endpoint in `api_server.py` — was missing, added
+  - Retry re-append in `api_server.py` — was missing, added
+  - WebSocket reset handler in `api_server.py` — was missing, added
+  - `AgentPool.clear_conversation()` — was missing, added
+  - `AgentPool.rollback_to_snapshots()` — was missing, added
+  - `load_session_from_log()` existing instance path — was missing, added
+  - `execute_agent_turn()` user message append — was missing, added
+  - `_create_and_run_agent()` sub-agent init — was missing, added
 
 ### Key lesson
 Cache invalidation is harder than caching itself. Use a sentinel value (`-1`) rather than increment-based approaches — increments can cause false cache hits when different message lists happen to have the same length. Always pass the instance explicitly for thread safety; don't rely on shared mutable state.
 
-## Fix #3: Lighter sub_agent_state Snapshots + Stale Entry Cleanup
+## Fix #3: Stale sub_agent_state Entry Cleanup (Partial)
 
 ### Problem
 Every 5 turns, full conversation was serialized via `model_dump()` for every message. Dismissed instances left stale entries forever.
 
-### Solution
-- Replaced `'messages': [full dump of all messages]` with lightweight metadata:
-  - `message_count`: just a count (not the actual messages)
-  - `latest_message_summary`: last 500 chars of latest message content
-  - `conversation_length_tokens`: from cached token count
-- Added cleanup of `sub_agent_state[instance_name]` in `remove_instance()`
+### Solution (Implemented)
+- Added cleanup of `sub_agent_state[instance_name]` in `remove_instance()` — dismissed instances no longer leave stale state.
+
+### Deferred: Lighter Snapshots
+Replacing full conversation dumps with lightweight metadata was NOT implemented because the WebUI reads directly from `sub_agent_state['messages']`. Changing this would require updating the WebUI, which is a larger change than we want to risk in perf fix scope. Defer until a dedicated WebUI refactor.
 
 ### Key lesson
-WebUI state doesn't need full conversation dumps — metadata is enough for display. Always clean up per-instance state when instances are removed to prevent memory leaks.
+WebUI state doesn't need full conversation dumps — metadata is enough for display. But changing the data shape requires coordinated changes across consumers. Always clean up per-instance state when instances are removed to prevent memory leaks.

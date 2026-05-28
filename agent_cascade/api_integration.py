@@ -203,6 +203,8 @@ def run_agent_in_pool_with_recovery(
             )
             with instance._compression_lock:
                 instance.conversation.append(hint_msg)
+                # Invalidate token count cache — conversation length changed
+                instance._last_token_count_conversation_length = -1
 
             retry_count += 1
 
@@ -512,6 +514,8 @@ def execute_agent_turn(
     with instance._compression_lock:
         user_msg = Message(role=USER, content=user_message_content)
         instance.conversation.append(user_msg)
+        # Invalidate token count cache — conversation length changed
+        instance._last_token_count_conversation_length = -1
     pool._mark_activity(instance_name)
 
     # Apply UI config if provided (sanitize and inject into LLM config)
