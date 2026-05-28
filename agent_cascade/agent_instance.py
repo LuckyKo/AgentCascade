@@ -51,7 +51,7 @@ class AgentInstance:
     # ── Compression State ─────────────────────────────────────────────
     compression_summary: Optional[str]   # Current cumulative summary (if any)
     latest_marker_index: int             # Index in conversation where latest summary marker was inserted
-    _compression_lock: threading.Lock = field(default_factory=threading.Lock)  # Per-agent lock for compression safety
+    _compression_lock: threading.RLock = field(default_factory=threading.RLock)  # RLock: recovery paths may re-acquire via instance_conversations.__setitem__
 
 
 @dataclass

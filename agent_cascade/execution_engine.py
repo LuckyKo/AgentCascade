@@ -12,6 +12,7 @@ and orchestrates phases. Each phase method (~20-60 lines) is independently testa
 """
 
 import json
+import os
 import time
 from typing import Any, Iterator, List, Tuple, Union
 
@@ -761,22 +762,10 @@ class ExecutionEngine:
         existing_class = self.pool.instance_classes.get(instance_name)
         if existing_class and agent_class and existing_class != agent_class:
             logger.info(
-                f"Class mismatch for '{instance_name}': {existing_class} -> {agent_class}. "
-                f"Clearing history to prevent context mix-up."
+                f"Class mismatch for '{instance_name}': existing={existing_class}, requested={agent_class}"
             )
-            self.pool.clear_conversation(instance_name) if hasattr(self.pool, 'clear_conversation') else None
-            # Reset logger's internal history tracking to prevent desync (reviewer Issue 3)
-            try:
-                log_inst = self.pool.get_logger(instance_name, agent_class)
-                log_inst.data["history"] = []
-            except Exception:
-                pass
-            # Update the instance's agent_class to the existing one (old behavior: keep existing class template)
-            existing_inst = self.pool.get_instance(instance_name)
-            if existing_inst:
-                existing_inst.agent_class = existing_class
-            # Reuse existing class — set agent_class back so we use the existing template
-            agent_class = existing_class
+            return (f"Error: Agent '{instance_name}' already exists as '{existing_class}'. "
+                    f"Cannot create as '{agent_class}'. Use a different instance name.")
 
         # Check concurrency limits
         is_parallel_allowed = True
@@ -831,6 +820,70 @@ class ExecutionEngine:
 
         self.pool.dismiss_instance(target_name)
         return f"[Agent '{target_name}' dismissed successfully.]"
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  compress_context tool handler
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _handle_compress_context(
+        self, args: dict, messages: List[Message], target_agent_name: str
+    ) -> str:
+        """Handle compress_context tool call — delegates to compression module.
+
+        Args:
+            args: Compression arguments (fraction, mode).
+            messages: Messages to compress.
+            target_agent_name: Name of the agent whose context should be compressed.
+
+        Returns:
+            Result string with compression outcome.
+        """
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                return f'Error: Invalid JSON arguments: {args}'
+
+        # Fix #7: Validate fraction to prevent extreme values
+        fraction = max(0.1, min(0.9, args.get('fraction', 0.5)))
+        mode = args.get('mode', 'auto')
+        summary_text = args.get('summary_text')
+        force = args.get('force', False)
+
+        # Acquire per-agent lock for thread safety
+        inst = self.pool.get_instance(target_agent_name)
+        if not inst:
+            return f"Error: Agent '{target_agent_name}' not found."
+
+        # NOTE: Do NOT wrap compress_context in _compression_lock — it internally
+        # calls agent_pool.get_conversation() which acquires the same lock.
+        # Holding the outer lock + inner lock = deadlock (non-reentrant Lock).
+        from agent_cascade.compression.core import compress_context as _compress
+        result = _compress(
+            agent_pool=self.pool,
+            target_agent_name=target_agent_name,
+            fraction=fraction,
+            mode=mode,
+            summary_text=summary_text,
+            force=force,
+            justification=args.get('justification', 'Agent-triggered compression'),
+        )
+
+        if result.success:
+            # Sync logger's internal data["history"] to match pool state (Item 11)
+            # Without this, update_history() will treat pool messages not yet seen by
+            # the logger as "new" and append them, causing duplication.
+            try:
+                conv = self.pool.get_conversation(target_agent_name)
+                log_inst = self.pool.get_logger(target_agent_name, inst.agent_class)
+                log_inst.update_history(conv)
+            except Exception as e:
+                logger.error(f"Logger sync after compress_context tool FAILED for '{target_agent_name}': {e}")
+
+            return (f"Compression successful. Discarded {result.messages_discarded} messages. "
+                    f"Tail count: {result.tail_count}.")
+        else:
+            return f"Compression failed: {result.error}"
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Item 7: /compress manual command handling
@@ -980,6 +1033,16 @@ class ExecutionEngine:
                 except Exception as e:
                     logger.error(f"Recovery after /compress failed for '{inst_name}': {e}")
 
+            # Sync logger's internal data["history"] to match pool state (Item 11)
+            # Without this, update_history() will treat pool messages not yet seen by
+            # the logger as "new" and append them, causing duplication.
+            try:
+                conv = self.pool.get_conversation(inst_name)
+                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                log_inst.update_history(conv)
+            except Exception as e:
+                logger.error(f"Logger sync after /compress FAILED for '{inst_name}': {e}")
+
             self._append_system_notification(
                 messages, "[SYSTEM NOTIFICATION: Compression applied",
                 f"[SYSTEM NOTIFICATION: /compress applied successfully for {inst_name}.]"
@@ -993,112 +1056,6 @@ class ExecutionEngine:
             )
 
         return True
-
-    # ═══════════════════════════════════════════════════════════════════════
-    #  Item 10: Message pool validation
-    # ═══════════════════════════════════════════════════════════════════════
-
-def validate_message_pool(messages: List[Message], agent_name: str) -> bool:
-    """Validate message pool integrity after compression operations.
-
-    Checks:
-      - Pool is not empty
-      - First message is SYSTEM (if present)
-      - No excessive duplicate consecutive messages (>30%)
-      - All message roles are valid non-empty strings
-
-    Returns True if the pool is valid, False if corruption detected.
-    """
-    if not messages:
-        logger.error(f"[MSG POOL VALIDATION] Empty message pool for agent '{agent_name}'")
-        return False
-
-    # Check first message is SYSTEM
-    first = messages[0]
-    first_role = first.get('role') if isinstance(first, dict) else getattr(first, 'role', '')
-    if first_role != SYSTEM:
-        logger.warning(f"[MSG POOL VALIDATION] First message for '{agent_name}' is not SYSTEM (got {first_role})")
-
-    # Check for duplicate consecutive messages (compression can cause this via extend+clear issues)
-    prev_content = None
-    prev_role = None
-    dup_count = 0
-    for i, msg in enumerate(messages):
-        role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-        # Increase content window from 200 to 500 chars for better precision (Issue 8 fix)
-        content_key = str(content)[:500] if content else ''
-
-        if role == prev_role and content_key == prev_content:
-            dup_count += 1
-            logger.warning(f"[MSG POOL VALIDATION] Duplicate consecutive msg at index {i} for '{agent_name}'")
-
-        prev_role = role
-        prev_content = content_key
-
-    # Lower threshold from 30% to 10% — 10% duplicate consecutive msgs is suspicious (Issue 7 fix)
-    if len(messages) > 5 and dup_count > len(messages) * 0.1:
-        logger.error(f"[MSG POOL VALIDATION] Excessive duplicates ({dup_count}/{len(messages)}) for agent '{agent_name}'")
-        return False
-
-    # Check that roles are valid strings (not None or empty after compression)
-    invalid_roles = sum(1 for m in messages if not (m.get('role') if isinstance(m, dict) else getattr(m, 'role', '')))
-    if invalid_roles:
-        logger.error(f"[MSG POOL VALIDATION] {invalid_roles} messages with invalid roles for agent '{agent_name}'")
-        return False
-
-    return True
-
-    # ═══════════════════════════════════════════════════════════════════════
-
-    def _handle_compress_context(
-        self, args: dict, messages: List[Message], target_agent_name: str
-    ) -> str:
-        """Handle compress_context tool call — delegates to compression module.
-
-        Args:
-            args: Compression arguments (fraction, mode).
-            messages: Messages to compress.
-            target_agent_name: Name of the agent whose context should be compressed.
-
-        Returns:
-            Result string with compression outcome.
-        """
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except json.JSONDecodeError:
-                return f'Error: Invalid JSON arguments: {args}'
-
-        fraction = args.get('fraction', 0.5)
-        mode = args.get('mode', 'auto')
-        summary_text = args.get('summary_text')
-        force = args.get('force', False)
-
-        # Acquire per-agent lock for thread safety
-        inst = self.pool.get_instance(target_agent_name)
-        if not inst:
-            return f"Error: Agent '{target_agent_name}' not found."
-
-        # NOTE: Do NOT wrap compress_context in _compression_lock — it internally
-        # calls agent_pool.get_conversation() which acquires the same lock.
-        # Holding the outer lock + inner lock = deadlock (non-reentrant Lock).
-        from agent_cascade.compression.core import compress_context as _compress
-        result = _compress(
-            agent_pool=self.pool,
-            target_agent_name=target_agent_name,
-            fraction=fraction,
-            mode=mode,
-            summary_text=summary_text,
-            force=force,
-            justification=args.get('justification', 'Agent-triggered compression'),
-        )
-
-        if result.success:
-            return (f"Compression successful. Discarded {result.messages_discarded} messages. "
-                    f"Tail count: {result.tail_count}.")
-        else:
-            return f"Compression failed: {result.error}"
 
     def _create_and_run_agent(
         self, agent_class: str, instance_name: str,
@@ -1604,3 +1561,59 @@ def validate_message_pool(messages: List[Message], agent_name: str) -> bool:
             if len(tool_result) > 8000:
                 return f"{tool_result[:8000]}\n\n[TOOL RESPONSE TRUNCATED]"
             return tool_result
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Item 10: Message pool validation (module-level utility)
+# ═══════════════════════════════════════════════════════════════════════
+
+def validate_message_pool(messages: List[Message], agent_name: str) -> bool:
+    """Validate message pool integrity after compression operations.
+
+    Checks:
+      - Pool is not empty
+      - First message is SYSTEM (if present)
+      - No excessive duplicate consecutive messages (>30%)
+      - All message roles are valid non-empty strings
+
+    Returns True if the pool is valid, False if corruption detected.
+    """
+    if not messages:
+        logger.error(f"[MSG POOL VALIDATION] Empty message pool for agent '{agent_name}'")
+        return False
+
+    # Check first message is SYSTEM
+    first = messages[0]
+    first_role = first.get('role') if isinstance(first, dict) else getattr(first, 'role', '')
+    if first_role != SYSTEM:
+        logger.warning(f"[MSG POOL VALIDATION] First message for '{agent_name}' is not SYSTEM (got {first_role})")
+
+    # Check for duplicate consecutive messages (compression can cause this via extend+clear issues)
+    prev_content = None
+    prev_role = None
+    dup_count = 0
+    for i, msg in enumerate(messages):
+        role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+        # Increase content window from 200 to 500 chars for better precision (Issue 8 fix)
+        content_key = str(content)[:500] if content else ''
+
+        if role == prev_role and content_key == prev_content:
+            dup_count += 1
+            logger.warning(f"[MSG POOL VALIDATION] Duplicate consecutive msg at index {i} for '{agent_name}'")
+
+        prev_role = role
+        prev_content = content_key
+
+    # Lower threshold from 30% to 10% — 10% duplicate consecutive msgs is suspicious (Issue 7 fix)
+    if len(messages) > 5 and dup_count > len(messages) * 0.1:
+        logger.error(f"[MSG POOL VALIDATION] Excessive duplicates ({dup_count}/{len(messages)}) for agent '{agent_name}'")
+        return False
+
+    # Check that roles are valid strings (not None or empty after compression)
+    invalid_roles = sum(1 for m in messages if not (m.get('role') if isinstance(m, dict) else getattr(m, 'role', '')))
+    if invalid_roles:
+        logger.error(f"[MSG POOL VALIDATION] {invalid_roles} messages with invalid roles for agent '{agent_name}'")
+        return False
+
+    return True

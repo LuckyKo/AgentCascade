@@ -60,7 +60,7 @@ class AgentInstanceLogger:
     # ── Formatting ────────────────────────────────────────────────────────
 
     def _format_message(self, message: Union[Dict, Any]) -> Dict:
-        """Ensure message is a dict and has a timestamp. Mutates input to preserve timestamp.
+        """Ensure message is a dict and has a timestamp. Returns a copy to avoid mutation.
 
         CRITICAL DESIGN NOTE — Timestamps as Identity Markers:
         The timestamp field is NOT just metadata; it serves as the PRIMARY KEY for message
@@ -69,6 +69,7 @@ class AgentInstanceLogger:
         a duplicate. DO NOT remove or randomize timestamps — doing so would break dedup and
         cause message duplication on every sync cycle.
         """
+        # Fix #6: Deep copy before mutating to avoid side effects on original Message objects
         if hasattr(message, 'model_dump'):  # For Pydantic-based Message
             msg_dict = message.model_dump()
 
@@ -87,10 +88,11 @@ class AgentInstanceLogger:
             return msg_dict
 
         if isinstance(message, dict):
-            # Mutate in-place to ensure stability across multiple update_history calls
-            if 'timestamp' not in message:
-                message['timestamp'] = datetime.datetime.now().isoformat()
-            return message
+            # Return a copy instead of mutating in-place (Fix #6)
+            msg_copy = dict(message)
+            if 'timestamp' not in msg_copy:
+                msg_copy['timestamp'] = datetime.datetime.now().isoformat()
+            return msg_copy
 
         # Fallback for generic objects or Message dataclass
         msg_dict = {}
