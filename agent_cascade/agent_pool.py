@@ -1053,12 +1053,44 @@ class ParallelAgentManager:
             return sum(1 for name in self.active_stack if self.pool.get_instance(name) and
                        self.pool.get_instance(name).agent_class.lower() == agent_class.lower())
 
+    def _acquire_slot(self, agent_class: str, instance_name: str):
+        """Acquire an endpoint scheduling slot. Returns a release callback or None for unlimited endpoints."""
+        from agent_cascade.log import logger
+
+        if not hasattr(self.pool, 'api_router') or not self.pool.api_router:
+            return None
+
+        router = self.pool.api_router
+        try:
+            # Get the effective concurrency for this agent class (includes default fallback)
+            concurrency_limit = router.get_effective_concurrency(agent_class)
+
+            # Resolve the actual api_base that will be used
+            llm_cfg = router.get_llm_config(agent_class)
+            api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
+
+            # Acquire a slot on the endpoint scheduler (blocks if at capacity)
+            return router.scheduler.acquire(api_base, concurrency_limit)
+        except Exception as e:
+            logger.error(f"Failed to acquire endpoint slot for {instance_name}: {e}")
+            raise
+
     def submit_task(self, agent_class, instance_name, args, history, caller):
-        """Submit an agent to run in the background thread pool. Returns immediately."""
+        """Submit an agent to run in the background thread pool. Returns immediately.
+        
+        Item 13: Acquires endpoint scheduling slot BEFORE submitting to thread pool,
+        with proper release in finally block when the task completes.
+        """
         from agent_cascade.log import logger
 
         if not self.executor:
             return f"[Agent '{instance_name}' requested in parallel mode but no thread pool available.]"
+
+        # Acquire endpoint slot before submitting (blocks if at capacity)
+        try:
+            endpoint_release = self._acquire_slot(agent_class, instance_name)
+        except Exception as e:
+            return f"[Agent '{instance_name}' failed to acquire endpoint slot: {e}]"
 
         # Deep copy history for thread safety
         import copy as _copy
@@ -1082,6 +1114,13 @@ class ParallelAgentManager:
                 error_msg = f"[Parallel Agent '{instance_name}' Failed]:\n{str(e)}"
                 self.pool.send_message(instance_name, caller, error_msg)
             finally:
+                # Release endpoint slot when agent completes
+                if endpoint_release is not None:
+                    try:
+                        endpoint_release()
+                    except Exception as e:
+                        logger.error(f"Failed to release endpoint slot for {instance_name}: {e}")
+
                 # Clean up active stack and tasks
                 with self._state_lock:
                     # In-place mutation to avoid breaking external references

@@ -265,6 +265,10 @@ class ExecutionEngine:
                     instance.conversation.append(async_msg)
             return True  # Yield and continue loop to process new messages
 
+        # ── /compress manual command handling (Item 7) ──────────────────────
+        if self._handle_compress_command(instance, messages):
+            return True  # Command handled — yield and continue
+
         # ── COMPRESSION CHECK (critical for long-running agents) ────────────
         max_tokens = self._get_max_tokens(instance)
         current_tokens = self._count_history_tokens(llm_messages)
@@ -329,6 +333,41 @@ class ExecutionEngine:
                         c = msg.get('content') if isinstance(msg, dict) else getattr(msg, 'content', '')
                         if isinstance(c, str) and '<context_summary>' in c:
                             instance.latest_marker_index = idx
+
+                    # Item 10: Validate message pool after forced compression
+                    if not validate_message_pool(conv, inst_name):
+                        logger.error(f"[MSG POOL VALIDATION] Pool invalid after forced compression for '{inst_name}'. Attempting recovery from log...")
+                        # Recovery: reload from the logger's history (which is unaffected)
+                        try:
+                            recov = self.pool.get_logger(inst_name, instance.agent_class).data.get('history', [])
+                            if recov and validate_message_pool(recov, inst_name):
+                                with instance._compression_lock:  # Thread-safe recovery write
+                                    self.pool.instance_conversations[inst_name] = list(recov)
+                                logger.info(f"Recovered message pool from log for '{inst_name}' ({len(recov)} messages)")
+                                conv = recov
+                                # Rebuild working sets from recovered data
+                                self._rebuild_working_set(messages, llm_messages, inst_name)
+                            else:
+                                logger.error("Recovery from log also failed — message pool may be corrupted")
+                                self._append_system_notification(
+                                    llm_messages, "[SYSTEM NOTIFICATION: Compression corrupted pool",
+                                    f"[SYSTEM NOTIFICATION: Forced compression and recovery both failed for {inst_name}. Agent halted to prevent corruption.]"
+                                )
+                                # Halt this instance to prevent further execution with corrupted state
+                                self.pool.halt_instance(inst_name)
+                        except Exception as e:
+                            logger.error(f"Recovery attempt failed for '{inst_name}': {e}")
+
+                    # Item 11: Sync the logger's internal data["history"] to match pool state
+                    # Without this, update_history() will treat pool messages not yet seen by
+                    # the logger as "new" and append them, causing duplication.
+                    try:
+                        log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                        log_inst.update_history(conv)
+                    except Exception as e:
+                        logger.error(f"Logger sync after forced compression FAILED for '{inst_name}': {e}. "
+                                     f"Pool may desync — manual intervention required.")
+
                 notification = (
                     f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%. "
                     f"Forced compression applied.]"
@@ -543,6 +582,10 @@ class ExecutionEngine:
             # Track compress_context execution
             if tool_name == 'compress_context':
                 self._rebuild_working_set(messages, llm_messages, inst_name)
+                # Item 10: Validate message pool after agent-triggered compression
+                conv = self.pool.get_conversation(inst_name)
+                if conv and not validate_message_pool(conv, inst_name):
+                    logger.error(f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
 
             # Build function result message
             fn_msg = Message(role=FUNCTION, name=tool_name, content=tool_result)
@@ -789,6 +832,225 @@ class ExecutionEngine:
         self.pool.dismiss_instance(target_name)
         return f"[Agent '{target_name}' dismissed successfully.]"
 
+    # ═══════════════════════════════════════════════════════════════════════
+    #  Item 7: /compress manual command handling
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _handle_compress_command(self, instance: AgentInstance, messages: List[Message]) -> bool:
+        """Detect and handle /compress [fraction] user command.
+
+        Checks the last USER message for a /compress command. If found:
+          1. Parse the fraction (default 0.5)
+          2. Generate a preview summary via dry_run compression
+          3. Request user approval via operation_manager
+          4. Apply compression if approved
+
+        Returns True if the command was handled (whether approved or not).
+        """
+        inst_name = instance.instance_name
+
+        # Find the last USER message
+        last_user = None
+        for msg in reversed(messages):
+            role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+            if role == USER:
+                last_user = msg
+                break
+
+        if last_user is None:
+            return False
+
+        content = last_user.get('content', '') if isinstance(last_user, dict) else getattr(last_user, 'content', '')
+        if not isinstance(content, str):
+            return False
+
+        if not content.strip().startswith('/compress'):
+            return False
+
+        # Parse fraction from command (default 0.5)
+        parts = content.strip().split()
+        fraction = 0.5
+        if len(parts) > 1:
+            try:
+                fraction = float(parts[1])
+            except ValueError:
+                pass
+
+        # Clamp fraction to valid range
+        fraction = max(0.1, min(0.9, fraction))
+
+        # Get compress_context tool from template
+        template = self.pool.templates.get(instance.agent_class)
+        if not template or 'compress_context' not in getattr(template, 'function_map', {}):
+            logger.warning(f"/compress command but compress_context tool unavailable for {inst_name}")
+            return True
+
+        compress_tool = template.function_map['compress_context']
+
+        # Step 1: Generate preview summary (dry_run)
+        try:
+            preview_params = json.dumps({
+                'fraction': fraction,
+                'justification': 'MANUAL USER COMMAND (Preview)',
+                'mode': 'auto',
+            })
+            summary = compress_tool.call(
+                preview_params,
+                messages=messages,
+                agent_instance_name=inst_name,
+                agent_obj=instance,  # Pass instance so tool can resolve agent_pool via template
+                dry_run=True,  # Don't mutate pool yet
+            )
+        except Exception as e:
+            logger.error(f"Preview compression failed for {inst_name}: {e}")
+            summary = None
+
+        if not summary or str(summary).startswith("ERROR"):
+            logger.warning(f"/compress preview failed for {inst_name}: {summary}")
+            self._append_system_notification(
+                messages, "[SYSTEM NOTIFICATION: Compression command failed",
+                f"[SYSTEM NOTIFICATION: /compress preview failed for {inst_name}. Cannot compress.]"
+            )
+            return True
+
+        # Step 2: Request user approval via operation_manager
+        approved = False
+        rejection_reason = ""
+        if self.pool.operation_manager:
+            try:
+                approved, rejection_reason = self.pool.operation_manager.request_user_approval(
+                    agent_name=inst_name,
+                    tool_name='compress_context',
+                    tool_args={'fraction': fraction, 'summary': summary},
+                    description=f"Proposed Compression Summary ({int(fraction*100)}% of history)",
+                )
+            except Exception as e:
+                logger.error(f"User approval request failed for {inst_name}: {e}")
+                self._append_system_notification(
+                    messages, "[SYSTEM NOTIFICATION: Compression command failed",
+                    f"[SYSTEM NOTIFICATION: /compress approval request failed: {e}]"
+                )
+                return True
+        else:
+            # No operation_manager — auto-approve (standalone mode)
+            approved = True
+
+        if not approved:
+            logger.info(f"/compress rejected by user for {inst_name}: {rejection_reason}")
+            self._append_system_notification(
+                messages, "[SYSTEM NOTIFICATION: Compression cancelled",
+                f"[SYSTEM NOTIFICATION: /compress cancelled by user. Reason: {rejection_reason}]"
+            )
+            return True
+
+        # Step 3: Apply the compression with precomputed summary
+        try:
+            apply_params = json.dumps({
+                'fraction': fraction,
+                'justification': 'MANUAL USER COMMAND (Approved)',
+                'mode': 'auto',
+            })
+            result = compress_tool.call(
+                apply_params,
+                messages=messages,
+                agent_instance_name=inst_name,
+                agent_obj=instance,  # Pass instance for proper pool resolution
+                precomputed_summary=summary,  # Skip LLM summary generation
+            )
+            logger.info(f"/compress applied for {inst_name}: {result}")
+
+            # Validate message pool after compression (Item 10)
+            conv = self.pool.get_conversation(inst_name)
+            if conv and not validate_message_pool(conv, inst_name):
+                logger.error(f"[MSG POOL VALIDATION] Pool invalid after /compress for '{inst_name}'. Attempting recovery...")
+                # Recovery: reload from logger history (same as forced compression path)
+                try:
+                    recov = self.pool.get_logger(inst_name, instance.agent_class).data.get('history', [])
+                    if recov and validate_message_pool(recov, inst_name):
+                        with instance._compression_lock:
+                            self.pool.instance_conversations[inst_name] = list(recov)
+                        logger.info(f"Recovered message pool after /compress for '{inst_name}' ({len(recov)} messages)")
+                        # Rebuild working sets from recovered data (matches forced compression path)
+                        self._rebuild_working_set(messages, llm_messages, inst_name)
+                    else:
+                        self._append_system_notification(
+                            messages, "[SYSTEM NOTIFICATION: Compression corrupted pool",
+                            f"[SYSTEM NOTIFICATION: /compress applied but message pool validation failed and recovery unsuccessful. Agent may behave unexpectedly.]"
+                        )
+                except Exception as e:
+                    logger.error(f"Recovery after /compress failed for '{inst_name}': {e}")
+
+            self._append_system_notification(
+                messages, "[SYSTEM NOTIFICATION: Compression applied",
+                f"[SYSTEM NOTIFICATION: /compress applied successfully for {inst_name}.]"
+            )
+
+        except Exception as e:
+            logger.error(f"/compress apply failed for {inst_name}: {e}")
+            self._append_system_notification(
+                messages, "[SYSTEM NOTIFICATION: Compression command failed",
+                f"[SYSTEM NOTIFICATION: /compress apply failed for {inst_name}: {e}]"
+            )
+
+        return True
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  Item 10: Message pool validation
+    # ═══════════════════════════════════════════════════════════════════════
+
+def validate_message_pool(messages: List[Message], agent_name: str) -> bool:
+    """Validate message pool integrity after compression operations.
+
+    Checks:
+      - Pool is not empty
+      - First message is SYSTEM (if present)
+      - No excessive duplicate consecutive messages (>30%)
+      - All message roles are valid non-empty strings
+
+    Returns True if the pool is valid, False if corruption detected.
+    """
+    if not messages:
+        logger.error(f"[MSG POOL VALIDATION] Empty message pool for agent '{agent_name}'")
+        return False
+
+    # Check first message is SYSTEM
+    first = messages[0]
+    first_role = first.get('role') if isinstance(first, dict) else getattr(first, 'role', '')
+    if first_role != SYSTEM:
+        logger.warning(f"[MSG POOL VALIDATION] First message for '{agent_name}' is not SYSTEM (got {first_role})")
+
+    # Check for duplicate consecutive messages (compression can cause this via extend+clear issues)
+    prev_content = None
+    prev_role = None
+    dup_count = 0
+    for i, msg in enumerate(messages):
+        role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+        # Increase content window from 200 to 500 chars for better precision (Issue 8 fix)
+        content_key = str(content)[:500] if content else ''
+
+        if role == prev_role and content_key == prev_content:
+            dup_count += 1
+            logger.warning(f"[MSG POOL VALIDATION] Duplicate consecutive msg at index {i} for '{agent_name}'")
+
+        prev_role = role
+        prev_content = content_key
+
+    # Lower threshold from 30% to 10% — 10% duplicate consecutive msgs is suspicious (Issue 7 fix)
+    if len(messages) > 5 and dup_count > len(messages) * 0.1:
+        logger.error(f"[MSG POOL VALIDATION] Excessive duplicates ({dup_count}/{len(messages)}) for agent '{agent_name}'")
+        return False
+
+    # Check that roles are valid strings (not None or empty after compression)
+    invalid_roles = sum(1 for m in messages if not (m.get('role') if isinstance(m, dict) else getattr(m, 'role', '')))
+    if invalid_roles:
+        logger.error(f"[MSG POOL VALIDATION] {invalid_roles} messages with invalid roles for agent '{agent_name}'")
+        return False
+
+    return True
+
+    # ═══════════════════════════════════════════════════════════════════════
+
     def _handle_compress_context(
         self, args: dict, messages: List[Message], target_agent_name: str
     ) -> str:
@@ -896,7 +1158,61 @@ class ExecutionEngine:
         context_text = args.get('context', '')
         if context_text:
             task_text = f"{context_text}\n\n{task_text}"
-        task_msg = Message(role=USER, content=task_text)
+
+        # Item 9: Multimodal image propagation — scan caller's conversation for images
+        # referenced in the task text and include them as multimodal content
+        sub_agent_msg_content: list = [{'type': 'text', 'text': task_text}]
+        added_to_sub = set()
+
+        def _safe_get_role(msg):
+            return msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+
+        def _safe_get_content(msg):
+            return msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+
+        # Get caller's conversation history to scan for images
+        caller_conv = self.pool.get_conversation(caller)
+        seen_images = {}
+        if caller_conv:
+            for msg in caller_conv:
+                content = _safe_get_content(msg)
+                if isinstance(content, list):
+                    for item in content:
+                        item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
+                        item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
+                        if item_type == 'image':
+                            img_url = item_value
+                            seen_images[img_url] = img_url
+
+        # Include images that are referenced in the task text
+        for img_url in seen_images.values():
+            basename = img_url.split('/')[-1].split('?')[0] if '/' in img_url else img_url
+            if basename in task_text and img_url not in added_to_sub:
+                sub_agent_msg_content.append({'type': 'image', 'value': img_url})
+                added_to_sub.add(img_url)
+
+        # Also check the last user message for images even if not referenced in text
+        if caller_conv:
+            last_user_msg = None
+            for m in reversed(caller_conv):
+                if _safe_get_role(m) == USER:
+                    last_user_msg = m
+                    break
+            if last_user_msg:
+                content = _safe_get_content(last_user_msg)
+                if isinstance(content, list):
+                    for item in content:
+                        item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
+                        item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
+                        if item_type == 'image' and item_value not in added_to_sub:
+                            sub_agent_msg_content.append({'type': 'image', 'value': item_value})
+                            added_to_sub.add(item_value)
+
+        # Use multimodal content list if images found, otherwise plain text
+        if len(sub_agent_msg_content) > 1:
+            task_msg = Message(role=USER, content=sub_agent_msg_content)
+        else:
+            task_msg = Message(role=USER, content=task_text)
 
         # Build conversation: [system, task]
         conv = [sys_msg, task_msg]
@@ -960,22 +1276,64 @@ class ExecutionEngine:
                                 logger.debug(
                                     f"Propagated disabled_tools to agent '{instance_name}': {caller_disabled_tools}"
                                 )
-            except Exception:
-                pass  # Propagation failures should not break agent creation
+            except Exception as e:
+                logger.warning(f"Failed to propagate disabled_tools from {caller} to {instance_name}: {e}")
 
         # Track in active stack (thread-safe via RLock)
         with self.pool._execution._state_lock:
             self.pool._execution.active_stack.append(instance_name)
 
+        # Item 12: Initialize sub-agent WebUI state before execution begins
+        try:
+            initial_state = {
+                'active': True,
+                'agent_name': f"{instance_name} ({agent_class})",
+                'messages': list(conv),
+            }
+            with self.pool._execution._state_lock:
+                self.pool.sub_agent_state[instance_name] = initial_state
+        except Exception:
+            pass  # WebUI state updates must never break execution
+
         try:
             # Execute through unified loop
             final_resp = []
+            _update_counter = 0
             for resp in self.run(inst):
                 if self.pool.stopped or self.pool.is_instance_halted(instance_name):
                     break
                 final_resp = resp
 
+                # Item 12: Throttled sub-agent WebUI state update (every 5 turns)
+                _update_counter += 1
+                if _update_counter % 5 == 0:
+                    try:
+                        current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
+                        state = {
+                            'active': True,
+                            'agent_name': f"{instance_name} ({agent_class})",
+                            'messages': [dict(m) if isinstance(m, dict) else m.model_dump() if hasattr(m, 'model_dump') else m for m in current_conv + list(final_resp)],
+                        }
+                        with self.pool._execution._state_lock:
+                            self.pool.sub_agent_state[instance_name] = state
+                    except Exception:
+                        pass  # WebUI state updates must never break execution
+
             conv.extend(final_resp)
+
+            # Item 12: Always emit final sub-agent state after loop completes
+            # Ensures even short-lived agents (<5 turns) appear in the WebUI
+            try:
+                current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
+                final_state = {
+                    'active': False,  # Execution complete — agent is no longer active
+                    'agent_name': f"{instance_name} ({agent_class})",
+                    'messages': [dict(m) if isinstance(m, dict) else m.model_dump() if hasattr(m, 'model_dump') else m for m in current_conv + list(final_resp)],
+                }
+                with self.pool._execution._state_lock:
+                    self.pool.sub_agent_state[instance_name] = final_state
+            except Exception:
+                pass  # WebUI state updates must never break execution
         finally:
             # Always clean up active stack — even on halt or error
             with self.pool._execution._state_lock:
