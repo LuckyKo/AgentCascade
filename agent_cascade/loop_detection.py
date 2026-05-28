@@ -22,6 +22,16 @@ _TOOL_TRUNCATED_RE = re.compile(
     r'\[TOOL RESPONSE TRUNCATED.*?\]', re.DOTALL
 )
 
+class LoopDetectedError(Exception):
+    """Raised when a repetitive loop is detected in agent turns."""
+    def __init__(self, reason, agent_name=None, pop_count=None, turn_pop_count=0, resp_snapshot=None):
+        self.reason = reason
+        self.agent_name = agent_name
+        self.pop_count = pop_count
+        self.turn_pop_count = turn_pop_count
+        self.resp_snapshot = resp_snapshot or []
+        super().__init__(f"Loop detected for {agent_name or 'agent'}: {reason}")
+
 
 def detect_loop(
     messages: List[Union[dict, Message]],

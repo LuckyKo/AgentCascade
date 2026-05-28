@@ -1430,8 +1430,8 @@ def create_app(agents, agent_pool, config=None):
                                 # After a failed forced compression cycle, sub-agent pools may be empty/corrupted.
                                 # Read directly from log files on disk to recover.
                                 try:
-                                    # Import validate_message_pool locally (defined in agent_orchestrator.py)
-                                    from agent_orchestrator import validate_message_pool
+                                    # Import validate_message_pool locally (defined in execution_engine.py)
+                                    from agent_cascade.execution_engine import validate_message_pool
                                     
                                     for sa_name, agent_class in list(agent_pool.instance_classes.items()):
                                         if sa_name == session['session_name']:

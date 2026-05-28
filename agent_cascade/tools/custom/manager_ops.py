@@ -140,11 +140,11 @@ You are a specialized agent instance.
                     if resp and (resp[-1].get(ROLE) == FUNCTION or resp[-1].get('function_call')):
                         logger_inst.update_history(messages + resp)
                         # Check for loop
-                        from agent_orchestrator import detect_loop
+                        from agent_cascade.loop_detection import detect_loop
                         loop_info = detect_loop(messages + response)
                         if loop_info:
                             loop_reason, pop_count = loop_info
-                            from agent_orchestrator import LoopDetectedError
+                            from agent_cascade.loop_detection import LoopDetectedError
                             logger.warning(f"Loop detected for sub-agent {instance_name}: {loop_reason}")
                             raise LoopDetectedError(loop_reason, agent_name=instance_name, pop_count=pop_count, turn_pop_count=len(response), resp_snapshot=list(response))
 
@@ -155,14 +155,14 @@ You are a specialized agent instance.
                     logger_inst.update_history(messages)
 
                     # Accumulate refined text output
-                    from agent_orchestrator import extract_sub_agent_feedback
+                    from agent_cascade.compression.helpers import extract_sub_agent_feedback
                     result_str = extract_sub_agent_feedback(response, instance_name)
                     
                     return f"[{instance_name}'s output]:\n{result_str}"
                 
                 return f"[{instance_name}]: No response generated"
             except Exception as e:
-                from agent_orchestrator import LoopDetectedError
+                from agent_cascade.loop_detection import LoopDetectedError
                 if isinstance(e, LoopDetectedError):
                     internal_retries += 1
                     if internal_retries > max_internal_retries:
