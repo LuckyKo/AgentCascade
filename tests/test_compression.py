@@ -774,7 +774,7 @@ class TestNestedCompressionGuard:
     def test_orchestrator_skips_inject_for_compression_agent(self):
         """When instance_name == 'compression_agent', _inject_compression_warning_for_agent
         is NOT called — prevents nested/circular compression."""
-        from agent_orchestrator import OrchestratorAgent
+        from agent_cascade.orchestrator_agent import OrchestratorAgent
 
         inject_called = {"value": False}
 
@@ -804,7 +804,7 @@ class TestNestedCompressionGuard:
 
     def test_orchestrator_calls_inject_for_other_agents(self):
         """For non-compression agents, _inject_compression_warning_for_agent IS called."""
-        from agent_orchestrator import OrchestratorAgent
+        from agent_cascade.orchestrator_agent import OrchestratorAgent
 
         inject_called = {"value": False}
 

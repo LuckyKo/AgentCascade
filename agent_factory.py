@@ -32,7 +32,7 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
         agent_pool: The AgentPool instance (for file ops and approvals).
         agent_name: The role name (e.g. 'orchestrator', 'coder').
     """
-    from agent_orchestrator import _SubAgentFunctionProxy, CALL_AGENT_SCHEMA
+    from agent_cascade.orchestrator_agent import _SubAgentFunctionProxy, CALL_AGENT_SCHEMA
 
     # ── Sub-agent management (intercepted in _run, not _call_tool) ──
     agent.function_map['call_agent'] = _SubAgentFunctionProxy(CALL_AGENT_SCHEMA)
@@ -182,7 +182,7 @@ def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None) -> Assistant:
     Returns:
         Fully configured OrchestratorAgent instance.
     """
-    from agent_orchestrator import OrchestratorAgent
+    from agent_cascade.orchestrator_agent import OrchestratorAgent
     import copy
 
     # Ensure each agent gets its own distinct LLM instance config

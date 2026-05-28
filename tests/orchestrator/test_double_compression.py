@@ -14,7 +14,7 @@ def test_inject_compression_does_not_double_trigger():
     the old deep-copied messages → sees >95% → triggers second forceful compression.
     """
     # Import what we need
-    from agent_orchestrator import OrchestratorAgent
+    from agent_cascade.orchestrator_agent import OrchestratorAgent
 
     # Build a mock orchestrator with enough history to trigger 95% threshold
     max_tokens = 10_000
@@ -68,7 +68,7 @@ def test_inject_compression_does_not_double_trigger():
 
 def test_inject_compression_triggers_when_over_95():
     """When context is genuinely over 95%, compression SHOULD be triggered."""
-    from agent_orchestrator import OrchestratorAgent
+    from agent_cascade.orchestrator_agent import OrchestratorAgent
 
     max_tokens = 10_000
     messages = [MagicMock(content="x" * 100, role='user', name='TestAgent')]
@@ -105,7 +105,7 @@ def test_inject_compression_no_double_trigger_with_stale_llm_messages():
 
     This test simulates that exact scenario.
     """
-    from agent_orchestrator import OrchestratorAgent
+    from agent_cascade.orchestrator_agent import OrchestratorAgent
 
     max_tokens = 10_000
 

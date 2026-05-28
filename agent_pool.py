@@ -132,8 +132,11 @@ class AgentPool:
         self._idle_checker_stop_event = threading.Event()
         
         # Initialize Parallel Agent Manager
-        from agent_orchestrator import ParallelAgentManager
-        self.parallel_manager = ParallelAgentManager(self, max_workers=llm_cfg.get('max_parallel_agents', 3))
+        # NOTE: This is a dead code path — ExecutionEngine handles all sub-agent spawning.
+        # The old ParallelAgentManager API from agent_orchestrator accepted max_workers;
+        # the new one in agent_cascade.agent_pool does not, so we use a compat alias here.
+        from agent_cascade.agent_pool import ParallelAgentManager as _PAM
+        self.parallel_manager = _PAM(self)
         
         # Callback hooks for dismissal events (used by api_server to broadcast real-time tab removal)
         # Each callback receives: callback(instance_name: str, log_path: Optional[str])
