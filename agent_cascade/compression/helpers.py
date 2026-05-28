@@ -17,6 +17,9 @@ def compute_discard_count(active_set, fraction, force):
     1. Start with fraction-based count: int(len(active_set) * fraction)
     2. If not force: keep at least 2 tail messages (clamp discard to len-2)
     3. If force: ensure at least 1 message is discarded
+    4. Tool-chain boundary protection: if the cut lands on a FUNCTION result,
+       walk back to include the paired ASSISTANT tool call so both are discarded
+       together (never orphan a tool result without its call).
 
     Args:
         active_set: List of active (uncompressed) messages eligible for compression.
@@ -33,6 +36,34 @@ def compute_discard_count(active_set, fraction, force):
     else:
         # Force mode: compress at least 1 message even from small sets
         discard = max(1, discard)
+
+    # Tool-chain boundary protection: if the message at the cut position is a
+    # FUNCTION result, walk back to include its paired ASSISTANT tool call.
+    # This ensures we never orphan a tool result without its corresponding call.
+    if discard < len(active_set):
+        msg = active_set[discard]
+        role = msg.get(ROLE) if isinstance(msg, dict) else getattr(msg, ROLE, '')
+        if role == FUNCTION:
+            # Walk back to find the ASSISTANT message with a function_call
+            i = discard - 1
+            while i >= 0:
+                prev_msg = active_set[i]
+                prev_role = prev_msg.get(ROLE) if isinstance(prev_msg, dict) else getattr(prev_msg, ROLE, '')
+                if prev_role == ASSISTANT and (
+                    prev_msg.get('function_call') if isinstance(prev_msg, dict)
+                    else getattr(prev_msg, 'function_call', None)
+                ):
+                    # Found the tool call at index i — include both it AND the
+                    # FUNCTION result at index discard in the discard set.
+                    # discard was already past index i (i < discard), so we need
+                    # to extend discard to include the FUNCTION at position discard.
+                    discard = discard + 1
+                    break
+                elif prev_role != FUNCTION:
+                    # Not a tool chain (e.g., plain assistant text) — stop walking
+                    break
+                i -= 1
+
     return discard
 
 
