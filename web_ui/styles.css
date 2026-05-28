@@ -266,18 +266,31 @@ body {
   flex: 1;
 }
 
-/* ─── Sub-agent messages (used inside sub-agent panels) ───────────────────── */
+/* ─── Step 11: Agent-Specific Visual Identity via CSS Custom Properties ───────────────────── */
+/* Subtle accent colors per agent type — applied via [data-instance-name] attribute on message elements */
+[data-instance-name="coder"] .msg-header { border-bottom-color: #58a6ff; }
+[data-instance-name="researcher"] .msg-header { border-bottom-color: #3fb950; }
+[data-instance-name="writer"] .msg-header { border-bottom-color: #d29922; }
+[data-instance-name="reviewer"] .msg-header { border-bottom-color: #f85149; }
+[data-instance-name="security-advisor"] .msg-header { border-bottom-color: #bc8cff; }
+[data-instance-name="generalist"] .msg-header { border-bottom-color: #79c0ff; }
 
-.sub-agent-messages {
+/* Generic sub-agent accent — for agents without specific color */
+[data-agent-type="sub"] .msg-header { border-bottom: 1px solid transparent; }
+
+/* ─── Unified message scroll container (used in both root and sub-agent panels) ───────────────────── */
+
+.messages {
   flex: 1;
   overflow-y: auto;
   padding: 24px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  scroll-behavior: smooth;
 }
 
-/* Unified markdown styles for both message types — single .msg-content selector replaces .msg-content/.sub-msg-content pairs */
+/* Unified markdown styles for all message types — single .msg-content selector */
 .msg-content p {
   margin: 0 0 8px;
 }
@@ -522,14 +535,15 @@ body {
   background: var(--bg-primary);
 }
 
-.sub-agent-panel .sub-agent-messages {
+/* Unified scroll container in sub-agent panels — same as root chat */
+.sub-agent-panel .messages {
   flex: 1;
   overflow-y: auto;
   scroll-behavior: smooth;
   min-height: 0;
 }
 
-.sub-agent-activity-bar,
+/* Unified activity bar — single class for all panels */
 .main-activity-bar {
   padding: 8px 16px;
   background: var(--bg-tertiary);
@@ -544,8 +558,7 @@ body {
   z-index: 10;
 }
 
-.main-activity-bar.active,
-.sub-agent-activity-bar.active {
+.main-activity-bar.active {
   box-shadow: 0 -2px 8px rgba(0,0,0,0.2);
 }
 
@@ -918,16 +931,6 @@ body {
   transform: translateX(16px);
 }
 
-.messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  scroll-behavior: smooth;
-}
-
 /* ─── Message bubbles ─────────────────────────────────────────────────────── */
 
 .message {
@@ -1030,19 +1033,17 @@ body {
 /* Markdown inside messages */
 /* Existing msg-content styles are now handled by unified blocks above */
 
-/* === Tab Unification: Data-Attribute Based Selectors === */
-/* Sub-agent specific visual hierarchy via indentation/border — applied via [data-agent-type="sub"] */
+/* === Tab Unification: Subtle accent for sub-agent messages (no indent) === */
+/* Applied via [data-agent-type="sub"] — unified visual style with root messages */
 
 [data-agent-type="sub"] {
-    border-left: 2px solid var(--border-color, #333);
-    margin-left: 16px;
+    border-left: 2px solid var(--accent-dim, #555);
 }
 
 [data-agent-type="sub"] .msg-name {
-    font-size: 11px;
-    color: var(--text-muted);
+    font-size: 12px;
+    color: var(--text-secondary);
     font-weight: 600;
-    margin-bottom: 2px;
 }
 
 /* ─── Tool calls & results ────────────────────────────────────────────────── */
@@ -1279,8 +1280,11 @@ body {
   overflow-y: auto;
   z-index: 50;
   flex-shrink: 0;
+  order: -1; /* Ensure approval bar renders before tab panels even when many tabs exist */
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
   animation: slide-down 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  /* Ensure approval bar is never hidden by overflow in parent container */
+  position: relative;
 }
 
 @keyframes slide-down {

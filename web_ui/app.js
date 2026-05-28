@@ -59,6 +59,7 @@ const state = {
     lastControlsUpdate: 0,      // For updateControls throttling (~1Hz)
     lastTelemetryUpdate: 0,     // For updateTelemetryPanel throttling (~2s)
     lastChatContentKey: '',     // Content key for early-exit optimization (count:length)
+    subContextBarThrottle: {},  // Per-agent context bar throttle timestamps (~1Hz during streaming)
   },
   totalTokens: 0,
   totalWords: 0,
@@ -84,6 +85,9 @@ document.addEventListener('visibilitychange', () => {
 
 // Sticky auto-scroll: locked at bottom by default, unlocks when user scrolls up
 let isAutoScrollLocked = true;
+
+// Per-panel scroll lock state for sub-agent panels (Step 8)
+const subAgentScrollLocks = {};
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
@@ -434,6 +438,7 @@ function saveSettings() {
   if ($('#setting-auto-continue')) s['auto-continue'] = $('#setting-auto-continue').checked;
   if ($('#setting-show-active-only')) s['show-active-only'] = $('#setting-show-active-only').checked;
   if ($('#setting-tool-result-max-chars')) s['tool-result-max-chars'] = $('#setting-tool-result-max-chars').value;
+  if ($('#setting-idle-timeout')) s['idle-timeout'] = $('#setting-idle-timeout').value;
   if (settingVisionEnabled) s['vision-enabled'] = settingVisionEnabled.checked;
   if (afkToggle) s['afk-enabled'] = afkToggle.checked;
   if (settingAfkMessage) s['afk-message'] = settingAfkMessage.value;
@@ -519,6 +524,9 @@ function loadSettings() {
     if (s['tool-result-max-chars'] !== undefined) {
       $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
       $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
+    }
+    if (s['idle-timeout'] !== undefined) {
+      $('#setting-idle-timeout').value = s['idle-timeout'];
     }
     if (s['grep_char_limit'] !== undefined) {
       $('#setting-grep-char-limit').value = s['grep_char_limit'];
@@ -839,7 +847,7 @@ function handleServerMessage(data) {
       lastLastContent = null;
       
       // Invalidate sub-agent panel caches so edits/deletes trigger re-renders
-      mainTabPanels.querySelectorAll('.sub-agent-messages').forEach(p => { p.dataset.contentKey = ''; });
+      mainTabPanels.querySelectorAll('.messages').forEach(p => { p.dataset.contentKey = ''; });
       
       renderMessages();
       renderSubAgents();
@@ -1279,13 +1287,12 @@ const readyMsgs = [];
   // Auto-scroll: batched in requestAnimationFrame to avoid forced reflows.
   // Reads layout (scrollHeight/scrollTop/clientHeight) AFTER DOM writes complete,
   // then scrolls if needed — single read-write cycle instead of interleaved reads/writes.
-  // The isAutoScrollLocked flag persists across ticks: locked = scroll + unlock, unlocked but at bottom = re-lock.
+  // Auto-scroll via rAF: scroll when locked at bottom, re-lock if user returns to bottom.
   requestAnimationFrame(() => {
     const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
 
     if (isAutoScrollLocked) {
-      isAutoScrollLocked = false; // Unlock on each tick so user can scroll freely
-      container.scrollTop = container.scrollHeight;
+      container.scrollTop = container.scrollHeight; // Scroll — scroll listener handles lock state
     } else if (atBottom) {
       isAutoScrollLocked = true; // Re-lock if user scrolled back to bottom
     }
@@ -1410,18 +1417,15 @@ function nameLabelClass(isRoot) {
 }
 
 /** Return the display label for a role, depending on whether it's root or sub-agent */
-function roleName(role, isRoot, msg) {
-    if (!isRoot) {
-        if (role === 'user') return '📤 Task';
-        if (role === 'assistant') return 'Agent';
-        if (role === 'tool') return 'result';
-        return role;
-    }
-    // Root labels — existing behavior
+function roleName(role, isRoot, msg, instanceName) {
+    // Unified labels: "You" for user everywhere, agent name for assistant in sub-agent tabs, "Tool Result" everywhere
     if (role === 'user') return 'You';
-    if (role === 'assistant') return 'Assistant';
-    if (role === 'tool') return 'Tool Result';
-    return role;
+    if (role === 'tool' || role === 'function') return 'Tool Result';
+    
+    // Assistant: show agent name from msg.name if available, then instanceName, then fallback
+    if (msg.name) return msg.name;
+    if (!isRoot && instanceName) return instanceName;
+    return 'Assistant';
 }
 
 /** Get config object for root-agent rendering */
@@ -1444,13 +1448,19 @@ function getSubAgentConfig(name) {
  * @param {number} depth        - nesting level (0=root, 1=direct sub-agent, etc.)
  * @param {Array}  [indexMap]   - optional mapping from filtered-index → original-index
  *                                (needed when messages have been pre-filtered, e.g., system msgs removed)
+ * @param {Object} [configOverride] - optional config override (e.g., isGenerating for sub-agent streaming state)
  * @returns {DocumentFragment}  fragment containing all rendered message elements
  */
-function renderAgentConversation(instanceName, messages, depth, indexMap) {
+function renderAgentConversation(instanceName, messages, depth, indexMap, configOverride) {
     if (!messages || messages.length === 0) return document.createDocumentFragment();
 
     const isRoot = (instanceName === 'root');
-    const config = isRoot ? getRootAgentConfig() : getSubAgentConfig(instanceName);
+    let config = isRoot ? getRootAgentConfig() : getSubAgentConfig(instanceName);
+    
+    // Merge any override (e.g., isGenerating from agentData.active)
+    if (configOverride) {
+        config = Object.assign({}, config, configOverride);
+    }
 
     const fragment = document.createDocumentFragment();
 
@@ -1492,7 +1502,7 @@ function createMessageEl(msg, index, config) {
   
   const nameSpan = document.createElement('span');
   nameSpan.className = nameLabelClass(isRoot);
-  nameSpan.textContent = roleName(msg.role || 'unknown', isRoot, msg);
+  nameSpan.textContent = roleName(msg.role || 'unknown', isRoot, msg, instName);
   header.appendChild(nameSpan);
 
   // Actions
@@ -1550,7 +1560,10 @@ function createMessageEl(msg, index, config) {
   contentDiv.className = contentClass(isRoot);
 
   let html = '';
-  const isGenerating = state.generating && index === state.messages.length - 1;
+  // Step 6 fix: Check config.isGenerating first (per-panel), then fall back to root state check
+  const isGenerating = (config.isGenerating !== undefined) 
+    ? config.isGenerating 
+    : (state.generating && index === (isRoot ? state.messages.length : (state.subAgents[config.instanceName]?.messages?.length || 0)) - 1);
 
   // Handle reasoning/thinking content first (always shown if present)
   if (msg.reasoning_content) {
@@ -1965,12 +1978,16 @@ function getEditClone(textarea) {
 function startEdit(index, selectedText = '', proportion = 0, instanceName = null) {
   const msgs = instanceName ? (state.subAgents[instanceName] ? state.subAgents[instanceName].messages : []) : state.messages;
   const msg = msgs[index];
-  if (!msg || msg.function_call || msg.role === 'function' || state.generating) return;
+  // Check if the specific agent is generating, not just the global root state
+  const isAgentGenerating = instanceName 
+    ? (state.subAgents[instanceName]?.active ?? state.generating)
+    : state.generating;
+  if (!msg || msg.function_call || msg.role === 'function' || isAgentGenerating) return;
 
   state.editingIndex = index;
   state.editingInstance = instanceName;
 
-  const containerSelector = instanceName ? `#panelSub-${instanceName} .sub-agent-messages` : '.messages-scroll';
+  const containerSelector = instanceName ? `#panelSub-${instanceName} .messages-scroll` : '.messages-scroll';
   const scrollContainer = document.querySelector(containerSelector);
   if (!scrollContainer) return;
 
@@ -2100,7 +2117,7 @@ function finishEdit(index, newContent, instanceName = null) {
   send({ type: 'edit_message', index, content: newContent, instance_name: instanceName });
 
   // Localized re-render
-  const containerSelector = instanceName ? `#panelSub-${instanceName} .sub-agent-messages` : '.messages-scroll';
+  const containerSelector = instanceName ? `#panelSub-${instanceName} .messages-scroll` : '.messages-scroll';
   const scrollContainer = document.querySelector(containerSelector);
   if (!scrollContainer) return;
 
@@ -2121,7 +2138,7 @@ function cancelEdit(index, instanceName = null) {
   }
 
   // Localized re-render
-  const containerSelector = instanceName ? `#panelSub-${instanceName} .sub-agent-messages` : '.messages-scroll';
+  const containerSelector = instanceName ? `#panelSub-${instanceName} .messages-scroll` : '.messages-scroll';
   const scrollContainer = document.querySelector(containerSelector);
   if (!scrollContainer) return;
 
@@ -2209,6 +2226,11 @@ function renderApprovals() {
 
   bar.style.display = 'block';
   bar.innerHTML = '';
+  
+  // Scroll approval bar into view if it's off-screen (happens with many agent tabs)
+  requestAnimationFrame(() => {
+    bar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
 
   for (const ap of state.approvals) {
     const card = document.createElement('div');
@@ -2307,6 +2329,11 @@ function renderSubAgents() {
       tab.remove();
       const panel = document.getElementById('panelSub-' + agentName);
       if (panel) panel.remove();
+      // Step 10: Clean up per-panel state when agent is removed
+      delete subAgentScrollLocks[agentName];
+      if (state.genStats.subContextBarThrottle) {
+        delete state.genStats.subContextBarThrottle[agentName];
+      }
     }
   });
 
@@ -2422,14 +2449,29 @@ function renderSubAgentPanel(panel, agentData, name) {
   if (!panel.dataset.initialized) {
     panel.dataset.initialized = "true";
     
-    // Scroll Container
+    // Scroll Container — unified class matches root chat panel
     const scrollContainer = document.createElement('div');
-    scrollContainer.className = 'sub-agent-messages messages-scroll';
+    scrollContainer.className = 'messages messages-scroll';
     panel.appendChild(scrollContainer);
     
-    // Activity Bar
+    // Step 8: Set up per-panel scroll lock state and listener for sub-agent panels
+    if (!subAgentScrollLocks[name]) {
+      subAgentScrollLocks[name] = { locked: true, listenerAdded: false }; // Start locked at bottom
+      
+      // Scroll listener: unlock when user scrolls up, re-lock when they scroll to bottom
+      // Only add once — guard is on listenerAdded, not on lock state
+      if (!subAgentScrollLocks[name].listenerAdded) {
+        scrollContainer.addEventListener('scroll', () => {
+          const distFromBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
+          subAgentScrollLocks[name].locked = (distFromBottom < 50);
+        });
+        subAgentScrollLocks[name].listenerAdded = true;
+      }
+    }
+    
+    // Activity Bar — unified class matches root chat panel
     const activityBar = document.createElement('div');
-    activityBar.className = 'sub-agent-activity-bar';
+    activityBar.className = 'main-activity-bar';
     activityBar.innerHTML = `
       <div class="activity-status">
         <span class="activity-dot"></span>
@@ -2466,8 +2508,8 @@ function renderSubAgentPanel(panel, agentData, name) {
     // Insert activity bar only (no per-panel input area — uses shared bottom bar)
   }
 
-  const activityBar = panel.querySelector('.sub-agent-activity-bar');
-  const scrollContainer = panel.querySelector('.sub-agent-messages');
+  const activityBar = panel.querySelector('.main-activity-bar');
+  const scrollContainer = panel.querySelector('.messages');
   const terminateBtn = activityBar.querySelector('.terminate-btn');
   const pauseBtn = activityBar.querySelector('.pause-btn');
   
@@ -2523,7 +2565,6 @@ function renderSubAgentPanel(panel, agentData, name) {
     return;
   }
 
-  const wasAtBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 50;
   panel.dataset.contentKey = contentKey;
 
   // 6. Incremental Rendering
@@ -2532,8 +2573,10 @@ function renderSubAgentPanel(panel, agentData, name) {
 
   if (currentCount < lastCount || lastCount === 0) {
     scrollContainer.innerHTML = '';
-    // Use unified rendering path for sub-agent full re-render
-    scrollContainer.appendChild(renderAgentConversation(name, msgs, 1));
+    // Pass isGenerating via config override so all messages know the streaming state
+    const subConfig = getSubAgentConfig(name);
+    subConfig.isGenerating = agentData.active;
+    scrollContainer.appendChild(renderAgentConversation(name, msgs, 1, null, subConfig));
     const fillEl = document.getElementById('subContextFill-' + name);
     if (fillEl) updateContextBar(fillEl, msgs, agentData.total_tokens, agentData.max_tokens);
   } else {
@@ -2544,9 +2587,19 @@ function renderSubAgentPanel(panel, agentData, name) {
       newMsgs.push(msgs[i]);
       newIndexMap.push(i);
     }
-    scrollContainer.appendChild(renderAgentConversation(name, newMsgs, 1, newIndexMap));
-    const fillEl = document.getElementById('subContextFill-' + name);
-    if (fillEl) updateContextBar(fillEl, msgs, agentData.total_tokens, agentData.max_tokens);
+    // Pass isGenerating via config override so all messages know the streaming state
+    const subConfig = getSubAgentConfig(name);
+    subConfig.isGenerating = agentData.active;
+    scrollContainer.appendChild(renderAgentConversation(name, newMsgs, 1, newIndexMap, subConfig));
+    
+    // Step 9: Throttle context bar updates to ~1Hz during streaming for sub-agents
+    const nowInRender = performance.now();
+    const lastUpdate = state.genStats.subContextBarThrottle[name] || 0;
+    if (nowInRender - lastUpdate > 1000 || currentCount - lastCount > 1) {
+      const fillEl = document.getElementById('subContextFill-' + name);
+      if (fillEl) updateContextBar(fillEl, msgs, agentData.total_tokens, agentData.max_tokens);
+      state.genStats.subContextBarThrottle[name] = nowInRender;
+    }
     // Use unified bubble content update with isGenerating passed via config
     if (scrollContainer.lastElementChild) {
       const subConfig = getSubAgentConfig(name);
@@ -2556,158 +2609,19 @@ function renderSubAgentPanel(panel, agentData, name) {
   }
   panel.dataset.lastRenderedCount = currentCount;
 
-  if (wasAtBottom) scrollContainer.scrollTop = scrollContainer.scrollHeight;
-}
-
-function createSubMsgEl(msg, index, instanceName, isGenerating) {
-  const div = document.createElement('div');
-  div.className = `sub-msg sub-msg-${msg.role || 'unknown'}`;
-  div.dataset.index = index;
-
-  const isEditable = !msg.function_call && msg.role !== 'function' && msg.role !== 'system';
-
-  const header = document.createElement('div');
-  header.className = 'sub-msg-header';
-  header.style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;";
-
-  const label = document.createElement('div');
-  label.className = 'sub-msg-label';
-  label.style = "margin-bottom: 0;";
-  
-  label.textContent = msg.role === 'user' ? '📤 Task' :
-    msg.role === 'function' ? `${msg.name || 'result'}` :
-      msg.name || 'Agent';
-
-  header.appendChild(label);
-
-  // Actions
-  const actions = document.createElement('div');
-  actions.className = 'msg-actions';
-
-  if (isEditable) {
-    const editBtn = document.createElement('button');
-    editBtn.className = 'msg-action-btn';
-    editBtn.textContent = '✏️';
-    editBtn.title = 'Edit message';
-    editBtn.onclick = (e) => { e.stopPropagation(); startEdit(index, '', 0, instanceName); };
-    actions.appendChild(editBtn);
-  }
-
-  const delBtn = document.createElement('button');
-  delBtn.className = 'msg-action-btn msg-action-delete';
-  delBtn.textContent = '🗑️';
-  delBtn.title = 'Delete message';
-  delBtn.onclick = (e) => { e.stopPropagation(); deleteMessage(index, instanceName); };
-  actions.appendChild(delBtn);
-
-  header.appendChild(actions);
-  div.appendChild(header);
-
-  const content = document.createElement('div');
-  content.className = 'sub-msg-content';
-
-  div.appendChild(content);
-
-  // Double click edit
-  div.addEventListener('dblclick', (e) => {
-    if (state.generating || !isEditable) return;
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) return;
-
-    let selectedText = sel.toString().trim();
-    if (!selectedText) return;
-
-    if (e.target.closest('.sub-msg-header')) return;
-
-    const contentDiv = div.querySelector('.sub-msg-content');
-    if (!contentDiv) return;
-
-    const range = sel.getRangeAt(0);
-    const preCaretRange = range.cloneRange();
-    preCaretRange.selectNodeContents(contentDiv);
-    preCaretRange.setEnd(range.startContainer, range.startOffset);
-    const renderedOffset = preCaretRange.toString().length;
-    const renderedLength = contentDiv.textContent.length;
-
-    const proportion = renderedLength > 0 ? renderedOffset / renderedLength : 0;
-
-    startEdit(index, selectedText, proportion, instanceName);
+  // Step 8: Unified auto-scroll using requestAnimationFrame and per-panel scroll lock state
+  requestAnimationFrame(() => {
+    const atBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 50;
+    
+    if (subAgentScrollLocks[name]?.locked) {
+      scrollContainer.scrollTop = scrollContainer.scrollHeight; // Scroll — scroll listener handles lock state
+    } else if (atBottom && subAgentScrollLocks[name]) {
+      subAgentScrollLocks[name].locked = true; // Re-lock if user scrolled back to bottom
+    }
   });
-
-  updateSubBubbleContent(div, msg, isGenerating);
-  return div;
 }
 
-
-function updateSubBubbleContent(bubble, msg, isGenerating) {
-  const content = bubble.querySelector('.sub-msg-content');
-  if (!content) return;
-
-  // PERFORMANCE: During streaming, only render the delta (new text appended)
-  // instead of re-rendering the entire message. This avoids O(N) marked.parse()
-  // on every tick when N is large (thousands of words).
-  const prevContent = bubble.dataset.prevSubContent;
-  const curContent = msg.content || '';
-  
-  if (isGenerating && prevContent !== undefined && !msg.function_call && msg.role !== 'function') {
-    // Force full re-render if reasoning_content changed — incremental path only handles plain content
-    const prevReasoning = bubble.dataset.prevSubReasoning;
-    const curReasoning = msg.reasoning_content || '';
-    if (prevReasoning !== curReasoning) {
-      delete bubble.dataset.prevSubContent;
-      delete bubble.dataset.prevSubReasoning;
-    } else if (curContent.startsWith(prevContent)) {
-      // Incremental streaming update: only render the new portion.
-      const newText = curContent.slice(prevContent.length);
-      if (newText) {
-        if (appendStreamingDelta(content, newText)) {
-          bubble.dataset.prevSubContent = curContent;
-          return;
-        }
-        // No suitable target — fall through to full re-render below
-      } else {
-        bubble.dataset.prevSubContent = curContent;
-        return;
-      }
-    }
-  }
-  
-  // Fallback: full re-render (content changed non-incrementally, or not generating)
-  delete bubble.dataset.prevSubContent;
-  delete bubble.dataset.prevSubReasoning;
-
-  let html = '';
-  if (msg.reasoning_content) {
-    html += renderThinkingBlock(msg.reasoning_content, isGenerating);
-  }
-
-  if (msg.function_call) {
-    html += renderToolCall(msg);
-  } else if (msg.role === 'function') {
-    html += renderToolResult(msg);
-  } else {
-    let text = msg.content || '';
-    // Deduplicate: If content starts with a thinking block that matches reasoning_content, strip it
-    if (msg.reasoning_content) {
-        const thinkMatch = text.match(_THINK_BLOCK_ANCHORED_RE) || text.match(_THINK_BLOCK_BRACKET_ANCHORED_RE);
-        if (thinkMatch) {
-            const embedded = thinkMatch[2].trim();
-            const reasoning = msg.reasoning_content.trim();
-            if (reasoning.includes(embedded) || embedded.includes(reasoning)) {
-                text = text.substring(thinkMatch[0].length).trim();
-            }
-        }
-    }
-    html += renderMarkdown(text, false); // Skip thinking block parsing — reasoning_content is already rendered separately via renderThinkingBlock
-  }
-
-  setInnerHtmlWithState(content, html);
-  
-  // Restore prevSubContent/prevSubReasoning after full re-render so the next tick
-  // can use the incremental path if only plain content grew.
-  bubble.dataset.prevSubContent = curContent;
-  bubble.dataset.prevSubReasoning = msg.reasoning_content || '';
-}
+// Dead code removed: createSubMsgEl and updateSubBubbleContent — replaced by unified renderAgentConversation + updateBubbleContent
 
 function switchMainTab(tabId) {
   // Update tab buttons
@@ -2720,15 +2634,28 @@ function switchMainTab(tabId) {
   if (tabId === 'chat') {
     const chatPanel = document.getElementById('panelChat');
     chatPanel.classList.add('active');
-    const scroll = chatPanel.querySelector('.messages-scroll');
-    if (scroll) scroll.scrollTop = scroll.scrollHeight;
+    const scroll = chatPanel.querySelector('.messages');
+    if (scroll) {
+      // Only scroll to bottom if user was near the bottom or generation is active
+      const distFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
+      if (distFromBottom < 50 || state.generating) {
+        scroll.scrollTop = scroll.scrollHeight;
+      }
+    }
   } else {
     const name = tabId.substring(4); // strip 'sub-'
     const panel = document.getElementById('panelSub-' + name);
     if (panel) {
       panel.classList.add('active');
-      const scroll = panel.querySelector('.messages-scroll');
-      if (scroll) scroll.scrollTop = scroll.scrollHeight;
+      const scroll = panel.querySelector('.messages');
+      if (scroll) {
+        // Only scroll to bottom if user was near the bottom or agent is actively generating
+        const distFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
+        const isGenerating = state.subAgents[name]?.active || state.generating;
+        if (distFromBottom < 50 || isGenerating) {
+          scroll.scrollTop = scroll.scrollHeight;
+        }
+      }
     }
   }
   
@@ -3414,6 +3341,7 @@ function getGenerateCfg() {
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
   if ($('#setting-max-rollbacks')) cfg.max_auto_rollbacks = parseInt($('#setting-max-rollbacks').value);
+  if ($('#setting-idle-timeout')) cfg.idle_timeout_seconds = parseFloat($('#setting-idle-timeout').value);
   if ($('#setting-tool-result-max-chars')) cfg.tool_result_max_chars = parseInt($('#setting-tool-result-max-chars').value) || 10000;
   if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value) || -1;
   if ($('#setting-grep-spillover')) cfg.grep_spillover = $('#setting-grep-spillover').checked;
@@ -3480,11 +3408,11 @@ function sendMessage(inputEl) {
 function continueMessage() {
   if (state.generating) return;
 
-  const text = "[SYSTEM]: Please continue.";
+  // FIX: Send a 'continue' type instead of a regular 'message'.
+  // This tells the server to resume generation without inserting a new user message.
   resetGenStats();
   send({
-    type: 'message',
-    text,
+    type: 'continue',
     agent_index: state.agentIndex,
     session_name: state.sessionName,
     generate_cfg: getGenerateCfg()

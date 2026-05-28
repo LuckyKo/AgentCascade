@@ -1553,7 +1553,8 @@ class ExecutionEngine:
         if not isinstance(tool_result, str):
             return tool_result
 
-        if tool_name in ['compress_context']:
+        # Exempt tools with short, structured output where truncation could confuse the agent
+        if tool_name in ['compress_context', 'read_file', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'move_file']:
             return tool_result
 
         inst = self.pool.get_instance(instance_name)

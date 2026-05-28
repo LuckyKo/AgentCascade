@@ -1382,6 +1382,41 @@ def create_app(agents, agent_pool, config=None):
 
                     await broadcast({'type': 'state', **build_state(generating=True)})
 
+                elif msg_type == 'continue':
+                    # Continue generation WITHOUT inserting a new user message.
+                    # Just send the existing conversation to the LLM so it can resume if it wants.
+                    # Update session config if provided
+                    if 'agent_index' in data:
+                        session['agent_index'] = int(data['agent_index'])
+                    if 'session_name' in data:
+                        session['session_name'] = data['session_name']
+                    if 'generate_cfg' in data:
+                        session['generate_cfg'] = data['generate_cfg']
+
+                    # Start agent generation with existing history (no new user message)
+                    with session_lock:
+                        session['stop_requested'] = False
+                    if agent_pool:
+                        agent_pool.stopped = False
+
+                    session['generation_id'] += 1
+                    gen_id = session['generation_id']
+                    agent_runner = get_agent()
+                    loop = asyncio.get_event_loop()
+
+                    # Get the current history from the pool (unified path)
+                    inst = agent_pool.get_instance(session['session_name']) if agent_pool else None
+                    history_copy = copy.deepcopy(inst.conversation) if inst else copy.deepcopy(session.get('history', []))
+
+                    thread = threading.Thread(
+                        target=run_agent_thread,
+                        args=(history_copy, agent_runner, gen_id, loop),
+                        daemon=True,
+                    )
+                    thread.start()
+
+                    await broadcast({'type': 'state', **build_state(generating=True)})
+
                 elif msg_type == 'stop':
                     with session_lock:
                         session['stop_requested'] = True
@@ -1684,6 +1719,10 @@ def create_app(agents, agent_pool, config=None):
                                 new_ws = ui_cfg['default_workspace']
                                 if new_ws:
                                     agent_pool.operation_manager.set_base_dir(new_ws)
+                        # Update idle timeout from UI settings (Bug #3 fix)
+                        if 'idle_timeout_seconds' in ui_cfg and agent_pool and hasattr(agent_pool, 'settings'):
+                            val = float(ui_cfg['idle_timeout_seconds'])
+                            agent_pool.settings.idle_timeout_seconds = max(0.0, val)  # 0 disables auto-dismissal
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'update_endpoints':

@@ -465,6 +465,10 @@
                     <input type="number" id="setting-max-rollbacks" min="-1" max="100" value="3" />
                   </label>
                   <label class="setting-field">
+                    <span>Auto-Discard Idle Agents (seconds, 0=off)</span>
+                    <input type="number" id="setting-idle-timeout" min="0" max="3600" step="10" value="300" />
+                  </label>
+                  <label class="setting-field">
                     <span>Wild Read Threshold (Chars)</span>
                     <input type="number" id="setting-tool-result-max-chars" min="1000" max="500000" step="1000" value="10000" />
                   </label>
