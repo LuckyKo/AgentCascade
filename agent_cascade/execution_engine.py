@@ -60,6 +60,7 @@ class ExecutionEngine:
             List[Message]: Current conversation state after each phase.
         """
         instance.is_active = True  # Mark active before execution starts
+        self._current_instance = instance  # Fix #2: set for token count cache lookups
         try:
             # ── Phase 1: Setup ─────────────────────────────────────────────
             messages, llm_messages, response = self._setup_turn(instance)
@@ -264,6 +265,8 @@ class ExecutionEngine:
                 llm_messages.append(async_msg)
                 with instance._compression_lock:
                     instance.conversation.append(async_msg)
+                # Fix #2: Invalidate token count cache — conversation mutated
+                instance._last_token_count_conversation_length = -1
             return True  # Yield and continue loop to process new messages
 
         # ── /compress manual command handling (Item 7) ──────────────────────
@@ -272,7 +275,7 @@ class ExecutionEngine:
 
         # ── COMPRESSION CHECK (critical for long-running agents) ────────────
         max_tokens = self._get_max_tokens(instance)
-        current_tokens = self._count_history_tokens(llm_messages)
+        current_tokens = self._count_history_tokens(llm_messages, instance)
         usage_pct = (current_tokens / max_tokens * 100) if max_tokens > 0 else 0
 
         # Forced compression at >95% — halts other agents, compresses, rebuilds
@@ -324,6 +327,8 @@ class ExecutionEngine:
             if result.success:
                 # Rebuild working set from compressed pool state
                 self._rebuild_working_set(messages, llm_messages, inst_name)
+                # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
+                instance._last_token_count_conversation_length = -1
                 # Use summary_text directly from CompressResult (P2 fix — no fragile tag parsing)
                 instance.compression_summary = result.summary_text
                 # Update latest_marker_index to point to the new marker in the conversation (P2 fix)
@@ -535,6 +540,9 @@ class ExecutionEngine:
         with instance._compression_lock:
             instance.conversation.extend(turn_output)
 
+        # Fix #2: Invalidate token count cache — conversation length changed
+        instance._last_token_count_conversation_length = -1  # Force cache miss on next call
+
         # Persist messages to JSONL log file (P1: LoggerManager migration)
         try:
             log_inst = self.pool.get_logger(inst_name, instance.agent_class)
@@ -554,6 +562,8 @@ class ExecutionEngine:
             llm_messages.append(cont_msg)
             with instance._compression_lock:
                 instance.conversation.append(cont_msg)
+            # Fix #2: Invalidate token count cache — conversation mutated
+            instance._last_token_count_conversation_length = -1
             return True  # Continue to next LLM call
 
         # ── Tool detection and execution ────────────────────────────────────
@@ -594,6 +604,8 @@ class ExecutionEngine:
             llm_messages.append(fn_msg)
             with instance._compression_lock:
                 instance.conversation.append(fn_msg)
+            # Fix #2: Invalidate token count cache — conversation mutated
+            instance._last_token_count_conversation_length = -1
 
             # ── Mid-tool urgent injection ───────────────────────────────────
             urgent = self.pool.drain_queue(inst_name)
@@ -605,6 +617,8 @@ class ExecutionEngine:
                         llm_messages.append(async_msg)
                         with instance._compression_lock:
                             instance.conversation.append(async_msg)
+                # Fix #2: Invalidate token count cache — conversation mutated by urgent injection
+                instance._last_token_count_conversation_length = -1
                 break  # Stop executing remaining tools
 
         return used_any_tool or is_truncated  # Continue loop if tool was used
@@ -870,6 +884,9 @@ class ExecutionEngine:
         )
 
         if result.success:
+            # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
+            instance._last_token_count_conversation_length = -1
+
             # Sync logger's internal data["history"] to match pool state (Item 11)
             # Without this, update_history() will treat pool messages not yet seen by
             # the logger as "new" and append them, causing duplication.
@@ -1032,6 +1049,9 @@ class ExecutionEngine:
                         )
                 except Exception as e:
                     logger.error(f"Recovery after /compress failed for '{inst_name}': {e}")
+
+            # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
+            instance._last_token_count_conversation_length = -1
 
             # Sync logger's internal data["history"] to match pool state (Item 11)
             # Without this, update_history() will treat pool messages not yet seen by
@@ -1240,12 +1260,14 @@ class ExecutionEngine:
         with self.pool._execution._state_lock:
             self.pool._execution.active_stack.append(instance_name)
 
-        # Item 12: Initialize sub-agent WebUI state before execution begins
+        # Item 12: Initialize sub-agent WebUI state before execution begins (Fix #3: lighter snapshot)
         try:
             initial_state = {
                 'active': True,
                 'agent_name': f"{instance_name} ({agent_class})",
-                'messages': list(conv),
+                'message_count': len(conv),
+                'latest_message_summary': '',
+                'conversation_length_tokens': getattr(inst, '_cached_token_count', 0),
             }
             with self.pool._execution._state_lock:
                 self.pool.sub_agent_state[instance_name] = initial_state
@@ -1261,15 +1283,23 @@ class ExecutionEngine:
                     break
                 final_resp = resp
 
-                # Item 12: Throttled sub-agent WebUI state update (every 5 turns)
+                # Item 12: Throttled sub-agent WebUI state update (every 5 turns) — Fix #3: lighter snapshot
                 _update_counter += 1
                 if _update_counter % 5 == 0:
                     try:
                         current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
+                        # Build a lightweight summary of the latest message instead of full dump
+                        latest_summary = ''
+                        if final_resp:
+                            last_msg = final_resp[-1]
+                            content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
+                            latest_summary = str(content)[:500] if content else ''
                         state = {
                             'active': True,
                             'agent_name': f"{instance_name} ({agent_class})",
-                            'messages': [dict(m) if isinstance(m, dict) else m.model_dump() if hasattr(m, 'model_dump') else m for m in current_conv + list(final_resp)],
+                            'message_count': len(current_conv),  # inst.conversation already includes final_resp
+                            'latest_message_summary': latest_summary,
+                            'conversation_length_tokens': getattr(inst, '_cached_token_count', 0),
                         }
                         with self.pool._execution._state_lock:
                             self.pool.sub_agent_state[instance_name] = state
@@ -1278,14 +1308,21 @@ class ExecutionEngine:
 
             conv.extend(final_resp)
 
-            # Item 12: Always emit final sub-agent state after loop completes
+            # Item 12: Always emit final sub-agent state after loop completes (Fix #3: lighter snapshot)
             # Ensures even short-lived agents (<5 turns) appear in the WebUI
             try:
                 current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
+                latest_summary = ''
+                if final_resp:
+                    last_msg = final_resp[-1]
+                    content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
+                    latest_summary = str(content)[:500] if content else ''
                 final_state = {
                     'active': False,  # Execution complete — agent is no longer active
                     'agent_name': f"{instance_name} ({agent_class})",
-                    'messages': [dict(m) if isinstance(m, dict) else m.model_dump() if hasattr(m, 'model_dump') else m for m in current_conv + list(final_resp)],
+                    'message_count': len(current_conv),  # inst.conversation already includes final_resp
+                    'latest_message_summary': latest_summary,
+                    'conversation_length_tokens': getattr(inst, '_cached_token_count', 0),
                 }
                 with self.pool._execution._state_lock:
                     self.pool.sub_agent_state[instance_name] = final_state
@@ -1344,10 +1381,15 @@ class ExecutionEngine:
         # 3. Fallback to reasonable default
         return 128000
 
-    def _count_history_tokens(self, messages: List[Message]) -> int:
-        """Calculate total tokens in a message list."""
+    def _count_history_tokens(self, messages: List[Message], instance: AgentInstance = None) -> int:
+        """Calculate total tokens in a message list (with caching — Fix #2)."""
         try:
             from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+
+            # Check cache: if conversation length hasn't changed, reuse the cached count
+            inst = instance or getattr(self, '_current_instance', None)  # Prefer explicit param (thread-safe)
+            if inst and inst._last_token_count_conversation_length >= 0 and len(messages) == inst._last_token_count_conversation_length:
+                return inst._cached_token_count
 
             total = 0
             for msg in messages:
@@ -1363,6 +1405,11 @@ class ExecutionEngine:
                 msg_obj = Message(**msg) if isinstance(msg, dict) else msg
                 text = extract_text_from_message(msg_obj, add_upload_info=True)
                 total += qwen_count(text)
+
+            # Update cache
+            if inst:
+                inst._cached_token_count = total
+                inst._last_token_count_conversation_length = len(messages)
 
             return total
         except Exception:

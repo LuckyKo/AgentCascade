@@ -55,7 +55,15 @@ class AgentInstanceLogger:
             if "original_log_path" not in self.data["metadata"] and "current_log_path" in base_metadata:
                 self.data["metadata"]["original_log_path"] = base_metadata["current_log_path"]
 
+        self._file_handle = None  # Cached file handle to avoid open/write/close per message (Fix #1)
         self._initial_save()
+
+    # ── File handle management ────────────────────────────────────────────
+
+    def _ensure_file(self):
+        """Open the log file if it's not already open. Reopens if closed."""
+        if self._file_handle is None or self._file_handle.closed:
+            self._file_handle = open(self.log_path, 'a', encoding='utf-8')
 
     # ── Formatting ────────────────────────────────────────────────────────
 
@@ -119,12 +127,14 @@ class AgentInstanceLogger:
     # ── File I/O ──────────────────────────────────────────────────────────
 
     def _append_line(self, data: Dict):
-        """Append a single JSON line to the log file."""
+        """Append a single JSON line to the log file (uses cached file handle)."""
         try:
-            with open(self.log_path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(data, ensure_ascii=False) + '\n')
+            self._ensure_file()
+            self._file_handle.write(json.dumps(data, ensure_ascii=False) + '\n')
+            self._file_handle.flush()  # Flush for durability — prevents data loss on crash
         except Exception as e:
             logger.error(f"Failed to append to agent log {self.log_path}: {e}")
+            self._file_handle = None  # Invalidate so _ensure_file reopens clean next time
 
     def _initial_save(self):
         """Write metadata as the first line."""
@@ -304,6 +314,12 @@ class AgentInstanceLogger:
         Otherwise, we append a compression baseline to the end of the log.
         """
         if rewrite:
+            # Close cached handle before overwriting (Fix #1)
+            if self._file_handle and not self._file_handle.closed:
+                self._file_handle.flush()
+                self._file_handle.close()
+                self._file_handle = None
+
             try:
                 # 1. Prepare all lines (metadata + history)
                 lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
@@ -362,6 +378,17 @@ class AgentInstanceLogger:
 
     # ── Rollback / truncation ─────────────────────────────────────────────
 
+    def close(self):
+        """Flush and close the cached file handle (Fix #1)."""
+        if self._file_handle and not self._file_handle.closed:
+            try:
+                self._file_handle.flush()
+                self._file_handle.close()
+            except Exception:
+                pass  # Best effort flush
+            finally:
+                self._file_handle = None
+
     def rollback(self, count: int, soft: bool = False, reason: Optional[str] = None):
         """Rollback the history by popping N messages.
 
@@ -382,6 +409,12 @@ class AgentInstanceLogger:
             }
             self._append_line(marker)
         else:
+            # Close cached handle before truncating (Fix #1)
+            if self._file_handle and not self._file_handle.closed:
+                self._file_handle.flush()
+                self._file_handle.close()
+                self._file_handle = None
+
             try:
                 with open(self.log_path, 'r', encoding='utf-8') as f:
                     lines = f.readlines()

@@ -75,11 +75,18 @@ class _InstanceConversationMapping(dict):
             raise KeyError(key)
 
     def __setitem__(self, key: str, value: List[Message]) -> None:
-        """Write propagates to instances[name].conversation AND dict storage."""
+        """Write propagates to instances[name].conversation AND dict storage.
+        
+        NOTE: Token count cache is invalidated automatically here when the instance exists.
+        If callers bypass this method (e.g., direct assignment), they must invalidate manually.
+        See Fix #2 for details.
+        """
         inst = self._pool.instances.get(key)
         if inst is not None:
             with inst._compression_lock:
                 inst.conversation = list(value)  # defensive copy
+            # Fix #2: Invalidate token count cache — conversation was replaced
+            inst._last_token_count_conversation_length = -1
         super().__setitem__(key, value)
 
     def __delitem__(self, key: str) -> None:
@@ -365,7 +372,19 @@ class AgentPool:
                 pass  # Already removed or never existed
         # Clean up logger entry for the instance
         with self._logger._lock:
-            self._logger._loggers.pop(instance_name, None)
+            log_inst = self._logger._loggers.pop(instance_name, None)
+
+        # Fix #3: Clean up stale sub_agent_state entries
+        if hasattr(self, 'sub_agent_state'):
+            self.sub_agent_state.pop(instance_name, None)
+
+        # Fix #1: Close the cached file handle for the logger if it exists
+        if log_inst and hasattr(log_inst, 'close'):
+            try:
+                log_inst.close()
+            except Exception:
+                pass
+
         self._fire_on_dismissed(instance_name)
 
     def halt_all_instances(self, except_instance: str = None,
@@ -455,6 +474,8 @@ class AgentPool:
             for inst in self.instances.values():
                 with inst._compression_lock:
                     inst.conversation.clear()
+                # Fix #2: Invalidate token count cache — conversation was cleared
+                inst._last_token_count_conversation_length = -1
 
     @property
     def _state_lock(self):
