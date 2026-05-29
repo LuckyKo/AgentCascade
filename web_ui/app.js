@@ -920,13 +920,25 @@ function handleServerMessage(data) {
       const historyCount = data.history_count || 0;
       const responseMsgs = data.response_messages || [];
 
-      // Merge root agent: keep stable history, replace streaming response tail
+      // Merge root agent: always truncate to historyCount before pushing response messages.
+      // The server guarantees that historyCount represents the number of stable messages
+      // already committed, and responseMsgs are the NEW messages beyond that.
+      // Always truncating prevents duplication when 'state' broadcast included messages
+      // that were committed during streaming (overlap between state.data.messages and stream_update.response_messages).
       const rootData = state.subAgents[rootName];
       if (rootData && rootData.messages) {
-        if (historyCount <= rootData.messages.length) {
+        // Guard against server reporting a higher historyCount than we have locally
+        // (can happen on reconnect or race conditions — reset to be safe instead of extending with undefined slots)
+        if (historyCount > rootData.messages.length) {
+          console.warn(`[stream_update] historyCount (${historyCount}) > local length (${rootData.messages.length}), resetting`);
+          rootData.messages = [];
+        } else {
           rootData.messages.length = historyCount;
         }
         rootData.messages.push(...responseMsgs);
+      } else if (rootData) {
+        // Root exists but has no messages yet — initialize from response_messages
+        rootData.messages = [...responseMsgs];
       }
 
       const oldStackStr = (state.activeStack || []).join(',');
@@ -964,6 +976,8 @@ function handleServerMessage(data) {
                 if (startIdx >= 0 && startIdx <= existing.messages.length) {
                   existing.messages.length = startIdx;
                   existing.messages.push(...sa.messages);
+                } else if (startIdx < 0) {
+                  console.warn(`[stream_update] sub-agent ${name}: startIdx (${startIdx}) < 0, hCount=${hCount}, sa.messages.length=${sa.messages.length} — server inconsistency`);
                 }
                 // Sync other metadata fields — but NOT messages (we just merged those above).
                 // Object.assign would overwrite our merged array with the partial sa.messages.
@@ -1045,15 +1059,18 @@ function handleServerMessage(data) {
         }
         return;
       }
-
+      
+             // Capture current timestamp for throttle checks below
+             const now = performance.now();
+      
       // Approvals require immediate rendering (user must see these promptly)
       if (data.approvals) {
         state.approvals = data.approvals;
         renderApprovals();
       }
 
-      // Throttle control updates to ~1Hz during streaming; always update when generating state changes
-      const wasGenerating = state.generating;
+      // Throttle control updates to ~1Hz during streaming; always update when generating state changes.
+      // Uses wasGenerating captured at function scope (line 770), before state.generating was updated above.
       if (wasGenerating !== state.generating || now - state.genStats.lastControlsUpdate > 1000) {
         updateControls();
         state.genStats.lastControlsUpdate = now;
@@ -1066,10 +1083,25 @@ function handleServerMessage(data) {
       //            to keep text flowing smoothly without excessive DOM churn.
       //   Tier 3 — Idle / no changes: slower throttle (~750ms) to save CPU.
       const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
-      const subThrottleContent = isSubAgentActive ? 150 : 750;
+      // During root-only streaming (no sub-agents in stack), use a moderate throttle rate
+      // since response messages were just merged into rootData.messages above.
+      // Root: ~3.3Hz (300ms) for smooth text flow. Sub-agent active: ~6.7Hz (150ms). Idle: ~1.3Hz (750ms).
+      const isRootStreaming = state.generating && !isSubAgentActive;
+      const subThrottleContent = isSubAgentActive ? 150 : (isRootStreaming ? 300 : 750);
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
       if (stackChanged || subAgentNewVisibleMessage || now - state.genStats.lastSubAgentRender > subThrottleContent) {
-        renderSubAgents();
+        // Only call renderSubAgents if we're NOT about to call switchMainTab,
+        // since switchMainTab calls renderSubAgents internally at the end.
+        // This avoids redundant rendering when stackChanged triggers a tab switch.
+        const willSwitchTab = stackChanged && (
+          (state.activeStack.length > 0 && state.subAgents?.[state.activeStack[state.activeStack.length - 1]] && 
+           state.activeSubTab !== 'sub-' + state.activeStack[state.activeStack.length - 1]) ||
+          (state.activeStack.length === 0 && state.activeSubTab !== getRootTabId())
+        );
+        
+        if (!willSwitchTab) {
+          renderSubAgents();
+        }
         state.genStats.lastSubAgentRender = now;
         
         if (stackChanged) {
@@ -1080,9 +1112,9 @@ function handleServerMessage(data) {
               switchMainTab('sub-' + topAgent);
             }
           } else {
-            // Only auto-switch back to root if the user isn't already looking at a sub-agent tab.
-            // This allows them to keep reading the sub-agent output even after it finishes.
-            if (!state.activeSubTab || !state.activeSubTab.startsWith('sub-')) {
+            // Auto-switch back to root when stack empties (if user isn't already on root)
+            // After unification, all tabs start with 'sub-' so we check against getRootTabId() directly
+            if (state.activeSubTab !== getRootTabId()) {
               switchMainTab(getRootTabId());
             }
           }
