@@ -131,36 +131,17 @@
 
       <!-- Main chat -->
       <main class="main">
-        <!-- Tab bar for Chat + Sub-agents -->
+        <!-- Tab bar for Chat + Sub-agents (all tabs created dynamically including root) -->
         <div class="main-tab-bar" id="mainTabBar">
-          <button class="main-tab active" data-tab="chat" id="mainTabChat">
-            <span class="main-tab-icon">💬</span> Chat
-          </button>
-          <!-- Sub-agent tabs injected here dynamically -->
+          <!-- Agent tabs injected here dynamically (including root agent tab) -->
         </div>
 
         <!-- Approval inline area (Global) -->
         <div class="approval-bar" id="approvalBar" style="display:none;"></div>
 
-        <!-- Tab panels -->
+        <!-- Tab panels (all created dynamically including root) -->
         <div class="main-tab-panels">
-          <!-- Chat panel (default) -->
-          <div class="main-tab-panel active" id="panelChat">
-            <div class="context-bar" title="Context Usage">
-              <div class="context-bar-fill" id="chatContextFill" style="width: 0%;"></div>
-            </div>
-            <div class="messages messages-scroll" id="messages"></div>
-
-            <div id="mainActivityBar" class="main-activity-bar">
-              <div class="activity-status">
-                <span class="activity-dot"></span>
-                <span>Activity</span>
-              </div>
-              <div class="activity-text">Idle</div>
-              <div class="activity-queued" id="mainQueuedMsg" style="display:none;">⚡ Queued</div>
-            </div>
-          </div>
-          <!-- Sub-agent panels injected here dynamically -->
+          <!-- Agent panels injected here dynamically (including root agent panel) -->
         </div>
 
         <!-- Input area (outside tab panels so it's always visible) -->

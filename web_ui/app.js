@@ -23,6 +23,9 @@ const ASSISTANT = 'assistant';
 const SYSTEM = 'system';
 const FUNCTION = 'function';
 
+// Root agent tab ID prefix — root agent uses the same dynamic tab system as sub-agents
+const ROOT_TAB_PREFIX = 'sub-';  // e.g., 'sub-Maine_root'
+
 // Pre-compiled regexes for thinking blocks (consistent with backend)
 const _TAG_THINK = 'think';
 const _TAG_THOUGHT = 'thought';
@@ -32,7 +35,8 @@ const _GEMMA_THOUGHT_ANCHORED_RE = /^\s*<\|channel>thought([\s\S]*?)(<channel\|>
 
 // ── State ────────────────────────────────────────────────────────────────────
 const state = {
-  messages: [],
+  // Root agent messages are now stored in subAgents under '{sessionName}_root'
+  // (same structure as other agents) — no separate state.messages needed
   subAgents: {},
   activeStack: [],
   approvals: [],
@@ -53,12 +57,10 @@ const state = {
     // Throttle timestamps for streaming performance
     lastGenStatsUpdate: 0,       // For updateGenStats throttling (~2Hz)
     lastSubAgentRender: 0,      // For renderSubAgents throttling (~750ms)
-    lastChatRender: 0,          // For renderMessages throttling (~300ms streaming / 750ms idle)
     lastContextBarUpdate: 0,    // For updateContextBar throttling (~1Hz during streaming)
-    lastUiUpdate: 0,            // For updateMainActivityBar throttling (~1Hz)
+    lastUiUpdate: 0,            // For activity bar throttling (~1Hz)
     lastControlsUpdate: 0,      // For updateControls throttling (~1Hz)
     lastTelemetryUpdate: 0,     // For updateTelemetryPanel throttling (~2s)
-    lastChatContentKey: '',     // Content key for early-exit optimization (count:length)
     subContextBarThrottle: {},  // Per-agent context bar throttle timestamps (~1Hz during streaming)
   },
   totalTokens: 0,
@@ -74,8 +76,7 @@ const state = {
 
 let ws = null;
 let reconnectTimer = null;
-let lastRenderedCount = Infinity;
-let lastLastContent = null;
+// Root agent rendering state is now managed per-panel via panel.dataset.lastRenderedCount (same as sub-agents)
 
 // Page Visibility API: skip rendering when tab is hidden to save GPU/CPU
 let documentHidden = false;
@@ -83,15 +84,12 @@ document.addEventListener('visibilitychange', () => {
   documentHidden = document.hidden;
 });
 
-// Sticky auto-scroll: locked at bottom by default, unlocks when user scrolls up
-let isAutoScrollLocked = true;
-
-// Per-panel scroll lock state for sub-agent panels (Step 8)
+// Per-panel scroll lock state for ALL panels including root (managed via subAgentScrollLocks)
 const subAgentScrollLocks = {};
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
-const messagesEl = $('#messages');
+// Root panel scroll container is now created dynamically (same as sub-agents)
 const chatInput = $('#chatInput');
 const sendBtn = $('#sendBtn');
 const continueBtn = $('#continueBtn');
@@ -103,19 +101,33 @@ const statusText = $('#statusText');
 const connectionDot = $('#connectionDot');
 const approvalBar = $('#approvalBar');
 const mainTabBar = $('#mainTabBar');
-const mainTabChat = $('#mainTabChat');
+// Root tab is now created dynamically — no static reference needed
 const mainTabPanels = document.querySelector('.main-tab-panels');
+
+// Helper: Get the root agent's instance name (e.g., 'Maine_root')
+function getRootAgentName() {
+  return state.sessionName + '_root';
+}
+
+// Helper: Check if an instance name is the root agent (accepts 'root', '_root' suffix, or exact root name)
+function isRootAgentName(name) {
+  return name && (name === 'root' || name.endsWith('_root') || name === getRootAgentName());
+}
+
+// Helper: Get the root agent's tab ID (e.g., 'sub-Maine_root')
+function getRootTabId() {
+  return ROOT_TAB_PREFIX + getRootAgentName();
+}
+
+// Helper: Get the root agent's panel element ID (e.g., 'panelSub-Maine_root')
+function getRootPanelId() {
+  return 'panelSub-' + getRootAgentName();
+}
 
 // New CWrite-style DOM refs
 const btnToggleSettings = $('#btn-toggle-settings');
 
-// Sticky auto-scroll: unlock when user scrolls up, re-lock when they scroll to bottom
-if (messagesEl) {
-  messagesEl.addEventListener('scroll', () => {
-    const distFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
-    isAutoScrollLocked = (distFromBottom < 50);
-  });
-}
+// Sticky auto-scroll: per-panel scroll lock state in subAgentScrollLocks (used for ALL panels including root)
 const sidePanel = $('#side-panel');
 const statusWords = $('#status-words');
 const statusTokens = $('#status-tokens');
@@ -371,7 +383,6 @@ if (settingLinesEnabled) {
 
 if (settingMaxContext) {
   settingMaxContext.addEventListener('change', () => {
-    renderMessages();
     renderSubAgents();
   });
 }
@@ -451,7 +462,6 @@ function saveSettings() {
   }
   
   // Re-render to apply setting changes immediately (like context bar max value)
-  renderMessages();
   renderSubAgents();
 }
 
@@ -763,18 +773,36 @@ function handleServerMessage(data) {
   switch (data.type) {
     case 'state':
     case 'done':
-      // Full state update
+      // Full state update — root agent messages go into subAgents just like other agents
+      const rootName = getRootAgentName();
+      
       // When paused mid-stream, preserve the last streamed message in case it wasn't committed yet
-      const partialContent = (state.generating && data.instance_halted && state.messages.length > 0) ? String(state.messages[state.messages.length - 1].content || '') : null;
-      state.messages = data.messages || [];
-      // Only restore if server didn't already include it (or a superset of it)
+      const rootData = state.subAgents[rootName];
+      const partialContent = (state.generating && data.instance_halted && rootData?.messages?.length > 0) 
+        ? String(rootData.messages[rootData.messages.length - 1].content || '') : null;
+      
+      // Route server's data.messages into subAgents under the root agent name
+      if (data.messages) {
+        state.subAgents[rootName] = Object.assign({}, state.subAgents[rootName], {
+          messages: data.messages,
+          is_partial: false,
+        });
+      }
+      // Only restore partial content if server didn't already include it
       if (partialContent) {
-        const lastServerContent = String(state.messages[state.messages.length - 1]?.content || '');
+        const rootMsgs = state.subAgents[rootName]?.messages || [];
+        const lastServerContent = String(rootMsgs[rootMsgs.length - 1]?.content || '');
         if (!lastServerContent.startsWith(partialContent)) {
-          state.messages.push({ role: 'assistant', content: partialContent });
+          rootMsgs.push({ role: 'assistant', content: partialContent });
         }
       }
-      state.subAgents = data.agent_instances || {};
+      
+      // Merge agent_instances (sub-agents) — don't overwrite root data
+      if (data.agent_instances) {
+        for (const [name, sa] of Object.entries(data.agent_instances)) {
+          state.subAgents[name] = sa;
+        }
+      }
       state.activeStack = data.active_stack || [];
       state.generating = data.generating ?? false;
       if (data.agents) {
@@ -843,22 +871,33 @@ function handleServerMessage(data) {
       }
 
       // Full state: force complete re-render (session load, reset, edit, delete, etc.)
-      lastRenderedCount = Infinity;
-      lastLastContent = null;
+      // Invalidate panel caches so edits/deletes trigger re-renders
+      mainTabPanels.querySelectorAll('.messages').forEach(p => { 
+        p.dataset.contentKey = ''; 
+        p.dataset.lastRenderedCount = '0';
+      });
       
-      // Invalidate sub-agent panel caches so edits/deletes trigger re-renders
-      mainTabPanels.querySelectorAll('.messages').forEach(p => { p.dataset.contentKey = ''; });
-      
-      renderMessages();
+      // Render root agent through the same path as sub-agents
       renderSubAgents();
+      
+      // Ensure root tab is active on initial load or if no tab is selected
+      if (!state.activeSubTab || state.activeSubTab === 'chat') {
+        state.activeSubTab = getRootTabId();
+        const rootTab = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
+        if (rootTab) rootTab.classList.add('active');
+        const rootPanel = document.getElementById(getRootPanelId());
+        if (rootPanel) rootPanel.classList.add('active');
+      }
       updateControls();
 
-      // Update stats if generating
+      // Update stats if generating — pass root agent messages
       if (state.generating) {
-        updateGenStats(state.messages);
+        const rootMsgs = state.subAgents[getRootAgentName()]?.messages || [];
+        updateGenStats(rootMsgs);
       } else if (wasGenerating) {
-        // Final update for stats
-        updateGenStats(state.messages, true);
+        // Final update for stats — use root agent messages
+        const rootMsgs = state.subAgents[getRootAgentName()]?.messages || [];
+        updateGenStats(rootMsgs, true);
         state.genStats.active = false;
         
         // Invalidate activity preview cache so next turn computes fresh preview
@@ -876,15 +915,19 @@ function handleServerMessage(data) {
       // Don't process stale stream updates after halt
       if (state.instance_halted) break;
 
-      // Lightweight streaming delta — only response messages + sub-agents
+      // Lightweight streaming delta — root agent messages go into subAgents just like other agents
+      const rootName = getRootAgentName();
       const historyCount = data.history_count || 0;
       const responseMsgs = data.response_messages || [];
 
-      // Merge: keep stable history, replace streaming response tail
-      if (historyCount <= state.messages.length) {
-        state.messages.length = historyCount;
+      // Merge root agent: keep stable history, replace streaming response tail
+      const rootData = state.subAgents[rootName];
+      if (rootData && rootData.messages) {
+        if (historyCount <= rootData.messages.length) {
+          rootData.messages.length = historyCount;
+        }
+        rootData.messages.push(...responseMsgs);
       }
-      state.messages.push(...responseMsgs);
 
       const oldStackStr = (state.activeStack || []).join(',');
       // Track subagent changes to decide render urgency:
@@ -964,7 +1007,16 @@ function handleServerMessage(data) {
       if (!state.generating) {
         state.genStats.lastChatRender = 0;
         state.genStats.lastChatContentKey = '';
-        lastRenderedCount = Infinity;
+        // Invalidate root panel cache to force re-render on fresh generation
+        const rootPanel = document.getElementById(getRootPanelId());
+        if (rootPanel) {
+          rootPanel.querySelector('.messages')?.dataset ? null : null;
+          const msgsEl = rootPanel?.querySelector('.messages');
+          if (msgsEl) {
+            msgsEl.dataset.contentKey = '';
+            msgsEl.dataset.lastRenderedCount = '0';
+          }
+        }
       }
       state.generating = true;
       const newStackStr = (state.activeStack || []).join(',');
@@ -1000,18 +1052,7 @@ function handleServerMessage(data) {
         renderApprovals();
       }
 
-      // Always update message display — already incremental-optimized inside renderMessages()
-      // Throttled to ~300ms during streaming (users can't perceive faster than ~10fps)
-      // and ~750ms when idle, matching the sub-agent throttle pattern.
-      const isStreaming = state.generating;
-      const chatThrottle = isStreaming ? 300 : 750;
-      const now = performance.now();
-      if (now - state.genStats.lastChatRender > chatThrottle) {
-        renderMessages();
-        state.genStats.lastChatRender = now;
-      }
-
-// Throttle control updates to ~1Hz during streaming; always update when generating state changes
+      // Throttle control updates to ~1Hz during streaming; always update when generating state changes
       const wasGenerating = state.generating;
       if (wasGenerating !== state.generating || now - state.genStats.lastControlsUpdate > 1000) {
         updateControls();
@@ -1039,10 +1080,10 @@ function handleServerMessage(data) {
               switchMainTab('sub-' + topAgent);
             }
           } else {
-            // Only auto-switch back to chat if the user isn't already looking at a sub-agent tab.
+            // Only auto-switch back to root if the user isn't already looking at a sub-agent tab.
             // This allows them to keep reading the sub-agent output even after it finishes.
             if (!state.activeSubTab || !state.activeSubTab.startsWith('sub-')) {
-              switchMainTab('chat');
+              switchMainTab(getRootTabId());
             }
           }
         }
@@ -1053,7 +1094,8 @@ function handleServerMessage(data) {
       // from the original frequency.
       if (!state.genStats.lastGenStatsUpdate) state.genStats.lastGenStatsUpdate = 0;
       if (now - state.genStats.lastGenStatsUpdate > 500) {
-        updateGenStats(state.messages);
+        const rootMsgs = state.subAgents[getRootAgentName()]?.messages || [];
+        updateGenStats(rootMsgs);
         state.genStats.lastGenStatsUpdate = now;
       }
     }
@@ -1182,215 +1224,8 @@ function triggerAfkSend() {
 
 // ── Rendering ────────────────────────────────────────────────────────────────
 
-function renderMessages() {
-  const msgs = state.messages;
-  const container = messagesEl;
-
-  // Word count and token estimation from Backend
-  if (statusWords) statusWords.textContent = `${state.totalWords} words`;
-  if (statusTokens) statusTokens.textContent = `${state.totalTokens} tokens`;
-
-  // LAZY RENDERING: If the main chat isn't visible, skip expensive message DOM work.
-  // We still update the stats and context bar above so they are current.
-  const isChatVisible = !state.activeSubTab || state.activeSubTab === 'chat';
-  if (!isChatVisible) return;
-
-  // Quick check: if nothing meaningful changed, skip heavy re-render
-  const currentCount = msgs.length;
-  const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
-  // contentKey: composite of message count + last message content length (cheap, reliable)
-  // Avoids building large strings every tick — sub-agent pattern proven effective
-  const currentKey = `${currentCount}:${lastMsg ? (lastMsg.content || '').length : 0}`;
-
-  // EARLY EXIT: if key unchanged, skip everything except stats
-  if (currentKey === state.genStats.lastChatContentKey) {
-    return;
-  }
-
-// Skip rendering during tool execution if only function_call arguments grew and no visible text is streaming
-  const isToolExecuting = lastMsg && lastMsg.function_call && !lastMsg.content && !lastMsg.reasoning_content;
-  if (isToolExecuting && currentCount === lastRenderedCount) {
-    return; // Tool arguments streaming but no visible content to update
-  }
-
-  // Content actually changed — update the content key NOW, before any DOM operations.
-  // If a DOM operation throws, the key is already updated so we don't get permanently stuck.
-  state.genStats.lastChatContentKey = currentKey;
-
-  // Compute the full content string for delta comparison below
-  const lastContent = lastMsg ? (lastMsg.content || '') + (lastMsg.function_call ? JSON.stringify(lastMsg.function_call) : '') + (lastMsg.reasoning_content || '') : '';
-
-  // Full re-render if count changed significantly or decreased
-  if (currentCount < lastRenderedCount || currentCount === 0) {
-    fullRender(msgs, container);
-    updateContextBar(document.getElementById('chatContextFill'), msgs, state.totalTokens, state.maxTokens);
-    lastRenderedCount = currentCount;
-    lastLastContent = lastContent;
-    return;
-  }
-
-  // Append new messages — only create bubbles when the previous message has content (done streaming)
-  if (currentCount > lastRenderedCount) {
-const readyMsgs = [];
-    const readyIndexMap = [];
-    for (let i = lastRenderedCount; i < currentCount; i++) {
-      const msg = msgs[i];
-      const isToolCall = !!msg.function_call;
-      const isFunctionResult = msg.role === 'function';
-
-      // Tool calls and function results always render immediately
-      if (isToolCall || isFunctionResult) {
-        readyMsgs.push(msg);
-        readyIndexMap.push(i);
-        continue;
-      }
-
-      // For assistant/user messages: only create bubble if the PREVIOUS message 
-      // already has content (meaning it's done streaming), OR this is the last message
-      const prevMsg = i > 0 ? msgs[i - 1] : null;
-      const prevHasContent = prevMsg && (
-        ((prevMsg.content || '').trim().length > 0) || 
-        ((prevMsg.reasoning_content || '').trim().length > 0)
-      );
-
-      if (prevHasContent || i === currentCount - 1) {
-        readyMsgs.push(msg);
-        readyIndexMap.push(i);
-      }
-      // Otherwise: wait until previous message finishes streaming
-    }
-
-    // Use unified render path for incremental appends too
-    if (readyMsgs.length > 0) {
-      container.appendChild(renderAgentConversation('root', readyMsgs, 0, readyIndexMap));
-      lastRenderedCount = readyIndexMap[readyIndexMap.length - 1] + 1;
-    }
-
-    // Throttle context bar updates to ~1Hz during streaming
-    if (!state.genStats.lastContextBarUpdate) state.genStats.lastContextBarUpdate = 0;
-    const nowInRender = performance.now();
-    if (nowInRender - state.genStats.lastContextBarUpdate > 1000 || readyMsgs.length > 1) {
-      updateContextBar(document.getElementById('chatContextFill'), msgs, state.totalTokens, state.maxTokens);
-    }
-  }
-
-  // Update last message content (streaming) — use fine-grained content comparison for delta updates
-  if (lastContent !== lastLastContent && container.lastElementChild) {
-    const lastBubble = container.lastElementChild;
-    const idx = parseInt(lastBubble.dataset.index);
-    if (idx < currentCount && state.editingIndex !== idx) {
-      updateBubbleContent(lastBubble, msgs[idx], getRootAgentConfig());
-    }
-  }
-  lastLastContent = lastContent;
-
-  // Auto-scroll: batched in requestAnimationFrame to avoid forced reflows.
-  // Reads layout (scrollHeight/scrollTop/clientHeight) AFTER DOM writes complete,
-  // then scrolls if needed — single read-write cycle instead of interleaved reads/writes.
-  // Auto-scroll via rAF: scroll when locked at bottom, re-lock if user returns to bottom.
-  requestAnimationFrame(() => {
-    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
-
-    if (isAutoScrollLocked) {
-      container.scrollTop = container.scrollHeight; // Scroll — scroll listener handles lock state
-    } else if (atBottom) {
-      isAutoScrollLocked = true; // Re-lock if user scrolled back to bottom
-    }
-  });
-
-  // Update main activity bar (throttled to ~1Hz during streaming)
-  if (!state.genStats.lastUiUpdate) state.genStats.lastUiUpdate = 0;
-  const nowUiUpdate = performance.now();
-  if (nowUiUpdate - state.genStats.lastUiUpdate > 1000) {
-    updateMainActivityBar();
-    state.genStats.lastUiUpdate = nowUiUpdate;
-  }
-}
-
-function updateMainActivityBar() {
-  const bar = document.getElementById('mainActivityBar');
-  if (!bar) return;
-
-  const activityText = bar.querySelector('.activity-text');
-  const chatTab = document.getElementById('mainTabChat');
-  
-  let newStatus = '';
-  let isActive = false;
-
-  if (state.generating) {
-    isActive = true;
-    if (state.is_waiting) {
-      newStatus = '<span class="waiting-spin">⏳</span> Waiting for API slot...';
-    } else {
-      const msgs = state.messages || [];
-      const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
-      if (lastMsg) {
-        // Cache activity preview to avoid repeated string parsing when only tool args grow
-        const previewKey = `${lastMsg.function_call?.name}:${(lastMsg.function_call?.arguments || '').length}`;
-        if (previewKey !== state._lastActivityPreviewKey) {
-          newStatus = getActivityPreview(lastMsg);
-          state._lastActivityPreviewKey = previewKey;
-          state._lastActivityPreview = newStatus;
-        } else {
-          newStatus = state._lastActivityPreview || 'Streaming...';
-        }
-      } else {
-        newStatus = 'Agent Starting...';
-      }
-    }
-  } else {
-    newStatus = 'Agent Idle';
-  }
-
-  if (state.totalTokens !== undefined) {
-    newStatus += ` (${state.totalWords} words, ${state.totalTokens} tokens)`;
-  }
-
-  // Only update DOM if status changed
-  if (state.lastActivityStatus !== newStatus) {
-    activityText.innerHTML = newStatus;
-    state.lastActivityStatus = newStatus;
-  }
-
-  if (isActive) {
-    bar.classList.add('active');
-    if (chatTab) chatTab.classList.add('agent-active');
-  } else {
-    bar.classList.remove('active');
-    if (chatTab) chatTab.classList.remove('agent-active');
-  }
-
-  // Only update tab label if needed — skip during generation to avoid race with updateControls
-  const newTabLabel = `<span class="main-tab-icon">💬</span> Chat`;
-  if (chatTab && !state.generating && chatTab.innerHTML !== newTabLabel) {
-    chatTab.innerHTML = newTabLabel;
-  }
-
-  // Persistent Queue Notification
-  const queuedEl = document.getElementById('mainQueuedMsg');
-  if (queuedEl) {
-    queuedEl.style.display = state.has_queued_messages ? 'block' : 'none';
-  }
-
-  // Toggle pulse dim class for JS-driven animation at ~1Hz throttle rate
-  togglePulseElements();
-}
-
-function fullRender(msgs, container) {
-  container.innerHTML = '';
-  // Filter out system messages (root chat hides them), tracking original indices
-  const visibleMsgs = [];
-  const indexMap = []; // maps filtered-index → original-index in msgs array
-  for (let i = 0; i < msgs.length; i++) {
-    if (msgs[i].role !== 'system') {
-      visibleMsgs.push(msgs[i]);
-      indexMap.push(i);
-    }
-  }
-  // Pass indexMap so data-index attributes use original indices (critical for edit/delete)
-  container.appendChild(renderAgentConversation('root', visibleMsgs, 0, indexMap));
-  scrollToBottom();
-}
+// Dead code removed: renderMessages() and fullRender() — root agent rendering now goes through
+// renderSubAgents() → renderSubAgentPanel() like all other agents
 
 // ── Unification Helper Functions ──────────────────────────────────────────────
 // These helpers abstract the root vs sub-agent distinction for CSS classes and labels.
@@ -1416,21 +1251,21 @@ function nameLabelClass(isRoot) {
     return 'msg-name';
 }
 
-/** Return the display label for a role, depending on whether it's root or sub-agent */
+/** Return the display label for a role — same logic for all agents including root */
 function roleName(role, isRoot, msg, instanceName) {
-    // Unified labels: "You" for user everywhere, agent name for assistant in sub-agent tabs, "Tool Result" everywhere
+    // Unified labels: "You" for user everywhere, agent name for assistant, "Tool Result" everywhere
     if (role === 'user') return 'You';
     if (role === 'tool' || role === 'function') return 'Tool Result';
     
     // Assistant: show agent name from msg.name if available, then instanceName, then fallback
     if (msg.name) return msg.name;
-    if (!isRoot && instanceName) return instanceName;
+    if (instanceName) return instanceName;  // Root also gets its instance name displayed now
     return 'Assistant';
 }
 
-/** Get config object for root-agent rendering */
+/** Get config object for root-agent rendering — root is treated same as sub-agents but isRoot flag set */
 function getRootAgentConfig() {
-    return { isRoot: true };
+    return { isRoot: true, instanceName: getRootAgentName() };
 }
 
 /** Get config object for sub-agent rendering (name = instance name) */
@@ -1440,10 +1275,9 @@ function getSubAgentConfig(name) {
 
 /**
  * Render a complete agent conversation as a DOM document fragment.
- * This is the unified rendering entry point — uses createMessageEl with config
- * to handle both root and sub-agent conversations through a single code path.
+ * This is the unified rendering entry point — all agents (including root) go through this.
  * 
- * @param {string} instanceName - "root" for main chat, or agent name (e.g., "coder")
+ * @param {string} instanceName - agent name (e.g., "Maine_root" for root, "coder" for sub-agent)
  * @param {Array}  messages     - array of message objects
  * @param {number} depth        - nesting level (0=root, 1=direct sub-agent, etc.)
  * @param {Array}  [indexMap]   - optional mapping from filtered-index → original-index
@@ -1454,8 +1288,9 @@ function getSubAgentConfig(name) {
 function renderAgentConversation(instanceName, messages, depth, indexMap, configOverride) {
     if (!messages || messages.length === 0) return document.createDocumentFragment();
 
-    const isRoot = (instanceName === 'root');
-    let config = isRoot ? getRootAgentConfig() : getSubAgentConfig(instanceName);
+    // All agents now use the same sub-agent config path (including root with _root suffix)
+    const isRoot = isRootAgentName(instanceName);
+    let config = getSubAgentConfig(instanceName);
     
     // Merge any override (e.g., isGenerating from agentData.active)
     if (configOverride) {
@@ -1485,15 +1320,14 @@ function createMessageEl(msg, index, config) {
   div.className = msgClass(msg.role || 'unknown', isRoot);
   div.dataset.index = index;
   
-  // Data attributes for CSS unification (allow .message[data-agent-type="root"] selectors)
-  div.dataset.agentType = isRoot ? 'root' : 'sub';
-  if (!isRoot && config.instanceName) {
+  // All agents get data-instance-name for per-agent accent color styling
+  if (config.instanceName) {
       div.dataset.instanceName = config.instanceName;
   }
 
   const isEditable = !msg.function_call && msg.role !== 'function' && msg.role !== 'system';
   
-  // Extract instanceName from config for sub-agent edit/delete operations
+  // Extract instanceName from config for edit/delete operations (all agents now have one)
   const instName = config.instanceName || null;
 
   // Header
@@ -1560,10 +1394,10 @@ function createMessageEl(msg, index, config) {
   contentDiv.className = contentClass(isRoot);
 
   let html = '';
-  // Step 6 fix: Check config.isGenerating first (per-panel), then fall back to root state check
+  // Check config.isGenerating first (per-panel), then fall back to checking subAgents for this instance
   const isGenerating = (config.isGenerating !== undefined) 
     ? config.isGenerating 
-    : (state.generating && index === (isRoot ? state.messages.length : (state.subAgents[config.instanceName]?.messages?.length || 0)) - 1);
+    : (state.generating && index === (state.subAgents[config.instanceName]?.messages?.length || 0) - 1);
 
   // Handle reasoning/thinking content first (always shown if present)
   if (msg.reasoning_content) {
@@ -1940,16 +1774,22 @@ function appendSystemBubble(text) {
   const div = document.createElement('div');
   div.className = 'message msg-system';
   div.innerHTML = `<div class="msg-content">${renderMarkdown(text)}</div>`;
-  messagesEl.appendChild(div);
-  scrollToBottom();
-}
-
-function scrollToBottom() {
-  if (!isAutoScrollLocked) return; // Respect user's scroll position
+  
+  // Append to the root agent's scroll container (same as sub-agents)
+  const rootPanel = document.getElementById(getRootPanelId());
+  if (rootPanel) {
+    const scrollContainer = rootPanel.querySelector('.messages');
+    if (scrollContainer) scrollContainer.appendChild(div);
+  }
+  
+  // Scroll to bottom of root panel
   requestAnimationFrame(() => {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    const rootScroll = document.querySelector(`#${getRootPanelId()} .messages`);
+    if (rootScroll) rootScroll.scrollTop = rootScroll.scrollHeight;
   });
 }
+
+// scrollToBottom removed — each panel handles its own scrolling via per-panel scroll locks
 
 // ── Message editing ──────────────────────────────────────────────────────────
 
@@ -1976,7 +1816,8 @@ function getEditClone(textarea) {
 }
 
 function startEdit(index, selectedText = '', proportion = 0, instanceName = null) {
-  const msgs = instanceName ? (state.subAgents[instanceName] ? state.subAgents[instanceName].messages : []) : state.messages;
+  // All agents (including root) now have an instanceName and live in subAgents
+  const msgs = state.subAgents[instanceName] ? state.subAgents[instanceName].messages : [];
   const msg = msgs[index];
   // Check if the specific agent is generating, not just the global root state
   const isAgentGenerating = instanceName 
@@ -1987,7 +1828,7 @@ function startEdit(index, selectedText = '', proportion = 0, instanceName = null
   state.editingIndex = index;
   state.editingInstance = instanceName;
 
-  const containerSelector = instanceName ? `#panelSub-${instanceName} .messages-scroll` : '.messages-scroll';
+  const containerSelector = `#panelSub-${instanceName} .messages-scroll`;
   const scrollContainer = document.querySelector(containerSelector);
   if (!scrollContainer) return;
 
@@ -2111,13 +1952,13 @@ function finishEdit(index, newContent, instanceName = null) {
     state.editingInstance = null;
   }
   
-  const msgs = instanceName ? (state.subAgents[instanceName] ? state.subAgents[instanceName].messages : []) : state.messages;
+  const msgs = state.subAgents[instanceName] ? state.subAgents[instanceName].messages : [];
   if (msgs[index]) msgs[index].content = newContent; // Optimistic update
   
   send({ type: 'edit_message', index, content: newContent, instance_name: instanceName });
 
-  // Localized re-render
-  const containerSelector = instanceName ? `#panelSub-${instanceName} .messages-scroll` : '.messages-scroll';
+  // Localized re-render — all agents use panelSub-{name} now
+  const containerSelector = `#panelSub-${instanceName} .messages-scroll`;
   const scrollContainer = document.querySelector(containerSelector);
   if (!scrollContainer) return;
 
@@ -2126,7 +1967,8 @@ function finishEdit(index, newContent, instanceName = null) {
   const bubble = Array.from(bubbles).find(b => b.dataset.index == index);
   if (!bubble) return;
 
-  const config = instanceName ? getSubAgentConfig(instanceName) : getRootAgentConfig();
+  // All agents use sub-agent config now (including root with _root suffix)
+  const config = getSubAgentConfig(instanceName);
   bubble.querySelector('.' + contentClass(config.isRoot)).classList.remove('editing');
   updateBubbleContent(bubble, msgs[index], config);
 }
@@ -2137,8 +1979,8 @@ function cancelEdit(index, instanceName = null) {
     state.editingInstance = null;
   }
 
-  // Localized re-render
-  const containerSelector = instanceName ? `#panelSub-${instanceName} .messages-scroll` : '.messages-scroll';
+  // Localized re-render — all agents use panelSub-{name} now
+  const containerSelector = `#panelSub-${instanceName} .messages-scroll`;
   const scrollContainer = document.querySelector(containerSelector);
   if (!scrollContainer) return;
 
@@ -2147,15 +1989,17 @@ function cancelEdit(index, instanceName = null) {
   const bubble = Array.from(bubbles).find(b => b.dataset.index == index);
   if (!bubble) return;
 
-  const config = instanceName ? getSubAgentConfig(instanceName) : getRootAgentConfig();
+  // All agents use sub-agent config now (including root with _root suffix)
+  const config = getSubAgentConfig(instanceName);
   bubble.querySelector('.' + contentClass(config.isRoot)).classList.remove('editing');
-  const msgs = instanceName ? (state.subAgents[instanceName] ? state.subAgents[instanceName].messages : []) : state.messages;
+  const msgs = state.subAgents[instanceName] ? state.subAgents[instanceName].messages : [];
   updateBubbleContent(bubble, msgs[index], config);
 }
 
 
 function deleteMessage(index, instanceName = null) {
-  const msgs = instanceName ? (state.subAgents[instanceName] ? state.subAgents[instanceName].messages : []) : state.messages;
+  // All agents (including root) now have an instanceName and live in subAgents
+  const msgs = state.subAgents[instanceName] ? state.subAgents[instanceName].messages : [];
   const msg = msgs[index];
   if (!msg) return;
 
@@ -2320,12 +2164,19 @@ window.rejectRequest = function (requestId) {
 
 function renderSubAgents() {
   const sa = state.subAgents;
-  const names = Object.keys(sa);
+  const rootName = getRootAgentName();
+  
+  // Include root agent in the list of agents to render
+  const namesArr = Object.keys(sa);
+  // Only include root in the list if it actually has data (has been initialized by server)
+  if (sa[rootName] && !namesArr.includes(rootName)) {
+    namesArr.unshift(rootName); // Ensure root is always first
+  }
 
   // Remove stale sub-agent tabs and panels for agents that no longer exist
   mainTabBar.querySelectorAll('.main-tab[data-tab^="sub-"]').forEach(tab => {
     const agentName = tab.dataset.tab.substring(4);
-    if (!names.includes(agentName)) {
+    if (!namesArr.includes(agentName)) {
       tab.remove();
       const panel = document.getElementById('panelSub-' + agentName);
       if (panel) panel.remove();
@@ -2337,14 +2188,18 @@ function renderSubAgents() {
     }
   });
 
-  if (names.length === 0) return;
+  if (namesArr.length === 0) return;
 
   // Auto-select active tab from stack
   const activeTop = state.activeStack.length > 0 ? state.activeStack[state.activeStack.length - 1] : null;
 
-  for (const name of names) {
+  for (const name of namesArr) {
     const tabId = 'sub-' + name;
-    const isActive = sa[name].active;
+    const isRoot = isRootAgentName(name);
+    const agentData = sa[name];
+    // Root agent: active if state.generating and not in a sub-agent stack
+    // Sub-agents: use their own active flag
+    const isActive = isRoot ? (state.generating && !agentData?.is_halted) : (agentData?.active ?? false);
 
     // Create tab button if it doesn't exist
     let tabBtn = mainTabBar.querySelector(`.main-tab[data-tab="${tabId}"]`);
@@ -2364,12 +2219,18 @@ function renderSubAgents() {
 
       const closeBtn = document.createElement('span');
       closeBtn.className = 'close-tab';
-      closeBtn.title = 'Terminate Agent';
+      closeBtn.title = isRoot ? 'Terminate Session' : 'Terminate Agent';
       closeBtn.textContent = '\u00d7';
       closeBtn.onclick = (e) => {
         e.stopPropagation();
-        send({ type: 'terminate_agent_instance', instance_name: name });
-        switchMainTab('chat');
+        if (isRoot) {
+          // Terminating root agent = ending the session
+          send({ type: 'terminate_agent_instance', instance_name: name });
+        } else {
+          send({ type: 'terminate_agent_instance', instance_name: name });
+          // Switch to root tab instead of non-existent 'chat'
+          switchMainTab(getRootTabId());
+        }
       };
       tabBtn.appendChild(closeBtn);
 
@@ -2382,7 +2243,8 @@ function renderSubAgents() {
       // Only update icon innerHTML when active state actually changed to avoid GPU churn
       const prevActive = tabBtn.dataset.isActive === 'true';
       if (prevActive !== isActive) {
-        iconSpan.innerHTML = isActive ? '<span class="sub-tab-pulse"></span>' : '<span class="main-tab-icon">🤖</span>';
+        iconSpan.innerHTML = isActive ? '<span class="sub-tab-pulse"></span>' : 
+          (isRoot ? '<span class="main-tab-icon">💬</span>' : '<span class="main-tab-icon">🤖</span>');
       }
       tabBtn.dataset.isActive = String(isActive);
     }
@@ -2425,15 +2287,6 @@ function renderSubAgents() {
 
     // Render sub-agent messages into the panel
     renderSubAgentPanel(panel, sa[name], name);
-
-    // Update tab activity dot
-    if (tabBtn) {
-      if (sa[name].active) {
-        tabBtn.classList.add('agent-active');
-      } else {
-        tabBtn.classList.remove('agent-active');
-      }
-    }
   }
 
   // Toggle pulse dim class for JS-driven animation at ~1Hz throttle rate
@@ -2442,8 +2295,15 @@ function renderSubAgents() {
 
 function renderSubAgentPanel(panel, agentData, name) {
   const isVisible = state.activeSubTab === 'sub-' + name;
-  const msgs = agentData.messages || [];
-  const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+  const isRoot = isRootAgentName(name);
+  const msgs = (agentData && agentData.messages) ? agentData.messages : [];
+  
+  // For root agent: derive active state from global generating flag, not agentData.active
+  const isActive = isRoot ? (state.generating && !agentData?.is_halted) : (agentData?.active ?? false);
+  
+  // Filter system messages for root agent (matches old fullRender behavior)
+  const displayMsgs = isRoot ? msgs.filter(m => m.role !== 'system') : msgs;
+  const lastMsg = displayMsgs.length > 0 ? displayMsgs[displayMsgs.length - 1] : null;
 
   // 1. Ensure basic structure exists (once)
   if (!panel.dataset.initialized) {
@@ -2487,7 +2347,8 @@ function renderSubAgentPanel(panel, agentData, name) {
     const terminateBtn = activityBar.querySelector('.terminate-btn');
     terminateBtn.onclick = () => {
       send({ type: 'terminate_agent_instance', instance_name: name });
-      switchMainTab('chat');
+      // Don't switch to root tab if terminating root itself (it'll be removed)
+      if (!isRootAgentName(name)) switchMainTab(getRootTabId());
     };
 
     // Pause/Resume toggle for this sub-agent
@@ -2524,18 +2385,21 @@ function renderSubAgentPanel(panel, agentData, name) {
   const queuedEl = activityBar.querySelector('.activity-queued');
 
   // 2. Always update activity status (so pulses/dots are current even when hidden)
-  if (agentData.active) {
+  if (isActive) {
     activityBar.classList.add('active');
     let status = 'Agent Starting...';
     
-    if (agentData.is_waiting) {
+    if (!isRoot && agentData.is_waiting) {
       status = 'Waiting for API slot...';
     } else if (lastMsg) {
       status = getActivityPreview(lastMsg);
     }
     
-    if (agentData.total_tokens !== undefined) {
-      status += ` (${agentData.total_words} words, ${agentData.total_tokens} tokens)`;
+    // Root: use global token/word counts; sub-agents: use their own
+    const tokCount = isRoot ? state.totalTokens : agentData.total_tokens;
+    const wordCount = isRoot ? state.totalWords : agentData.total_words;
+    if (tokCount !== undefined) {
+      status += ` (${wordCount} words, ${tokCount} tokens)`;
     }
     if (activityText.textContent !== status) activityText.textContent = status;
     terminateBtn.style.display = 'block';
@@ -2547,7 +2411,18 @@ function renderSubAgentPanel(panel, agentData, name) {
   if (queuedEl) queuedEl.style.display = agentData.has_queued_messages ? 'block' : 'none';
 
   // 3. LAZY RENDERING: Skip expensive message work if the tab isn't visible
-  if (!isVisible) return;
+  if (!isVisible) {
+    // Still update status bar stats even when hidden (was in old renderMessages)
+    if (isRoot && statusWords) statusWords.textContent = `${state.totalWords} words`;
+    if (isRoot && statusTokens) statusTokens.textContent = `${state.totalTokens} tokens`;
+    return;
+  }
+
+  // Update status bar stats for root agent (was in old renderMessages)
+  if (isRoot) {
+    if (statusWords) statusWords.textContent = `${state.totalWords} words`;
+    if (statusTokens) statusTokens.textContent = `${state.totalTokens} tokens`;
+  }
 
   // 4. Check Content Key EARLY to skip all layout reads and DOM work when nothing changed
   const lastMsgTextLen = (() => {
@@ -2558,9 +2433,11 @@ function renderSubAgentPanel(panel, agentData, name) {
     return String(lastMsg.content || '').length;
   })();
   const funcCallLen = (lastMsg && lastMsg.function_call && lastMsg.function_call.arguments) ? String(lastMsg.function_call.arguments).length : 0;
-  const contentKey = msgs.length + ':' + lastMsgTextLen + ':' + (lastMsg ? String(lastMsg.reasoning_content || '').length : 0) + ':' + funcCallLen + ':' + agentData.active;
+  // For root, use state.generating for active flag in content key
+  const activeFlag = isRoot ? state.generating : agentData.active;
+  const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + (lastMsg ? String(lastMsg.reasoning_content || '').length : 0) + ':' + funcCallLen + ':' + activeFlag;
   
-  if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === msgs.length) {
+  if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === displayMsgs.length) {
     // Nothing changed — skip scrollHeight read and all DOM updates
     return;
   }
@@ -2568,43 +2445,53 @@ function renderSubAgentPanel(panel, agentData, name) {
   panel.dataset.contentKey = contentKey;
 
   // 6. Incremental Rendering
-  const currentCount = msgs.length;
+  const currentCount = displayMsgs.length;
   const lastCount = parseInt(panel.dataset.lastRenderedCount || '0');
 
   if (currentCount < lastCount || lastCount === 0) {
     scrollContainer.innerHTML = '';
     // Pass isGenerating via config override so all messages know the streaming state
     const subConfig = getSubAgentConfig(name);
-    subConfig.isGenerating = agentData.active;
-    scrollContainer.appendChild(renderAgentConversation(name, msgs, 1, null, subConfig));
-    const fillEl = document.getElementById('subContextFill-' + name);
-    if (fillEl) updateContextBar(fillEl, msgs, agentData.total_tokens, agentData.max_tokens);
+    subConfig.isGenerating = isActive;
+    scrollContainer.appendChild(renderAgentConversation(name, displayMsgs, 1, null, subConfig));
+    
+    // Root: use global token counts and context bar ID; sub-agents: use their own
+    if (isRoot) {
+      updateContextBar(document.getElementById('subContextFill-' + name), displayMsgs, state.totalTokens, state.maxTokens);
+    } else {
+      const fillEl = document.getElementById('subContextFill-' + name);
+      if (fillEl) updateContextBar(fillEl, displayMsgs, agentData.total_tokens, agentData.max_tokens);
+    }
   } else {
     // Append new messages using unified rendering with indexMap to preserve indices
     const newMsgs = [];
     const newIndexMap = [];
     for (let i = lastCount; i < currentCount; i++) {
-      newMsgs.push(msgs[i]);
+      newMsgs.push(displayMsgs[i]);
       newIndexMap.push(i);
     }
     // Pass isGenerating via config override so all messages know the streaming state
     const subConfig = getSubAgentConfig(name);
-    subConfig.isGenerating = agentData.active;
+    subConfig.isGenerating = isActive;
     scrollContainer.appendChild(renderAgentConversation(name, newMsgs, 1, newIndexMap, subConfig));
     
-    // Step 9: Throttle context bar updates to ~1Hz during streaming for sub-agents
+    // Throttle context bar updates to ~1Hz during streaming for all agents including root
     const nowInRender = performance.now();
     const lastUpdate = state.genStats.subContextBarThrottle[name] || 0;
     if (nowInRender - lastUpdate > 1000 || currentCount - lastCount > 1) {
       const fillEl = document.getElementById('subContextFill-' + name);
-      if (fillEl) updateContextBar(fillEl, msgs, agentData.total_tokens, agentData.max_tokens);
+      if (fillEl) {
+        const tokCount = isRoot ? state.totalTokens : agentData.total_tokens;
+        const maxTok = isRoot ? state.maxTokens : agentData.max_tokens;
+        updateContextBar(fillEl, displayMsgs, tokCount, maxTok);
+      }
       state.genStats.subContextBarThrottle[name] = nowInRender;
     }
     // Use unified bubble content update with isGenerating passed via config
     if (scrollContainer.lastElementChild) {
       const subConfig = getSubAgentConfig(name);
-      subConfig.isGenerating = agentData.active;
-      updateBubbleContent(scrollContainer.lastElementChild, msgs[currentCount - 1], subConfig);
+      subConfig.isGenerating = isActive;
+      updateBubbleContent(scrollContainer.lastElementChild, displayMsgs[currentCount - 1], subConfig);
     }
   }
   panel.dataset.lastRenderedCount = currentCount;
@@ -2629,54 +2516,31 @@ function switchMainTab(tabId) {
   const activeTab = mainTabBar.querySelector(`.main-tab[data-tab="${tabId}"]`);
   if (activeTab) activeTab.classList.add('active');
 
-  // Update panels
+  // Update panels — all tabs use the same dynamic panel system now
   mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => p.classList.remove('active'));
-  if (tabId === 'chat') {
-    const chatPanel = document.getElementById('panelChat');
-    chatPanel.classList.add('active');
-    const scroll = chatPanel.querySelector('.messages');
+  
+  const name = tabId.substring(4); // strip 'sub-' prefix (works for root too: sub-Maine_root → Maine_root)
+  const panel = document.getElementById('panelSub-' + name);
+  if (panel) {
+    panel.classList.add('active');
+    const scroll = panel.querySelector('.messages');
     if (scroll) {
-      // Only scroll to bottom if user was near the bottom or generation is active
+      // Only scroll to bottom if user was near the bottom or agent is actively generating
       const distFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
-      if (distFromBottom < 50 || state.generating) {
+      const isGenerating = state.subAgents[name]?.active || state.generating;
+      if (distFromBottom < 50 || isGenerating) {
         scroll.scrollTop = scroll.scrollHeight;
-      }
-    }
-  } else {
-    const name = tabId.substring(4); // strip 'sub-'
-    const panel = document.getElementById('panelSub-' + name);
-    if (panel) {
-      panel.classList.add('active');
-      const scroll = panel.querySelector('.messages');
-      if (scroll) {
-        // Only scroll to bottom if user was near the bottom or agent is actively generating
-        const distFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
-        const isGenerating = state.subAgents[name]?.active || state.generating;
-        if (distFromBottom < 50 || isGenerating) {
-          scroll.scrollTop = scroll.scrollHeight;
-        }
       }
     }
   }
   
   state.activeSubTab = tabId;
   
-  // Trigger immediate render of the newly visible content
-  if (tabId === 'chat') {
-    // Reset lastRenderedCount to force a full re-render sync on visibility return.
-    // Without this, switching away during streaming and back causes duplicate messages
-    // because lastRenderedCount was stale from before the user switched tabs.
-    lastRenderedCount = Infinity;
-    renderMessages();
-  } else {
-    renderSubAgents();
-  }
+  // Trigger immediate render of the newly visible content — all agents use same path now
+  renderSubAgents();
 }
 
-// Wire up the static Chat tab
-if (mainTabChat) {
-  mainTabChat.addEventListener('click', () => switchMainTab('chat'));
-}
+// Root tab is now created dynamically via renderSubAgents() — no static wiring needed
 
 // ── Agent selector ───────────────────────────────────────────────────────────
 
@@ -2804,13 +2668,17 @@ function updateControls() {
     if (isGenerating) {
       sendBtn.classList.add('inject-mode');
       sendBtn.title = 'Inject message into active agent (Enter)';
-      if (mainTabChat) mainTabChat.innerHTML = '<span class="sub-tab-pulse"></span> Chat';
+      // Update root tab to show pulse indicator (root tab is now dynamic, no mainTabChat ref)
+      const rootTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
+      if (rootTabEl) rootTabEl.innerHTML = '<span class="sub-tab-pulse"></span> 💬 ' + (state.sessionName || 'Maine') + '_root';
       resetBtn.disabled = true;
       document.body.classList.add('is-generating');
     } else {
       sendBtn.classList.remove('inject-mode');
       sendBtn.title = 'Send (Enter)';
-      if (mainTabChat) mainTabChat.innerHTML = '<span class="main-tab-icon">💬</span> Chat';
+      // Restore root tab icon
+      const rootTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
+      if (rootTabEl) rootTabEl.innerHTML = '<span class="main-tab-icon">💬</span> ' + (state.sessionName || 'Maine') + '_root';
       resetBtn.disabled = false;
       document.body.classList.remove('is-generating');
     }
@@ -2818,10 +2686,10 @@ function updateControls() {
   }
   stopBtn.style.opacity = state.generating ? '1' : '0.4';
   sendBtn.disabled = !state.connected;
-  continueBtn.disabled = state.generating || state.messages.length === 0;
+  continueBtn.disabled = state.generating || (state.subAgents[getRootAgentName()]?.messages || []).length === 0;
   const refreshBtn = document.getElementById('refreshBtn');
   const mainRB = document.getElementById('mainRetryBtn');
-  const retryDisabled = state.generating || state.messages.length === 0;
+  const retryDisabled = state.generating || (state.subAgents[getRootAgentName()]?.messages || []).length === 0;
   if (refreshBtn) refreshBtn.disabled = state.generating;
   if (mainRB) mainRB.disabled = retryDisabled;
 
@@ -2915,7 +2783,7 @@ function resetGenStats() {
     firstTokenTime: 0,
     lastTokenTime: 0,
     activeGenTime: 0,
-    startMsgCount: state.messages ? state.messages.length : 0,
+    startMsgCount: (state.subAgents[getRootAgentName()]?.messages || []).length,
     saStartCounts: saStartCounts,
     tokenCount: 0,
     active: true,
@@ -2953,9 +2821,11 @@ function updateGenStats(msgs, isFinal = false) {
     }
   }
 
-  // 2. Sub-Agent Tokens
+  // 2. Sub-Agent Tokens (exclude root agent which is passed as msgs parameter)
+  const rootName = getRootAgentName();
   if (state.subAgents) {
     for (const name in state.subAgents) {
+      if (name === rootName) continue; // Root agent handled via msgs param above
       const saMsgs = state.subAgents[name].messages || [];
       const saStart = (state.genStats.saStartCounts && state.genStats.saStartCounts[name]) || 0;
       for (let i = saStart; i < saMsgs.length; i++) {
@@ -3279,7 +3149,12 @@ function createPauseButton(btn, instanceSource) {
 if (pauseBtn) createPauseButton(pauseBtn, () => document.getElementById('sessionName')?.value || 'Maine');
 
 const onRetryClick = () => {
-  lastRenderedCount = Infinity;
+  // Invalidate root panel cache to force full re-render
+  const rootMsgsEl = document.querySelector(`#${getRootPanelId()} .messages`);
+  if (rootMsgsEl) {
+    rootMsgsEl.dataset.contentKey = '';
+    rootMsgsEl.dataset.lastRenderedCount = '0';
+  }
   retryGeneration();
 };
 const refreshBtn = document.getElementById('refreshBtn');
@@ -3300,8 +3175,12 @@ if (refreshBtn) {
 if (mainRetryBtn) mainRetryBtn.addEventListener('click', onRetryClick);
 resetBtn.addEventListener('click', () => {
   if (confirm('Reset the entire conversation and start a new session?')) {
-    lastRenderedCount = Infinity;
-    send({ type: 'reset' });
+    // Invalidate all panel caches to force full re-render after reset
+      mainTabPanels.querySelectorAll('.messages').forEach(p => {
+        p.dataset.contentKey = '';
+        p.dataset.lastRenderedCount = '0';
+      });
+      send({ type: 'reset' });
   }
 });
 
@@ -3387,8 +3266,8 @@ function sendMessage(inputEl) {
 
   if (state.generating) {
     // Async injection: route to the agent whose tab is active
-    let targetAgent = state.sessionName || 'Maine';
-    if (state.activeSubTab && state.activeSubTab !== 'chat') {
+    let targetAgent = getRootAgentName();
+    if (state.activeSubTab && state.activeSubTab !== getRootTabId()) {
       targetAgent = state.activeSubTab.substring(4); // strip 'sub-'
     }
     send({ type: 'message', text, target_agent: targetAgent });

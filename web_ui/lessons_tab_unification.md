@@ -32,6 +32,12 @@ Added 7 new functions at the end of `app.js` (lines 3415-3509):
 
 5. **config.isGenerating enables sub-agent streaming**: The merged `updateBubbleContent` checks `config.isGenerating !== undefined ? config.isGenerating : state.generating`. This means sub-agent streaming (where `state.generating` is false but the sub-agent is active) works correctly.
 
+6. **No separate 'stream' WebSocket message type exists**: All streaming flows through `stream_update`. There's no distinction between root and sub-agent streaming at the protocol level — just different state objects being updated.
+
+7. **State tracking pattern mismatch**: Root uses global variables (`lastRenderedCount`, `isAutoScrollLocked`), while sub-agents use per-panel DOM attributes (`dataset.lastRenderedCount`, `dataset.contentKey`). Functionally equivalent but architecturally inconsistent.
+
+8. **"Maine" is hardcoded in 4 places** (lines 43, 3279, 3316, 3390) as the default session/agent name. This needs to be parameterized.
+
 ### Data Flow Reference
 
 ```
@@ -56,3 +62,22 @@ state.activeSubTab                → null/'chat'/'sub-{name}' (controls lazy re
 5. `finishEdit()`/`cancelEdit()` — unified dispatch via single `updateBubbleContent(bubble, msgs[index], config)` call
 6. Removed: `createSubMsgEl()`, `updateSubBubbleContent()` (deprecated)
 7. CSS: all `.msg-X, .sub-msg-X` pairs collapsed to just `.msg-X`; sub-agent overrides in `[data-agent-type="sub"]`
+
+## Phase 2 Status: Naming Convention Unification (Not Started)
+
+### Remaining Differences Identified in Audit
+
+| # | Difference | Root Chat | Sub-Agent | Risk |
+|---|-----------|-----------|-----------|------|
+| 1 | Visual hierarchy CSS | No left border | `border-left: 2px solid` accent | Low (CSS only) |
+| 2 | Panel ID naming | `panelChat` | `panelSub-{name}` | Medium (DOM selector) |
+| 3 | Tab ID naming | `'chat'` | `'sub-{name}'` | Medium (JS logic) |
+| 4 | '_root' suffix | Not present | N/A (uses agent name directly) | Medium |
+| 5 | Chat tab closable | No close button | Has × terminate button | Low (UI only) |
+| 6 | Hardcoded "Maine" | 4 references | N/A | Low |
+| 7 | State tracking vars | Global (`lastRenderedCount`) | Per-panel DOM (`dataset.*`) | Medium |
+
+### Key Decision Points for Phase 2
+- Should the root agent be named `{sessionName}_root` (e.g., `Maine_root`) to match sub-agent naming pattern?
+- Should the chat tab be closable/terminatable like sub-agent tabs?
+- Should visual hierarchy CSS be fully unified (no left border on any messages) or kept as a subtle distinction?

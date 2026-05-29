@@ -268,6 +268,8 @@ body {
 
 /* ─── Step 11: Agent-Specific Visual Identity via CSS Custom Properties ───────────────────── */
 /* Subtle accent colors per agent type — applied via [data-instance-name] attribute on message elements */
+/* Root agent (orchestrator) gets a distinct color too */
+[data-instance-name$="_root"] .msg-header { border-bottom-color: #58a6ff; }  /* Blue for orchestrator */
 [data-instance-name="coder"] .msg-header { border-bottom-color: #58a6ff; }
 [data-instance-name="researcher"] .msg-header { border-bottom-color: #3fb950; }
 [data-instance-name="writer"] .msg-header { border-bottom-color: #d29922; }
@@ -275,8 +277,8 @@ body {
 [data-instance-name="security-advisor"] .msg-header { border-bottom-color: #bc8cff; }
 [data-instance-name="generalist"] .msg-header { border-bottom-color: #79c0ff; }
 
-/* Generic sub-agent accent — for agents without specific color */
-[data-agent-type="sub"] .msg-header { border-bottom: 1px solid transparent; }
+/* Generic sub-agent accent — for agents without specific color (applies to ALL agents now including root) */
+.message .msg-header { border-bottom: 1px solid transparent; }
 
 /* ─── Unified message scroll container (used in both root and sub-agent panels) ───────────────────── */
 
@@ -1034,13 +1036,13 @@ body {
 /* Existing msg-content styles are now handled by unified blocks above */
 
 /* === Tab Unification: Subtle accent for sub-agent messages (no indent) === */
-/* Applied via [data-agent-type="sub"] — unified visual style with root messages */
+/* Applied via .message — unified visual style for ALL agents (root and sub-agents identical) */
 
-[data-agent-type="sub"] {
+.message {
     border-left: 2px solid var(--accent-dim, #555);
 }
 
-[data-agent-type="sub"] .msg-name {
+.message .msg-name {
     font-size: 12px;
     color: var(--text-secondary);
     font-weight: 600;
