@@ -11,6 +11,7 @@
     href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
     rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2358a6ff'%3E%3Cpath d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/%3E%3C/svg%3E">
@@ -391,11 +392,11 @@
                 </h3>
                 <div id="api-endpoints-list" class="settings-section-body" style="gap:0;">
                   <!-- Endpoint cards injected here by JS -->
-                  <div class="api-endpoint-empty" style="text-align:center;color:var(--text-dim);padding:12px;font-size:12px;">
+                  <div class="api-endpoint-empty" style="text-align:center;color:var(--text-muted);padding:12px;font-size:12px;">
                     No extra endpoints configured. Agents use the General Settings API.
                   </div>
                 </div>
-                <div style="padding:4px 8px;font-size:11px;color:var(--text-dim);">
+                <div style="padding:4px 8px;font-size:11px;color:var(--text-muted);">
                   ℹ️ The General Settings API is always the last-resort fallback for all agents.
                 </div>
               </div>
@@ -405,11 +406,11 @@
                 <h3 class="settings-section-title">Agent API Assignments</h3>
                 <div id="agent-api-assignments" class="settings-section-body">
                   <!-- Per-agent-type endpoint priority lists injected here by JS -->
-                  <div style="text-align:center;color:var(--text-dim);padding:12px;font-size:12px;">
+                  <div style="text-align:center;color:var(--text-muted);padding:12px;font-size:12px;">
                     Add endpoints above, then assign them to agent types.
                   </div>
                 </div>
-                <div style="padding:4px 8px;font-size:11px;color:var(--text-dim);">
+                <div style="padding:4px 8px;font-size:11px;color:var(--text-muted);">
                   ℹ️ Agents try endpoints top-to-bottom. Falls back to General Settings API.
                 </div>
               </div>

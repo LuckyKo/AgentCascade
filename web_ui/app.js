@@ -17,6 +17,19 @@ marked.setOptions({
   },
 });
 
+// ── DOMPurify security configuration ─────────────────────────────────────────
+// Hardened config: explicitly whitelist allowed tags/attributes for defense-in-depth.
+if (typeof DOMPurify !== 'undefined') {
+  DOMPurify.setConfig({
+    ALLOWED_TAGS: ['b','i','u','em','strong','a','code','pre','blockquote',
+                   'p','br','hr','ul','ol','li','table','thead','tbody',
+                   'tr','th','td','img','details','summary','span','h1','h2','h3',
+                   'h4','h5','h6','div','section','article','mark','del'],
+    ALLOWED_ATTR: ['href','src','title','class','open','style','alt'],
+    ALLOW_DATA_ATTR: true,
+  });
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 const USER = 'user';
 const ASSISTANT = 'assistant';
@@ -56,7 +69,7 @@ const state = {
     active: false,
     // Throttle timestamps for streaming performance
     lastGenStatsUpdate: 0,       // For updateGenStats throttling (~2Hz)
-    lastSubAgentRender: 0,      // For renderSubAgents throttling (~750ms)
+    lastSubAgentRender: 0,      // For renderSubAgents throttling (~200ms)
     lastContextBarUpdate: 0,    // For updateContextBar throttling (~1Hz during streaming)
     lastUiUpdate: 0,            // For activity bar throttling (~1Hz)
     lastControlsUpdate: 0,      // For updateControls throttling (~1Hz)
@@ -72,7 +85,7 @@ const state = {
   summary: "", // Active compression summary
   lastMemoryEditTime: 0, // Timestamp of last manual memory edit to prevent race condition reverts
   _lastIsGenerating: undefined, // For change detection in updateControls()
-  closedTabs: new Set(),
+  closedTabs: new Set(JSON.parse(localStorage.getItem('agent-cascade-closed-tabs') || '[]')),
 };
 
 let ws = null;
@@ -168,8 +181,8 @@ const ActivityBar = {
     
     const activeInstance = this.getFilterInstance();
     const agentData = state.subAgents[activeInstance];
-    const isRoot = isRootAgentName(activeInstance);
-    const isActive = isRoot ? (state.generating && !agentData?.is_halted) : (agentData?.active ?? false);
+    // Unified active state: prefer agentData.active if available, fall back to global generating flag
+    const isActive = agentData?.active ?? state.generating;
     
     this.el.classList.toggle('active', isActive);
     const dot = this.el.querySelector('.activity-dot');
@@ -177,7 +190,7 @@ const ActivityBar = {
     
     if (isActive) {
       let status = '';
-      if (!isRoot && agentData?.is_waiting) {
+      if (!isRootAgentName(activeInstance) && agentData?.is_waiting) {
         status = 'Waiting for API slot...';
       } else if (streamingText !== undefined) {
         status = streamingText;
@@ -188,8 +201,9 @@ const ActivityBar = {
         status = getActivityPreview(lastMsg) || 'Agent Idle';
       }
       
-      const tokCount = isRoot ? state.totalTokens : agentData?.total_tokens;
-      const wordCount = isRoot ? state.totalWords : agentData?.total_words;
+      // Use agent-level stats if available, fall back to global stats
+      const tokCount = agentData?.total_tokens ?? state.totalTokens;
+      const wordCount = agentData?.total_words ?? state.totalWords;
       if (tokCount !== undefined) {
         status += ` (${wordCount} words, ${tokCount} tokens)`;
       }
@@ -355,25 +369,6 @@ async function fetchSessions() {
 // Initial fetch
 fetchSessions();
 
-// ── Unified UI State for tab/message unification ──────────────────────────────
-const UIState = {
-    // Scroll positions per agent instance
-    scrollPositions: {},
-    
-    // Active tab / focused agent
-    activeInstance: 'root',
-    
-    // Pending streaming requests per instance
-    pendingRequests: {},
-    
-    // Whether an instance is currently generating
-    generating: {},
-    
-    // Scroll to bottom flags per instance
-    scrollToBottom: { root: true },
-};
-
-
 // Render session list
 function renderSessions() {
   if (!sessionsList) return;
@@ -389,10 +384,10 @@ function renderSessions() {
   }
 
   sessionsList.innerHTML = filtered.map(s => `
-    <div class="session-item" data-path="${s.path.replace(/\\/g, '/')}">
+    <div class="session-item" data-path="${escapeHtml(s.path.replace(/\\/g, '/'))}">
       <div class="session-item-header">
-        <span class="session-item-name">${s.name}</span>
-        <span class="session-item-agent">${s.agent}</span>
+        <span class="session-item-name">${escapeHtml(s.name)}</span>
+        <span class="session-item-agent">${escapeHtml(s.agent)}</span>
       </div>
       <div class="session-item-meta">
         <span>${formatDate(s.mtime * 1000)}</span>
@@ -401,8 +396,8 @@ function renderSessions() {
     </div>
   `).join('');
 
-  // Add click listeners to session items
-  document.querySelectorAll('.session-item').forEach(item => {
+  // Add click listeners scoped to sessionsList (old DOM is replaced each render, so no leak)
+  sessionsList.querySelectorAll('.session-item').forEach(item => {
     item.addEventListener('click', () => {
       const path = item.dataset.path;
       loadSession(path);
@@ -419,6 +414,7 @@ function loadSession(path) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     if (confirm('Load this session? Current unsaved state will be lost.')) {
       state.closedTabs.clear();
+      localStorage.removeItem('agent-cascade-closed-tabs');
       ws.send(JSON.stringify({
         type: 'load_session',
         path: path
@@ -781,7 +777,9 @@ function connect() {
     try {
       const data = JSON.parse(event.data);
       handleServerMessage(data);
-    } catch { }
+    } catch (err) {
+      console.error('[WS] Failed to process server message:', err.message);
+    }
   };
 }
 
@@ -878,10 +876,12 @@ function handleServerMessage(data) {
         }
       }
       
-      // Merge agent_instances (sub-agents) — don't overwrite root data
+      // Merge agent_instances (sub-agents) — skip root agent; its messages come from data.messages above
       if (data.agent_instances) {
         for (const [name, sa] of Object.entries(data.agent_instances)) {
-          state.subAgents[name] = sa;
+          if (!isRootAgentName(name)) {
+            state.subAgents[name] = sa;
+          }
         }
       }
       state.activeStack = data.active_stack || [];
@@ -896,8 +896,8 @@ function handleServerMessage(data) {
       if (data.agent_index !== undefined) state.agentIndex = data.agent_index;
       if (data.approvals) {
         state.approvals = data.approvals;
-        renderApprovals();
       }
+      renderApprovals(); // Always call to keep bar in sync, even when approvals field is missing
 
       if (data.total_tokens !== undefined) state.totalTokens = data.total_tokens;
       if (data.total_words !== undefined) state.totalWords = data.total_words;
@@ -955,9 +955,9 @@ function handleServerMessage(data) {
       // Invalidate panel caches so edits/deletes trigger re-renders
       mainTabPanels.querySelectorAll('.messages').forEach(p => { 
         p.dataset.contentKey = ''; 
-        p.dataset.lastRenderedCount = '0';
+        p.dataset.lastRenderedCount = '999999999';
       });
-      
+
       // Render root agent through the same path as sub-agents
       renderSubAgents();
       
@@ -1001,20 +1001,20 @@ function handleServerMessage(data) {
       const historyCount = data.history_count || 0;
       const responseMsgs = data.response_messages || [];
 
-      // Merge root agent: always truncate to historyCount before pushing response messages.
-      // The server guarantees that historyCount represents the number of stable messages
-      // already committed, and responseMsgs are the NEW messages beyond that.
-      // Always truncating prevents duplication when 'state' broadcast included messages
-      // that were committed during streaming (overlap between state.data.messages and stream_update.response_messages).
+      // Merge root agent: truncate local messages to historyCount before pushing response messages,
+             // but only when historyCount <= local length (to discard uncommitted streaming content).
+             // If historyCount > local length (reconnect/race condition), keep existing messages —
+             // the server's responseMsgs will fill in any gaps rather than wiping our state.
       const rootData = state.subAgents[rootName];
       if (rootData && rootData.messages) {
         // Guard against server reporting a higher historyCount than we have locally
-        // (can happen on reconnect or race conditions — reset to be safe instead of extending with undefined slots)
+               // (can happen on reconnect or race conditions — keep existing messages instead of wiping them,
+               // the server's responseMsgs will fill in any gaps; only truncate when historyCount is lower)
         if (historyCount > rootData.messages.length) {
-          console.warn(`[stream_update] historyCount (${historyCount}) > local length (${rootData.messages.length}), resetting`);
-          rootData.messages = [];
+                 console.warn(`[stream_update] historyCount (${historyCount}) > local length (${rootData.messages.length}), keeping existing messages`);
+                 // Do NOT reset — server's responseMsgs below will fill in gaps
         } else {
-          rootData.messages.length = historyCount;
+                 rootData.messages.length = historyCount;  // discard uncommitted streaming content
         }
         rootData.messages.push(...responseMsgs);
       } else if (rootData) {
@@ -1027,11 +1027,13 @@ function handleServerMessage(data) {
       //   subAgentNewVisibleMessage — a new bubble was added to a VISIBLE panel (force immediate render)
       //   subAgentContentChanged   — any subagent state changed (content streaming or new messages).
       //     Note: subAgentNewVisibleMessage only covers new-message arrivals on visible panels;
-      //     streaming content updates rely on the tiered throttle timer below.
+      //     streaming content updates rely on the flat ~200ms throttle timer below.
       let subAgentNewVisibleMessage = false;
       let subAgentContentChanged = false;
       if (data.agent_instances) {
                for (const [name, sa] of Object.entries(data.agent_instances)) {
+                // Skip root agent in stream_update — its messages are handled separately above
+                if (isRootAgentName(name)) continue;
           const existing = state.subAgents[name];
           const prevMsgCount = existing ? existing.messages.length : 0;
           
@@ -1045,10 +1047,9 @@ function handleServerMessage(data) {
               if (hCount < (existing._lastHistoryCount || 0)) {
                 // Stale: only sync metadata, don't touch message array.
                 // Exclude sa.messages from Object.assign to prevent overwriting our local array.
-                const savedMessages = sa.messages;
-                delete sa.messages;
-                Object.assign(existing, sa);
-                sa.messages = savedMessages;
+                const saCopy = { ...sa };
+                delete saCopy.messages;
+                Object.assign(existing, saCopy);
                 existing._lastHistoryCount = hCount;
                 delete existing.is_partial;
               } else {
@@ -1062,10 +1063,12 @@ function handleServerMessage(data) {
                 }
                 // Sync other metadata fields — but NOT messages (we just merged those above).
                 // Object.assign would overwrite our merged array with the partial sa.messages.
-                const savedMessages = sa.messages;
-                delete sa.messages;
-                Object.assign(existing, sa);
-                sa.messages = savedMessages;
+                const saCopy = { ...sa };
+                delete saCopy.messages;
+                Object.assign(existing, saCopy);
+                // Defensive fallback: existing.messages is always set by the merge above,
+                // but guard against malformed server data where Object.assign overwrites it.
+                existing.messages = existing.messages || sa.messages || [];
                 existing._lastHistoryCount = hCount;
                 delete existing.is_partial; // local state should be complete
               }
@@ -1079,7 +1082,7 @@ function handleServerMessage(data) {
           
           // Detect changes to decide render urgency:
           //   - New messages (message count grew or brand new agent) → force immediate render if visible
-          //   - Any state change (including streaming content growth with same message count) → use tiered throttle
+          //   - Any state change (including streaming content growth with same message count) → use flat ~200ms throttle
           const newMsgCount = existing ? existing.messages.length : (sa.messages ? sa.messages.length : 0);
           const hasNewMessage = newMsgCount > prevMsgCount || !prevMsgCount;
           
@@ -1113,16 +1116,11 @@ function handleServerMessage(data) {
       if (!state.generating) {
         state.genStats.lastChatRender = 0;
         state.genStats.lastChatContentKey = '';
-        // Invalidate root panel cache to force re-render on fresh generation
-        const rootPanel = document.getElementById(getRootPanelId());
-        if (rootPanel) {
-          rootPanel.querySelector('.messages')?.dataset ? null : null;
-          const msgsEl = rootPanel?.querySelector('.messages');
-          if (msgsEl) {
-            msgsEl.dataset.contentKey = '';
-            msgsEl.dataset.lastRenderedCount = '0';
-          }
-        }
+        // Invalidate ALL panel caches (not just root) to force re-render on fresh generation
+        mainTabPanels.querySelectorAll('.messages').forEach(p => {
+          p.dataset.contentKey = '';
+          p.dataset.lastRenderedCount = '999999999';
+        });
       }
       state.generating = true;
       const newStackStr = (state.activeStack || []).join(',');
@@ -1158,8 +1156,8 @@ function handleServerMessage(data) {
       // Approvals require immediate rendering (user must see these promptly)
       if (data.approvals) {
         state.approvals = data.approvals;
-        renderApprovals();
       }
+      renderApprovals(); // Always call to ensure bar stays in sync with current state
 
       // Throttle control updates to ~1Hz during streaming; always update when generating state changes.
       // Uses wasGenerating captured at function scope (line 770), before state.generating was updated above.
@@ -1168,19 +1166,9 @@ function handleServerMessage(data) {
         state.genStats.lastControlsUpdate = now;
       }
 
-      // Throttle sub-agent rendering with tiered rates based on change urgency:
-      //   Tier 1 — New visible bubble (subAgentNewVisibleMessage): force immediate render, reset timer.
-      //            Only fires for panels the user is actually looking at (visibility guard above).
-      //   Tier 2 — Content streaming (no new messages, subAgentContentChanged): faster throttle (~150ms)
-      //            to keep text flowing smoothly without excessive DOM churn.
-      //   Tier 3 — Idle / no changes: slower throttle (~750ms) to save CPU.
-      const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
-      // During root-only streaming (no sub-agents in stack), use a moderate throttle rate
-      // since response messages were just merged into rootData.messages above.
-      // Root: ~3.3Hz (300ms) for smooth text flow. Sub-agent active: ~6.7Hz (150ms). Idle: ~1.3Hz (750ms).
-      const isRootStreaming = state.generating && !isSubAgentActive;
-      const subThrottleContent = isSubAgentActive ? 150 : (isRootStreaming ? 300 : 750);
+      // Throttle sub-agent rendering to ~200ms during streaming
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
+      const subThrottleContent = 200;
       if (stackChanged || subAgentNewVisibleMessage || now - state.genStats.lastSubAgentRender > subThrottleContent) {
         // Only call renderSubAgents if we're NOT about to call switchMainTab,
         // since switchMainTab calls renderSubAgents internally at the end.
@@ -1355,28 +1343,28 @@ function triggerAfkSend() {
 // These helpers abstract the root vs sub-agent distinction for CSS classes and labels.
 // All messages now use the same base CSS classes — differentiation is via data-agent-type attribute.
 
-/** Return the combined CSS class string for a message element — same base class for both root and sub-agent */
-function msgClass(role, isRoot) {
+/** Return the combined CSS class string for a message element */
+function msgClass(role) {
     return `message msg-${role}`;  // Differentiate via data-agent-type attribute only
 }
 
-/** Return the CSS class for a message header element — same class for both root and sub-agent */
-function headerClass(isRoot) {
+/** Return the CSS class for a message header element */
+function headerClass() {
     return 'msg-header';
 }
 
-/** Return the CSS class for a message content element — same class for both root and sub-agent */
-function contentClass(isRoot) {
+/** Return the CSS class for a message content element */
+function contentClass() {
     return 'msg-content';
 }
 
-/** Return the CSS class for the role name/label element — same class for both root and sub-agent */
-function nameLabelClass(isRoot) {
+/** Return the CSS class for the role name/label element */
+function nameLabelClass() {
     return 'msg-name';
 }
 
 /** Return the display label for a role — same logic for all agents including root */
-function roleName(role, isRoot, msg, instanceName) {
+function roleName(role, msg, instanceName) {
     // Unified labels: "You" for user everywhere, agent name for assistant, "Tool Result" everywhere
     if (role === 'user') return 'You';
     if (role === 'tool' || role === 'function') return 'Tool Result';
@@ -1387,14 +1375,9 @@ function roleName(role, isRoot, msg, instanceName) {
     return 'Assistant';
 }
 
-/** Get config object for root-agent rendering — root is treated same as sub-agents but isRoot flag set */
-function getRootAgentConfig() {
-    return { isRoot: true, instanceName: getRootAgentName() };
-}
-
-/** Get config object for sub-agent rendering (name = instance name) */
-function getSubAgentConfig(name) {
-    return { isRoot: false, instanceName: name };
+/** Get config object for any agent rendering — all agents use the same path */
+function getAgentConfig(name) {
+    return { instanceName: name };
 }
 
 /**
@@ -1412,9 +1395,8 @@ function getSubAgentConfig(name) {
 function renderAgentConversation(instanceName, messages, depth, indexMap, configOverride) {
     if (!messages || messages.length === 0) return document.createDocumentFragment();
 
-    // All agents now use the same sub-agent config path (including root with _root suffix)
-    const isRoot = isRootAgentName(instanceName);
-    let config = getSubAgentConfig(instanceName);
+    // All agents now use the same config path (including root with _root suffix)
+    let config = getAgentConfig(instanceName);
     
     // Merge any override (e.g., isGenerating from agentData.active)
     if (configOverride) {
@@ -1437,11 +1419,10 @@ function renderAgentConversation(instanceName, messages, depth, indexMap, config
 
 function createMessageEl(msg, index, config) {
   // Default to root agent config if not provided (backward compatible)
-  if (!config) config = getRootAgentConfig();
-  const isRoot = config.isRoot;
+  if (!config) config = getAgentConfig(getRootAgentName());
 
   const div = document.createElement('div');
-  div.className = msgClass(msg.role || 'unknown', isRoot);
+  div.className = msgClass(msg.role || 'unknown');
   div.dataset.index = index;
   
   // All agents get data-instance-name for per-agent accent color styling
@@ -1456,11 +1437,11 @@ function createMessageEl(msg, index, config) {
 
   // Header
   const header = document.createElement('div');
-  header.className = headerClass(isRoot);
+  header.className = headerClass();
   
   const nameSpan = document.createElement('span');
-  nameSpan.className = nameLabelClass(isRoot);
-  nameSpan.textContent = roleName(msg.role || 'unknown', isRoot, msg, instName);
+  nameSpan.className = nameLabelClass();
+  nameSpan.textContent = roleName(msg.role || 'unknown', msg, instName);
   header.appendChild(nameSpan);
 
   // Actions
@@ -1496,9 +1477,9 @@ function createMessageEl(msg, index, config) {
     let selectedText = sel.toString().trim();
     if (!selectedText) return;
 
-    if (e.target.closest('.' + headerClass(isRoot))) return;
+    if (e.target.closest('.' + headerClass())) return;
 
-    const contentDiv = div.querySelector('.' + contentClass(isRoot));
+    const contentDiv = div.querySelector('.' + contentClass());
     if (!contentDiv) return;
 
     const range = sel.getRangeAt(0);
@@ -1515,7 +1496,7 @@ function createMessageEl(msg, index, config) {
 
   // Content
   const contentDiv = document.createElement('div');
-  contentDiv.className = contentClass(isRoot);
+  contentDiv.className = contentClass();
 
   let html = '';
   // Check config.isGenerating first (per-panel), then fall back to checking subAgents for this instance
@@ -1560,56 +1541,12 @@ function createMessageEl(msg, index, config) {
   return div;
 }
 
-// ── Shared streaming-delta helper ─────────────────────────────────────────────
-
-/**
- * Append a raw-text delta during LLM streaming without re-parsing through marked.
- * 
- * Why raw text: calling marked.parse() on each delta wraps it in <p> tags, breaking
- * mid-paragraph runs into separate blocks with visible gaps (the "chunked lines" bug).
- * 
- * Strategy: find the deepest block-level container and append raw text as a sibling
- * text node so it flows visually within existing structure. Inline formatting elements
- * (<code>, <strong>, <em>, <a>) are skipped to prevent trapping raw text inside them.
- * Pre blocks trigger fallback to full re-render (incremental append diverges from parsing).
- * 
- * Tradeoffs: markdown characters (backticks, asterisks) in deltas appear as literal text
- * until the next full re-render tick (~300ms throttled). This is acceptable — the full
- * re-render restores proper formatting within that window.
- * 
-* @param {HTMLElement} container - The .msg-content div
- * @param {string} newText - The delta text to append
- * @returns {boolean} true if appended successfully, false if caller should fall back to full re-render
- */
-function appendStreamingDelta(container, newText) {
-  if (!newText || typeof newText !== 'string') return false;
-
-  let target = container.lastElementChild;
-  while (target && target.lastElementChild) {
-    const child = target.lastElementChild;
-    // Don't descend into inline formatting elements — they could trap raw text.
-    // Also skip if target itself is inside a <pre> block, or child is/will be inside one.
-    if (target.closest('pre') || ['code', 'strong', 'em', 'a'].includes(child.tagName.toLowerCase()) || child.closest('pre')) {
-      break;
-    }
-    target = child;
-  }
-  if (!target) return false; // Edge case: empty container → caller falls through to full re-render
-  try {
-    target.insertAdjacentText('beforeend', newText);
-    return true;
-  } catch (e) {
-    // Fallback: append as a text node directly to the container (safe, preserves existing content)
-    container.appendChild(document.createTextNode(newText));
-    return true;
-  }
-}
+// ── Bubble content updater ─────────────────────────────────────────────
 
 function updateBubbleContent(bubble, msg, config) {
-  if (!config) config = getRootAgentConfig();
-  const isRoot = config.isRoot;
+  if (!config) config = getAgentConfig(getRootAgentName());
 
-  const contentDiv = bubble.querySelector('.' + contentClass(isRoot));
+  const contentDiv = bubble.querySelector('.' + contentClass());
   if (!contentDiv) return;
 
   // PERFORMANCE: During streaming, only render the delta (new text appended)
@@ -1629,18 +1566,11 @@ function updateBubbleContent(bubble, msg, config) {
       delete bubble.dataset.prevContent;
       delete bubble.dataset.prevReasoning;
     } else if (curContent.startsWith(prevContent)) {
-      // Incremental streaming update: only render the new portion
-      const newText = curContent.slice(prevContent.length);
-      if (newText) {
-        if (appendStreamingDelta(contentDiv, newText)) {
-          bubble.dataset.prevContent = curContent;
-          return;
-        }
-        // No suitable target — fall through to full re-render below
-      } else {
-        bubble.dataset.prevContent = curContent;
-        return;
-      }
+      // Streaming delta detected — just update the tracking marker and skip re-render.
+      // The throttle loop will trigger a full re-render at the next tick, which avoids
+      // the "chunked lines" bug where raw text injection creates visible gaps mid-paragraph.
+      bubble.dataset.prevContent = curContent;
+      return;
     }
   }
   
@@ -1717,7 +1647,8 @@ function renderMarkdown(text, allowThinking = true) {
   // O(N^2) regex work to keep the UI responsive.
   if (!allowThinking) {
     try {
-      return marked.parse(text);
+      // Sanitize HTML output from marked to prevent XSS from LLM-generated content
+      return DOMPurify.sanitize(marked.parse(text));
     } catch {
       return `<p>${escapeHtml(text)}</p>`;
     }
@@ -1764,7 +1695,8 @@ function renderMarkdown(text, allowThinking = true) {
   }
 
   try {
-    return marked.parse(text);
+    // Sanitize HTML output from marked to prevent XSS from LLM-generated content
+    return DOMPurify.sanitize(marked.parse(text));
   } catch {
     return `<p>${escapeHtml(text)}</p>`;
   }
@@ -1898,6 +1830,12 @@ function appendSystemBubble(text) {
   const bar = document.getElementById('systemToastBar');
   if (!bar) return;
   
+  // Enforce max capacity of 3 toasts — remove the oldest one first
+  const existingToasts = bar.querySelectorAll('.system-toast-item');
+  if (existingToasts.length >= 3 && existingToasts[0]) {
+    existingToasts[0].remove();
+  }
+  
   const toast = document.createElement('div');
   toast.className = 'system-toast-item';
   toast.innerHTML = `
@@ -1905,8 +1843,10 @@ function appendSystemBubble(text) {
     <button class="toast-dismiss">×</button>
   `;
   const dismissBtn = toast.querySelector('.toast-dismiss');
+  let autoDismissTimer = null;
   if (dismissBtn) {
     dismissBtn.onclick = () => {
+      clearTimeout(autoDismissTimer); // Cancel pending auto-dismiss to avoid wasted timer
       toast.remove();
       if (!bar.querySelector('.system-toast-item')) bar.style.display = 'none';
     };
@@ -1915,7 +1855,7 @@ function appendSystemBubble(text) {
   bar.style.display = 'block';
   
   // Auto-dismiss after 15 seconds
-  setTimeout(() => {
+  autoDismissTimer = setTimeout(() => {
     if (toast.parentNode) {
       toast.remove();
       if (!bar.querySelector('.system-toast-item')) bar.style.display = 'none';
@@ -1968,7 +1908,7 @@ function startEdit(index, selectedText = '', proportion = 0, instanceName = null
 
   const bubbleSelector = '.message';
   const bubbles = scrollContainer.querySelectorAll(bubbleSelector);
-  const bubble = Array.from(bubbles).find(b => b.dataset.index == index);
+  const bubble = Array.from(bubbles).find(b => b.dataset.index === String(index));
   if (!bubble) return;
 
 
@@ -2098,12 +2038,12 @@ function finishEdit(index, newContent, instanceName = null) {
 
   const bubbleSelector = '.message';
   const bubbles = scrollContainer.querySelectorAll(bubbleSelector);
-  const bubble = Array.from(bubbles).find(b => b.dataset.index == index);
+  const bubble = Array.from(bubbles).find(b => b.dataset.index === String(index));
   if (!bubble) return;
 
-  // All agents use sub-agent config now (including root with _root suffix)
-  const config = getSubAgentConfig(instanceName);
-  bubble.querySelector('.' + contentClass(config.isRoot)).classList.remove('editing');
+  // All agents use the same config now (including root with _root suffix)
+  const config = getAgentConfig(instanceName);
+  bubble.querySelector('.' + contentClass()).classList.remove('editing');
   updateBubbleContent(bubble, msgs[index], config);
 }
 
@@ -2120,12 +2060,12 @@ function cancelEdit(index, instanceName = null) {
 
   const bubbleSelector = '.message';
   const bubbles = scrollContainer.querySelectorAll(bubbleSelector);
-  const bubble = Array.from(bubbles).find(b => b.dataset.index == index);
+  const bubble = Array.from(bubbles).find(b => b.dataset.index === String(index));
   if (!bubble) return;
 
-  // All agents use sub-agent config now (including root with _root suffix)
-  const config = getSubAgentConfig(instanceName);
-  bubble.querySelector('.' + contentClass(config.isRoot)).classList.remove('editing');
+  // All agents use the same config now (including root with _root suffix)
+  const config = getAgentConfig(instanceName);
+  bubble.querySelector('.' + contentClass()).classList.remove('editing');
   const msgs = state.subAgents[instanceName] ? state.subAgents[instanceName].messages : [];
   updateBubbleContent(bubble, msgs[index], config);
 }
@@ -2207,7 +2147,7 @@ function renderApprovals() {
   
   // Scroll approval bar into view if it's off-screen (happens with many agent tabs)
   requestAnimationFrame(() => {
-    bar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    bar.scrollIntoView({ behavior: 'instant', block: 'start' });
   });
 
   for (const ap of state.approvals) {
@@ -2250,9 +2190,9 @@ function renderApprovals() {
       </details>
       ${securityHtml}
       <div class="approval-actions">
-        <button class="btn btn-primary btn-sm" onclick="approveRequest('${ap.request_id}')">✅ Approve</button>
-        <button class="btn btn-warning btn-sm ask-security-btn" ${checkBtnDisabled} onclick="askSecurity('${ap.request_id}', this)">${checkBtnText}</button>
-        <button class="btn btn-danger btn-sm" onclick="showRejectInput('${ap.request_id}', this)">❌ Reject</button>
+        <button class="btn btn-primary btn-sm" data-request-id="${escapeHtml(ap.request_id)}" onclick="approveRequest(this.dataset.requestId)">✅ Approve</button>
+        <button class="btn btn-warning btn-sm ask-security-btn" ${checkBtnDisabled} data-request-id="${escapeHtml(ap.request_id)}" onclick="askSecurity(this.dataset.requestId, this)">${checkBtnText}</button>
+        <button class="btn btn-danger btn-sm" data-request-id="${escapeHtml(ap.request_id)}" onclick="showRejectInput(this.dataset.requestId, this)">❌ Reject</button>
       </div>
     `;
     bar.appendChild(card);
@@ -2281,8 +2221,8 @@ window.showRejectInput = function (requestId, btn) {
   const area = document.createElement('div');
   area.className = 'reject-input-area';
   area.innerHTML = `
-    <input type="text" placeholder="Rejection reason..." class="reject-reason-input" id="reject-${requestId}">
-    <button class="btn btn-danger btn-sm" onclick="rejectRequest('${requestId}')">Confirm Reject</button>
+    <input type="text" placeholder="Rejection reason..." class="reject-reason-input" id="reject-${escapeHtml(requestId)}">
+    <button class="btn btn-danger btn-sm" data-request-id="${escapeHtml(requestId)}" onclick="rejectRequest(this.dataset.requestId)">Confirm Reject</button>
   `;
   card.appendChild(area);
   area.querySelector('input').focus();
@@ -2329,11 +2269,12 @@ function renderSubAgents() {
 
   for (const name of namesArr) {
     const tabId = 'sub-' + name;
+    // Behavioral check only: root agent's close button terminates the session instead of closing the tab
     const isRoot = isRootAgentName(name);
     const agentData = sa[name];
-    // Root agent: active if state.generating and not in a sub-agent stack
-    // Sub-agents: use their own active flag
-    const isActive = isRoot ? (state.generating && !agentData?.is_halted) : (agentData?.active ?? false);
+    // Unified active state: prefer agentData.active if available, fall back to global generating flag.
+    // Note: this means sub-agent tabs will pulse during ANY agent's generation, not just their own.
+    const isActive = agentData?.active ?? state.generating;
 
     // Create tab button if it doesn't exist
     let tabBtn = mainTabBar.querySelector(`.main-tab[data-tab="${tabId}"]`);
@@ -2362,7 +2303,8 @@ function renderSubAgents() {
           send({ type: 'terminate_agent_instance', instance_name: name });
         } else {
           send({ type: 'terminate_agent_instance', instance_name: name });
-          state.closedTabs.add(tabId);
+          // Don't add to closedTabs optimistically — let server state sync handle tab removal.
+          // If termination fails, the agent stays in subAgents and its tab reappears naturally.
           if (state.activeSubTab === tabId) {
             switchMainTab(getRootTabId());
           } else {
@@ -2387,7 +2329,7 @@ function renderSubAgents() {
       tabBtn.dataset.isActive = String(isActive);
     }
     const labelSpan = tabBtn.querySelector('.tab-label');
-    if (labelSpan) {
+    if (labelSpan && labelSpan.textContent !== ` ${name}`) {
       labelSpan.textContent = ` ${name}`;
     }
 
@@ -2426,18 +2368,20 @@ function renderSubAgents() {
     // Render sub-agent messages into the panel
     renderSubAgentPanel(panel, sa[name], name);
   }
-
-  // Toggle pulse dim class for JS-driven animation at ~1Hz throttle rate
-  togglePulseElements();
 }
 
 function renderSubAgentPanel(panel, agentData, name) {
   const isVisible = state.activeSubTab === 'sub-' + name;
-  const isRoot = isRootAgentName(name);
   const msgs = (agentData && agentData.messages) ? agentData.messages : [];
   
-  // For root agent: derive active state from global generating flag, not agentData.active
-  const isActive = isRoot ? (state.generating && !agentData?.is_halted) : (agentData?.active ?? false);
+  // Unified active state: prefer agentData.active if available, fall back to global generating flag.
+  // Note: this means sub-agent tabs will pulse during ANY agent's generation, not just their own.
+  const isActive = agentData?.active ?? state.generating;
+  
+  // Unified token/word counts: use agent-level stats if available, fall back to global
+  const tokCount = agentData?.total_tokens ?? state.totalTokens;
+  const wordCount = agentData?.total_words ?? state.totalWords;
+  const maxTok = agentData?.max_tokens ?? state.maxTokens;
   
   // Pool mirror: show ALL messages including system prompt — no filtering
   const displayMsgs = msgs;
@@ -2478,16 +2422,14 @@ function renderSubAgentPanel(panel, agentData, name) {
   // 3. LAZY RENDERING: Skip expensive message work if the tab isn't visible
   if (!isVisible) {
     // Still update status bar stats even when hidden (was in old renderMessages)
-    if (isRoot && statusWords) statusWords.textContent = `${state.totalWords} words`;
-    if (isRoot && statusTokens) statusTokens.textContent = `${state.totalTokens} tokens`;
+    if (statusWords) statusWords.textContent = `${wordCount} words`;
+    if (statusTokens) statusTokens.textContent = `${tokCount} tokens`;
     return;
   }
 
-  // Update status bar stats for root agent (was in old renderMessages)
-  if (isRoot) {
-    if (statusWords) statusWords.textContent = `${state.totalWords} words`;
-    if (statusTokens) statusTokens.textContent = `${state.totalTokens} tokens`;
-  }
+  // Update status bar stats
+  if (statusWords) statusWords.textContent = `${wordCount} words`;
+  if (statusTokens) statusTokens.textContent = `${tokCount} tokens`;
 
   // 4. Check Content Key EARLY to skip all layout reads and DOM work when nothing changed
   const lastMsgTextLen = (() => {
@@ -2498,8 +2440,8 @@ function renderSubAgentPanel(panel, agentData, name) {
     return String(lastMsg.content || '').length;
   })();
   const funcCallLen = (lastMsg && lastMsg.function_call && lastMsg.function_call.arguments) ? String(lastMsg.function_call.arguments).length : 0;
-  // For root, use state.generating for active flag in content key
-  const activeFlag = isRoot ? state.generating : agentData.active;
+  // Unified active flag: use the same derivation as isActive above
+  const activeFlag = agentData?.active ?? state.generating;
   const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + (lastMsg ? String(lastMsg.reasoning_content || '').length : 0) + ':' + funcCallLen + ':' + activeFlag;
   
   if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === displayMsgs.length) {
@@ -2516,29 +2458,38 @@ function renderSubAgentPanel(panel, agentData, name) {
   if (currentCount < lastCount || lastCount === 0) {
     scrollContainer.innerHTML = '';
     // Pass isGenerating via config override so all messages know the streaming state
-    const subConfig = getSubAgentConfig(name);
+    const subConfig = getAgentConfig(name);
     subConfig.isGenerating = isActive;
     scrollContainer.appendChild(renderAgentConversation(name, displayMsgs, 1, null, subConfig));
     
-    // Root: use global token counts and context bar ID; sub-agents: use their own
-    if (isRoot) {
-      updateContextBar(document.getElementById('subContextFill-' + name), displayMsgs, state.totalTokens, state.maxTokens);
-    } else {
-      const fillEl = document.getElementById('subContextFill-' + name);
-      if (fillEl) updateContextBar(fillEl, displayMsgs, agentData.total_tokens, agentData.max_tokens);
-    }
+    // Update context bar with unified token counts
+    updateContextBar(document.getElementById('subContextFill-' + name), displayMsgs, tokCount, maxTok);
   } else {
-    // Append new messages using unified rendering with indexMap to preserve indices
-    const newMsgs = [];
-    const newIndexMap = [];
-    for (let i = lastCount; i < currentCount; i++) {
-      newMsgs.push(displayMsgs[i]);
-      newIndexMap.push(i);
+    // CRITICAL: Verify DOM actually contains lastCount child elements before appending.
+    // If the container was cleared by another path (tab switch, retry, etc.) but
+    // lastRenderedCount wasn't reset in time, appending would create duplicates.
+    const actualChildCount = scrollContainer.children.length;
+    if (actualChildCount !== lastCount) {
+      // DOM is out of sync — do a full re-render instead of append
+      scrollContainer.innerHTML = '';
+      const subConfig = getAgentConfig(name);
+      subConfig.isGenerating = isActive;
+      scrollContainer.appendChild(renderAgentConversation(name, displayMsgs, 1, null, subConfig));
+      // Update context bar since we just did a full re-render
+      updateContextBar(document.getElementById('subContextFill-' + name), displayMsgs, tokCount, maxTok);
+    } else {
+      // Safe to append — DOM matches expected state
+      const newMsgs = [];
+      const newIndexMap = [];
+      for (let i = lastCount; i < currentCount; i++) {
+        newMsgs.push(displayMsgs[i]);
+        newIndexMap.push(i);
+      }
+      // Pass isGenerating via config override so all messages know the streaming state
+      const subConfig = getAgentConfig(name);
+      subConfig.isGenerating = isActive;
+      scrollContainer.appendChild(renderAgentConversation(name, newMsgs, 1, newIndexMap, subConfig));
     }
-    // Pass isGenerating via config override so all messages know the streaming state
-    const subConfig = getSubAgentConfig(name);
-    subConfig.isGenerating = isActive;
-    scrollContainer.appendChild(renderAgentConversation(name, newMsgs, 1, newIndexMap, subConfig));
     
     // Throttle context bar updates to ~1Hz during streaming for all agents including root
     const nowInRender = performance.now();
@@ -2546,15 +2497,13 @@ function renderSubAgentPanel(panel, agentData, name) {
     if (nowInRender - lastUpdate > 1000 || currentCount - lastCount > 1) {
       const fillEl = document.getElementById('subContextFill-' + name);
       if (fillEl) {
-        const tokCount = isRoot ? state.totalTokens : agentData.total_tokens;
-        const maxTok = isRoot ? state.maxTokens : agentData.max_tokens;
         updateContextBar(fillEl, displayMsgs, tokCount, maxTok);
       }
       state.genStats.subContextBarThrottle[name] = nowInRender;
     }
     // Use unified bubble content update with isGenerating passed via config
     if (scrollContainer.lastElementChild) {
-      const subConfig = getSubAgentConfig(name);
+      const subConfig = getAgentConfig(name);
       subConfig.isGenerating = isActive;
       updateBubbleContent(scrollContainer.lastElementChild, displayMsgs[currentCount - 1], subConfig);
     }
@@ -2676,6 +2625,7 @@ function renderToolsForSelectedAgent() {
     </label>
   `).join('');
 
+  // Scoped to settingToolsList (old DOM replaced each render, so no listener leak)
   settingToolsList.querySelectorAll('.tool-toggle').forEach(chk => {
     chk.addEventListener('change', (e) => {
       const aName = e.target.dataset.agent;
@@ -2712,20 +2662,6 @@ document.querySelectorAll('.settings-tab').forEach(btn => {
 
 // ── Controls ─────────────────────────────────────────────────────────────────
 
-// Toggle dim class on animated elements to create pulse effect at ~1Hz throttle rate
-// Instead of infinite CSS animation running at 60fps — massive GPU savings
-let _lastPulseToggle = 0;
-const PULSE_THROTTLE_MS = 800; // ~1.25Hz for a smooth pulse cadence
-
-function togglePulseElements() {
-  const now = performance.now();
-  if (now - _lastPulseToggle < PULSE_THROTTLE_MS) return;
-  _lastPulseToggle = now;
-
-  const pulses = document.querySelectorAll('.sub-tab-pulse, .activity-dot, .activity-queued, .btn-stop, .send-btn.inject-mode');
-  pulses.forEach(el => el.classList.toggle('dimmed'));
-}
-
 function updateControls() {
   const isGenerating = state.generating;
   
@@ -2736,7 +2672,7 @@ function updateControls() {
       sendBtn.title = 'Inject message into active agent (Enter)';
       // Update root tab to show pulse indicator (root tab is now dynamic, no mainTabChat ref)
       const rootTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
-      if (rootTabEl) rootTabEl.innerHTML = '<span class="sub-tab-pulse"></span> 💬 ' + (state.sessionName || 'Maine') + '_root';
+      if (rootTabEl) rootTabEl.innerHTML = '<span class="sub-tab-pulse"></span> 💬 ' + escapeHtml(state.sessionName || 'Maine') + '_root';
       resetBtn.disabled = true;
       document.body.classList.add('is-generating');
     } else {
@@ -2744,7 +2680,7 @@ function updateControls() {
       sendBtn.title = 'Send (Enter)';
       // Restore root tab icon
       const rootTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
-      if (rootTabEl) rootTabEl.innerHTML = '<span class="main-tab-icon">💬</span> ' + (state.sessionName || 'Maine') + '_root';
+      if (rootTabEl) rootTabEl.innerHTML = '<span class="main-tab-icon">💬</span> ' + escapeHtml(state.sessionName || 'Maine') + '_root';
       resetBtn.disabled = false;
       document.body.classList.remove('is-generating');
     }
@@ -2760,21 +2696,24 @@ function updateControls() {
   if (mainRB) mainRB.disabled = retryDisabled;
 
   const activeInstance = getActiveInstanceName();
-  const isRoot = isRootAgentName(activeInstance);
   const activeAgentData = state.subAgents[activeInstance];
   const isHalted = !!activeAgentData?.is_halted;
 
-  statusText.textContent = state.generating ? 'Generating...' : (isHalted ? '⏸ Paused' : '');
+  // Check if ANY active agent is halted (not just the current one) for accurate status display
+  const anyHalted = Object.values(state.subAgents).some(a => a?.is_halted);
+
+  // Show halt status even during generation — prevents misleading "Generating..." when something is stuck
+  statusText.textContent = anyHalted ? '⏸ Paused' : (state.generating ? 'Generating...' : '');
   
   // Sync pause button to current active agent's halted state
   if (pauseBtn) {
     pauseBtn.textContent = isHalted ? '▶️ Resume' : '⏸ Pause';
   }
 
-  // Sync terminate button visibility
+  // Sync terminate button visibility — unified active check
   const terminateBtn = document.getElementById('terminateBtn');
   if (terminateBtn) {
-    const isInstanceActive = isRoot ? state.generating : !!activeAgentData?.active;
+    const isInstanceActive = activeAgentData?.active ?? state.generating;
     terminateBtn.style.display = isInstanceActive ? 'inline-flex' : 'none';
   }
   
@@ -2849,11 +2788,11 @@ function updateAllContextBars() {
   for (const name of Object.keys(sa)) {
     const fillEl = document.getElementById('subContextFill-' + name);
     if (fillEl) {
-      const isRoot = isRootAgentName(name);
       const agentData = sa[name];
       const displayMsgs = agentData?.messages || [];
-      const tokCount = isRoot ? state.totalTokens : agentData?.total_tokens;
-      const maxTok = isRoot ? state.maxTokens : agentData?.max_tokens;
+      // Unified token counts: use agent-level stats if available, fall back to global
+      const tokCount = agentData?.total_tokens ?? state.totalTokens;
+      const maxTok = agentData?.max_tokens ?? state.maxTokens;
       updateContextBar(fillEl, displayMsgs, tokCount, maxTok);
     }
   }
@@ -3253,12 +3192,11 @@ if (terminateBtn) {
 }
 
 const onRetryClick = () => {
-  // Invalidate root panel cache to force full re-render
-  const rootMsgsEl = document.querySelector(`#${getRootPanelId()} .messages`);
-  if (rootMsgsEl) {
-    rootMsgsEl.dataset.contentKey = '';
-    rootMsgsEl.dataset.lastRenderedCount = '0';
-  }
+  // Invalidate ALL panel caches to force full re-render (not just root)
+  mainTabPanels.querySelectorAll('.messages').forEach(p => {
+    p.dataset.contentKey = '';
+    p.dataset.lastRenderedCount = '999999999';
+  });
   retryGeneration();
 };
 const refreshBtn = document.getElementById('refreshBtn');
@@ -3281,10 +3219,11 @@ resetBtn.addEventListener('click', () => {
   if (confirm('Reset the entire conversation and start a new session?')) {
     // Clear closed tabs cache so all tabs reappear after reset
     state.closedTabs.clear();
+    localStorage.removeItem('agent-cascade-closed-tabs');
     // Invalidate all panel caches to force full re-render after reset
       mainTabPanels.querySelectorAll('.messages').forEach(p => {
         p.dataset.contentKey = '';
-        p.dataset.lastRenderedCount = '0';
+        p.dataset.lastRenderedCount = '999999999';
       });
       send({ type: 'reset' });
   }
@@ -3300,6 +3239,7 @@ agentSelect.addEventListener('change', () => {
 sessionNameInput.addEventListener('change', () => {
   state.sessionName = sessionNameInput.value.trim() || 'Maine';
   state.closedTabs.clear();
+  localStorage.removeItem('agent-cascade-closed-tabs');
   localStorage.setItem('agent-cascade-session-name', state.sessionName);
   send({ type: 'set_session_name', name: state.sessionName });
 });
@@ -3505,8 +3445,9 @@ function updateTelemetryPanel(telemetry) {
       entries.sort((a, b) => b[1].total - a[1].total);
       toolTbody.innerHTML = entries.map(([name, data]) => {
         const rateClass = getSuccessClass(data.success_rate);
+        const safeName = escapeHtml(name);
         return `<tr>
-          <td title="${name}">${name}</td>
+          <td title="${safeName}">${safeName}</td>
           <td>${data.total}</td>
           <td class="${rateClass}">${data.success_rate}%</td>
           <td>${formatMs(data.avg_latency_ms)}</td>
@@ -3527,11 +3468,12 @@ function updateTelemetryConfigTable(configs) {
 
   configTbody.innerHTML = configs.map(c => {
     const desc = c.config_description || {};
+    const safeModel = desc.model ? escapeHtml(desc.model) : '';
     const label = desc.model
-      ? `${desc.model} T=${desc.temperature ?? '?'}`
+      ? `${safeModel} T=${desc.temperature ?? '?'}`
       : c.config_fingerprint.slice(0, 8);
     return `<tr>
-      <td title="${c.config_fingerprint}"><span class="telem-config-tag">${label}</span></td>
+      <td title="${escapeHtml(c.config_fingerprint)}"><span class="telem-config-tag">${label}</span></td>
       <td>${c.turns}</td>
       <td>${formatNumber(c.total_tokens)}</td>
       <td>${formatMs(c.avg_turn_duration_ms)}</td>
@@ -3578,7 +3520,7 @@ function renderApiEndpoints() {
   
   if (endpoints.length === 0) {
     listEl.innerHTML = `
-      <div class="api-endpoint-empty" style="text-align:center;color:var(--text-dim);padding:12px;font-size:12px;">
+      <div class="api-endpoint-empty" style="text-align:center;color:var(--text-muted);padding:12px;font-size:12px;">
         No extra endpoints configured. Agents use the General Settings API.
       </div>`;
     return;
@@ -3770,7 +3712,7 @@ function renderAgentApiAssignments() {
 
   if (endpoints.length === 0) {
     container.innerHTML = `
-      <div style="text-align:center;color:var(--text-dim);padding:12px;font-size:12px;">
+      <div style="text-align:center;color:var(--text-muted);padding:12px;font-size:12px;">
         Add endpoints above, then assign them to agent types.
       </div>`;
     return;

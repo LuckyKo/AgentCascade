@@ -395,21 +395,36 @@ body {
 /* ─── Main Tab Bar ────────────────────────────────────────────────────────── */
 
 .main-tab-bar {
+  flex-shrink: 0;          /* Prevent being squeezed in the column flex parent (.main) */
   display: flex;
+  flex-wrap: wrap;         /* Allow tabs to wrap to a new row when they overflow */
   align-items: center;
   gap: 2px;
-  padding: 0 12px;
-  height: 38px;
-  min-height: 38px;
+  padding: 4px 12px;       /* Slightly more vertical padding for multi-row layout */
+  height: auto;            /* Grow with content instead of fixed height */
+  min-height: 38px;        /* Keep single row at same visual height */
+  max-height: 90px;        /* Limit to ~2 rows before scrolling kicks in */
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--bg-elevated);
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
+  overflow-y: auto;        /* Allow vertical scroll if many rows exceed max-height */
+  scrollbar-width: thin;   /* Show a slim scrollbar vertically so users know they can scroll */
+  scrollbar-gutter: stable;/* Reserve space for scrollbar, prevent content jump when it appears */
 }
 
 .main-tab-bar::-webkit-scrollbar {
-  display: none;
+  width: 4px;              /* Thin vertical scrollbar for multi-row overflow */
+}
+
+.main-tab-bar::-webkit-scrollbar-thumb {
+  background: var(--bg-elevated);
+  border-radius: 2px;
+}
+
+/* Firefox — match webkit scrollbar appearance */
+@supports (scrollbar-width: thin) {
+  .main-tab-bar {
+    scrollbar-color: var(--bg-elevated) transparent;
+  }
 }
 
 .main-tab {
@@ -426,8 +441,28 @@ body {
   border-bottom: 2px solid transparent;
   cursor: pointer;
   transition: all 150ms ease;
-  white-space: nowrap;
+  white-space: nowrap;       /* Tab content stays on one line within the tab */
   position: relative;
+  flex-shrink: 1;            /* Allow tabs to shrink when space is tight */
+  min-width: 60px;           /* Minimum width so tabs don't collapse entirely */
+}
+
+/* Tab label can truncate with ellipsis when the tab itself shrinks */
+.main-tab .tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;            /* Label shrinks before the whole tab does */
+  min-width: 0;              /* Required for text-overflow to work on flex children */
+}
+
+/* Icon and close button never shrink — they stay visible at all times */
+.main-tab .tab-icon-container {
+  flex-shrink: 0;
+}
+
+.main-tab .close-tab {
+  flex-shrink: 0;
 }
 
 .main-tab .activity-dot {
@@ -485,10 +520,6 @@ body {
   color: var(--text-primary);
 }
 
-.main-tab#mainTabChat .close-tab {
-  display: none;
-}
-
 /* Pulsing dot for active sub-agents */
 .sub-tab-pulse {
   display: inline-block;
@@ -505,7 +536,7 @@ body {
 }
 
 /* Move glow effect to parent to avoid GPU filter compositing on animated element */
-.main-tab-bar .main-tab:not(#mainTabChat).agent-active .tab-icon-container {
+.main-tab-bar .main-tab.agent-active .tab-icon-container {
   filter: drop-shadow(0 0 6px var(--accent));
 }
 
@@ -628,7 +659,7 @@ body {
 .toast-dismiss {
   background: none;
   border: none;
-  color: var(--text-dim);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 16px;
   padding: 0 4px;
@@ -1308,13 +1339,14 @@ body {
   flex-direction: column;
   gap: 12px;
   max-height: 45vh;
+  min-height: 60px; /* Prevent flex container from squeezing it away with many tabs */
   overflow-y: auto;
-  z-index: 50;
+  z-index: 90; /* Higher than tab panels (z-index:10) so it stays on top */
   flex-shrink: 0;
   order: -1; /* Ensure approval bar renders before tab panels even when many tabs exist */
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
   animation: slide-down 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  /* Ensure approval bar is never hidden by overflow in parent container */
+  /* Position relative + z-index ensures approval bar renders above tab panels */
   position: relative;
 }
 
@@ -1788,12 +1820,15 @@ body {
   }
 
   .main-tab-bar {
-    padding: 0 6px;
+    padding: 4px 6px;
+    max-height: 120px;       /* Allow more rows on mobile */
+    gap: 3px;               /* Slightly more spacing for touch targets on wrapped rows */
   }
 
   .main-tab {
     padding: 6px 10px;
     font-size: 11px;
+    min-width: 50px;         /* Slightly smaller minimum on narrow screens */
   }
 }
 

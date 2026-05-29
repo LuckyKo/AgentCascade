@@ -14,7 +14,7 @@ and orchestrates phases. Each phase method (~20-60 lines) is independently testa
 import json
 import os
 import time
-from typing import Any, Iterator, List, Tuple, Union
+from typing import Any, Iterator, List, Tuple
 
 from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
@@ -215,7 +215,18 @@ class ExecutionEngine:
                         can_call_agents = False
                         disabled_tools = []
                         if template and hasattr(template, 'function_map'):
-                            disabled_tools = getattr(getattr(template, 'llm', None), 'generate_cfg', {}).get('disabled_tools', [])
+                            raw_disabled = getattr(getattr(template, 'llm', None), 'generate_cfg', {}).get('disabled_tools', [])
+                            # Handle both dict format (per-agent: {"Maine": ["tool1"]}) and flat list format
+                            if isinstance(raw_disabled, dict):
+                                agent_key = instance.agent_class
+                                slug = agent_key.lower().replace(' ', '_')
+                                disabled_tools = list(set(
+                                    raw_disabled.get(agent_key, []) + raw_disabled.get(slug, [])
+                                ))
+                            elif isinstance(raw_disabled, (list, tuple)):
+                                disabled_tools = list(set(raw_disabled))
+                            else:
+                                disabled_tools = []  # Invalid format — ignore silently
                             can_call_agents = 'call_agent' in template.function_map and 'call_agent' not in disabled_tools
 
                         # Only inject agent types list if the agent can actually call other agents
@@ -620,16 +631,77 @@ class ExecutionEngine:
             if self.pool.stopped or self.pool.is_instance_halted(inst_name):
                 break
 
-            try:
-                tool_result = self._execute_tool(instance, tool_name, tool_args, llm_messages)
-            except Exception as e:
-                logger.error(f"Tool {tool_name} failed for {inst_name}: {e}")
-                tool_result = f"Error: {e}"
+            # Track tool success/failure — needed for function_id matching and frontend isToolFailure()
+            _tool_success = True
+            _tool_error = ""
 
-            # Truncate if needed
-            tool_result = self._truncate_tool_result(
-                str(tool_result), tool_name, llm_messages, inst_name
-            )
+            # Telemetry: record tool call start (non-blocking)
+            try:
+                if hasattr(self.pool, 'telemetry'):
+                    self.pool.telemetry.record_tool_call_start(inst_name, tool_name)
+            except Exception:
+                pass
+
+            try:
+                try:
+                    tool_result = self._execute_tool(instance, tool_name, tool_args, llm_messages)
+                except Exception as e:
+                    logger.error(f"Tool {tool_name} failed for {inst_name}: {e}")
+                    tool_result = f"Error: {e}"
+                    _tool_success = False
+                    _tool_error = str(e)
+                    # Re-raise loop detection errors so the turn loop stops as intended
+                    if isinstance(e, LoopDetectedError):
+                        # tool_result already set above, so finally-block telemetry will fire before propagate
+                        raise
+
+                # Truncate if needed — track whether truncation actually occurred.
+                # Non-string tool results bypass truncation and always report truncated=False.
+                _was_truncated = False
+                if isinstance(tool_result, str):
+                    _pre_trunc_len = len(tool_result)
+                    tool_result = self._truncate_tool_result(
+                        tool_result, tool_name, llm_messages, inst_name
+                    )
+                    _was_truncated = len(tool_result) < _pre_trunc_len
+
+                # ── Post-execution success detection ────────────────────────────────
+                # Many tools return an error message as a string instead of raising an exception.
+                # NOTE: This uses first-line heuristics — false positives are possible for tools
+                # that return structured error-like output. Only affects telemetry metrics and
+                # frontend tool status display, not execution flow.
+                if _tool_success and isinstance(tool_result, str):
+                    first_line = ''
+                    for line in tool_result.split('\n'):
+                        stripped = line.strip()
+                        if stripped:
+                            first_line = stripped.lower()
+                            break
+                    error_indicators = [
+                        'error:', 'rejected by user:', 'failed:', 'invalid:',
+                        'permission denied:', 'an error occurred', 'does not exist'
+                    ]
+                    if any(first_line.startswith(ind) for ind in error_indicators) or 'failed to' in first_line:
+                        _tool_success = False
+                        _tool_error = tool_result[:500]
+
+            finally:
+                # Telemetry: record tool call end (non-blocking, always called)
+                try:
+                    if hasattr(self.pool, 'telemetry'):
+                        self.pool.telemetry.record_tool_call_end(
+                            inst_name, tool_name,
+                            success=_tool_success,
+                            result_chars=len(tool_result) if isinstance(tool_result, str) else 0,
+                            truncated=_was_truncated,
+                            error=_tool_error,
+                        )
+                except Exception:
+                    pass
+
+            # Extract function_id from the assistant message that had the tool call
+            # This is critical — without it, the LLM API can't match tool results to tool calls
+            extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
 
             # Track compress_context execution
             if tool_name == 'compress_context':
@@ -639,14 +711,30 @@ class ExecutionEngine:
                 if conv and not validate_message_pool(conv, inst_name):
                     logger.error(f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
 
-            # Build function result message
-            fn_msg = Message(role=FUNCTION, name=tool_name, content=tool_result)
+            # Build function result message — include function_id and tool_success per OpenAI spec
+            fn_msg = Message(
+                role=FUNCTION,
+                name=tool_name,
+                content=tool_result,
+                extra={
+                    'function_id': extra_data.get('function_id', '1'),
+                    'tool_success': _tool_success,
+                },
+            )
             messages.append(fn_msg)
             llm_messages.append(fn_msg)
+            response.append(fn_msg)  # Stream tool result to UI (was missing)
             with instance._compression_lock:
                 instance.conversation.append(fn_msg)
             # Fix #2: Invalidate token count cache — conversation mutated
             instance._last_token_count_conversation_length = -1
+
+            # Log the function result to JSONL (was missing)
+            try:
+                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                log_inst.log_message(fn_msg)
+            except Exception:
+                pass  # Logging must never block tool execution
 
             # ── Mid-tool urgent injection ───────────────────────────────────
             urgent = self.pool.drain_queue(inst_name)
@@ -656,6 +744,7 @@ class ExecutionEngine:
                         async_msg = Message(role=USER, content=text)
                         messages.append(async_msg)
                         llm_messages.append(async_msg)
+                        response.append(async_msg)  # Stream urgent message to UI (was missing)
                         with instance._compression_lock:
                             instance.conversation.append(async_msg)
                 # Fix #2: Invalidate token count cache — conversation mutated by urgent injection

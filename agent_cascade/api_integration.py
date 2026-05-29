@@ -747,6 +747,27 @@ def _apply_ui_config(
     if 'max_turns' in ui_cfg:
         instance.max_turns = ui_cfg['max_turns']
 
+    # Update agent_pool.llm_cfg and disabled_tools under thread-safe lock
+    # (pool is passed as a parameter to this function — no need to look it up)
+    if hasattr(pool, 'llm_cfg'):
+        try:
+            with pool._execution._state_lock:  # Thread-safe write to shared config
+                # Re-apply disabled_tools under lock to prevent race with concurrent reads
+                if 'disabled_tools' in sanitized and sanitized['disabled_tools'] is not None:
+                    dt = sanitized['disabled_tools']
+                    if isinstance(dt, (list, dict)):
+                        template.llm.generate_cfg['disabled_tools'] = dt
+
+                for _key in (
+                    'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
+                    'shell_char_limit', 'code_char_limit'
+                ):
+                    if _key in sanitized:
+                        pool.llm_cfg[_key] = sanitized[_key]
+        except Exception:
+            # Lock access should always work, but don't let it break generation
+            pass
+
 
 def get_agent_state_from_pool(
     pool: AgentPool,

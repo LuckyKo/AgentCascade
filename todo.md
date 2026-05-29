@@ -31,7 +31,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] resume button does not restart halted processes
 - [x] cmd_shell timeout does not kill some python processes that hang, just the cmd window, leaving the python process stray and blocking the system
 - [x] having issues with edit_file heuristic match mode, duplicating comments and messing up indentation. <- FIXED: removed comment stripping from heuristic matching pipeline. Heuristic mode now matches on raw content with only whitespace normalization. If old_content comments differ from file → match fails → LLM gets feedback to retry with correct content. Simpler, more predictable, prevents silent data loss.
-- make the sub-agent tab names shrink to fit the width of the screen when they multiply beyond the visible limit / or they could pile on additional rows
+- [x] make the sub-agent tab names shrink to fit the width of the screen when they multiply beyond the visible limit / or they could pile on additional rows — FIXED: Added flex-wrap: wrap for multi-row tabs, text-overflow: ellipsis on labels, icons and close buttons always visible via flex-shrink: 0, max-height cap with vertical scrollbar.
 - [x] compression agent polling times out at max_polls=1000 during forced compression (>95% context) — each LLM streaming chunk = one iteration, large tasks exceed 1000. Fix: replaced with time-based timeout (300s, monotonic clock).
 - [x] dismiss_agent tool should return the list of log paths of closed agents in case they need to be resurrected.
 - [x] dismissing an agent does not close the UI tab in real time, it current needs f5 to clear it.
@@ -42,13 +42,17 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] subprocess grep truncation can result in "Found 0 matches" when all lines exceed char_limit — FIXED: _sub_truncated=True with count==0 no longer falls through to Python fallback; summary shows "Matches found [TRUNCATED]" instead of misleading "Found 0 matches"
 - [x] inconsistent truncation notices — subprocess path omitted character count but Python fallback included it — FIXED: all 4 truncation points now include ({chars} chars); _try_subprocess_grep returns original_output_size for consistent reporting
 - [x] both grep spillover and grep char limit get reset on refresh — FIXED: added explicit save lines with correct hyphenated keys in saveSettings()
-- user injected messages cause context reprocessing. investigate message stack trashing
-- streaming is fixed in sub-agent tabs but inconsistent on main chat (why are we even using different formatting path? they should look the same). display speed seems to not keep up with generation speed so maybe if a new bubble pops, we should just fill in the full prev bubble and continue streaming into the new one... or use some faster formatting code. (i hope we're not processing older bubbles that do not change)
-- continue should not insert a new user message, just send the active agent_pool too the LLM so it can resume if it wants.
-- the approval window sometimes disappears (when there are a lot of agent tabs mostly), have to hit F5 to make it show up again.
+- [x] user injected messages cause context reprocessing. investigate message stack trashing — INVESTIGATED: No full reprocessing in normal flow. Messages are appended to existing working sets. Loop recovery and forced compression do rebuild from scratch (expected behavior). Edge case: continue command spawns new thread while old one may still be running — potential race condition worth monitoring.
+- [x] continue should not insert a new user message, just send the active agent_pool to the LLM so it can resume if it wants. — FIXED: unified branch sends {type: 'continue'} without text and has dedicated backend handler that doesn't inject user messages. Main branch still has this bug (sends [SYSTEM]: Please continue as a regular message).
+- [x] the approval window sometimes disappears (when there are a lot of agent tabs mostly), have to hit F5 to make it show up again. — FIXED: Added min-height: 60px + flex-shrink: 0 to prevent flex container from squeezing it away, raised z-index to 90 for visibility above tab panels, changed scrollIntoView from 'nearest' to 'start', made renderApprovals() unconditional in state/done/stream_update handlers.
 - [x] message bubbles use no `md` formatting sometimes, its inconsistent. — FIXED: renderToolResult now uses hybrid approach (prose tools via renderMarkdown, code tools via pre/code), allowThinking parameter made consistent across all rendering paths, added CSS for markdown-rendered tool content
-- auto agent discard timer value should be added to agent settings
-- [x] forced compression failed on sub-agent with not enough messages to compress, agent_pool got erased and started from scratch — FIXED: 3 bugs patched (see forced_compression_bug_fix_plan.md): (1) rebuild_working_set() now always called after forced compression attempt including failure/exception paths, (2) minimum message guard bypassed in force mode via `not force` check, (3) sub-agent pools restored from JSONL logs on resume 
-- tool output truncation affects write_file, blocking the operation. this is incorrect, we do truncation mostly on the output of the op, write file's output should not matter if the operation is effectuated or not, just affect the feedback dump that comes into chat.
+- [x] auto agent discard timer value should be added to agent settings — Already exists as "Auto-Discard Idle Agents (seconds)" in UI, wired to backend via idle_timeout_seconds setting.
+
+- [ ] fix tool use to match main (currently not working at all), LLM does not receive native tool info.
+- [ ] chat window must auto scroll on bottom, decouple if user scrolls up, recouple if he scrolls back to bottom
+- [ ] implement finished sounds on end/user aproval pop - just like main
+- [ ] system prompt metadata lacks RO/RW paths set in UI
+
+
 
 # EOF
