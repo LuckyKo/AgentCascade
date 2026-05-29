@@ -88,7 +88,7 @@ def run_agent_thread_unified(
 
         # ── Create main agent instance if it doesn't exist ───────────────
         instance = pool.get_instance(instance_name)
-        if instance is None and system_message_content:
+        if (instance is None or not instance.conversation) and system_message_content:
             create_main_agent_instance(
                 pool=pool,
                 instance_name=instance_name,
@@ -226,8 +226,8 @@ def run_agent_thread_unified(
                     }),
                     loop,
                 )
-        except Exception:
-            pass  # Don't let broadcast failure mask the original error
+        except Exception as e:
+            logger.debug(f"Error state broadcast failed (non-critical): {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -283,7 +283,8 @@ def get_token_stats_unified(
     try:
         from agent_cascade.utils.utils import get_history_stats
         h_stats = get_history_stats(active_h)
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Token stats calculation failed for {instance_name} (using estimate): {e}")
         # Fallback: estimate ~4 tokens per message on average (conservative)
         h_stats = {'tokens': len(active_h) * 4, 'words': 0}
 

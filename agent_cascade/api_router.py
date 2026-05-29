@@ -498,16 +498,24 @@ class APIRouter:
 
                     result = call_fn(*args, **kwargs)
                     if hasattr(result, '__iter__') and not isinstance(result, (list, dict, str)):
-                        # It's a generator. Wrap it to release the semaphore only when exhausted.
-                        # Use default-argument capture (_sem=sem) to freeze the semaphore reference
-                        # at definition time — prevents stale-semaphore risk if the endpoint is
-                        # resized between this iteration and when the generator is consumed (audit fix).
-                        def sem_generator_wrapper(gen, _sem=sem):
+                        # It's a generator. Pull first chunk to detect API errors early
+                        # (connection/auth/model failures only surface on first next()).
+                        it = iter(result)
+                        try:
+                            first_chunk = next(it)
+                        except StopIteration:
+                            sem.release()
+                            return iter([])  # Empty but valid
+
+                        # Wrap the ORIGINAL generator chain directly — not a reconstructed one.
+                        # This preserves the streaming pipeline without double-wrapping.
+                        def sem_generator_wrapper(first, rest, _sem=sem):
+                            yield first
                             try:
-                                yield from gen
+                                yield from rest
                             finally:
                                 _sem.release()
-                        return sem_generator_wrapper(result)
+                        return sem_generator_wrapper(first_chunk, it)
                     else:
                         # Regular result, release now
                         sem.release()
@@ -535,29 +543,14 @@ class APIRouter:
                     
                     result = execute_with_sem(current_agent_name)
                     
-                    # Handle generator fallback: we must attempt to get the first item
-                    # to catch connection/auth/model errors.
-                    if hasattr(result, '__iter__') and not isinstance(result, (list, dict, str)):
-                        try:
-                            # We can only "test" the generator once. 
-                            # If it fails on the VERY FIRST next(), we catch and fallback.
-                            # Note: This is a bit of a hack but common for API stream wrappers.
-                            it = iter(result)
-                            first_chunk = next(it)
-                            
-                            # Re-construct the generator for the caller
-                            def reconstruct(first, rest):
-                                yield first
-                                yield from rest
-                            return reconstruct(first_chunk, it)
-                            
-                        except StopIteration:
-                            return iter([]) # Empty but valid
-                    
+                    # Generator errors are already detected inside execute_with_sem (first-chunk pull).
+                    # Pass the generator through directly — no double-wrapping needed.
                     return result
                     
                 except Exception as e:
-                    error_msg = f"Endpoint '{endpoint_name}' @ {endpoint_base} attempt {attempt+1}/{max_retries+1}: {e}"
+                    import traceback
+                    tb_str = traceback.format_exc()
+                    error_msg = f"Endpoint '{endpoint_name}' @ {endpoint_base} attempt {attempt+1}/{max_retries+1}: {e}\nTraceback: {tb_str}"
                     logger.warning(f"[APIRouter] {error_msg}")
                     all_errors.append(error_msg)
 

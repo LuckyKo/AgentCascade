@@ -140,9 +140,20 @@ def initialize_agents():
     idle_timeout = float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
     idle_check_interval = float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
 
+    # Create OperationManager for blocking user approvals on mutating operations
+    from agent_cascade.operation_manager import OperationManager
+    operation_mgr = OperationManager(base_dir=WORKSPACE_DIR)
+
+    # PROJECT_ROOT is already the project root (start_api_server.py lives there)
+    agents_path = str(PROJECT_ROOT / 'agents')
+    
     agent_pool = AgentPool(
-        llm_cfg, 'agents', workspace_dir=WORKSPACE_DIR,
+        llm_cfg, agents_path, workspace_dir=WORKSPACE_DIR,
+        operation_manager=operation_mgr,
     )
+
+    # Set back-reference so OperationManager can check pool.stopped during approval loops
+    operation_mgr.agent_pool = agent_pool
 
     # Configure pool settings before starting background services (avoids race window)
     if hasattr(agent_pool, 'settings'):  # TODO: Remove hasattr guard once old pool files are fully removed
@@ -244,7 +255,7 @@ if __name__ == '__main__':
 
     app = create_app(all_agents, agent_pool, chatbot_config)
 
-    port = 8765
+    port = int(os.getenv('QWEN_AGENT_PORT', 8765))
     logger.info("\n[OK] API Server ready!")
     logger.info("    -> Open http://127.0.0.1:%d in your browser", port)
     logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", port)

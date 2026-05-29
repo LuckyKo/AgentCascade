@@ -615,8 +615,8 @@ class OperationManager:
             if result.returncode == 1:
                 return [], 0, False, False, 0
                 
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass  # Fall through to Python implementation
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.debug(f"grep subprocess unavailable (falling back to Python): {e}")
         
         return None, 0, False, False, 0
 
@@ -855,8 +855,8 @@ class OperationManager:
                             rel = file_path.relative_to(resolved)
                             if fnmatch.fnmatch(str(rel), exclude):
                                 continue
-                        except ValueError:
-                            pass  # Fallback — can't determine relative path
+                        except ValueError as e:
+                            logger.debug(f"Relative path resolution failed for {file_path} (using fallback): {e}")
                     try:
                         content = file_path.read_text(encoding='utf-8', errors='ignore')
                         lines = content.split('\n')
@@ -893,7 +893,8 @@ class OperationManager:
                                     match_count += 1  # Count actual matches
                                     try:
                                         rel_path = file_path.relative_to(self.base_dir)
-                                    except ValueError:
+                                    except ValueError as e:
+                                        logger.debug(f"Relative path resolution failed for {file_path} (using filename fallback): {e}")
                                         rel_path = file_path.name  # Fallback
                                     normalized_rel_path = str(rel_path).replace('\\', '/')
                                     # M3: Don't strip — preserve whitespace; H2: normalize path separators
@@ -909,7 +910,8 @@ class OperationManager:
                         if len(results) > 5000:  # Safety limit to prevent OOM
                             hit_result_limit = True
                             break
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Error reading file during grep (skipping): {e}")
                         continue
 
             # Fix 3: Debug log when Python fallback also finds no matches (subprocess already confirmed)
@@ -1692,9 +1694,9 @@ class OperationManager:
                         logger.warning(f"taskkill failed for PID {proc.pid}: {e}, falling back to proc.kill()")
                         try:
                             proc.kill()
-                        except Exception:
-                            pass
-                    
+                        except Exception as e:
+                            logger.debug(f"Process kill failed (non-critical): {e}")
+                        
                     # Second pass: taskkill /T may miss grandchildren if their parent was
                     # already killed before the tree traversal reached them. Run a second pass
                     # with a brief delay to catch any processes that just orphaned.
@@ -1704,8 +1706,8 @@ class OperationManager:
                             ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
                             capture_output=True, timeout=10,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Second-pass taskkill failed (non-critical): {e}")
                     
                     # Third pass: recursive WMIC sweep to find any remaining descendants.
                     # Collect all descendant PIDs first, then kill them in bulk.
@@ -1747,19 +1749,20 @@ class OperationManager:
                                     ['taskkill', '/F', '/PID', str(dpid)],
                                     capture_output=True, timeout=5,
                                 )
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug(f"WMIC child kill failed (non-critical): {e}")
                     except Exception as e:
                         logger.warning(f"WMIC descendant sweep failed: {e}")
                 else:
                     # On Unix, kill the process group using -PID (negative = group)
                     try:
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Unix process group kill failed (falling back to proc.kill): {e}")
                         try:
                             proc.kill()
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"Process kill fallback failed (non-critical): {e}")
 
                 # Drain any partial output before reporting timeout
                 try:

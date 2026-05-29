@@ -37,7 +37,9 @@ if not WORKSPACE_DIR:
         logger.info(f"[INIT] Using local workspace: {WORKSPACE_DIR}")
 
 from bs4 import BeautifulSoup
-from agent_cascade.gui import WebUI
+# WebUI (Gradio) was replaced by the custom HTML/JS frontend served via FastAPI.
+# Use start_api_server.py instead of this file for the web interface.
+# from agent_cascade.gui import WebUI  # obsolete — removed in unified branch
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.agent_pool import AgentPool
 from agent_cascade.agent_factory import load_orchestrator_agent
@@ -152,10 +154,18 @@ if __name__ == '__main__':
     idle_timeout = float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
     idle_check_interval = float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
 
+    # Create OperationManager for blocking user approvals on mutating operations
+    from agent_cascade.operation_manager import OperationManager
+    operation_mgr = OperationManager(base_dir=WORKSPACE_DIR)
+
     # Create agent pool (auto-loads all agents from /agents directory)
     agent_pool = AgentPool(
-        llm_cfg, 'agents', workspace_dir=WORKSPACE_DIR,
+        llm_cfg, str(PROJECT_ROOT / 'agents'), workspace_dir=WORKSPACE_DIR,
+        operation_manager=operation_mgr,
     )
+
+    # Set back-reference so OperationManager can check pool.stopped during approval loops
+    operation_mgr.agent_pool = agent_pool
 
     # Configure pool settings before starting background services (avoids race window)
     if hasattr(agent_pool, 'settings'):  # TODO: Remove hasattr guard once old pool files are fully removed
@@ -273,24 +283,6 @@ if __name__ == '__main__':
     logger.info(f"[OK] Available agents: {[a.name for a in all_agents]}")
     logger.info("=" * 50)
 
-    # Configure UI - now the orchestrator is one of the agents!
-    chatbot_config = {
-        'input.placeholder': 'Ask me anything! Multi-agent system with approval workflow...',
-        'prompt.suggestions': [
-            'Have the coder create a Python script',
-            'Research quantum computing and write a report',
-            'Show me the workspace files',
-        ],
-        'user.name': 'You',
-        'available_tools': ALL_BUILTIN_TOOLS,
-        'verbose': False,
-    }
-
-    # Launch WebUI with orchestrator as the main agent
-    # Users can also switch between agents via the dropdown
-    logger.info("\n[OK] Orchestrator ready! Launching WebUI...")
-    logger.info("Open your browser to http://127.0.0.1:7860")
-    
     # Set up background thread for async terminal messages
     import threading
     import sys
@@ -306,7 +298,7 @@ if __name__ == '__main__':
             except Exception:
                 break
     threading.Thread(target=async_input_listener, daemon=True).start()
-    
+
     logger.info("\n[TIP] You can type messages in this terminal at ANY TIME to seamlessly inject them into the active agent's thought process without clicking Stop in the WebUI!")
     logger.info("=" * 50)
 
@@ -330,4 +322,21 @@ if __name__ == '__main__':
 
     # Note: Gradio might try to override signal handlers, but we'll try to catch it first.
     # To be extremely aggressive against hanging, os._exit(0) is used above.
-    WebUI(all_agents, chatbot_config=chatbot_config).run()
+
+    # Launch the API server (FastAPI + custom HTML/JS frontend) instead of Gradio WebUI
+    from agent_cascade.api_server import create_app
+    import uvicorn
+
+    chatbot_config = {
+        'session_name': 'Maine',
+        'verbose': False,
+    }
+
+    app = create_app(all_agents, agent_pool, chatbot_config)
+    port = 8765
+    logger.info("\n[OK] API Server ready!")
+    logger.info("    -> Open http://127.0.0.1:%d in your browser", port)
+    logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", port)
+    logger.info("    -> REST API at http://127.0.0.1:%d/api/", port)
+
+    uvicorn.run(app, host='0.0.0.0', port=port, log_level='info')

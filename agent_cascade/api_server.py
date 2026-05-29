@@ -397,6 +397,8 @@ def create_app(agents, agent_pool, config=None):
         build_stream_update_from_pool,
         create_main_agent_instance,
         _apply_ui_config,
+        _build_agents_list,
+        _get_approvals,
     )
 
     # ── Helpers ───────────────────────────────────────────────────────────
@@ -478,8 +480,8 @@ def create_app(agents, agent_pool, config=None):
             # Orchestrator logs might be named session_NAME.jsonl or follow the agent instance pattern
             path = log_dir / f"session_{name}.jsonl"
             if not path.exists():
-                # Try finding a log with the Orchestrator pattern
-                potential = list(log_dir.glob(f"Orchestrator_{name}_*.jsonl"))
+                # Try finding a log matching any agent_class prefix (handles lowercase naming like orchestrator_Maine_*.jsonl)
+                potential = list(log_dir.glob(f"*_{name}_*.jsonl"))
                 if potential:
                     potential.sort(key=lambda x: x.stat().st_mtime, reverse=True)
                     path = potential[0]
@@ -552,9 +554,28 @@ def create_app(agents, agent_pool, config=None):
     }
     # Initial load — pool is the single source of truth for conversation state (Phase 6)
     if agent_pool:
-        _load_session_history(default_session_name)
-        # Note: _load_session_history calls agent_pool.load_session_from_log() internally,
-        # which already populates instance_conversations/instance_summaries. No need to write again.
+        loaded = _load_session_history(default_session_name)
+        # If log loading failed, create an empty instance so build_state_from_pool() doesn't return None.
+        # This mirrors how the original branch always had session['history'] = [] even on load failure.
+        if not loaded and agent_pool.get_instance(default_session_name) is None:
+            try:
+                # Extract system message from the orchestrator agent (first in agents list)
+                sys_content = None
+                if agents:
+                    orch = agents[0]
+                    if hasattr(orch, 'base_system_message') and orch.base_system_message:
+                        sys_content = str(orch.base_system_message)
+                    elif hasattr(orch, 'system_message') and orch.system_message:
+                        sys_content = str(orch.system_message)
+                if sys_content:
+                    create_main_agent_instance(
+                        pool=agent_pool,
+                        instance_name=default_session_name,
+                        system_message_content=sys_content,
+                    )
+            except Exception as e:
+                logger.error(f"Failed to create fallback main agent instance: {e}")
+                logger.warning("Server starting without main agent instance — first user message may fail")
 
     # ── Unified token cache (coexists with old _cached_hist_stats during transition) ──
     from config.token_cache import AgentTokenCache
@@ -727,10 +748,10 @@ def create_app(agents, agent_pool, config=None):
     def _safe_get_telemetry():
         """Get telemetry summary safely — never crash state serialization."""
         try:
-            if agent_pool and hasattr(agent_pool, 'telemetry'):
+            if agent_pool and hasattr(agent_pool, 'telemetry') and agent_pool.telemetry:
                 return agent_pool.telemetry.get_session_summary()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Telemetry fetch failed (non-critical): {e}")
         return None
 
     def build_state(responses=None, generating=None):
@@ -751,17 +772,64 @@ def create_app(agents, agent_pool, config=None):
         
         # If unified build returned None (instance not yet created), return minimal state
         if result is None:
+            agents_list = _build_agents_list(agent_pool) if agent_pool else []
+            approvals = _get_approvals(agent_pool) if agent_pool else []
+            stopped = agent_pool.stopped if agent_pool else False
+            has_queued = agent_pool.has_messages(instance_name) if agent_pool else False
+            
+            # Get current model from the orchestrator agent (first in agents list)
+            current_model = 'Unknown'
+            if agents:
+                orch = agents[0]
+                if hasattr(orch, 'llm') and orch.llm:
+                    current_model = getattr(orch.llm, 'model', 'Unknown')
+            
+            # Resolve max_tokens via API router (same logic as _get_max_tokens_for_instance)
+            fallback_max_tokens = DEFAULT_MAX_INPUT_TOKENS
+            if agent_pool and hasattr(agent_pool, 'api_router') and agent_pool.api_router:
+                try:
+                    router_limit = agent_pool.api_router.get_effective_max_tokens('orchestrator')
+                    if router_limit > 0:
+                        fallback_max_tokens = router_limit
+                except Exception as e:
+                    logger.debug(f"API router max_tokens lookup failed (using fallback): {e}")
+            
+            # Get API router state
+            api_router_state = {'endpoints': [], 'agent_priorities': {}}
+            if agent_pool and hasattr(agent_pool, 'api_router') and agent_pool.api_router:
+                try:
+                    api_router_state = agent_pool.api_router.to_dict()
+                except Exception as e:
+                    logger.debug(f"API router state serialization failed (using empty): {e}")
+            
+            # Get default workspace
+            from agent_cascade.settings import DEFAULT_WORKSPACE
+            default_workspace = str(DEFAULT_WORKSPACE)
+            if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
+                default_workspace = str(agent_pool.operation_manager.base_dir)
+            
             return {
                 'messages': [],
+                'instances': {},
                 'agent_instances': {},
                 'active_stack': [],
-                'approvals': [],
+                'approvals': approvals,
                 'generating': gen,
                 'session_name': instance_name,
+                'instance_name': instance_name,
                 'agent_index': session.get('agent_index', 0),
                 'total_tokens': 0,
                 'total_words': 0,
-                'max_tokens': DEFAULT_MAX_INPUT_TOKENS,
+                'max_tokens': fallback_max_tokens,
+                'summary': '',
+                'has_queued_messages': has_queued,
+                'stopped': stopped,
+                'agents': agents_list,
+                'current_model': current_model,
+                'telemetry': None,
+                'default_workspace': default_workspace,
+                'is_waiting': False,
+                'api_router': api_router_state,
             }
         
         # Add legacy-compatible fields that frontend expects
@@ -784,16 +852,40 @@ def create_app(agents, agent_pool, config=None):
         
         # Fallback to minimal state if unified build failed
         if result is None:
+            approvals = _get_approvals(agent_pool) if agent_pool else []
+            stopped = agent_pool.stopped if agent_pool else False
+            
+            # Get current model
+            current_model = 'Unknown'
+            if agents:
+                orch = agents[0]
+                if hasattr(orch, 'llm') and orch.llm:
+                    current_model = getattr(orch.llm, 'model', 'Unknown')
+            
+            # Resolve max_tokens via API router (same as build_state fallback)
+            stream_max_tokens = DEFAULT_MAX_INPUT_TOKENS
+            if agent_pool and hasattr(agent_pool, 'api_router') and agent_pool.api_router:
+                try:
+                    rl = agent_pool.api_router.get_effective_max_tokens('orchestrator')
+                    if rl > 0:
+                        stream_max_tokens = rl
+                except Exception as e:
+                    logger.debug(f"API router max_tokens lookup failed in stream (using fallback): {e}")
+            
             return {
                 'history_count': len(_get_main_history(agent_pool, instance_name)),
                 'response_messages': [serialize_message(m, i) for i, m in enumerate(responses or [])],
+                'instances': {},
                 'agent_instances': {},
                 'active_stack': [],
-                'approvals': [],
+                'approvals': approvals,
                 'generating': True,
                 'total_tokens': 0,
                 'total_words': 0,
-                'max_tokens': DEFAULT_MAX_INPUT_TOKENS,
+                'max_tokens': stream_max_tokens,
+                'current_model': current_model,
+                'telemetry': None,
+                'stopped': stopped,
             }
         
         return result
@@ -813,7 +905,8 @@ def create_app(agents, agent_pool, config=None):
         for conn in snapshot:
             try:
                 await conn.send_text(text)
-            except Exception:
+            except Exception as e:
+                logger.debug(f"WebSocket send failed, removing connection: {e}")
                 ws_connections.discard(conn)
 
     # ── Agent execution thread ────────────────────────────────────────────
@@ -894,8 +987,8 @@ def create_app(agents, agent_pool, config=None):
                     try:
                         msg = {'type': 'dismissal', 'instance_name': instance_name}
                         asyncio.run_coroutine_threadsafe(send_queue.put(msg), ws_loop)
-                    except Exception:
-                        pass  # Never let callback errors disrupt agent execution
+                    except Exception as e:
+                        logger.debug(f"Dismissal callback failed (non-critical): {e}")
             
             agent_pool.on_dismissed(_on_dismiss_callback)
 
@@ -914,8 +1007,8 @@ def create_app(agents, agent_pool, config=None):
                     await broadcast(data)
             except asyncio.CancelledError:
                 break
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Sender loop iteration failed (continuing): {e}")
 
     async def _approval_loop():
         """Poll for pending approvals and push to clients."""
@@ -930,8 +1023,8 @@ def create_app(agents, agent_pool, config=None):
                     await broadcast({'type': 'approvals', 'approvals': pending})
             except asyncio.CancelledError:
                 break
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Approval loop iteration failed (continuing): {e}")
 
     # ── E2E Encrypted REST API ────────────────────────────────────────────
 
@@ -1053,6 +1146,13 @@ def create_app(agents, agent_pool, config=None):
                     inst.conversation.clear()
                     # Invalidate token count cache — conversation cleared
                     inst._last_token_count_conversation_length = -1
+                # Create a new logger session so messages go to a new JSONL file (Fix: New Session was appending to old logs)
+                try:
+                    agent_pool._logger.create_new_session(
+                        session['session_name'], inst.agent_class
+                    )
+                except Exception as e:
+                    logger.debug(f"Logger reset during new session failed (non-critical): {e}")
         
         # Phase 6: No need to clear session['history'] — pool is the source of truth
         session['generating'] = False
@@ -1133,7 +1233,8 @@ def create_app(agents, agent_pool, config=None):
                     "size": p.stat().st_size,
                     "mtime": p.stat().st_mtime
                 })
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to parse session log file info: {e}")
                 continue
         
         # Sort by mtime descending
@@ -1161,7 +1262,7 @@ def create_app(agents, agent_pool, config=None):
     @app.get("/api/telemetry")
     async def api_telemetry():
         """Return session telemetry summary and per-config comparison data."""
-        if agent_pool and hasattr(agent_pool, 'telemetry'):
+        if agent_pool and hasattr(agent_pool, 'telemetry') and agent_pool.telemetry:
             return {
                 "session": agent_pool.telemetry.get_session_summary(),
                 "configs": agent_pool.telemetry.get_config_comparison(),
@@ -1173,7 +1274,7 @@ def create_app(agents, agent_pool, config=None):
     async def api_telemetry_export():
         """Download the raw telemetry JSONL log file."""
         from fastapi.responses import FileResponse, JSONResponse
-        if agent_pool and hasattr(agent_pool, 'telemetry'):
+        if agent_pool and hasattr(agent_pool, 'telemetry') and agent_pool.telemetry:
             path = agent_pool.telemetry.export_jsonl()
             import os
             if os.path.exists(path):
@@ -1284,7 +1385,8 @@ def create_app(agents, agent_pool, config=None):
                 raw = await websocket.receive_text()
                 try:
                     data = json.loads(raw)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Malformed WebSocket message received (skipping): {e}")
                     continue
 
                 msg_type = data.get('type', '')
@@ -1317,8 +1419,8 @@ def create_app(agents, agent_pool, config=None):
                         if len(parts) > 1:
                             try:
                                 n = int(parts[1])
-                            except ValueError:
-                                pass
+                            except ValueError as e:
+                                logger.warning(f"Invalid rollback count in /rollback command: {e}")
                         
                         # Rollback N messages using pool's surgical_rollback (unified path)
                         if agent_pool:
@@ -1342,12 +1444,15 @@ def create_app(agents, agent_pool, config=None):
                     # If it doesn't, create it with the system message from the agent runner.
                     if agent_pool:
                         inst = agent_pool.get_instance(instance_name)
-                        if inst is None:
+                        if inst is None or not inst.conversation:
                             # Extract system message content from the active agent runner
+                            # Priority: base_system_message > system_message (the actual attribute names on Agent)
                             sys_content = None
                             agent_runner = get_agent()
-                            if hasattr(agent_runner, 'system_prompt') and agent_runner.system_prompt:
-                                sys_content = str(agent_runner.system_prompt)
+                            if hasattr(agent_runner, 'base_system_message') and agent_runner.base_system_message:
+                                sys_content = str(agent_runner.base_system_message)
+                            elif hasattr(agent_runner, 'system_message') and agent_runner.system_message:
+                                sys_content = str(agent_runner.system_message)
                             elif hasattr(agent_runner, 'llm') and hasattr(agent_runner.llm, 'cfg'):
                                 sys_content = agent_runner.llm.cfg.get('system', '') or agent_runner.llm.cfg.get('system_message', '')
                             
@@ -1511,7 +1616,8 @@ def create_app(agents, agent_pool, config=None):
                                                             item = json.loads(line)
                                                             if "metadata" not in item:  # Skip metadata lines
                                                                 recov.append(item)
-                                                        except json.JSONDecodeError:
+                                                        except json.JSONDecodeError as e:
+                                                            logger.debug(f"Skipping malformed JSONL line in agent pool recovery: {e}")
                                                             continue
                                             
                                             # Only overwrite pool if recovered data is valid
@@ -1660,6 +1766,13 @@ def create_app(agents, agent_pool, config=None):
                                 inst.conversation.clear()
                                 # Invalidate token count cache — conversation cleared
                                 inst._last_token_count_conversation_length = -1
+                            # Create a new logger session so messages go to a new JSONL file (Fix: New Session was appending to old logs)
+                            try:
+                                agent_pool._logger.create_new_session(
+                                    session['session_name'], inst.agent_class
+                                )
+                            except Exception as e:
+                                logger.debug(f"Logger reset during stop failed (non-critical): {e}")
                     
                     with session_lock:
                         # Phase 6: No need to clear session['history'] — pool is the source of truth
@@ -1853,8 +1966,8 @@ def create_app(agents, agent_pool, config=None):
                                                     "[SYSTEM WARNING] Your analysis is taking longer than expected. "
                                                     "Please provide a verdict as soon as possible — the approval request may timeout soon."
                                                 )
-                                            except Exception:
-                                                pass  # Best-effort warning, don't fail the security check
+                                            except Exception as e:
+                                                logger.debug(f"Security advisor warning injection failed (non-critical): {e}")
                                         
                                         sec_warning_timer = threading.Timer(SECURITY_ADVISOR_WARNING_SECONDS, _sec_warning_injector)
                                         sec_warning_timer.daemon = True
@@ -1889,8 +2002,8 @@ def create_app(agents, agent_pool, config=None):
                                             # Fix #1: Close the generator to abort any active LLM call / HTTP connection
                                             try:
                                                 run_gen.close()
-                                            except Exception:
-                                                pass  # Best-effort close; don't fail security check if cleanup throws
+                                            except Exception as e:
+                                                logger.debug(f"Security advisor generator cleanup failed (non-critical): {e}")
 
                                     display_response = ""
                                     parsing_response = ""
@@ -2272,13 +2385,19 @@ def create_app(agents, agent_pool, config=None):
 
         except WebSocketDisconnect:
             pass
-        except Exception:
+        except Exception as e:
+            logger.error(f"WebSocket handler error for client: {e}")
             traceback.print_exc()
         finally:
             ws_connections.discard(websocket)
 
     # ── Serve frontend static files ───────────────────────────────────────
-    web_ui_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web_ui')
+    # api_server.py is inside agent_cascade/, but web_ui/ is at the project root — go one level up
+    web_ui_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'web_ui'))
+
+    # Validate that the web UI directory actually exists before serving static files
+    if not os.path.isdir(web_ui_dir):
+        logger.warning("Web UI directory does not exist: %s — static file serving will fail", web_ui_dir)
 
     @app.post("/api/find_file")
     async def find_file(request: Request):
@@ -2304,8 +2423,8 @@ def create_app(agents, agent_pool, config=None):
                             search_dir(item)
                         elif item.is_file() and item.name == filename:
                             matches.append(str(item.absolute()))
-                except PermissionError:
-                    pass
+                except PermissionError as e:
+                    logger.debug(f"Permission denied searching directory (skipping): {e}")
                     
             search_dir(base_dir)
             
@@ -2320,7 +2439,10 @@ def create_app(agents, agent_pool, config=None):
 
     @app.get("/{path:path}")
     async def serve_static(path: str):
-        file_path = os.path.join(web_ui_dir, path)
+        file_path = os.path.normpath(os.path.join(web_ui_dir, path))
+        # Path traversal protection: ensure resolved path is still within web_ui_dir
+        if not (file_path.startswith(web_ui_dir + os.sep) or file_path == web_ui_dir):
+            return JSONResponse(status_code=403, content={"message": "Forbidden"})
         if os.path.isfile(file_path):
             return FileResponse(file_path)
         # SPA fallback
@@ -2363,6 +2485,9 @@ if __name__ == "__main__":
     import argparse
     from agent_cascade.agent_pool import AgentPool
 
+    # Resolve project root: api_server.py lives inside agent_cascade/, so go up one level
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    
     parser = argparse.ArgumentParser(description="AgentCascade API Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=12345, help="Port to bind to")
@@ -2386,11 +2511,17 @@ if __name__ == "__main__":
     idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
     idle_check_interval = args.idle_check_interval if args.idle_check_interval is not None else float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
     
+    # Create OperationManager for blocking user approvals on mutating operations
+    from agent_cascade.operation_manager import OperationManager
+    operation_mgr = OperationManager(base_dir=args.workspace)
+    
     agent_pool = AgentPool(
-        llm_cfg=initial_llm_cfg, 
-        agents_dir='agents',
+        llm_cfg=initial_llm_cfg,
+        agents_dir=str(PROJECT_ROOT / 'agents'),
         workspace_dir=args.workspace,
+        operation_manager=operation_mgr,
     )
+    operation_mgr.agent_pool = agent_pool
     
     # Set idle timeout settings via PoolSettings (new pool uses PoolSettings instead of constructor args)
     agent_pool.settings.idle_timeout_seconds = idle_timeout
@@ -2401,6 +2532,20 @@ if __name__ == "__main__":
     
     # Get the orchestrator agent template for create_app (new pool separates instances from templates)
     orch_agent = agent_pool.get_agent('orchestrator')
+    
+    # Inject system message into Maine's conversation so the soul content flows into the instance
+    # Priority: base_system_message > system_message (matches the priority chain in run_agent_thread)
+    sys_msg_content = None
+    if hasattr(orch_agent, 'base_system_message') and orch_agent.base_system_message:
+        sys_msg_content = str(orch_agent.base_system_message)
+    elif hasattr(orch_agent, 'system_message') and orch_agent.system_message:
+        sys_msg_content = str(orch_agent.system_message)
+    
+    if sys_msg_content:
+        from agent_cascade.llm.schema import Message, SYSTEM
+        maine_inst = agent_pool.get_instance('Maine')
+        if maine_inst and not maine_inst.conversation:
+            maine_inst.conversation.append(Message(role=SYSTEM, content=sys_msg_content))
     
     app = create_app(agents=[orch_agent], agent_pool=agent_pool)
     

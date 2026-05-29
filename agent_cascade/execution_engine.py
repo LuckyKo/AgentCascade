@@ -138,11 +138,25 @@ class ExecutionEngine:
         if not conv:
             return None, None, None
 
-        # P7: System prompt injection for root agent (first/top-level agent in the pool)
+        # Load template to get system message if needed
+        template = self.pool.templates.get(instance.agent_class)
+
+        # P7: System prompt injection for ALL agents (not just root)
         # Inject identity, session metadata, available resources, and argument reuse instructions
-        if instance.parent_instance is None and len(conv) > 0:
+        if len(conv) > 0:
             m0 = conv[0]
             m0_role = m0.get('role') if isinstance(m0, dict) else getattr(m0, 'role', '')
+            
+            # If no system message at start, inject it from template
+            if m0_role != SYSTEM and template and getattr(template, 'system_message', None):
+                sys_msg = Message(role=SYSTEM, content=template.system_message)
+                conv.insert(0, sys_msg)
+                with instance._compression_lock:
+                    instance.conversation.insert(0, sys_msg)
+                instance._last_token_count_conversation_length = -1
+                m0 = sys_msg
+                m0_role = SYSTEM
+
             if m0_role == SYSTEM:
                 m0_content = m0.get('content', '') if isinstance(m0, dict) else getattr(m0, 'content', '')
                 if isinstance(m0_content, str):
@@ -157,8 +171,13 @@ class ExecutionEngine:
                     if '## Session Metadata' not in m0_content:
                         meta_lines = [
                             "## Session Metadata",
-                            f"- Supervisor: User",  # Root agent's supervisor is always the user
                         ]
+
+                        # Root agent only knows its supervisor is the user; sub-agents get their caller as supervisor
+                        if instance.parent_instance is None:
+                            meta_lines.append(f"- Supervisor: User")
+                        else:
+                            meta_lines.append(f"- Supervisor: {instance.parent_instance}")
 
                         # Try to get logger metadata for paths; fall back to defaults on failure
                         try:
@@ -186,27 +205,37 @@ class ExecutionEngine:
                         for i, ml in enumerate(meta_lines):
                             content_lines.insert(insert_pos + i, ml)
                         m0_content = '\n'.join(content_lines)
-                    # 3. Inject available resources (other agent types and enabled tools)
+                    
+                    # 3. Inject available resources (enabled tools always; agent types only if call_agent is available)
                     if '--- CURRENT AVAILABLE RESOURCES' not in m0_content:
                         res_append = "\n\n--- CURRENT AVAILABLE RESOURCES (Auto-Injected) ---\n"
-                        res_append += "\nAvailable Agent Types (call via call_agent):\n"
-                        
-                        # List available templates
-                        has_agents = False
-                        for name in sorted(self.pool.templates.keys()):
-                            if name.lower() != inst_name.lower():
-                                agent_obj = self.pool.templates[name]
-                                tagline = getattr(agent_obj, 'description', 'No description provided')
-                                res_append += f"- **{name}**: {tagline}\n"
-                                has_agents = True
-                        if not has_agents:
-                            res_append += "- None currently available.\n"
-                        
-                        # List enabled tools (excluding disabled_tools)
-                        res_append += "\nEnabled Tools (can change per interaction):\n"
+
+                        # Determine if this agent can call other agents (call_agent in function_map and not disabled)
                         template = self.pool.templates.get(instance.agent_class)
+                        can_call_agents = False
+                        disabled_tools = []
                         if template and hasattr(template, 'function_map'):
-                            disabled_tools = getattr(template.llm, 'generate_cfg', {}).get('disabled_tools', [])
+                            disabled_tools = getattr(getattr(template, 'llm', None), 'generate_cfg', {}).get('disabled_tools', [])
+                            can_call_agents = 'call_agent' in template.function_map and 'call_agent' not in disabled_tools
+
+                        # Only inject agent types list if the agent can actually call other agents
+                        if can_call_agents:
+                            res_append += "\nAvailable Agent Types (call via call_agent):\n"
+                            
+                            # List available templates
+                            has_agents = False
+                            for name in sorted(self.pool.templates.keys()):
+                                if name != instance.agent_class:
+                                    agent_obj = self.pool.templates[name]
+                                    tagline = getattr(agent_obj, 'description', 'No description provided')
+                                    res_append += f"- **{name}**: {tagline}\n"
+                                    has_agents = True
+                            if not has_agents:
+                                res_append += "- None currently available.\n"
+
+                        # List enabled tools (excluding disabled_tools) — always injected for all agents
+                        res_append += "\nEnabled Tools (can change per interaction):\n"
+                        if template and hasattr(template, 'function_map'):
                             for t_name in sorted(template.function_map.keys()):
                                 if t_name in disabled_tools:
                                     continue
@@ -216,7 +245,7 @@ class ExecutionEngine:
                             res_append += "- None currently enabled.\n"
                         m0_content += res_append
                     
-                    # 4. Inject Argument Reuse instructions (static version for caching)
+                    # 4. Inject Argument Reuse instructions (static version for caching) — all agents
                     if '### Advanced Feature: Argument Reuse' not in m0_content:
                         m0_content += (
                             "\n\n### Advanced Feature: Argument Reuse\n"
@@ -446,24 +475,36 @@ class ExecutionEngine:
         # Get active functions (tool schemas) from template
         active_functions = template._get_active_functions() if hasattr(template, '_get_active_functions') else []
 
-        # Build the LLM call
+        # Build the LLM call — with delta_stream=False each yielded item is a List[Message]
+        # (the accumulated response so far). We iterate through all items (or until stop/halt),
+        # keeping the latest accumulated result, then yield individual messages from it.
         try:
+            last_output = None
             for output in self._execute_llm_call(instance, template, llm_messages, active_functions):
-                # Check stop/halt mid-stream
+                last_output = output  # keep latest accumulated response FIRST
+                # Check stop/halt mid-stream (after capturing the current result)
                 if self.pool.stopped or self.pool.is_instance_halted(inst_name):
                     break
-                yield output
+
+            if not last_output or (isinstance(last_output, list) and len(last_output) == 0):
+                yield Message(role=ASSISTANT, content="[SYSTEM ERROR: Empty LLM response]")
+            else:
+                for msg in last_output:
+                    yield msg
         except Exception as e:
             logger.error(f"LLM call failed for {inst_name}: {e}")
             yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {e}]")
 
-    def _execute_llm_call(self, instance: AgentInstance, template, messages: List[Message], active_functions) -> Iterator[Message]:
-        """Execute the actual LLM API call via api_router with failover."""
+    def _execute_llm_call(self, instance: AgentInstance, template, messages: List[Message], active_functions) -> Iterator[List[Message]]:
+        """Execute the actual LLM API call via api_router with failover.
+        
+        Returns an iterator of List[Message] (each item is the accumulated response).
+        """
         if self.pool.api_router and hasattr(self.pool.api_router, 'call_with_fallback'):
             # Route through API router for multi-endpoint failover
             agent_type = instance.agent_class.lower()
 
-            def _do_call(llm_cfg: dict) -> Iterator[Message]:
+            def _do_call(llm_cfg: dict) -> Iterator[List[Message]]:
                 merged_cfg = {}
                 if hasattr(template.llm, 'generate_cfg'):
                     merged_cfg.update(template.llm.generate_cfg)
@@ -548,8 +589,8 @@ class ExecutionEngine:
             log_inst = self.pool.get_logger(inst_name, instance.agent_class)
             for msg in turn_output:
                 log_inst.log_message(msg)
-        except Exception:
-            pass  # Logging failures must never break the execution loop
+        except Exception as e:
+            logger.debug(f"Logging message to file failed for {inst_name} (non-critical): {e}")
 
         # ── Auto-continue on truncation ─────────────────────────────────────
         if is_truncated and not self.pool.stopped and not self.pool.is_instance_halted(inst_name):
@@ -687,7 +728,19 @@ class ExecutionEngine:
             # Agent has truly completed
             return False
 
-        return True  # Has real content — continue the loop
+        # Wait for parallel agent results even if it has real content
+        if self.pool._execution.has_active_tasks(inst_name):
+            while (self.pool._execution.has_active_tasks(inst_name) and
+                   not self.pool.stopped and
+                   not self.pool.is_instance_halted(inst_name)):
+                time.sleep(0.5)
+                
+        # Post-generation queue drain
+        if self.pool.has_messages(inst_name):
+            logger.info(f"Queued messages for {inst_name} after turn completion. Looping back.")
+            return True  # Loop back to process injected messages
+
+        return False  # Has real content but NO tool calls — agent is done
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Tool Execution — unified path for ALL tools including call_agent
@@ -787,8 +840,8 @@ class ExecutionEngine:
         if self.pool.api_router:
             try:
                 effective_concurrency = self.pool.api_router.get_effective_concurrency(agent_class)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Concurrency lookup failed for {agent_class} (using default): {e}")
 
         if effective_concurrency == 0:
             is_parallel_allowed = False
@@ -943,8 +996,8 @@ class ExecutionEngine:
         if len(parts) > 1:
             try:
                 fraction = float(parts[1])
-            except ValueError:
-                pass
+            except ValueError as e:
+                logger.warning(f"Invalid fraction in /compress command for {inst_name}: {e}")
 
         # Clamp fraction to valid range
         fraction = max(0.1, min(0.9, fraction))
@@ -1119,14 +1172,9 @@ class ExecutionEngine:
         if lines and f" {instance_name}" not in lines[0]:
             lines[0] = f"You are {instance_name}."
 
-        # Insert session metadata
-        meta_block = [
-            "## Session Metadata",
-            f"- Supervisor: {caller}",
-        ]
-        insert_pos = 2 if len(lines) > 1 and not lines[1].startswith("#") else 1
-        for i, ml in enumerate(meta_block):
-            lines.insert(insert_pos + i, ml)
+        # Session metadata injection is handled by P7 in _setup_turn for all agents uniformly.
+        # Do NOT pre-inject here — it would cause P7's idempotency guard to skip full metadata
+        # (Working Dir, Log Path, Extra Paths) for sub-agents.
 
         sys_msg = Message(role=SYSTEM, content="\n".join(lines))
 
@@ -1198,18 +1246,18 @@ class ExecutionEngine:
             # Invalidate token count cache — conversation replaced
             inst._last_token_count_conversation_length = -1
 
-        # Log initial messages to agent's JSONL file (P1 continuation)
-        try:
-            log_inst = self.pool.get_logger(instance_name, agent_class)
-            log_inst.log_message(sys_msg)
-            log_inst.log_message(task_msg)
-            # Sync internal tracking to prevent drift if logger instance differs later
-            log_inst.data["history"] = [
-                log_inst._format_message(sys_msg),
-                log_inst._format_message(task_msg),
-            ]
-        except Exception:
-            pass  # Logging failures must never break execution
+            # Log initial messages to agent's JSONL file (P1 continuation)
+            try:
+                log_inst = self.pool.get_logger(instance_name, agent_class)
+                log_inst.log_message(sys_msg)
+                log_inst.log_message(task_msg)
+                # Sync internal tracking to prevent drift if logger instance differs later
+                log_inst.data["history"] = [
+                    log_inst._format_message(sys_msg),
+                    log_inst._format_message(task_msg),
+                ]
+            except Exception as e:
+                logger.debug(f"Logging initial messages for {instance_name} failed (non-critical): {e}")
 
         # P6: Settings propagation from caller agent
         # Propagate max_turns, auto_continue_enabled, and max_input_tokens
@@ -1234,8 +1282,8 @@ class ExecutionEngine:
                                     cfg = (target_template.llm.generate_cfg or {}).copy()
                                     cfg['max_input_tokens'] = supervisor_max
                                     target_template.llm.generate_cfg = cfg
-            except Exception:
-                pass  # Settings propagation failures should not break agent creation
+            except Exception as e:
+                logger.debug(f"Settings propagation from {caller} to {instance_name} failed (non-critical): {e}")
 
         # P3: Disabled tools propagation to other agents (security/UX) — thread-safe copy-write
         if hasattr(self.pool, 'api_router') and self.pool.api_router:
@@ -1273,8 +1321,8 @@ class ExecutionEngine:
             }
             with self.pool._execution._state_lock:
                 self.pool.instance_state[instance_name] = initial_state
-        except Exception:
-            pass  # WebUI state updates must never break execution
+        except Exception as e:
+            logger.debug(f"WebUI initial state update for {instance_name} failed (non-critical): {e}")
 
         try:
             # Execute through unified loop
@@ -1305,8 +1353,8 @@ class ExecutionEngine:
                         }
                         with self.pool._execution._state_lock:
                             self.pool.instance_state[instance_name] = state
-                    except Exception:
-                        pass  # WebUI state updates must never break execution
+                    except Exception as e:
+                        logger.debug(f"WebUI state update for {instance_name} failed (non-critical): {e}")
 
             conv.extend(final_resp)
 
@@ -1328,8 +1376,8 @@ class ExecutionEngine:
                 }
                 with self.pool._execution._state_lock:
                     self.pool.instance_state[instance_name] = final_state
-            except Exception:
-                pass  # WebUI state updates must never break execution
+            except Exception as e:
+                logger.debug(f"WebUI final state update for {instance_name} failed (non-critical): {e}")
         finally:
             # Always clean up active stack — even on halt or error
             with self.pool._execution._state_lock:
@@ -1368,8 +1416,8 @@ class ExecutionEngine:
                 router_limit = self.pool.api_router.get_effective_max_tokens(instance.agent_class.lower())
                 if router_limit > 0:
                     return router_limit
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"API router max_tokens lookup failed for {instance.agent_class} (using fallback): {e}")
 
         # 2. Try template\'s LLM config
         template = self.pool.templates.get(instance.agent_class)
@@ -1414,7 +1462,8 @@ class ExecutionEngine:
                 inst._last_token_count_conversation_length = len(messages)
 
             return total
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Token counting failed (using rough estimate): {e}")
             # Fallback: rough estimate (4 chars per token)
             total_chars = sum(
                 len(str(m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')))
@@ -1606,7 +1655,8 @@ class ExecutionEngine:
             truncated = tool_result[:target_tokens * 3]
             return f"{truncated}\n\n[TOOL RESPONSE TRUNCATED — reason: token budget exceeded]"
 
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Tool result truncation calculation failed (using fallback): {e}")
             # Fallback: just truncate to a reasonable size
             if len(tool_result) > 8000:
                 return f"{tool_result[:8000]}\n\n[TOOL RESPONSE TRUNCATED]"

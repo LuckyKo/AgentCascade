@@ -1,1 +1,3 @@
+set QWEN_AGENT_IDLE_TIMEOUT=900
+set QWEN_AGENT_PORT=12346
 python start_api_server.py

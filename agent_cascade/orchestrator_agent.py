@@ -114,7 +114,7 @@ class OrchestratorAgent:
         # Initialize attributes that Agent.__init__ would set (code may access these)
         llm_cfg = kwargs.get('llm')
         try:
-            from agent_cascade.llm.utils import get_chat_model
+            from agent_cascade.llm import get_chat_model
             self.llm = get_chat_model(llm_cfg) if llm_cfg else None
         except Exception:
             # If LLM init fails (e.g., missing API key), store raw config

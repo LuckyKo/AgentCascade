@@ -69,7 +69,7 @@ def create_main_agent_instance(
 
     instance = pool.create_instance(
         instance_name=instance_name,
-        agent_class='Orchestrator',
+        agent_class='orchestrator',
         parent_instance=None,  # Root agent — no parent
         max_turns=max_turns,
         conversation=conversation,
@@ -276,7 +276,8 @@ def build_state_from_pool(
         from agent_cascade.utils.utils import get_history_stats
         h_stats = get_history_stats(active_h)
         r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Token stats calculation failed for {instance_name} (using estimate): {e}")
         # Fallback: estimate ~4 tokens per message on average (conservative)
         h_stats = {'tokens': len(active_h) * 4, 'words': 0}
         r_stats = {'tokens': 0, 'words': 0}
@@ -314,8 +315,8 @@ def build_state_from_pool(
     if hasattr(pool, 'telemetry') and pool.telemetry:
         try:
             telemetry_data = pool.telemetry.get_summary(instance_name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Telemetry summary fetch failed for {instance_name} (non-critical): {e}")
 
     # Get default workspace from operation manager or settings default
     from agent_cascade.settings import DEFAULT_WORKSPACE
@@ -328,16 +329,16 @@ def build_state_from_pool(
     if hasattr(pool, 'api_router') and pool.api_router:
         try:
             api_router_state = pool.api_router.to_dict()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"API router state serialization failed (using empty): {e}")
 
     # Check if instance is waiting (endpoint slot blocked)
     is_waiting = False
     if hasattr(pool, 'api_router') and pool.api_router:
         try:
             is_waiting = pool.api_router.is_waiting(instance_name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"API router waiting check failed for {instance_name} (using default): {e}")
 
     return {
         'messages': [serialize_message(m, i) for i, m in enumerate(msgs)],
@@ -414,7 +415,8 @@ def build_stream_update_from_pool(
         from agent_cascade.utils.utils import get_history_stats
         h_stats = get_history_stats(active_h)
         r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Token stats calculation failed for stream update (using estimate): {e}")
         # Fallback: estimate ~4 tokens per message on average (conservative)
         h_stats = {'tokens': len(active_h) * 4, 'words': 0}
         r_stats = {'tokens': 0, 'words': 0}
@@ -447,8 +449,8 @@ def build_stream_update_from_pool(
     if hasattr(pool, 'telemetry') and pool.telemetry:
         try:
             telemetry_data = pool.telemetry.get_summary(instance_name)
-        except Exception:
-            pass  # Telemetry must never block streaming
+        except Exception as e:
+            logger.debug(f"Telemetry summary fetch failed for {instance_name} in stream (non-critical): {e}")
 
     return {
         'history_count': history_count,
@@ -628,8 +630,8 @@ def _get_approvals(pool: AgentPool) -> list:
     if hasattr(pool, 'operation_manager') and pool.operation_manager:
         try:
             return pool.operation_manager.get_pending_approvals()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to get pending approvals (non-critical): {e}")
     return []
 
 
@@ -656,8 +658,8 @@ def _build_agents_list(pool: AgentPool) -> list:
                 'tools': tools_list,
                 'default_tools': default_tools,
             })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to build agent info for template (skipping): {e}")
     return agents_list
 
 
@@ -700,13 +702,13 @@ def _apply_ui_config(
         if k in floats and v is not None:
             try:
                 sanitized[k] = float(v)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.debug(f"UI config float conversion failed for key '{k}': {e}")
         elif k in ints and v is not None:
             try:
                 sanitized[k] = int(float(v))
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.debug(f"UI config int conversion failed for key '{k}': {e}")
         else:
             sanitized[k] = v
 

@@ -310,13 +310,15 @@ class AgentPool:
 
     @stopped.setter
     def stopped(self, value: bool):
+        from agent_cascade.log import logger
+        
         if value:
             self._stopped_event.set()
             # Shut down background services when pool stops
             try:
                 self._idle.stop()
-            except Exception:
-                pass  # Idle manager shutdown should never block pool stop
+            except Exception as e:
+                logger.debug(f"Idle manager shutdown failed (non-critical): {e}")
         else:
             self._stopped_event.clear()
 
@@ -374,6 +376,8 @@ class AgentPool:
         Used by IdleManager for auto-dismissal and by dismiss_agent tool execution.
         Fires dismissal callbacks and cleans up message queues.
         """
+        from agent_cascade.log import logger
+        
         self._instances_version += 1  # Fix #3: signal that instances changed
         self.instances.pop(instance_name, None)
         self.message_queues.pop(instance_name, None)
@@ -381,8 +385,8 @@ class AgentPool:
         if hasattr(self, '_instance_conversations'):
             try:
                 del self._instance_conversations[instance_name]
-            except KeyError:
-                pass  # Already removed or never existed
+            except KeyError as e:
+                logger.debug(f"Instance conversation cleanup key missing (expected): {e}")
         # Clean up logger entry for the instance
         with self._logger._lock:
             log_inst = self._logger._loggers.pop(instance_name, None)
@@ -395,8 +399,8 @@ class AgentPool:
         if log_inst and hasattr(log_inst, 'close'):
             try:
                 log_inst.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Logger close failed for {instance_name} (non-critical): {e}")
 
         self._fire_on_dismissed(instance_name)
 
@@ -576,8 +580,8 @@ class AgentPool:
                 try:
                     log_inst = self._logger.get_logger(name, inst.agent_class)
                     log_inst.truncate_to(target_len)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Logger truncation failed for {name} (non-critical): {e}")
 
     def load_session_from_log(self, log_input: str, target_instance: Optional[str] = None) -> str:
         """Load session history from a log file path or JSON string.
@@ -616,7 +620,8 @@ class AgentPool:
                                 metadata.update(item["metadata"])
                             else:
                                 messages.append(item)
-                        except json.JSONDecodeError:
+                        except json.JSONDecodeError as e:
+                            logger.debug(f"Skipping malformed JSONL line in log file: {e}")
                             continue
                 log_source = f"file '{potential_path.name}'"
             except Exception as e:
@@ -637,9 +642,10 @@ class AgentPool:
                             messages.extend(item)
                         else:
                             messages.append(item)
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as e:
                         if len(lines) == 1:
                             raise  # Re-raise to try full-block parse
+                        logger.debug(f"Skipping malformed JSONL line in inline input: {e}")
                         continue
                 log_source = "JSON input"
             except json.JSONDecodeError:
@@ -731,8 +737,8 @@ class AgentPool:
         try:
             log_inst = self._logger.get_logger(instance_name, agent_class)
             log_inst.update_history(restored_messages)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Logger history sync after log load failed for {instance_name} (non-critical): {e}")
 
         return f"Successfully loaded {len(restored_messages)} messages for instance '{instance_name}' ({agent_class}) from {log_source}."
 
@@ -805,6 +811,7 @@ class AgentPool:
 
         This is the single point of truth for adding messages — no separate
         session['history'] or instance_conversations dict needed anymore.
+        Also persists the message to the JSONL log file.
         """
         inst = self.instances.get(instance_name)
         if inst:
@@ -813,8 +820,14 @@ class AgentPool:
                 # Invalidate token count cache — conversation length changed
                 inst._last_token_count_conversation_length = -1
             self._mark_activity(instance_name)
-
-    # ── Backward-compatible accessors for compression module ───────────────
+            # Persist message to JSONL log file
+            try:
+                log_inst = self.get_logger(instance_name, inst.agent_class)
+                log_inst.log_message(message)
+            except Exception as e:
+                            logger.debug(f"Log message write failed for {instance_name} (non-critical): {e}")
+            
+                # ── Backward-compatible accessors for compression module
     # The old compress_context() API expects agent_pool.get_conversation() and
     # agent_pool.instance_conversations[] — bridge them to the new model.
 
@@ -1021,8 +1034,8 @@ class AgentPool:
             try:
                 log_inst = self._logger.get_logger(instance_name, inst.agent_class)
                 log_inst.truncate_to(len(inst.conversation))
-            except Exception:
-                pass  # Logger truncation must never block rollback
+            except Exception as e:
+                logger.debug(f"Logger truncation failed during rollback for {instance_name} (non-critical): {e}")
 
     # ── Parallel execution delegation ──────────────────────────────────────
 
@@ -1073,6 +1086,8 @@ class ParallelAgentManager:
     """Manages parallel agent execution via thread pool. Active_stack, task lifecycle."""
 
     def __init__(self, pool: AgentPool):
+        from agent_cascade.log import logger
+        
         self.pool = pool
         self.active_stack: List[str] = []  # Stack of currently executing agent names
         self.active_tasks: Dict[str, tuple] = {}  # instance_name → (Future, caller, agent_class)
@@ -1084,7 +1099,8 @@ class ParallelAgentManager:
         try:
             import concurrent.futures
             self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Parallel executor initialization failed (non-critical): {e}")
             self.executor = None
 
     def has_active_tasks(self, instance_name: str) -> bool:
@@ -1210,6 +1226,27 @@ class LoggerManager:
                 )
             return self._loggers[instance_name]
 
+    def create_new_session(self, instance_name: str, agent_class: str) -> None:
+        """Replace the logger for an instance with a fresh one (new timestamp = new JSONL file).
+        
+        Used by "New Session" to start writing to a new log file instead of appending.
+        Closes the old logger's file handle before replacing it.
+        """
+        with self._lock:
+            # Close old logger's file handle if present
+            if instance_name in self._loggers:
+                try:
+                    self._loggers[instance_name].close()
+                except Exception as e:
+                    logger.debug(f"Logger close during reinit failed for {instance_name} (non-critical): {e}")
+            from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
+            self._loggers[instance_name] = AgentInstanceLogger(
+                agent_class=agent_class,
+                instance_name=instance_name,
+                log_dir=str(self.log_dir),
+            )
+        return
+
 
 class IdleManager:
     """Manages idle detection and auto-dismissal of agents.
@@ -1319,8 +1356,8 @@ class IdleManager:
         try:
             log_inst = self.pool._logger.get_logger(instance_name, inst.agent_class)
             log_path = getattr(log_inst, 'log_path', None)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Idle checker log path lookup failed for {instance_name} (non-critical): {e}")
 
         logger.info(
             f"[idle_checker] Auto-dismissing idle agent '{instance_name}' "
