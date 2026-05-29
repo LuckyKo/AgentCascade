@@ -72,6 +72,7 @@ const state = {
   summary: "", // Active compression summary
   lastMemoryEditTime: 0, // Timestamp of last manual memory edit to prevent race condition reverts
   _lastIsGenerating: undefined, // For change detection in updateControls()
+  closedTabs: new Set(),
 };
 
 let ws = null;
@@ -123,6 +124,85 @@ function getRootTabId() {
 function getRootPanelId() {
   return 'panelSub-' + getRootAgentName();
 }
+
+function getActiveInstanceName() {
+  if (!state.activeSubTab) return getRootAgentName();
+  return state.activeSubTab.substring(4);
+}
+
+const ActivityBar = {
+  el: null,          // DOM ref to #globalActivityBar
+  fifoEl: null,      // DOM ref to .activity-fifo
+  queuedEl: null,    // DOM ref to .activity-queued
+  lastRenderTime: 0, // Throttle: only re-render every ~500ms
+  
+  init() {
+    this.el = document.getElementById('globalActivityBar');
+    if (!this.el) console.warn('ActivityBar.init(): #globalActivityBar not found in DOM');
+    if (this.el) {
+      this.fifoEl = this.el.querySelector('.activity-fifo');
+      this.queuedEl = this.el.querySelector('.activity-queued');
+    }
+  },
+  
+  push(instanceName, text) {
+    if (instanceName !== this.getFilterInstance()) return;
+    this.render(text);
+  },
+  
+  getFilterInstance() {
+    return getActiveInstanceName();
+  },
+  
+  setActiveTab(tabId) {
+    this.render();
+  },
+  
+  render(streamingText) {
+    // Throttle: skip re-render if less than 500ms since last render
+    const now = performance.now();
+    if (now - this.lastRenderTime < 500) return;
+    this.lastRenderTime = now;
+    
+    if (!this.el || !this.fifoEl) return;
+    
+    const activeInstance = this.getFilterInstance();
+    const agentData = state.subAgents[activeInstance];
+    const isRoot = isRootAgentName(activeInstance);
+    const isActive = isRoot ? (state.generating && !agentData?.is_halted) : (agentData?.active ?? false);
+    
+    this.el.classList.toggle('active', isActive);
+    const dot = this.el.querySelector('.activity-dot');
+    if (dot) dot.parentElement.classList.toggle('active', isActive);
+    
+    if (isActive) {
+      let status = '';
+      if (!isRoot && agentData?.is_waiting) {
+        status = 'Waiting for API slot...';
+      } else if (streamingText !== undefined) {
+        status = streamingText;
+      } else {
+        // Fallback or tab switch: get from last message of agent
+        const msgs = agentData?.messages || [];
+        const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+        status = getActivityPreview(lastMsg) || 'Agent Idle';
+      }
+      
+      const tokCount = isRoot ? state.totalTokens : agentData?.total_tokens;
+      const wordCount = isRoot ? state.totalWords : agentData?.total_words;
+      if (tokCount !== undefined) {
+        status += ` (${wordCount} words, ${tokCount} tokens)`;
+      }
+      this.fifoEl.textContent = status;
+    } else {
+      this.fifoEl.textContent = 'Agent Idle';
+    }
+    
+    if (this.queuedEl) {
+      this.queuedEl.style.display = agentData?.has_queued_messages ? 'block' : 'none';
+    }
+  }
+};
 
 // New CWrite-style DOM refs
 const btnToggleSettings = $('#btn-toggle-settings');
@@ -338,6 +418,7 @@ if ($('#setting-model')) $('#setting-model').addEventListener('change', saveSett
 function loadSession(path) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     if (confirm('Load this session? Current unsaved state will be lost.')) {
+      state.closedTabs.clear();
       ws.send(JSON.stringify({
         type: 'load_session',
         path: path
@@ -383,7 +464,7 @@ if (settingLinesEnabled) {
 
 if (settingMaxContext) {
   settingMaxContext.addEventListener('change', () => {
-    renderSubAgents();
+    updateAllContextBars();
   });
 }
 
@@ -462,7 +543,7 @@ function saveSettings() {
   }
   
   // Re-render to apply setting changes immediately (like context bar max value)
-  renderSubAgents();
+  updateAllContextBars();
 }
 
 function loadSettings() {
@@ -912,11 +993,11 @@ function handleServerMessage(data) {
       break;
 
     case 'stream_update': {
-      // Don't process stale stream updates after halt
-      if (state.instance_halted) break;
+      // Only block stream updates when the ROOT agent itself is halted, not when any sub-agent is halted
+      const rootName = getRootAgentName();
+      if (state.subAgents[rootName]?.is_halted) break;
 
       // Lightweight streaming delta — root agent messages go into subAgents just like other agents
-      const rootName = getRootAgentName();
       const historyCount = data.history_count || 0;
       const responseMsgs = data.response_messages || [];
 
@@ -1013,8 +1094,19 @@ function handleServerMessage(data) {
             // Partial arrived with same message count — content is streaming in an existing bubble
             subAgentContentChanged = true;
           }
-        }
       }
+      }  // end if (data.agent_instances)
+      
+      // Feed activity bar — happens on EVERY stream_update tick, before throttling
+      const activeInstance = ActivityBar.getFilterInstance();
+      const instanceData = state.subAgents[activeInstance];
+      if (instanceData && instanceData.messages && instanceData.messages.length > 0) {
+        const lastMsg = instanceData.messages[instanceData.messages.length - 1];
+        ActivityBar.push(activeInstance, getActivityPreview(lastMsg));
+      } else {
+        ActivityBar.push(activeInstance, '');
+      }
+
       if (data.active_stack) state.activeStack = data.active_stack;
       // Reset throttle state if generation just started (was idle before this tick).
       // Server can initiate generation via stream_update without calling resetGenStats().
@@ -1803,22 +1895,32 @@ function renderThinkingBlock(thought, isOpen) {
 }
 
 function appendSystemBubble(text) {
-  const div = document.createElement('div');
-  div.className = 'message msg-system';
-  div.innerHTML = `<div class="msg-content">${renderMarkdown(text)}</div>`;
+  const bar = document.getElementById('systemToastBar');
+  if (!bar) return;
   
-  // Append to the root agent's scroll container (same as sub-agents)
-  const rootPanel = document.getElementById(getRootPanelId());
-  if (rootPanel) {
-    const scrollContainer = rootPanel.querySelector('.messages');
-    if (scrollContainer) scrollContainer.appendChild(div);
+  const toast = document.createElement('div');
+  toast.className = 'system-toast-item';
+  toast.innerHTML = `
+    <div class="msg-content">${renderMarkdown(text)}</div>
+    <button class="toast-dismiss">×</button>
+  `;
+  const dismissBtn = toast.querySelector('.toast-dismiss');
+  if (dismissBtn) {
+    dismissBtn.onclick = () => {
+      toast.remove();
+      if (!bar.querySelector('.system-toast-item')) bar.style.display = 'none';
+    };
   }
+  bar.appendChild(toast);
+  bar.style.display = 'block';
   
-  // Scroll to bottom of root panel
-  requestAnimationFrame(() => {
-    const rootScroll = document.querySelector(`#${getRootPanelId()} .messages`);
-    if (rootScroll) rootScroll.scrollTop = rootScroll.scrollHeight;
-  });
+  // Auto-dismiss after 15 seconds
+  setTimeout(() => {
+    if (toast.parentNode) {
+      toast.remove();
+      if (!bar.querySelector('.system-toast-item')) bar.style.display = 'none';
+    }
+  }, 15000);
 }
 
 // scrollToBottom removed — each panel handles its own scrolling via per-panel scroll locks
@@ -2198,10 +2300,10 @@ function renderSubAgents() {
   const sa = state.subAgents;
   const rootName = getRootAgentName();
   
-  // Include root agent in the list of agents to render
-  const namesArr = Object.keys(sa);
+  // Include root agent in the list of agents to render, filtered by closedTabs
+  const namesArr = Object.keys(sa).filter(name => !state.closedTabs.has('sub-' + name));
   // Only include root in the list if it actually has data (has been initialized by server)
-  if (sa[rootName] && !namesArr.includes(rootName)) {
+  if (sa[rootName] && !namesArr.includes(rootName) && !state.closedTabs.has('sub-' + rootName)) {
     namesArr.unshift(rootName); // Ensure root is always first
   }
 
@@ -2251,7 +2353,7 @@ function renderSubAgents() {
 
       const closeBtn = document.createElement('span');
       closeBtn.className = 'close-tab';
-      closeBtn.title = isRoot ? 'Terminate Session' : 'Terminate Agent';
+      closeBtn.title = isRoot ? 'Terminate Session' : 'Close Tab';
       closeBtn.textContent = '\u00d7';
       closeBtn.onclick = (e) => {
         e.stopPropagation();
@@ -2260,8 +2362,12 @@ function renderSubAgents() {
           send({ type: 'terminate_agent_instance', instance_name: name });
         } else {
           send({ type: 'terminate_agent_instance', instance_name: name });
-          // Switch to root tab instead of non-existent 'chat'
-          switchMainTab(getRootTabId());
+          state.closedTabs.add(tabId);
+          if (state.activeSubTab === tabId) {
+            switchMainTab(getRootTabId());
+          } else {
+            renderSubAgents();
+          }
         }
       };
       tabBtn.appendChild(closeBtn);
@@ -2333,8 +2439,8 @@ function renderSubAgentPanel(panel, agentData, name) {
   // For root agent: derive active state from global generating flag, not agentData.active
   const isActive = isRoot ? (state.generating && !agentData?.is_halted) : (agentData?.active ?? false);
   
-  // Filter system messages for root agent (matches old fullRender behavior)
-  const displayMsgs = isRoot ? msgs.filter(m => m.role !== 'system') : msgs;
+  // Pool mirror: show ALL messages including system prompt — no filtering
+  const displayMsgs = msgs;
   const lastMsg = displayMsgs.length > 0 ? displayMsgs[displayMsgs.length - 1] : null;
 
   // 1. Ensure basic structure exists (once)
@@ -2360,87 +2466,14 @@ function renderSubAgentPanel(panel, agentData, name) {
         subAgentScrollLocks[name].listenerAdded = true;
       }
     }
-    
-    // Activity Bar — unified class matches root chat panel
-    const activityBar = document.createElement('div');
-    activityBar.className = 'main-activity-bar';
-    activityBar.innerHTML = `
-      <div class="activity-status">
-        <span class="activity-dot"></span>
-        <span>Activity</span>
-      </div>
-      <div class="activity-text">Idle</div>
-      <div class="activity-queued" style="display:none;">⚡ Queued</div>
-      <button class="btn btn-secondary btn-sm pause-btn" title="Pause/Resume this agent" style="margin-left: 4px; padding: 2px 8px; font-size: 11px;">⏸ Pause</button>
-      <button class="btn btn-danger btn-sm terminate-btn" style="margin-left: auto; display: none; padding: 2px 8px; font-size: 11px;">Terminate</button>
-    `;
-    panel.appendChild(activityBar);
-    
-    const terminateBtn = activityBar.querySelector('.terminate-btn');
-    terminateBtn.onclick = () => {
-      send({ type: 'terminate_agent_instance', instance_name: name });
-      // Don't switch to root tab if terminating root itself (it'll be removed)
-      if (!isRootAgentName(name)) switchMainTab(getRootTabId());
-    };
-
-    // Pause/Resume toggle for this sub-agent
-    const pauseBtn = activityBar.querySelector('.pause-btn');
-    pauseBtn.addEventListener('click', async () => {
-      try {
-        if (pauseBtn.textContent.includes('Pause')) {
-          const resp = await fetch(`/api/halt/${encodeURIComponent(name)}`, { method: 'POST' });
-          if (resp.ok) pauseBtn.textContent = '▶️ Resume';
-        } else {
-          // Send a WebSocket resume message so the server clears the halt flag AND restarts generation
-          send({ type: 'resume', instance_name: name });
-          pauseBtn.textContent = '⏸ Pause';
-        }
-      } catch(e) { console.error('Pause/Resume failed:', e); }
-    });
-
-    // Insert activity bar only (no per-panel input area — uses shared bottom bar)
   }
 
-  const activityBar = panel.querySelector('.main-activity-bar');
   const scrollContainer = panel.querySelector('.messages');
-  const terminateBtn = activityBar.querySelector('.terminate-btn');
-  const pauseBtn = activityBar.querySelector('.pause-btn');
   
-  // Sync pause button to server-side halted state
-  if (agentData.is_halted && !pauseBtn.textContent.includes('Resume')) {
-    pauseBtn.textContent = '▶️ Resume';
-  } else if (!agentData.is_halted && !pauseBtn.textContent.includes('Pause')) {
-    pauseBtn.textContent = '⏸ Pause';
+  // Update global activity bar if this is the active visible tab
+  if (isVisible) {
+    ActivityBar.render();
   }
-  
-  const activityText = activityBar.querySelector('.activity-text');
-  const queuedEl = activityBar.querySelector('.activity-queued');
-
-  // 2. Always update activity status (so pulses/dots are current even when hidden)
-  if (isActive) {
-    activityBar.classList.add('active');
-    let status = 'Agent Starting...';
-    
-    if (!isRoot && agentData.is_waiting) {
-      status = 'Waiting for API slot...';
-    } else if (lastMsg) {
-      status = getActivityPreview(lastMsg);
-    }
-    
-    // Root: use global token/word counts; sub-agents: use their own
-    const tokCount = isRoot ? state.totalTokens : agentData.total_tokens;
-    const wordCount = isRoot ? state.totalWords : agentData.total_words;
-    if (tokCount !== undefined) {
-      status += ` (${wordCount} words, ${tokCount} tokens)`;
-    }
-    if (activityText.textContent !== status) activityText.textContent = status;
-    terminateBtn.style.display = 'block';
-  } else {
-    activityBar.classList.remove('active');
-    if (activityText.textContent !== 'Agent Idle') activityText.textContent = 'Agent Idle';
-    terminateBtn.style.display = 'none';
-  }
-  if (queuedEl) queuedEl.style.display = agentData.has_queued_messages ? 'block' : 'none';
 
   // 3. LAZY RENDERING: Skip expensive message work if the tab isn't visible
   if (!isVisible) {
@@ -2567,6 +2600,7 @@ function switchMainTab(tabId) {
   }
   
   state.activeSubTab = tabId;
+  ActivityBar.setActiveTab(tabId);
   
   // Trigger immediate render of the newly visible content — all agents use same path now
   renderSubAgents();
@@ -2725,15 +2759,23 @@ function updateControls() {
   if (refreshBtn) refreshBtn.disabled = state.generating;
   if (mainRB) mainRB.disabled = retryDisabled;
 
-  statusText.textContent = state.generating ? 'Generating...' : (state.instance_halted ? '⏸ Paused' : '');
+  const activeInstance = getActiveInstanceName();
+  const isRoot = isRootAgentName(activeInstance);
+  const activeAgentData = state.subAgents[activeInstance];
+  const isHalted = !!activeAgentData?.is_halted;
+
+  statusText.textContent = state.generating ? 'Generating...' : (isHalted ? '⏸ Paused' : '');
   
-  // Sync pause button to server-side halted state (only when server explicitly confirms)
-  if (pauseBtn && state._serverHaltConfirmed) {
-    const wasPaused = pauseBtn.textContent === '▶️ Resume';
-    const nowHalted = !!state.instance_halted;
-    if (nowHalted && !wasPaused) { pauseBtn.textContent = '▶️ Resume'; }
-    else if (!nowHalted && wasPaused) { pauseBtn.textContent = '⏸ Pause'; }
-    state._serverHaltConfirmed = false;  // consume the confirmation
+  // Sync pause button to current active agent's halted state
+  if (pauseBtn) {
+    pauseBtn.textContent = isHalted ? '▶️ Resume' : '⏸ Pause';
+  }
+
+  // Sync terminate button visibility
+  const terminateBtn = document.getElementById('terminateBtn');
+  if (terminateBtn) {
+    const isInstanceActive = isRoot ? state.generating : !!activeAgentData?.active;
+    terminateBtn.style.display = isInstanceActive ? 'inline-flex' : 'none';
   }
   
   chatInput.placeholder = state.generating
@@ -2799,6 +2841,21 @@ function updateContextBar(barEl, msgs, overrideTokens, overrideMax) {
     barEl.className = 'context-bar-fill warning';
   } else {
     barEl.className = 'context-bar-fill';
+  }
+}
+
+function updateAllContextBars() {
+  const sa = state.subAgents;
+  for (const name of Object.keys(sa)) {
+    const fillEl = document.getElementById('subContextFill-' + name);
+    if (fillEl) {
+      const isRoot = isRootAgentName(name);
+      const agentData = sa[name];
+      const displayMsgs = agentData?.messages || [];
+      const tokCount = isRoot ? state.totalTokens : agentData?.total_tokens;
+      const maxTok = isRoot ? state.maxTokens : agentData?.max_tokens;
+      updateContextBar(fillEl, displayMsgs, tokCount, maxTok);
+    }
   }
 }
 
@@ -3166,19 +3223,34 @@ function createPauseButton(btn, instanceSource) {
     try {
       if (btn.textContent.includes('Pause')) {
         const resp = await fetch(`/api/halt/${encodeURIComponent(sessionName)}`, { method: 'POST' });
-        if (resp.ok) { btn.textContent = '▶️ Resume'; state.instance_halted = true; }
+        if (resp.ok) {
+          btn.textContent = '▶️ Resume';
+          if (state.subAgents[sessionName]) state.subAgents[sessionName].is_halted = true;
+        }
       } else {
         // Send a WebSocket resume message so the server clears the halt flag AND restarts generation
         send({ type: 'resume', instance_name: sessionName });
         btn.textContent = '⏸ Pause';
-        state.instance_halted = false;
+        if (state.subAgents[sessionName]) state.subAgents[sessionName].is_halted = false;
       }
     } catch(e) { console.error('Pause/Resume failed:', e); }
   });
 }
 
 // Main chat pause button
-if (pauseBtn) createPauseButton(pauseBtn, () => document.getElementById('sessionName')?.value || 'Maine');
+if (pauseBtn) createPauseButton(pauseBtn, () => getActiveInstanceName());
+
+// Main chat terminate button
+const terminateBtn = $('#terminateBtn');
+if (terminateBtn) {
+  terminateBtn.addEventListener('click', () => {
+    const activeInstance = getActiveInstanceName();
+    if (!activeInstance) return;
+    if (confirm(`Terminate ${activeInstance}?`)) {
+      send({ type: 'terminate_agent_instance', instance_name: activeInstance });
+    }
+  });
+}
 
 const onRetryClick = () => {
   // Invalidate root panel cache to force full re-render
@@ -3207,6 +3279,8 @@ if (refreshBtn) {
 if (mainRetryBtn) mainRetryBtn.addEventListener('click', onRetryClick);
 resetBtn.addEventListener('click', () => {
   if (confirm('Reset the entire conversation and start a new session?')) {
+    // Clear closed tabs cache so all tabs reappear after reset
+    state.closedTabs.clear();
     // Invalidate all panel caches to force full re-render after reset
       mainTabPanels.querySelectorAll('.messages').forEach(p => {
         p.dataset.contentKey = '';
@@ -3225,6 +3299,7 @@ agentSelect.addEventListener('change', () => {
 
 sessionNameInput.addEventListener('change', () => {
   state.sessionName = sessionNameInput.value.trim() || 'Maine';
+  state.closedTabs.clear();
   localStorage.setItem('agent-cascade-session-name', state.sessionName);
   send({ type: 'set_session_name', name: state.sessionName });
 });
@@ -3342,6 +3417,7 @@ function retryGeneration() {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
+ActivityBar.init();
 connect();
 if ($('#apply-mcp-btn')) {
   $('#apply-mcp-btn').addEventListener('click', () => {

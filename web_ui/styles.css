@@ -597,13 +597,42 @@ body {
   opacity: 0.2;
 }
 
-.activity-text {
+.activity-text,
+.activity-fifo {
   flex: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--accent);
   font-style: italic;
+}
+
+.system-toast-bar {
+  padding: 8px 16px;
+  background: rgba(255, 193, 7, 0.08);
+  border-bottom: 1px solid rgba(255, 193, 7, 0.2);
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.system-toast-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  animation: fadeIn 0.3s ease;
+}
+
+.toast-dismiss {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0 4px;
+  flex-shrink: 0;
 }
 
 .activity-queued {

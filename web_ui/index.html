@@ -139,9 +139,22 @@
         <!-- Approval inline area (Global) -->
         <div class="approval-bar" id="approvalBar" style="display:none;"></div>
 
+        <!-- System Messages Toast (like approval bar) -->
+        <div class="system-toast-bar" id="systemToastBar" style="display:none;"></div>
+
         <!-- Tab panels (all created dynamically including root) -->
         <div class="main-tab-panels">
           <!-- Agent panels injected here dynamically (including root agent panel) -->
+        </div>
+
+        <!-- Persistent Activity Bar (decoupled from panels) -->
+        <div class="main-activity-bar" id="globalActivityBar">
+          <div class="activity-status">
+            <span class="activity-dot"></span>
+            <span>Activity</span>
+          </div>
+          <div class="activity-fifo"></div>
+          <div class="activity-queued" style="display:none;">⚡ Queued</div>
         </div>
 
         <!-- Input area (outside tab panels so it's always visible) -->
@@ -193,6 +206,7 @@
               Continue</button>
             <button id="mainRetryBtn" class="btn btn-secondary" title="Retry last turn (Ctrl+Shift+R)">🔄 Retry</button>
             <button id="stopBtn" class="btn btn-stop">⏹ Stop</button>
+            <button id="terminateBtn" class="btn btn-danger" title="Terminate the active agent" style="display:none;">🗑️ Terminate</button>
             <button id="pauseBtn" class="btn btn-secondary" title="Pause the current agent">⏸ Pause</button>
             <span class="status-text" id="statusText"></span>
           </div>
