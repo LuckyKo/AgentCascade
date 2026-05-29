@@ -889,7 +889,7 @@ class AgentPool:
 
         # active_start_idx: where the "active" (post-marker) window starts
         if latest_marker >= 0:
-            active_start_idx = latest_marker
+            active_start_idx = latest_marker + 1  # Skip past marker — markers are not part of active set
         else:
             # Skip system message at index 0 if present
             from agent_cascade.llm.schema import SYSTEM as SYS_ROLE
