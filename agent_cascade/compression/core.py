@@ -20,7 +20,6 @@ def compress_context(
     summary_text: str | None = None,  # Required when mode == "manual"
     force: bool = False,           # Bypass validation guards (forced compression at >95%)
     justification: str = "",       # Human-readable reason for this compression
-    orchestrator=None,             # Optional: orchestrator instance for call_agent pattern
     dry_run: bool = False,         # If True, generate summary but don't mutate pool
     precomputed_summary: str | None = None,  # Pre-generated summary to skip LLM call
 ) -> CompressResult:
@@ -44,7 +43,6 @@ def compress_context(
         summary_text: Required when mode == "manual". Raw summary text.
         force: If True, bypass the "not enough messages" guard.
         justification: Human-readable reason (logged for debugging).
-        orchestrator: Optional orchestrator instance for call_agent pattern invocation.
         dry_run: If True, generate summary but don't mutate pool (for /compress command).
         precomputed_summary: Pre-generated summary to skip LLM call in auto mode.
 
@@ -198,7 +196,6 @@ def compress_context(
                 agent_pool=agent_pool,
                 target_messages=target_messages,
                 existing_summary=existing_summary,
-                orchestrator=orchestrator,
             )
         except Exception as e:
             # Fail-safe: Compression Agent failed — pool is untouched

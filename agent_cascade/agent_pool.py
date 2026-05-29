@@ -28,8 +28,6 @@ class _InstanceConversationMapping(dict):
     When api_server.py does `pool.instance_conversations[name] = some_list`, this class
     intercepts the write and also updates `pool.instances[name].conversation` to maintain
     bidirectional sync. Reads return the conversation from instances, not from dict storage.
-    
-    This is a compatibility shim — remove in Phase 6 after full cleanup of api_server.py.
     """
 
     def __init__(self, pool: 'AgentPool'):
@@ -270,16 +268,14 @@ class AgentPool:
         self._compression_halted: set = set()              # instances halted by forced compression (not manual)
         self.terminated_instances: set = set()             # instances marked for immediate termination
 
-        # ── Compatibility shim attributes (Phase 5 bridge to old api_server calls) ──
-        # These are thin shims that provide backward-compatible access patterns
-        # until Phase 6 completes full cleanup of api_server.py.
+        # ── Attributes required by api_server.py and agent_invoker.py ──
+        # These bridge the new unified model with existing call patterns.
         self.last_tool_args: Dict[str, Dict[str, Dict[str, Any]]] = {}  # tool arg cache for __USE_PREV_ARG__
         self.instance_summaries: Dict[str, str] = {}         # per-instance compression summaries
-        self._ws_loop = None                                 # asyncio event loop ref (set by api_server at runtime, used by dismissal callback)
-# ── Backward compatibility shim for agent_invoker.py ────────────────
-        # The old model used instance_state dict for WebUI visibility.
-        # In the new model, state lives in instances[name].conversation.
-        # This shim is maintained only until agent_invoker is refactored.
+        self._ws_loop = None                                 # asyncio event loop ref (set by api_server at runtime)
+        
+        # instance_state bridges the old WebUI state pattern with the new unified model.
+        # Maintained for agent_invoker.py and session rename patterns.
         self.instance_state: Dict[str, dict] = {}
         self.message_queues: Dict[str, List[str]] = {}     # per-agent message queues
 
@@ -453,13 +449,11 @@ class AgentPool:
         else:
             self.remove_instance(instance_name)
 
-    # ── Compatibility shims (Phase 5 bridge to old api_server calls) ────────
-    # These methods/properties provide backward-compatible access patterns that
-    # api_server.py expects. They are thin wrappers around the new unified model.
-    # Remove in Phase 6 after full cleanup of api_server.py.
+    # ── API bridge methods for api_server.py ────────────────────────────────
+    # These methods provide access patterns that api_server.py expects.
 
     def is_halted(self, instance_name: str) -> bool:
-        """Alias for is_instance_halted — old api_server calls this name."""
+        """Alias for is_instance_halted — required by api_server.py."""
         return self.is_instance_halted(instance_name)
 
     def list_agents(self) -> List[str]:
@@ -496,10 +490,10 @@ class AgentPool:
 
     @property
     def _state_lock(self):
-        """Delegate to ParallelAgentManager's state lock for backward compatibility.
+        """Delegate to ParallelAgentManager's state lock.
 
-        agent_orchestrator.py references self.agent_pool._state_lock at 5 call sites
-        (lines 1404, 1472, 1963, 2175, 2224). This property bridges that gap.
+        Required by code that references self.agent_pool._state_lock (e.g., 
+        agent_invoker.py for thread-safe access).
         """
         return self._execution._state_lock
 
@@ -562,12 +556,10 @@ class AgentPool:
                 result[name] = len(inst.conversation)
         return result
 
-    def rollback_to_snapshots(self, snapshots: Dict[str, int], soft: bool = False, reason: Optional[str] = None):
+    def rollback_to_snapshots(self, snapshots: Dict[str, int], reason: Optional[str] = None):
         """Rollback all instances to the lengths recorded in snapshots.
         
         Truncates conversation lists and notifies loggers via LoggerManager.
-        Note: soft and reason parameters are accepted for API compatibility but
-        are no-ops in the unified pool (NoOpLogger doesn't differentiate).
         """
         for name, target_len in snapshots.items():
             inst = self.instances.get(name)
@@ -809,8 +801,9 @@ class AgentPool:
     def add_message(self, instance_name: str, message: Message):
         """Append a message (thread-safe) to an agent's conversation.
 
-        This is the single point of truth for adding messages — no separate
-        session['history'] or instance_conversations dict needed anymore.
+        This is the single point of truth for adding messages — all writes go
+        directly to instances[name].conversation. The instance_conversations
+        mapping is a convenience view used by other components.
         Also persists the message to the JSONL log file.
         """
         inst = self.instances.get(instance_name)
@@ -827,13 +820,13 @@ class AgentPool:
             except Exception as e:
                             logger.debug(f"Log message write failed for {instance_name} (non-critical): {e}")
             
-                # ── Backward-compatible accessors for compression module
-    # The old compress_context() API expects agent_pool.get_conversation() and
-    # agent_pool.instance_conversations[] — bridge them to the new model.
+    # ── Compression module compatibility layer
+    # The compress_context() API in core.py expects agent_pool.get_conversation() and
+    # agent_pool.instance_conversations[] — these bridge to the new instance.conversation model.
 
     @property
     def instance_conversations(self) -> Dict[str, List[Message]]:
-        """View of all conversations as a dict (for compression module compat).
+        """View of all conversations as a dict (required by compression module and api_server.py).
         
         Returns the live _instance_conversations mapping which is kept in sync with
         self.instances. Writes to this dict propagate back to instances[name].conversation.
@@ -967,7 +960,7 @@ class AgentPool:
                 return i
         return -1
 
-    def surgical_rollback(self, instance_name: str, pop_count: int, soft: bool = False, reason: Optional[str] = None):
+    def surgical_rollback(self, instance_name: str, pop_count: int, reason: Optional[str] = None):
         """Remove the last `pop_count` messages from an agent's conversation.
 
         Used by loop recovery to roll back repetitive patterns.
@@ -975,7 +968,6 @@ class AgentPool:
         Args:
             instance_name: Name of the agent instance to rollback.
             pop_count: Number of messages to remove from the end.
-            soft: Legacy parameter for backward compatibility (no-op in unified pool).
             reason: Optional reason string for logging.
 
         Safety guarantees (§7.3):

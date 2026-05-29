@@ -84,7 +84,7 @@ def build_system_prompt(config: dict) -> str:
         system_prompt += "\n## Your Rules\n"
         for i, rule in enumerate(rules, 1):
             if isinstance(rule, dict):
-                # Handle cases where YAML still parses as dict (legacy/unquoted)
+                # YAML may parse multi-line strings as dicts — normalize to key: value format
                 for k, v in rule.items():
                     system_prompt += f"{i}. {k}: {v}\n"
             else:
@@ -190,12 +190,14 @@ def create_agent_from_soul(llm_cfg: dict, soul_path: str = 'soul.md', agent_clas
         description=config.get('tagline', 'A helpful AI assistant'),
         system_message=system_prompt,
         function_list=[],  # Empty - tools added manually by agent_orchestrator
-        agent_type=role_name.replace('_', ' ').title() if role_name else raw_name,
         **agent_kwargs
     )
+
+    # Store role info for tool filtering and logging
+    if role_name:
+        agent.agent_type = role_name.replace('_', ' ').title()
     
     # Store config and base system message for later dynamic updates
-    # Use role_name if available to ensure compatibility with AgentPool tracking (slug vs display name)
     config_key = role_name if role_name else config.get('name', 'assistant')
     agent.agent_configs = {config_key: config}
     agent.base_system_message = system_prompt

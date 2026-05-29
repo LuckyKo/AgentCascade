@@ -767,18 +767,16 @@ class TestNestedCompressionGuard:
         if instance_name != 'compression_agent':
             hook_forced = self._inject_compression_warning_for_agent(...)
 
-    These tests use a MagicMock(spec=OrchestratorAgent) to verify the guard's behavior
-    with real orchestrator method signatures.
+    These tests verify the guard's behavior using simple mock objects.
     """
 
     def test_orchestrator_skips_inject_for_compression_agent(self):
         """When instance_name == 'compression_agent', _inject_compression_warning_for_agent
         is NOT called — prevents nested/circular compression."""
-        from agent_cascade.orchestrator_agent import OrchestratorAgent
 
         inject_called = {"value": False}
 
-        mock_orch = MagicMock(spec=OrchestratorAgent)
+        mock_orch = MagicMock()
         mock_orch._compress_context_ran_this_turn = False
 
         def track_inject(_agent, _instance_name, _messages):
@@ -804,11 +802,10 @@ class TestNestedCompressionGuard:
 
     def test_orchestrator_calls_inject_for_other_agents(self):
         """For non-compression agents, _inject_compression_warning_for_agent IS called."""
-        from agent_cascade.orchestrator_agent import OrchestratorAgent
 
         inject_called = {"value": False}
 
-        mock_orch = MagicMock(spec=OrchestratorAgent)
+        mock_orch = MagicMock()
 
         def track_inject(_agent, _instance_name, _messages):
             inject_called["value"] = True

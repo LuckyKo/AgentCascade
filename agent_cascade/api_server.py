@@ -77,7 +77,7 @@ def _get_main_history(agent_pool, session_name):
     conversation list from the pool instance, or an empty list if not found.
     
     Args:
-        agent_pool: The AgentPool instance (may be None in legacy mode)
+        agent_pool: The AgentPool instance managing all instances.
         session_name: Name of the main session/instance
         
     Returns:
@@ -89,8 +89,7 @@ def _get_main_history(agent_pool, session_name):
     if inst is not None:
         with inst._compression_lock:
             return list(inst.conversation)
-    # Fallback: try instance_conversations mapping directly
-    return list(agent_pool.instance_conversations.get(session_name, []))
+    return []
 
 
 def _get_msg_role(msg):
@@ -514,8 +513,7 @@ def create_app(agents, agent_pool, config=None):
             list of message objects
         """
         # Read from unified store — always read from pool.instances for live data.
-        # instance_state is a legacy shim that can go stale; instances[name].conversation
-        # is the single source of truth during execution (Fix #9).
+        # For non-root instances, history comes from instance_state which is updated during streaming.
         if instance_name == 'root':
             inst = agent_pool.get_instance(session['session_name']) if agent_pool else None
             if inst is not None:
@@ -832,15 +830,13 @@ def create_app(agents, agent_pool, config=None):
                 'api_router': api_router_state,
             }
         
-        # Add legacy-compatible fields that frontend expects
-        result['agent_index'] = session.get('agent_index', 0)
         return result
 
     def build_stream_update(responses, cached_h_stats=None, agent_instances=None, telemetry=None):
         """Build a lightweight streaming delta (skips re-serializing stable history).
         
         Delegates to build_stream_update_from_pool which reads from pool.instances.
-        Legacy parameters are accepted for backward compatibility but ignored.
+        Legacy parameters are accepted but ignored — callers should use the unified path directly.
         """
         instance_name = session['session_name']
         
@@ -916,7 +912,7 @@ def create_app(agents, agent_pool, config=None):
         Unified agent execution entry point. Delegates to run_agent_thread_unified
         which uses ExecutionEngine and pool.instances instead of session['history'].
         
-        Signature preserved for backward compatibility with existing call sites.
+        Signature preserved for existing call sites.
           - history_for_agent → used to extract system message content (can be None if instance exists in pool)
           - agent_runner → not used (engine is stateless, reads from pool)
           - gen_id → tracked in session for stop detection
@@ -1427,7 +1423,7 @@ def create_app(agents, agent_pool, config=None):
                             inst = agent_pool.get_instance(session['session_name'])
                             if inst is not None and len(inst.conversation) > 0:
                                 agent_pool.surgical_rollback(
-                                    session['session_name'], n, soft=True, reason="Manual /rollback command"
+                                    session['session_name'], n, reason="Manual /rollback command"
                                 )
                             else:
                                 await broadcast({'type': 'error', 'message': 'Nothing to roll back — no conversation yet'})
@@ -1510,8 +1506,8 @@ def create_app(agents, agent_pool, config=None):
                     loop = asyncio.get_event_loop()
 
                     # Get the current history from the pool (unified path)
-                    inst = agent_pool.get_instance(session['session_name']) if agent_pool else None
-                    history_copy = copy.deepcopy(inst.conversation) if inst else copy.deepcopy(session.get('history', []))
+                    assert inst is not None, "No agent instance found for session"
+                    history_copy = copy.deepcopy(inst.conversation)
 
                     thread = threading.Thread(
                         target=run_agent_thread,
@@ -1686,16 +1682,13 @@ def create_app(agents, agent_pool, config=None):
                             with inst._compression_lock:
                                 while inst.conversation and _get_msg_role(inst.conversation[-1]) in (ASSISTANT, FUNCTION):
                                     inst.conversation.pop()
-                    # TODO(Phase 7): Remove legacy fallback — agent_pool should always exist
 
                     # Roll back one more (the user message) to allow a clean re-trigger
                     last_user_msg = None
-                    if agent_pool:
-                        inst = agent_pool.get_instance(instance_name)
-                        with inst._compression_lock:
-                            if inst.conversation and _get_msg_role(inst.conversation[-1]) == USER:
-                                last_user_msg = inst.conversation.pop()
-                    # TODO(Phase 7): Remove legacy fallback — agent_pool should always exist
+                    inst = agent_pool.get_instance(instance_name)
+                    with inst._compression_lock:
+                        if inst.conversation and _get_msg_role(inst.conversation[-1]) == USER:
+                            last_user_msg = inst.conversation.pop()
 
                     if not (agent_pool and agent_pool.get_instance(instance_name)) and not _get_main_history(agent_pool, instance_name) and not last_user_msg:
                         _save_session_history()
@@ -1709,7 +1702,7 @@ def create_app(agents, agent_pool, config=None):
 
                         # 1. Rollback agent instances to the start of the last turn
                         if session.get('last_turn_snapshots'):
-                            agent_pool.rollback_to_snapshots(session['last_turn_snapshots'], soft=True, reason="User retry")
+                            agent_pool.rollback_to_snapshots(session['last_turn_snapshots'], reason="User retry")
                             
                             # Sync instance_state so build_state() sees the rolled-back histories
                             for name in session['last_turn_snapshots']:
@@ -1819,13 +1812,10 @@ def create_app(agents, agent_pool, config=None):
                                 logger.info("[MCP] Eagerly loaded %d tools.", len(mcp_tools))
                             except Exception as e:
                                 logger.warning("[MCP] Eager initialization failed: %s", e)
-                        if 'work_access_folders_ro' in ui_cfg or 'work_access_folders_rw' in ui_cfg or 'work_access_folders' in ui_cfg:
+                        if 'work_access_folders_ro' in ui_cfg or 'work_access_folders_rw' in ui_cfg:
                             if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
                                 ro = ui_cfg.get('work_access_folders_ro', [])
                                 rw = ui_cfg.get('work_access_folders_rw', [])
-                                # Support legacy 'work_access_folders' as RW for backward compatibility
-                                legacy = ui_cfg.get('work_access_folders', [])
-                                rw = list(set(rw + legacy))
                                 agent_pool.operation_manager.set_extra_work_folders(ro, rw)
                         if 'default_workspace' in ui_cfg:
                             if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:

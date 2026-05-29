@@ -315,16 +315,6 @@ class APIRouter:
         with self._lock:
             return list(self.agent_priorities.get(agent_type, []))
 
-    def get_concurrency_limit(self, agent_type: str) -> int:
-        """
-        Returns the concurrency_limit for the highest-priority enabled endpoint 
-        of the given agent type. Returns -1 if unlimited (default).
-        
-        DEPRECATED — delegates to get_effective_concurrency() which also checks
-        the default fallback endpoint. Kept for backward compatibility.
-        """
-        return self.get_effective_concurrency(agent_type)
-
     def get_effective_concurrency(self, agent_type: str) -> int:
         """
         Returns the concurrency limit of the actual endpoint that will be used 

@@ -1,7 +1,7 @@
 """Integration tests for __USE_PREV_ARG__ resolution in the streaming tool path.
 
 These tests verify that resolve_prev_arg_placeholders() from tool_utils is called
-in both the streaming (sub-agent) and non-streaming paths of OrchestratorAgent._run,
+in both the streaming (sub-agent) and non-streaming paths of ExecutionEngine,
 and that lock protection around last_tool_args reads/writes works correctly.
 
 After Phase 8 cleanup, USE_UNIFIED_LOOP is permanently True — resolution is always

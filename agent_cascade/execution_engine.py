@@ -25,6 +25,35 @@ from agent_cascade.utils.utils import extract_text_from_message
 from .agent_instance import AgentInstance, LoopDetectedError
 
 
+def _get_active_functions_from_template(template) -> list:
+    """
+    Build the list of active function schemas from a template's function_map,
+    filtering out any tools disabled via the template's LLM generate_cfg.
+
+    Mirrors Agent._get_active_functions() from the main branch so that tool
+    filtering works correctly for all agents — including the orchestrator which
+    no longer has a class-specific _get_active_functions method.
+    """
+    # Read disabled_tools from template.llm.generate_cfg (same source as Agent)
+    # Templates are always created via load_agent() → create_agent_from_soul(),
+    # so llm and generate_cfg are guaranteed to exist by construction.
+    disabled_map = getattr(template.llm, 'generate_cfg', {}).get('disabled_tools', {})
+
+    # Collect all disabled tool names for this agent (by name, slug, and agent_type)
+    agent_name = getattr(template, 'name', None)
+    disabled = set(disabled_map.get(agent_name, []))  # Mirrors main branch — safe even when name is None
+    if agent_name:
+        slug = agent_name.lower().replace(' ', '_')
+        disabled.update(disabled_map.get(slug, []))
+
+    agent_type = getattr(template, 'agent_type', None)
+    if agent_type and agent_type in disabled_map:
+        disabled.update(disabled_map[agent_type])
+
+    # Return function schemas for tools NOT in the disabled set
+    return [func.function for name, func in template.function_map.items() if name not in disabled]
+
+
 class ExecutionEngine:
     """
     Coordinates execution of an AgentInstance through its turn loop.
@@ -484,7 +513,8 @@ class ExecutionEngine:
             return
 
         # Get active functions (tool schemas) from template
-        active_functions = template._get_active_functions() if hasattr(template, '_get_active_functions') else []
+        # Mirrors Agent._get_active_functions(): filter out disabled tools from function_map
+        active_functions = _get_active_functions_from_template(template)
 
         # Build the LLM call — with delta_stream=False each yielded item is a List[Message]
         # (the accumulated response so far). We iterate through all items (or until stop/halt),

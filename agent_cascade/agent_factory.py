@@ -1,13 +1,12 @@
 """
 Agent Factory — Unified tool registration and agent loading.
 
-All agents are OrchestratorAgent instances (capable of spawning sub-agents).
-The "main orchestrator" is just one more agent with its own soul.md, not a
-special class. Tool availability is controlled via the disabled_tools policy,
-not by which loader function was used.
+All agents are loaded from their soul.md files as standard Agent instances
+(capable of spawning sub-agents). The "main orchestrator" is just one more
+agent with its own soul.md, not a special class. Tool availability is
+controlled via the disabled_tools policy, not by which loader function was used.
 """
 
-from agent_cascade.agents import Assistant
 from agent_cascade.log import logger
 from agent_cascade.tools.code_interpreter import CodeInterpreter
 from agent_cascade.tools.custom import (
@@ -32,7 +31,7 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
         agent_pool: The AgentPool instance (for file ops and approvals).
         agent_name: The role name (e.g. 'orchestrator', 'coder').
     """
-    from agent_cascade.orchestrator_agent import _AgentInstanceFunctionProxy, CALL_AGENT_SCHEMA
+    from agent_cascade.tools._agent_instance_proxy import _AgentInstanceFunctionProxy, CALL_AGENT_SCHEMA
 
     # ── Sub-agent management (intercepted in _run, not _call_tool) ──
     agent.function_map['call_agent'] = _AgentInstanceFunctionProxy(CALL_AGENT_SCHEMA)
@@ -166,23 +165,22 @@ Workspace & Path Reference:
 """
 
 
-def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None) -> Assistant:
+def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None):
     """
     Load any agent (including the orchestrator) from its soul.md.
     
-    Every agent is an OrchestratorAgent — fully capable of spawning and
+    Every agent is a standard Agent instance — fully capable of spawning and
     managing sub-agents. The "main orchestrator" is just another agent
     whose soul.md gives it a supervisor personality.
     
     Args:
         agent_pool: The AgentPool instance.
         agent_name: The agent's role name (e.g. 'orchestrator', 'coder').
-        llm_cfg: Legacy fallback parameter (ignored if APIRouter is active).
+        llm_cfg: LLM config used when APIRouter is not active.
         
     Returns:
-        Fully configured OrchestratorAgent instance.
+        Fully configured Agent instance with tools registered.
     """
-    from agent_cascade.orchestrator_agent import OrchestratorAgent
     import copy
 
     # Ensure each agent gets its own distinct LLM instance config
@@ -196,7 +194,7 @@ def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None) -> Assistant:
     if agent_llm_cfg is None:
         raise ValueError(
             f"No LLM configuration available for agent '{agent_name}'. "
-            "Pass llm_cfg to load_orchestrator_agent()/load_agent_template() or provide it when constructing AgentPool."
+            "Pass llm_cfg to load_agent() or provide it when constructing AgentPool."
         )
         
     # Deepcopy to prevent shared references in the LLM object tree
@@ -208,23 +206,22 @@ def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None) -> Assistant:
         agent, config = create_agent_from_soul(
             agent_llm_cfg,
             str(soul_path),
-            agent_class=OrchestratorAgent,
-            agent_pool=agent_pool,
             role_name=agent_name,
         )
     else:
         # Fallback: no soul.md — create with a generic prompt
+        from agent_cascade.agents import Assistant
+
         config = {}
         system_prompt = _default_agent_prompt(agent_pool, agent_name)
-        agent = OrchestratorAgent(
-            agent_pool=agent_pool,
+        agent = Assistant(
             llm=agent_llm_cfg,
             name=agent_name.replace('_', ' ').title(),
-            agent_type=agent_name.replace('_', ' ').title(),
             description=f"{agent_name.replace('_', ' ').title()} agent",
             system_message=system_prompt,
             function_list=[],
         )
+        agent.agent_type = agent_name.replace('_', ' ').title()  # Mirrors main branch — needed for disabled_tools lookup
         agent.agent_configs = {agent_name: config}
         agent.base_system_message = system_prompt
 
@@ -234,14 +231,14 @@ def load_agent(agent_pool, agent_name: str, llm_cfg: dict = None) -> Assistant:
     return agent
 
 
-# ── Backward-compatible aliases ──────────────────────────────────────────────
+# ── Convenience wrappers ────────────────────────────────────────────────────────
 
-def load_orchestrator_agent(agent_pool, llm_cfg: dict) -> Assistant:
-    """Load the orchestrator. Delegates to load_agent('orchestrator')."""
+def load_orchestrator_agent(agent_pool, llm_cfg: dict):
+    """Load the orchestrator agent. Delegates to load_agent('orchestrator')."""
     return load_agent(agent_pool, 'orchestrator', llm_cfg)
 
 
-def load_agent_template(agent_pool, agent_name: str, llm_cfg: dict) -> Assistant:
+def load_agent_template(agent_pool, agent_name: str, llm_cfg: dict):
     """Load an agent template. Delegates to load_agent()."""
     return load_agent(agent_pool, agent_name, llm_cfg)
 

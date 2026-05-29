@@ -72,11 +72,11 @@ class TestImportChain:
         from agent_cascade.llm.schema import Message, SYSTEM, USER, ASSISTANT  # noqa: F401
         assert Message is not None
 
-    def test_import_orchestrator_stub(self):
-        """OrchestratorAgent stub can be imported (used for backward compat)."""
-        from agent_cascade.orchestrator_agent import OrchestratorAgent, CALL_AGENT_SCHEMA  # noqa: F401
-        assert OrchestratorAgent is not None
-        assert callable(CALL_AGENT_SCHEMA) or isinstance(CALL_AGENT_SCHEMA, dict)
+    def test_import_agent_instance_proxy(self):
+        """Agent instance proxy and CALL_AGENT_SCHEMA can be imported from new location."""
+        from agent_cascade.tools._agent_instance_proxy import _AgentInstanceFunctionProxy, CALL_AGENT_SCHEMA  # noqa: F401
+        assert _AgentInstanceFunctionProxy is not None
+        assert isinstance(CALL_AGENT_SCHEMA, dict)
 
     def test_import_soul_loader(self):
         """Soul loader can be imported from the package."""
@@ -387,7 +387,6 @@ class TestSoulLoader:
     def test_load_orchestrator_soul(self):
         """Orchestrator soul.md should load as valid config and create an agent."""
         from agent_cascade.soul_loader import create_agent_from_soul
-        from agent_cascade.orchestrator_agent import OrchestratorAgent
 
         soul_path = PROJECT_ROOT / 'agents' / 'orchestrator_soul.md'
         assert soul_path.exists(), f"Soul file not found: {soul_path}"
@@ -398,11 +397,10 @@ class TestSoulLoader:
             'api_key': 'EMPTY',
         }
 
-        # Pass agent_class=OrchestratorAgent (same as load_agent does in agent_factory)
+        # create_agent_from_soul defaults to Assistant when agent_class is not provided
         # Also pass role_name for complete flow parity with production code path
         agent, config = create_agent_from_soul(
             llm_cfg, str(soul_path),
-            agent_class=OrchestratorAgent,
             role_name='orchestrator',
         )
         assert agent is not None
@@ -411,7 +409,6 @@ class TestSoulLoader:
     def test_all_soul_files_load(self):
         """All soul files in the agents dir should load without errors."""
         from agent_cascade.soul_loader import create_agent_from_soul
-        from agent_cascade.orchestrator_agent import OrchestratorAgent
 
         llm_cfg = {
             'model': 'test_model',
@@ -424,7 +421,6 @@ class TestSoulLoader:
             agent_name = soul_file.name.replace('_soul.md', '')
             agent, config = create_agent_from_soul(
                 llm_cfg, str(soul_file),
-                agent_class=OrchestratorAgent,
                 role_name=agent_name,
             )
             assert agent is not None, f"Failed to load {soul_file.name}"

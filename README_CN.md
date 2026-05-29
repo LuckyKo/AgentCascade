@@ -37,7 +37,7 @@ limitations under the License.
 ## 核心特性
 
 ### 🤖 多智能体编排 (Orchestration)
-- **OrchestratorAgent** (`agent_orchestrator.py`)：一个主管智能体，负责管理子智能体的生命周期，拦截 `call_agent`/`dismiss_agent` 工具调用，并将多智能体流式输出统一处理。
+- **Orchestrator** (`execution_engine.py`)：一个主管智能体，负责管理子智能体的生命周期，拦截 `call_agent`/`dismiss_agent` 工具调用，并将多智能体流式输出统一处理。
 - **AgentPool** (`agent_pool.py`)：集中化的智能体管理，支持每个实例的会话持久化（JSONL）、上下文压缩（自动+手动模式）以及实时状态同步。
 
 ### 🛡️ 生产级安全与控制

@@ -63,7 +63,6 @@ def invoke_compression_agent(
     agent_pool,
     target_messages,
     existing_summary=None,
-    orchestrator=None,   # Unused — retained for backward compatibility
 ):
     """
     Invoke the Compression Agent to generate a summary of target messages.
@@ -76,7 +75,6 @@ def invoke_compression_agent(
         agent_pool: The AgentPool instance (provides agent loading and state management).
         target_messages: List of messages to summarize.
         existing_summary: Optional previous summary text to compound onto.
-        orchestrator: Unused — retained for backward compatibility.
 
     Returns:
         The raw summary string (with thinking blocks stripped).

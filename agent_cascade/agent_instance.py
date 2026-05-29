@@ -2,7 +2,7 @@
 Unified Agent Instance Model — Phase 1 of the AgentCascade Architecture Rewrite.
 
 Every agent (including the "main" orchestrator) is represented as an AgentInstance.
-There is no inheritance hierarchy — OrchestratorAgent is simply the first instance
+There is no inheritance hierarchy — the orchestrator is simply the first instance
 created in the pool with agent_class="Orchestrator".
 
 See DESIGN_REWRITE.md §2.1 for design rationale.

@@ -78,7 +78,7 @@ def create_main_agent_instance(
     # Populate instance_state for the main instance so get_session_history() in
     # unified mode can read it. Register under both 'root' (what api_server expects)
     # and the actual instance name for consistency with agent instance registration.
-    agent_label = f"{instance_name} (OrchestratorAgent)"
+    agent_label = f"{instance_name} (Orchestrator)"
     # Read conversation under lock for thread safety
     with instance._compression_lock:
         conv_snapshot = list(instance.conversation)
@@ -358,7 +358,7 @@ def build_state_from_pool(
         'summary': current_summary,
         'has_queued_messages': pool.has_messages(instance_name),
         'stopped': pool.stopped,
-        # Extra fields for frontend compatibility (matches old build_state output)
+        # Extra fields for frontend display
         'agents': agents_list,
         'current_model': current_model,
         'telemetry': telemetry_data,
@@ -378,8 +378,8 @@ def build_stream_update_from_pool(
     Replaces build_stream_update() which read from session['history']. Only
     serializes the changing response messages — history is already on the client.
 
-    Includes sub_agents, current_model, and telemetry fields to match the output
-    format of the old build_stream_update() for frontend compatibility.
+    Includes sub_agents, current_model, and telemetry fields to match the frontend's
+    expected output format.
 
     Args:
         pool: The AgentPool managing all instances.
@@ -579,7 +579,7 @@ def _get_max_tokens_for_instance(pool: AgentPool, instance: AgentInstance) -> in
 def serialize_message(msg: Any, index: Optional[int] = None) -> dict:
     """Serialize a Message object or dict to a JSON-serializable dict for UI rendering.
 
-    Handles both Message objects and raw dicts (backward compatibility).
+    Handles Message objects (Pydantic or dataclass), raw dicts, and any object with role/content attributes.
     Includes optional index field for UI ordering.
 
     Args:
