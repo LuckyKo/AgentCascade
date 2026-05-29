@@ -675,25 +675,44 @@ class AgentPool:
         if not cleaned_messages:
             return "Error: No valid conversation messages found."
 
-        # Extract summary from last compression marker
-        latest_summary_idx = -1
-        for i in range(len(cleaned_messages) - 1, -1, -1):
-            msg = cleaned_messages[i]
+        # ── Design spec §2.6: Build working set from JSONL ────────────────
+        # Forward pass — find all compression markers
+        def _is_compression_marker(msg: dict) -> bool:
             content = msg.get(CONTENT, '') if isinstance(msg.get(CONTENT), str) else ''
-            if msg.get(ROLE) == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                latest_summary_idx = i
-                break
+            return msg.get(ROLE) == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER)
 
-        if latest_summary_idx >= 0:
-            import re
-            summary_msg = cleaned_messages[latest_summary_idx].get(CONTENT, '')
-            match = re.search(r"<context_summary>[\s\n]*(.*?)[\s\n]*</context_summary>", summary_msg, re.DOTALL)
-            if match:
-                self.instance_summaries[instance_name] = match.group(1).strip()
+        markers = []
+        last_marker_index = -1
+        for i, msg in enumerate(cleaned_messages):
+            if _is_compression_marker(msg):
+                markers.append(msg)
+                last_marker_index = i
+
+        # Extract summaries from ALL markers (not just the last one)
+        for marker_msg in markers:
+            summary_text = marker_msg.get(CONTENT, '')
+            start_tag = '<context_summary>'
+            end_tag = '</context_summary>'
+            start = summary_text.find(start_tag) + len(start_tag)
+            end = summary_text.find(end_tag, start)
+            if start > len(start_tag) - 1 and end > start:
+                self.instance_summaries[instance_name] = summary_text[start:end].strip()  # Latest wins
+
+        # Build working set per design spec
+        if last_marker_index >= 0:
+            # [SYSTEM if present] + [all markers stacked] + [tail after last marker, no event markers]
+            system_msg = None
+            if cleaned_messages and cleaned_messages[0].get(ROLE) == SYSTEM:
+                system_msg = cleaned_messages[0]
+            tail = cleaned_messages[last_marker_index + 1:]
+            working_set = ([system_msg] if system_msg else []) + markers + tail
+        else:
+            # No compression — full history is the working set
+            working_set = cleaned_messages
 
         # Restore to pool — convert raw dicts from JSONL into Message objects
         restored_messages = []
-        for msg_dict in cleaned_messages:
+        for msg_dict in working_set:
             try:
                 restored_messages.append(Message(**msg_dict))
             except Exception as e:
@@ -881,21 +900,57 @@ class AgentPool:
         return active_start_idx, active_set, latest_marker
 
     def slice_history_for_llm(self, history: List[Message]) -> List[Message]:
-        """Extract the working set from a full conversation (system + post-marker tail)."""
+        """Extract the working set from a conversation.
+
+        After load_session_from_log() Fix 1, the working set is already built correctly
+        (culling happened at load time). This function now acts as a safety guard:
+        - If markers are already stacked near the start (post-cull), return a copy.
+        - If there are gaps between markers (unculled data still present), apply culling.
+        """
         if not history:
             return []
-        marker_idx = self.find_last_marker(history)
-        if marker_idx < 0:
-            return list(history)
 
-        # Include system message at top if present
+        # Find ALL marker indices to detect stacking vs unculled gaps
+        marker_indices = []
+        for i in range(len(history)):
+            content = (
+                history[i].get('content', '')
+                if isinstance(history[i], dict)
+                else getattr(history[i], 'content', '')
+            )
+            if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                marker_indices.append(i)
+
+        if not marker_indices:
+            return list(history)  # No markers — nothing to slice
+
+        # Check if markers are already stacked (consecutive near the start)
+        # If they're consecutive starting from index 1 (after system), culling already happened
         from agent_cascade.llm.schema import SYSTEM as SYS_ROLE
         first_role = history[0].get('role') if isinstance(history[0], dict) else getattr(history[0], 'role', '')
-        tail = list(history[marker_idx:])
+        expected_start = 1 if first_role == SYS_ROLE else 0
 
-        if first_role == SYS_ROLE and (tail[0].get('role') if isinstance(tail[0], dict) else getattr(tail[0], 'role', '')) != SYS_ROLE:
-            return [history[0]] + tail
-        return tail
+        markers_stacked = (
+            len(marker_indices) > 0 and
+            marker_indices[0] == expected_start and
+            marker_indices[-1] == expected_start + len(marker_indices) - 1
+        )
+
+        if markers_stacked:
+            # Already culled at load time — return a copy
+            return list(history)
+
+        # Unculled data still present — apply culling now (same logic as Fix 1)
+        last_marker_idx = marker_indices[-1]
+        tail = list(history[last_marker_idx + 1:])
+
+        # Collect all marker messages
+        marker_msgs = [history[i] for i in marker_indices]
+
+        # Include system message at top if present — check history[0], not tail[0]
+        if first_role == SYS_ROLE:
+            return [history[0]] + marker_msgs + tail
+        return marker_msgs + tail
 
     # ── Message queue operations ───────────────────────────────────────────
 
