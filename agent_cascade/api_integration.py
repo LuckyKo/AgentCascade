@@ -22,7 +22,7 @@ from agent_cascade.log import logger
 
 from .agent_instance import AgentInstance, LoopDetectedError
 from .agent_pool import AgentPool
-from .execution_engine import ExecutionEngine, _build_resources_block, _replace_resources_block
+from .execution_engine import ExecutionEngine, _build_resources_block, _replace_resources_block, _build_session_metadata, _replace_section
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -771,22 +771,29 @@ def _apply_ui_config(
             # so the agent sees the updated tool list on its next turn
             # NOTE: This runs OUTSIDE _state_lock to avoid nested lock acquisition
             # with _compression_lock — lock ordering invariant: _state_lock before _compression_lock
-            if disabled_tools_changed and instance.conversation:
+            needs_m0_refresh = disabled_tools_changed or 'work_access_folders' in ui_cfg
+            if needs_m0_refresh and instance.conversation:
                 try:
                     with instance._compression_lock:
                         m0 = instance.conversation[0]
                         m0_content = m0.get('content', '') if isinstance(m0, dict) else getattr(m0, 'content', '')
                         if isinstance(m0_content, str):
-                            new_block = _build_resources_block(pool, template)
-                            if new_block:
-                                m0_content = _replace_resources_block(m0_content, new_block)
-                                if isinstance(m0, dict):
-                                    m0['content'] = m0_content
-                                else:
-                                    m0.content = m0_content
-                except Exception:
+                            # Refresh session metadata (workspace folders may have changed)
+                            meta_block = _build_session_metadata(pool, instance)
+                            if meta_block:
+                                m0_content = _replace_section(m0_content, "## Session Metadata", meta_block)
+                            # Refresh resources block if disabled_tools changed
+                            if disabled_tools_changed:
+                                res_block = _build_resources_block(pool, template)
+                                if res_block:
+                                    m0_content = _replace_resources_block(m0_content, res_block)
+                            if isinstance(m0, dict):
+                                m0['content'] = m0_content
+                            else:
+                                m0.content = m0_content
+                except Exception as e:
                     # Don't let m0 refresh break the main flow
-                    logger.debug("Failed to refresh resources block in m0 after disabled_tools change")
+                    logger.debug("Failed to refresh m0 after UI config change: %s", e)
         except AttributeError:
             # pool._execution or _state_lock doesn't exist — skip safely
             logger.debug("Execution engine not available for disabled_tools update")

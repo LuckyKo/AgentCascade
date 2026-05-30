@@ -119,11 +119,84 @@ def _build_resources_block(pool, template) -> str:
     return res
 
 
+def _build_session_metadata(pool, instance) -> str:
+    """Build the '## Session Metadata' section reflecting current workspace state.
+
+    Used both during initial injection and to refresh the block each turn so that
+    changes to working_dir / extra_paths are reflected immediately.
+
+    Args:
+        pool: The AgentPool instance (needed to get logger metadata).
+        instance: The agent instance whose metadata to build.
+
+    Returns:
+        A string containing the full Session Metadata section, or empty string on failure.
+    """
+    inst_name = instance.instance_name
+
+    meta_lines = ["## Session Metadata"]
+
+    # Root agent only knows its supervisor is the user; sub-agents get their caller as supervisor
+    if instance.parent_instance is None:
+        meta_lines.append("- Supervisor: User")
+    else:
+        meta_lines.append(f"- Supervisor: {instance.parent_instance}")
+
+    # Try to get logger metadata for paths; fall back to defaults on failure
+    try:
+        log_inst = pool.get_logger(inst_name, instance.agent_class)
+        working_dir = log_inst.data['metadata'].get('working_dir', 'Unknown')
+        extra_ro = log_inst.data['metadata'].get('extra_paths_ro', [])
+        extra_rw = log_inst.data['metadata'].get('extra_paths_rw', [])
+        log_path = getattr(log_inst, 'log_path', 'Unknown')
+    except Exception:
+        working_dir = os.getcwd() if hasattr(os, 'getcwd') else "Unknown"
+        log_path = "N/A"
+        extra_ro = []
+        extra_rw = []
+
+    meta_lines.append(f"- Working Dir: {working_dir}")
+    if extra_ro:
+        meta_lines.append(f"- Extra Paths (Read-Only): {', '.join(extra_ro)}")
+    if extra_rw:
+        meta_lines.append(f"- Extra Paths (Read-Write): {', '.join(extra_rw)}")
+    meta_lines.append(f"- Log Path: {log_path}")
+    meta_lines.append("Use your logs to recall details from turns that were compressed.")
+
+    return '\n'.join(meta_lines)
+
+
+def _replace_section(m0_content: str, heading_prefix: str, new_section: str) -> str:
+    """Replace a section in m0 content starting with a given heading up to the next heading or end.
+
+    Generic version of _replace_resources_block that works for any ## heading or --- horizontal rule.
+
+    Args:
+        m0_content: The current system message content.
+        heading_prefix: The raw heading text to search for (e.g., "## Session Metadata").
+            This is NOT a regex — it gets escaped internally.
+        new_section: The freshly built section to insert.
+
+    Returns:
+        The updated m0_content with the section replaced.
+    """
+    if not new_section:
+        return m0_content  # Guard: don't delete the section if replacement is empty
+    # Build pattern that matches from the heading through everything until next blank-line + heading/--- or end
+    # NOTE: Use string concatenation for regex to avoid f-string {1,6} quantifier being evaluated as Python expression
+    escaped = re.escape(heading_prefix)
+    pattern = escaped + r'.*?(?=\n\n(?:#{1,6}|---)|\Z)'
+    # Use lambda for replacement to prevent re.sub from interpreting backslashes in the text as regex escapes
+    # (critical on Windows where paths like N:\work\... contain \w which would crash)
+    return re.sub(pattern, lambda m: new_section.rstrip(), m0_content, count=1, flags=re.DOTALL)
+
+
 def _replace_resources_block(m0_content: str, new_block: str) -> str:
     """Replace the existing '--- CURRENT AVAILABLE RESOURCES' block in m0 content.
 
     Uses a regex to find and replace the entire block (from the header line
-    through to just before the next top-level section or end of string).
+    through to just before the next heading or --- rule or end of string).
+    Delegates to _replace_section() for the actual replacement logic.
 
     Args:
         m0_content: The current system message content.
@@ -132,11 +205,7 @@ def _replace_resources_block(m0_content: str, new_block: str) -> str:
     Returns:
         The updated m0_content with the resources block replaced.
     """
-    if not new_block:
-        return m0_content  # Guard: don't delete the block if replacement is empty
-    # Match from the resources header through everything until next top-level section (any ## or ###) or end
-    pattern = r'--- CURRENT AVAILABLE RESOURCES.*?(?=(?:^|\n)\n(?:#{1,6} )|\Z)'
-    return re.sub(pattern, new_block.rstrip(), m0_content, count=1, flags=re.DOTALL)
+    return _replace_section(m0_content, "--- CURRENT AVAILABLE RESOURCES", new_block)
 
 
 class ExecutionEngine:
@@ -279,44 +348,19 @@ class ExecutionEngine:
                     if re.search(pattern, m0_content):
                         m0_content = re.sub(pattern, f"You are {inst_name}.", m0_content, count=1)
                     
-                    # 2. Insert Session Metadata section (if not present)
-                    if '## Session Metadata' not in m0_content:
-                        meta_lines = [
-                            "## Session Metadata",
-                        ]
-
-                        # Root agent only knows its supervisor is the user; sub-agents get their caller as supervisor
-                        if instance.parent_instance is None:
-                            meta_lines.append(f"- Supervisor: User")
+                    # 2. Inject/update Session Metadata section — always rebuild each turn so changes are reflected immediately
+                    meta_block = _build_session_metadata(self.pool, instance)
+                    if meta_block:
+                        if '## Session Metadata' in m0_content:
+                            # Replace the existing block with fresh data
+                            m0_content = _replace_section(m0_content, "## Session Metadata", meta_block)
                         else:
-                            meta_lines.append(f"- Supervisor: {instance.parent_instance}")
-
-                        # Try to get logger metadata for paths; fall back to defaults on failure
-                        try:
-                            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                            working_dir = log_inst.data['metadata'].get('working_dir', 'Unknown')
-                            log_path = getattr(log_inst, 'log_path', 'Unknown')
-                            extra_ro = log_inst.data['metadata'].get('extra_paths_ro', [])
-                            extra_rw = log_inst.data['metadata'].get('extra_paths_rw', [])
-                        except Exception:
-                            working_dir = os.getcwd()
-                            log_path = "N/A"
-                            extra_ro = []
-                            extra_rw = []
-
-                        meta_lines.append(f"- Working Dir: {working_dir}")
-                        meta_lines.append(f"- Log Path: {log_path}")
-                        if extra_ro:
-                            meta_lines.append(f"- Extra Paths (Read-Only): {', '.join(extra_ro)}")
-                        if extra_rw:
-                            meta_lines.append(f"- Extra Paths (Read-Write): {', '.join(extra_rw)}")
-                        meta_lines.append("Use your logs to recall details from turns that were compressed.")
-
-                        content_lines = m0_content.split('\n')
-                        insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith("#") else 1
-                        for i, ml in enumerate(meta_lines):
-                            content_lines.insert(insert_pos + i, ml)
-                        m0_content = '\n'.join(content_lines)
+                            # First injection — insert after the identity line (same position as before)
+                            content_lines = m0_content.split('\n')
+                            insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith("#") else 1
+                            for i, ml in enumerate(meta_block.split('\n')):
+                                content_lines.insert(insert_pos + i, ml)
+                            m0_content = '\n'.join(content_lines)
                     
                     # 3. Inject/update available resources (enabled tools always; agent types only if call_agent is available)
                     # Always rebuild this block each turn so that changes to disabled_tools are reflected immediately
