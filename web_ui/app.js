@@ -57,7 +57,7 @@ const state = {
   agents: [],
   agentIndex: 0,
   viewingAgentIndex: 0,
-  sessionName: localStorage.getItem('agent-cascade-session-name') || localStorage.getItem('qwen-session-name') || 'Maine',
+  sessionName: localStorage.getItem('agent-cascade-session-name') || 'Maine',
   connected: false,
   editingIndex: null,  // Which message index is being edited
   activeSubTab: null,
@@ -646,9 +646,6 @@ function loadSettings() {
     if (workAccessFoldersRW) {
       if (s['work-access-folders-rw'] !== undefined) {
         workAccessFoldersRW.value = s['work-access-folders-rw'];
-      } else if (s['work-access-folders'] !== undefined) {
-        // Migration from legacy
-        workAccessFoldersRW.value = s['work-access-folders'];
       }
     }
     if (workAccessFoldersRO && s['work-access-folders-ro'] !== undefined) {
@@ -958,8 +955,7 @@ function handleServerMessage(data) {
       renderSubAgents();
       
       // Ensure root tab is active on initial load or if no tab is selected.
-      // 'chat' sentinel is legacy compatibility for migrated browser state (pre-unification).
-      if (!state.activeSubTab || state.activeSubTab === 'chat') {
+      if (!state.activeSubTab) {
         state.activeSubTab = getRootTabId();
         const rootTab = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
         if (rootTab) rootTab.classList.add('active');
@@ -1085,8 +1081,6 @@ function handleServerMessage(data) {
       // Reset throttle state if generation just started (was idle before this tick).
       // Server can initiate generation via stream_update without calling resetGenStats().
       if (!state.generating) {
-        state.genStats.lastChatRender = 0;
-        state.genStats.lastChatContentKey = '';
         // Invalidate ALL panel caches (not just root) to force re-render on fresh generation
         mainTabPanels.querySelectorAll('.messages').forEach(p => {
           p.dataset.contentKey = '';
@@ -1306,9 +1300,6 @@ function triggerAfkSend() {
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────
-
-// Dead code removed: renderMessages() and fullRender() — root agent rendering now goes through
-// renderSubAgents() → renderSubAgentPanel() like all other agents
 
 // ── Unification Helper Functions ──────────────────────────────────────────────
 // These helpers abstract the root vs sub-agent distinction for CSS classes and labels.
@@ -1833,8 +1824,6 @@ function appendSystemBubble(text) {
     }
   }, 15000);
 }
-
-// scrollToBottom removed — each panel handles its own scrolling via per-panel scroll locks
 
 // ── Message editing ──────────────────────────────────────────────────────────
 
@@ -2528,8 +2517,6 @@ function renderSubAgentPanel(panel, agentData, name) {
   });
 }
 
-// Dead code removed: createSubMsgEl and updateSubBubbleContent — replaced by unified renderAgentConversation + updateBubbleContent
-
 function switchMainTab(tabId) {
   // Update tab buttons
   mainTabBar.querySelectorAll('.main-tab').forEach(t => t.classList.remove('active'));
@@ -2824,12 +2811,10 @@ function resetGenStats() {
     // Reset throttle timestamps at generation start for fresh timing windows
     lastGenStatsUpdate: 0,
     lastSubAgentRender: 0,
-    lastChatRender: 0,
     lastContextBarUpdate: 0,
     lastUiUpdate: 0,
     lastControlsUpdate: 0,
     lastTelemetryUpdate: 0,
-    lastChatContentKey: '',
   };
   if (statusTokensSec) statusTokensSec.textContent = '— t/s';
   if (statusGenInfo) statusGenInfo.textContent = 'Starting...';

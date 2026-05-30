@@ -268,8 +268,6 @@ body {
 
 /* ─── Step 11: Agent-Specific Visual Identity via CSS Custom Properties ───────────────────── */
 /* Subtle accent colors per agent type — applied via [data-instance-name] attribute on message elements */
-/* Root agent (orchestrator) gets a distinct color too */
-[data-instance-name$="_root"] .msg-header { border-bottom-color: #58a6ff; }  /* Blue for orchestrator */
 [data-instance-name="coder"] .msg-header { border-bottom-color: #58a6ff; }
 [data-instance-name="researcher"] .msg-header { border-bottom-color: #3fb950; }
 [data-instance-name="writer"] .msg-header { border-bottom-color: #d29922; }
