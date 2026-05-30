@@ -11,6 +11,7 @@ Key design principle: Engine is stateless. It receives AgentInstance as a parame
 and orchestrates phases. Each phase method (~20-60 lines) is independently testable.
 """
 
+import asyncio
 import copy
 import json
 import os
@@ -22,6 +23,10 @@ from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
 )
 from agent_cascade.log import logger
+# Import at module level for build_stream_update_from_pool (Minor #5 from review):
+# Python caches module imports in sys.modules, so this is not a performance concern.
+# Kept local to _create_and_run_agent only because execution_engine shouldn't have
+# hard dependency on api_integration at module scope (cleaner separation of concerns).
 from agent_cascade.utils.utils import extract_text_from_message
 
 from .agent_instance import AgentInstance, LoopDetectedError
@@ -1651,9 +1656,17 @@ class ExecutionEngine:
             logger.debug(f"WebUI initial state update for {instance_name} failed (non-critical): {e}")
 
         try:
-            # Execute through unified loop
+            # Execute through unified loop — push stream_update events so the
+            # frontend sees sub-agent tab updates independently of main agent flow.
+            # Without this, the main streaming loop is blocked during tool execution
+            # and no WebSocket events arrive until the sub-agent finishes.
             final_resp = []
             _update_counter = 0
+            _last_sub_send = 0.0
+            _sub_send_interval = 0.15  # Match main loop throttle (run_agent_unified.py line 154)
+            _ws_error_count = 0       # Track consecutive WebSocket push failures
+            _stream_pushing_disabled = False  # Set True after 3 consecutive failures
+
             for resp in self.run(inst):
                 if self.pool.stopped or self.pool.is_instance_halted(instance_name):
                     break
@@ -1682,6 +1695,52 @@ class ExecutionEngine:
                     except Exception as e:
                         logger.debug(f"WebUI state update for {instance_name} failed (non-critical): {e}")
 
+                # ── Push stream_update to frontend during sub-agent execution ──
+                # This is the key fix: without this, the main agent's streaming loop
+                # is blocked and no WebSocket events reach the frontend. The frontend
+                # relies on stream_update to call renderSubAgents() every ~200ms.
+                now = time.time()  # Use time.time() for consistency with run_agent_unified.py:135
+                if now - _last_sub_send >= _sub_send_interval and not _stream_pushing_disabled:
+                    try:
+                        ws_queue = getattr(self.pool, '_ws_send_queue', None)
+                        ws_loop = getattr(self.pool, '_ws_loop', None)
+                        if ws_queue and ws_loop and not ws_loop.is_closed():
+                            # Import here to avoid circular import at module level
+                            from agent_cascade.api_integration import build_stream_update_from_pool
+                            # Pass root agent name (caller) for token stats — the function
+                            # iterates over ALL instances in pool.instances anyway.
+                            su = build_stream_update_from_pool(
+                                pool=self.pool,
+                                instance_name=caller,  # Root/primary instance for header stats
+                                responses=None,        # Use None — reads full conversations from pool
+                            )
+                            if su is not None:
+                                asyncio.run_coroutine_threadsafe(
+                                    ws_queue.put({'type': 'stream_update', **su}),
+                                    ws_loop,
+                                )
+                            _last_sub_send = now
+                            _ws_error_count = 0  # Reset error counter on success
+                    except RuntimeError as e:
+                        # RuntimeError from run_coroutine_threadsafe means event loop was closed
+                        _ws_error_count += 1
+                        logger.debug(f"Sub-agent stream_update push failed — event loop closed (non-critical): {e}")
+                        if _ws_error_count >= 3:
+                            logger.warning(
+                                f"WebSocket send failed {_ws_error_count} times consecutively — "
+                                f"disabling sub-agent streaming for {instance_name}"
+                            )
+                            _stream_pushing_disabled = True
+                    except Exception as e:
+                        _ws_error_count += 1
+                        logger.debug(f"Sub-agent stream_update push failed (non-critical): {e}")
+                        if _ws_error_count >= 3:
+                            logger.warning(
+                                f"WebSocket send failed {_ws_error_count} times consecutively — "
+                                f"disabling sub-agent streaming for {instance_name}"
+                            )
+                            _stream_pushing_disabled = True
+
             conv.extend(final_resp)
 
             # Item 12: Always emit final sub-agent state after loop completes (Fix #3: lighter snapshot)
@@ -1702,6 +1761,27 @@ class ExecutionEngine:
                 }
                 with self.pool._execution._state_lock:
                     self.pool.instance_state[instance_name] = final_state
+
+                # ── Push final stream_update after sub-agent completes ──
+                if not _stream_pushing_disabled:
+                    ws_queue = getattr(self.pool, '_ws_send_queue', None)
+                    ws_loop = getattr(self.pool, '_ws_loop', None)
+                    if ws_queue and ws_loop and not ws_loop.is_closed():
+                        from agent_cascade.api_integration import build_stream_update_from_pool
+                        # Pass root agent name (caller) for token stats — the function
+                        # iterates over ALL instances in pool.instances anyway.
+                        su = build_stream_update_from_pool(
+                            pool=self.pool,
+                            instance_name=caller,  # Root/primary instance for header stats
+                            responses=None,        # Use None — reads full conversations from pool
+                        )
+                        if su is not None:
+                            asyncio.run_coroutine_threadsafe(
+                                ws_queue.put({'type': 'stream_update', **su}),
+                                ws_loop,
+                            )
+                except Exception as e:
+                    logger.debug(f"Sub-agent final stream_update push failed (non-critical): {e}")
             except Exception as e:
                 logger.debug(f"WebUI final state update for {instance_name} failed (non-critical): {e}")
         finally:

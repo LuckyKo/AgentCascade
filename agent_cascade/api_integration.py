@@ -422,6 +422,11 @@ def build_stream_update_from_pool(
     # Build ALL instances snapshot (C3: take snapshot before iterating)
     # Root agent is included alongside sub-agents — no special treatment.
     # Each agent carries its own messages/history_count via _serialize_instance.
+    # Note: dict(pool.instances) creates a shallow copy for safe iteration.
+    # Instance conversations are protected by inst._compression_lock inside
+    # _serialize_instance. Concurrent add/remove of instances during snapshot
+    # is acceptable — worst case is a stale or partially-complete snapshot,
+    # which the frontend handles gracefully via history_count merging.
     instance_snapshot_data = dict(pool.instances)
     all_instances = {
         # Streaming=True → only send tail (last 3 msgs) to avoid O(N²) serialisation

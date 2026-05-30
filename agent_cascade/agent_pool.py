@@ -487,6 +487,9 @@ class AgentPool:
                     inst.conversation.clear()
                 # Fix #2: Invalidate token count cache — conversation was cleared
                 inst._last_token_count_conversation_length = -1
+        # Clean up WebSocket references to prevent stale queue/loop usage in new sessions
+        self._ws_send_queue = None
+        self._ws_loop = None
 
     @property
     def _state_lock(self):

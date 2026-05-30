@@ -37,7 +37,7 @@ const SYSTEM = 'system';
 const FUNCTION = 'function';
 
 // Root agent tab ID prefix — root agent uses the same dynamic tab system as sub-agents
-const ROOT_TAB_PREFIX = 'sub-';  // e.g., 'sub-Maine_root'
+const ROOT_TAB_PREFIX = 'sub-';  // e.g., 'sub-Maine' (root is just another agent)
 
 // Pre-compiled regexes for thinking blocks (consistent with backend)
 const _TAG_THINK = 'think';
@@ -48,8 +48,8 @@ const _GEMMA_THOUGHT_ANCHORED_RE = /^\s*<\|channel>thought([\s\S]*?)(<channel\|>
 
 // ── State ────────────────────────────────────────────────────────────────────
 const state = {
-  // Root agent messages are now stored in subAgents under '{sessionName}_root'
-  // (same structure as other agents) — no separate state.messages needed
+  // Root agent messages stored in subAgents under session name (e.g., 'Maine')
+  // — same structure as all other agents, no special treatment.
   subAgents: {},
   activeStack: [],
   approvals: [],
@@ -118,22 +118,24 @@ const mainTabBar = $('#mainTabBar');
 // Root tab is now created dynamically — no static reference needed
 const mainTabPanels = document.querySelector('.main-tab-panels');
 
-// Helper: Get the root agent's instance name (e.g., 'Maine_root')
+// Helper: Get the root agent's instance name — same as session name, no special suffix.
+// All agents are equal; root is just the first instance with parent_instance=null.
 function getRootAgentName() {
-  return state.sessionName + '_root';
+  return state.sessionName;
 }
 
-// Helper: Check if an instance name is the root agent (accepts 'root', '_root' suffix, or exact root name)
+// Helper: Check if an instance name is the root agent.
+// Root is identified by matching the session name (no _root suffix needed).
 function isRootAgentName(name) {
-  return name && (name === 'root' || name.endsWith('_root') || name === getRootAgentName());
+  return name === getRootAgentName();
 }
 
-// Helper: Get the root agent's tab ID (e.g., 'sub-Maine_root')
+// Helper: Get the root agent's tab ID (e.g., 'sub-Maine')
 function getRootTabId() {
   return ROOT_TAB_PREFIX + getRootAgentName();
 }
 
-// Helper: Get the root agent's panel element ID (e.g., 'panelSub-Maine_root')
+// Helper: Get the root agent's panel element ID (e.g., 'panelSub-Maine')
 function getRootPanelId() {
   return 'panelSub-' + getRootAgentName();
 }
@@ -864,18 +866,11 @@ function handleServerMessage(data) {
       const partialContent = (state.generating && data.instance_halted && rootData?.messages?.length > 0)
         ? String(rootData.messages[rootData.messages.length - 1].content || '') : null;
 
-      // Merge ALL agent_instances including root — no special root path
+      // Merge ALL agent_instances including root — single source of truth, no legacy fallbacks
       if (data.agent_instances) {
         for (const [name, sa] of Object.entries(data.agent_instances)) {
           state.subAgents[name] = sa;
         }
-      }
-      // Fallback: if root wasn't in agent_instances, use data.messages (legacy support)
-      if (!state.subAgents[rootName]?.messages && data.messages) {
-        state.subAgents[rootName] = Object.assign({}, state.subAgents[rootName], {
-          messages: data.messages,
-          is_partial: false,
-        });
       }
       // Only restore partial content if server didn't already include it
       if (partialContent) {
@@ -962,7 +957,8 @@ function handleServerMessage(data) {
       // Render root agent through the same path as sub-agents
       renderSubAgents();
       
-      // Ensure root tab is active on initial load or if no tab is selected
+      // Ensure root tab is active on initial load or if no tab is selected.
+      // 'chat' sentinel is legacy compatibility for migrated browser state (pre-unification).
       if (!state.activeSubTab || state.activeSubTab === 'chat') {
         state.activeSubTab = getRootTabId();
         const rootTab = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
@@ -1359,7 +1355,7 @@ function getAgentConfig(name) {
  * Render a complete agent conversation as a DOM document fragment.
  * This is the unified rendering entry point — all agents (including root) go through this.
  * 
- * @param {string} instanceName - agent name (e.g., "Maine_root" for root, "coder" for sub-agent)
+ * @param {string} instanceName - agent name (e.g., "Maine" for root, "coder" for sub-agent)
  * @param {Array}  messages     - array of message objects
  * @param {number} depth        - nesting level (0=root, 1=direct sub-agent, etc.)
  * @param {Array}  [indexMap]   - optional mapping from filtered-index → original-index
@@ -1370,7 +1366,7 @@ function getAgentConfig(name) {
 function renderAgentConversation(instanceName, messages, depth, indexMap, configOverride) {
     if (!messages || messages.length === 0) return document.createDocumentFragment();
 
-    // All agents now use the same config path (including root with _root suffix)
+    // All agents use the same config path — no special handling needed
     let config = getAgentConfig(instanceName);
     
     // Merge any override (e.g., isGenerating from agentData.active)
@@ -2016,7 +2012,7 @@ function finishEdit(index, newContent, instanceName = null) {
   const bubble = Array.from(bubbles).find(b => b.dataset.index === String(index));
   if (!bubble) return;
 
-  // All agents use the same config now (including root with _root suffix)
+  // All agents use the same config now — no special handling needed
   const config = getAgentConfig(instanceName);
   bubble.querySelector('.' + contentClass()).classList.remove('editing');
   updateBubbleContent(bubble, msgs[index], config);
@@ -2038,7 +2034,7 @@ function cancelEdit(index, instanceName = null) {
   const bubble = Array.from(bubbles).find(b => b.dataset.index === String(index));
   if (!bubble) return;
 
-  // All agents use the same config now (including root with _root suffix)
+  // All agents use the same config now — no special handling needed
   const config = getAgentConfig(instanceName);
   bubble.querySelector('.' + contentClass()).classList.remove('editing');
   const msgs = state.subAgents[instanceName] ? state.subAgents[instanceName].messages : [];
@@ -2215,11 +2211,17 @@ function renderSubAgents() {
   const sa = state.subAgents;
   const rootName = getRootAgentName();
   
-  // Include root agent in the list of agents to render, filtered by closedTabs
+  // Build agent list from subAgents, filtered by closedTabs.
+  // Root is just another agent in the pool — no special inclusion logic needed.
   const namesArr = Object.keys(sa).filter(name => !state.closedTabs.has('sub-' + name));
-  // Only include root in the list if it actually has data (has been initialized by server)
-  if (sa[rootName] && !namesArr.includes(rootName) && !state.closedTabs.has('sub-' + rootName)) {
-    namesArr.unshift(rootName); // Ensure root is always first
+  // Ensure root is always first if it exists and isn't closed
+  const rootIdx = namesArr.indexOf(rootName);
+  if (rootIdx > 0) {
+    namesArr.splice(rootIdx, 1);
+    namesArr.unshift(rootName);
+  } else if (rootIdx === -1 && sa[rootName] && !state.closedTabs.has('sub-' + rootName)) {
+    // Root has data but wasn't in the list (shouldn't happen now, defensive)
+    namesArr.unshift(rootName);
   }
 
   // Remove stale sub-agent tabs and panels for agents that no longer exist
@@ -2537,7 +2539,7 @@ function switchMainTab(tabId) {
   // Update panels — all tabs use the same dynamic panel system now
   mainTabPanels.querySelectorAll('.main-tab-panel').forEach(p => p.classList.remove('active'));
   
-  const name = tabId.substring(4); // strip 'sub-' prefix (works for root too: sub-Maine_root → Maine_root)
+  const name = tabId.substring(4); // strip 'sub-' prefix (works for root too: sub-Maine → Maine)
   const panel = document.getElementById('panelSub-' + name);
   if (panel) {
     panel.classList.add('active');
@@ -2674,9 +2676,9 @@ function updateControls() {
     if (isGenerating) {
       sendBtn.classList.add('inject-mode');
       sendBtn.title = 'Inject message into active agent (Enter)';
-      // Update root tab to show pulse indicator (root tab is now dynamic, no mainTabChat ref)
+      // Update root tab to show pulse indicator immediately. renderSubAgents() also handles icon updates but is throttled (~200ms); this provides instant visual feedback when generation starts/stops.
       const rootTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
-      if (rootTabEl) rootTabEl.innerHTML = '<span class="sub-tab-pulse"></span> 💬 ' + escapeHtml(state.sessionName || 'Maine') + '_root';
+      if (rootTabEl) rootTabEl.innerHTML = '<span class="sub-tab-pulse"></span> 💬 ' + escapeHtml(state.sessionName || 'Maine');
       resetBtn.disabled = true;
       document.body.classList.add('is-generating');
     } else {
@@ -2684,7 +2686,7 @@ function updateControls() {
       sendBtn.title = 'Send (Enter)';
       // Restore root tab icon
       const rootTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
-      if (rootTabEl) rootTabEl.innerHTML = '<span class="main-tab-icon">💬</span> ' + escapeHtml(state.sessionName || 'Maine') + '_root';
+      if (rootTabEl) rootTabEl.innerHTML = '<span class="main-tab-icon">💬</span> ' + escapeHtml(state.sessionName || 'Maine');
       resetBtn.disabled = false;
       document.body.classList.remove('is-generating');
     }

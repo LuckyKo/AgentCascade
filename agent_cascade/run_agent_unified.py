@@ -86,6 +86,12 @@ def run_agent_thread_unified(
             with pool._execution._state_lock:
                 pool._execution.active_stack.clear()
 
+        # ── Store send_queue and loop on pool for sub-agent streaming ────
+        # Sub-agents execute synchronously inside ExecutionEngine and need
+        # access to the WebSocket send_queue to push stream_update events.
+        pool._ws_send_queue = send_queue
+        pool._ws_loop = loop
+
         # ── Create main agent instance if it doesn't exist ───────────────
         instance = pool.get_instance(instance_name)
         if (instance is None or not instance.conversation) and system_message_content:
