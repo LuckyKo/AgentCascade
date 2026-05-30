@@ -35,6 +35,7 @@ const USER = 'user';
 const ASSISTANT = 'assistant';
 const SYSTEM = 'system';
 const FUNCTION = 'function';
+const DEFAULT_SESSION_NAME = 'Maine'; // Default session/agent name
 
 // Root agent tab ID prefix — root agent uses the same dynamic tab system as sub-agents
 const ROOT_TAB_PREFIX = 'sub-';  // e.g., 'sub-Maine' (root is just another agent)
@@ -57,7 +58,7 @@ const state = {
   agents: [],
   agentIndex: 0,
   viewingAgentIndex: 0,
-  sessionName: localStorage.getItem('agent-cascade-session-name') || 'Maine',
+  sessionName: localStorage.getItem('agent-cascade-session-name') || DEFAULT_SESSION_NAME,
   connected: false,
   editingIndex: null,  // Which message index is being edited
   activeSubTab: null,
@@ -1564,41 +1565,36 @@ function updateBubbleContent(bubble, msg, config) {
     }
     html += renderMarkdown(text, false); // Skip thinking block parsing — reasoning_content is already rendered separately via renderThinkingBlock
   }
-  setInnerHtmlWithState(contentDiv, html);
-  
-  // Restore prevContent/prevReasoning after full re-render so the next tick
-  // can use the incremental path if only plain content grew.
-  bubble.dataset.prevContent = curContent;
-  bubble.dataset.prevReasoning = msg.reasoning_content || '';
-}
 
-function setInnerHtmlWithState(el, html) {
-  const details = el.querySelectorAll('details');
-  const states = Array.from(details).map(d => d.open);
-
-  // Save code block scroll positions before replacing content (Bug 2 fix)
+  // Preserve <details> open/close state and code block scroll positions during innerHTML replacement
+  const details = contentDiv.querySelectorAll('details');
+  const detailStates = Array.from(details).map(d => d.open);
   const codeScrollPositions = [];
-  const codeBlocks = el.querySelectorAll('pre:not(.mermaid-container)');
+  const codeBlocks = contentDiv.querySelectorAll('pre:not(.mermaid-container)');
   codeBlocks.forEach(cb => {
     codeScrollPositions.push({ element: cb, scrollTop: cb.scrollTop });
   });
 
-  el.innerHTML = html;
+  contentDiv.innerHTML = html;
 
-  const newDetails = el.querySelectorAll('details');
+  const newDetails = contentDiv.querySelectorAll('details');
   newDetails.forEach((d, i) => {
-    if (i < states.length) {
-      d.open = states[i];
+    if (i < detailStates.length) {
+      d.open = detailStates[i];
     }
   });
 
-  // Restore code block scroll positions
-  const newCodeBlocks = el.querySelectorAll('pre:not(.mermaid-container)');
+  const newCodeBlocks = contentDiv.querySelectorAll('pre:not(.mermaid-container)');
   newCodeBlocks.forEach((cb, i) => {
     if (i < codeScrollPositions.length) {
       cb.scrollTop = codeScrollPositions[i].scrollTop;
     }
   });
+
+  // Restore prevContent/prevReasoning after full re-render so the next tick
+  // can use the incremental path if only plain content grew.
+  bubble.dataset.prevContent = curContent;
+  bubble.dataset.prevReasoning = msg.reasoning_content || '';
 }
 
 function renderMarkdown(text, allowThinking = true) {
@@ -2673,7 +2669,7 @@ function updateControls() {
       sendBtn.title = 'Inject message into active agent (Enter)';
       // Update root tab to show pulse indicator immediately. renderSubAgents() also handles icon updates but is throttled (~200ms); this provides instant visual feedback when generation starts/stops.
       const rootTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
-      if (rootTabEl) rootTabEl.innerHTML = '<span class="sub-tab-pulse"></span> 💬 ' + escapeHtml(state.sessionName || 'Maine');
+      if (rootTabEl) rootTabEl.innerHTML = '<span class="sub-tab-pulse"></span> 💬 ' + escapeHtml(state.sessionName || DEFAULT_SESSION_NAME);
       resetBtn.disabled = true;
       document.body.classList.add('is-generating');
     } else {
@@ -2681,7 +2677,7 @@ function updateControls() {
       sendBtn.title = 'Send (Enter)';
       // Restore root tab icon
       const rootTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
-      if (rootTabEl) rootTabEl.innerHTML = '<span class="main-tab-icon">💬</span> ' + escapeHtml(state.sessionName || 'Maine');
+      if (rootTabEl) rootTabEl.innerHTML = '<span class="main-tab-icon">💬</span> ' + escapeHtml(state.sessionName || DEFAULT_SESSION_NAME);
       resetBtn.disabled = false;
       document.body.classList.remove('is-generating');
     }
@@ -3236,7 +3232,7 @@ agentSelect.addEventListener('change', () => {
 });
 
 sessionNameInput.addEventListener('change', () => {
-  state.sessionName = sessionNameInput.value.trim() || 'Maine';
+  state.sessionName = sessionNameInput.value.trim() || DEFAULT_SESSION_NAME;
   state.closedTabs.clear();
   localStorage.removeItem('agent-cascade-closed-tabs');
   localStorage.setItem('agent-cascade-session-name', state.sessionName);
