@@ -2618,21 +2618,29 @@ function renderToolsForSelectedAgent() {
     </label>
   `).join('');
 
-  // Scoped to settingToolsList (old DOM replaced each render, so no listener leak)
-  settingToolsList.querySelectorAll('.tool-toggle').forEach(chk => {
-    chk.addEventListener('change', (e) => {
-      const aName = e.target.dataset.agent;
-      const tName = e.target.dataset.tool;
-      if (!agentDisabledTools[aName]) agentDisabledTools[aName] = [];
-      if (!e.target.checked) {
-        if (!agentDisabledTools[aName].includes(tName)) agentDisabledTools[aName].push(tName);
-      } else {
-        agentDisabledTools[aName] = agentDisabledTools[aName].filter(t => t !== tName);
-      }
-      localStorage.setItem('agent-cascade-disabled-tools', JSON.stringify(agentDisabledTools));
-      saveSettings();
-    });
-  });
+  // ── Event Delegation (single listener on container, no per-checkbox leaks) ──
+  if (!toolsDelegationAttached) {
+    toolsDelegationAttached = true;
+    settingToolsList.addEventListener('change', handleToolToggleChange);
+  }
+}
+
+// ── Delegated event handler for tool toggles ────────────────────────────────
+let toolsDelegationAttached = false; // Guard against accumulating listeners on settingToolsList
+
+function handleToolToggleChange(e) {
+  const chk = e.target.closest('.tool-toggle');
+  if (!chk) return;
+  const aName = chk.dataset.agent;
+  const tName = chk.dataset.tool;
+  if (!agentDisabledTools[aName]) agentDisabledTools[aName] = [];
+  if (!e.target.checked) {
+    if (!agentDisabledTools[aName].includes(tName)) agentDisabledTools[aName].push(tName);
+  } else {
+    agentDisabledTools[aName] = agentDisabledTools[aName].filter(t => t !== tName);
+  }
+  localStorage.setItem('agent-cascade-disabled-tools', JSON.stringify(agentDisabledTools));
+  saveSettings();
 }
 
 if (settingAgentSelect) {
@@ -3503,6 +3511,8 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
 
 // ── API Router Management ──────────────────────────────────────────────────
 
+let apiEndpointsListenersAttached = false; // Guard against accumulating listeners on listEl
+
 function renderApiEndpoints() {
   const listEl = document.getElementById('api-endpoints-list');
   if (!listEl) return;
@@ -3582,91 +3592,110 @@ function renderApiEndpoints() {
     `;
   }).join('');
 
-  // Bind Events
-  listEl.querySelectorAll('.api-endpoint-card').forEach(card => {
-    const id = card.dataset.id;
-    const ep = endpoints.find(e => e.id === id);
-    if (!ep) return;
+  // ── Event Delegation (no per-card listeners to leak) ──────────────────────
+  // Flag guard prevents accumulating listeners on listEl across render calls
+  if (!apiEndpointsListenersAttached) {
+    apiEndpointsListenersAttached = true;
 
-    // Toggle Enable
-    card.querySelector('.api-endpoint-toggle').addEventListener('change', (e) => {
-      ep.enabled = e.target.checked;
+    // Click handler for buttons (expand, toggle visibility, move up/down, delete)
+    listEl.addEventListener('click', handleApiEndpointClick);
+
+    // Change handler for toggle checkbox (enable/disable endpoint)
+    listEl.addEventListener('change', handleApiEndpointToggle);
+
+    // Blur handler for input fields — save edits when focus leaves an input (capture phase)
+    listEl.addEventListener('blur', handleApiEndpointBlur, true);
+
+    // Keydown handler for input fields — Enter triggers save via blur (capture phase)
+    listEl.addEventListener('keydown', handleApiEndpointKeydown, true);
+  }
+}
+
+// ── Delegated event handlers for API endpoint cards ────────────────────────
+
+function handleApiEndpointClick(e) {
+  const card = e.target.closest('.api-endpoint-card');
+  if (!card) return;
+  const id = card.dataset.id;
+  const endpoints = state.api_router?.endpoints || [];
+  const ep = endpoints.find(ep => ep.id === id);
+  if (!ep) return;
+
+  if (e.target.matches('.api-endpoint-expand')) {
+    // Expand/Collapse details panel
+    const btn = e.target;
+    const details = card.querySelector('.api-endpoint-details');
+    btn.classList.toggle('open');
+    details.classList.toggle('open');
+  } else if (e.target.matches('.api-key-toggle')) {
+    // Show/Hide API key
+    const input = card.querySelector('.ep-input-key');
+    if (input.type === 'password') {
+      input.type = 'text';
+      e.target.style.color = 'var(--accent)';
+    } else {
+      input.type = 'password';
+      e.target.style.color = '';
+    }
+  } else if (e.target.matches('.api-endpoint-move-up')) {
+    // Move endpoint up one position
+    const idx = endpoints.indexOf(ep);
+    if (idx > 0) {
+      [endpoints[idx-1], endpoints[idx]] = [endpoints[idx], endpoints[idx-1]];
       sendApiRouterUpdate();
-    });
-
-    // Expand/Collapse
-    card.querySelector('.api-endpoint-expand').addEventListener('click', (e) => {
-      const btn = e.target;
-      const details = card.querySelector('.api-endpoint-details');
-      btn.classList.toggle('open');
-      details.classList.toggle('open');
-    });
-
-    // API Key Show/Hide
-    card.querySelector('.api-key-toggle').addEventListener('click', (e) => {
-      const input = card.querySelector('.ep-input-key');
-      if (input.type === 'password') {
-        input.type = 'text';
-        e.target.style.color = 'var(--accent)';
-      } else {
-        input.type = 'password';
-        e.target.style.color = '';
-      }
-    });
-
-    // Move Up
-    card.querySelector('.api-endpoint-move-up').addEventListener('click', () => {
-      const idx = endpoints.indexOf(ep);
-      if (idx > 0) {
-        [endpoints[idx-1], endpoints[idx]] = [endpoints[idx], endpoints[idx-1]];
-        sendApiRouterUpdate();
-      }
-    });
-
-    // Move Down
-    card.querySelector('.api-endpoint-move-down').addEventListener('click', () => {
-      const idx = endpoints.indexOf(ep);
-      if (idx < endpoints.length - 1) {
-        [endpoints[idx+1], endpoints[idx]] = [endpoints[idx], endpoints[idx+1]];
-        sendApiRouterUpdate();
-      }
-    });
-
-    // Delete
-    card.querySelector('.api-endpoint-delete').addEventListener('click', () => {
-      if (confirm(`Delete endpoint "${ep.name}"?`)) {
-        state.api_router.endpoints = endpoints.filter(e => e.id !== id);
-        // Clean up assignments
-        if (state.api_router.agent_priorities) {
-          for (const type in state.api_router.agent_priorities) {
-            state.api_router.agent_priorities[type] = state.api_router.agent_priorities[type].filter(e => e !== id);
-          }
-        }
-        sendApiRouterUpdate();
-      }
-    });
-
-    // Inputs blur (save on edit)
-    const saveEdits = () => {
-      ep.name = card.querySelector('.ep-input-name').value.trim();
-      ep.api_base = card.querySelector('.ep-input-base').value.trim();
-      ep.api_key = card.querySelector('.ep-input-key').value.trim() || 'EMPTY';
-      ep.model = card.querySelector('.ep-input-model').value.trim();
-      ep.max_retries = parseInt(card.querySelector('.ep-input-retries').value) || 0;
-      ep.concurrency_limit = parseInt(card.querySelector('.ep-input-concurrency').value) || 0;
-      ep.max_input_tokens = parseInt(card.querySelector('.ep-input-tokens').value) || 0;
+    }
+  } else if (e.target.matches('.api-endpoint-move-down')) {
+    // Move endpoint down one position
+    const idx = endpoints.indexOf(ep);
+    if (idx < endpoints.length - 1) {
+      [endpoints[idx+1], endpoints[idx]] = [endpoints[idx], endpoints[idx+1]];
       sendApiRouterUpdate();
-    };
-
-    card.querySelectorAll('input:not(.api-endpoint-toggle)').forEach(input => {
-      input.addEventListener('blur', saveEdits);
-      input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          input.blur();
+    }
+  } else if (e.target.matches('.api-endpoint-delete')) {
+    // Delete endpoint and clean up assignments
+    if (confirm(`Delete endpoint "${ep.name}"?`)) {
+      state.api_router.endpoints = endpoints.filter(e => e.id !== id);
+      if (state.api_router.agent_priorities) {
+        for (const type in state.api_router.agent_priorities) {
+          state.api_router.agent_priorities[type] = state.api_router.agent_priorities[type].filter(e => e !== id);
         }
-      });
-    });
-  });
+      }
+      sendApiRouterUpdate();
+    }
+  }
+}
+
+function handleApiEndpointToggle(e) {
+  const toggle = e.target.closest('.api-endpoint-toggle');
+  if (!toggle) return;
+  const card = toggle.closest('.api-endpoint-card');
+  const endpoints = state.api_router?.endpoints || [];
+  const ep = endpoints.find(ep => ep.id === card.dataset.id);
+  if (ep) { ep.enabled = e.target.checked; sendApiRouterUpdate(); }
+}
+
+function handleApiEndpointBlur(e) {
+  const card = e.target.closest('.api-endpoint-card');
+  if (!card || !card.querySelector(':scope > .api-endpoint-header')) return;
+  const id = card.dataset.id;
+  const endpoints = state.api_router?.endpoints || [];
+  const ep = endpoints.find(ep => ep.id === id);
+  if (!ep) return;
+
+  ep.name = card.querySelector('.ep-input-name').value.trim();
+  ep.api_base = card.querySelector('.ep-input-base').value.trim();
+  ep.api_key = card.querySelector('.ep-input-key').value.trim() || 'EMPTY';
+  ep.model = card.querySelector('.ep-input-model').value.trim();
+  ep.max_retries = parseInt(card.querySelector('.ep-input-retries').value) || 0;
+  ep.concurrency_limit = parseInt(card.querySelector('.ep-input-concurrency').value) || 0;
+  ep.max_input_tokens = parseInt(card.querySelector('.ep-input-tokens').value) || 0;
+  sendApiRouterUpdate();
+}
+
+function handleApiEndpointKeydown(e) {
+  if (e.key !== 'Enter') return;
+  const input = e.target.closest('input.ep-input-name, input.ep-input-base, input.ep-input-key, input.ep-input-model, input.ep-input-retries, input.ep-input-concurrency, input.ep-input-tokens');
+  if (input) input.blur();
 }
 
 function renderAgentApiAssignments() {
