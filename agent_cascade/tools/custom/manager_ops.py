@@ -87,17 +87,34 @@ class CallAgent(BaseTool):
         caller_class = caller.__class__.__name__ if caller else 'Tool'
 
         # Prepare sub-agent system message with identity and memory info
+        # Read workspace config from operation_manager (live source of truth), falling back to logger metadata
+        _working_dir = "Unknown"
+        _extra_ro: list[str] = []
+        _extra_rw: list[str] = []
+        _om = getattr(self.agent_pool, 'operation_manager', None) if self.agent_pool else None
+        if _om is not None:
+            _working_dir = str(getattr(_om, 'base_dir', 'Unknown'))
+            _extra_ro = [str(p) for p in getattr(_om, 'extra_work_folders_ro', [])]
+            _extra_rw = [str(p) for p in getattr(_om, 'extra_work_folders_rw', [])]
+        else:
+            try:
+                _working_dir = logger_inst.data['metadata'].get('working_dir', 'Unknown')
+                _extra_ro = logger_inst.data['metadata'].get('extra_paths_ro', [])
+                _extra_rw = logger_inst.data['metadata'].get('extra_paths_rw', [])
+            except (AttributeError, KeyError):
+                pass  # Keep defaults set on lines 91-93
+
         metadata_prompt = f"""
 [IDENTITY]
 You are a specialized agent instance.
 - Instance Name: {instance_name}
 - Agent Class: {agent_class}
 - Supervisor: {caller_name} ({caller_class})
-- Working Dir: {logger_inst.data['metadata'].get('working_dir', 'Unknown')}
+- Working Dir: {_working_dir}
 """
         # Add extra paths if they exist
-        extra_ro = logger_inst.data['metadata'].get('extra_paths_ro', [])
-        extra_rw = logger_inst.data['metadata'].get('extra_paths_rw', [])
+        extra_ro = _extra_ro
+        extra_rw = _extra_rw
         if extra_ro:
             metadata_prompt += f"- Extra Paths (Read-Only): {', '.join(extra_ro)}\n"
         if extra_rw:

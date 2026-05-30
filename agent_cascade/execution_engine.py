@@ -125,6 +125,10 @@ def _build_session_metadata(pool, instance) -> str:
     Used both during initial injection and to refresh the block each turn so that
     changes to working_dir / extra_paths are reflected immediately.
 
+    Reads workspace configuration from the operation_manager (the live source of truth)
+    rather than logger metadata, which is never updated when UI settings change.
+    Falls back to logger metadata if operation_manager is unavailable.
+
     Args:
         pool: The AgentPool instance (needed to get logger metadata).
         instance: The agent instance whose metadata to build.
@@ -142,18 +146,39 @@ def _build_session_metadata(pool, instance) -> str:
     else:
         meta_lines.append(f"- Supervisor: {instance.parent_instance}")
 
-    # Try to get logger metadata for paths; fall back to defaults on failure
+    # Get workspace config from operation_manager (live source of truth), falling back to logger metadata
+    working_dir = "Unknown"
+    extra_ro: list[str] = []
+    extra_rw: list[str] = []
+    log_path = "N/A"
+
     try:
-        log_inst = pool.get_logger(inst_name, instance.agent_class)
-        working_dir = log_inst.data['metadata'].get('working_dir', 'Unknown')
-        extra_ro = log_inst.data['metadata'].get('extra_paths_ro', [])
-        extra_rw = log_inst.data['metadata'].get('extra_paths_rw', [])
-        log_path = getattr(log_inst, 'log_path', 'Unknown')
-    except Exception:
+        # Prefer operation_manager — it reflects UI config changes in real-time
+        om = getattr(pool, 'operation_manager', None)
+        if om is not None:
+            working_dir = str(getattr(om, 'base_dir', 'Unknown'))
+            extra_ro = [str(p) for p in getattr(om, 'extra_work_folders_ro', [])]
+            extra_rw = [str(p) for p in getattr(om, 'extra_work_folders_rw', [])]
+
+        # Get logger instance (needed for log_path; also used as fallback for workspace config)
+        try:
+            log_inst = pool.get_logger(inst_name, instance.agent_class)
+            log_path = getattr(log_inst, 'log_path', 'Unknown')
+
+            # Fallback: if operation_manager unavailable, read from logger metadata (may be stale)
+            if om is None:
+                working_dir = log_inst.data['metadata'].get('working_dir', 'Unknown')
+                extra_ro = log_inst.data['metadata'].get('extra_paths_ro', [])
+                extra_rw = log_inst.data['metadata'].get('extra_paths_rw', [])
+
+        except (AttributeError, KeyError) as e:
+            from agent_cascade.log import logger
+            logger.debug("Logger metadata access failed for %s: %s", inst_name, e)
+
+    except Exception as e:
+        from agent_cascade.log import logger
+        logger.debug("Session metadata build failed: %s", e)
         working_dir = os.getcwd() if hasattr(os, 'getcwd') else "Unknown"
-        log_path = "N/A"
-        extra_ro = []
-        extra_rw = []
 
     meta_lines.append(f"- Working Dir: {working_dir}")
     if extra_ro:
