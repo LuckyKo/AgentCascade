@@ -1764,24 +1764,23 @@ class ExecutionEngine:
 
                 # ── Push final stream_update after sub-agent completes ──
                 if not _stream_pushing_disabled:
-                    ws_queue = getattr(self.pool, '_ws_send_queue', None)
-                    ws_loop = getattr(self.pool, '_ws_loop', None)
-                    if ws_queue and ws_loop and not ws_loop.is_closed():
-                        from agent_cascade.api_integration import build_stream_update_from_pool
-                        # Pass root agent name (caller) for token stats — the function
-                        # iterates over ALL instances in pool.instances anyway.
-                        su = build_stream_update_from_pool(
-                            pool=self.pool,
-                            instance_name=caller,  # Root/primary instance for header stats
-                            responses=None,        # Use None — reads full conversations from pool
-                        )
-                        if su is not None:
-                            asyncio.run_coroutine_threadsafe(
-                                ws_queue.put({'type': 'stream_update', **su}),
-                                ws_loop,
+                    try:
+                        ws_queue = getattr(self.pool, '_ws_send_queue', None)
+                        ws_loop = getattr(self.pool, '_ws_loop', None)
+                        if ws_queue and ws_loop and not ws_loop.is_closed():
+                            from agent_cascade.api_integration import build_stream_update_from_pool
+                            su = build_stream_update_from_pool(
+                                pool=self.pool,
+                                instance_name=caller,
+                                responses=None,
                             )
-                except Exception as e:
-                    logger.debug(f"Sub-agent final stream_update push failed (non-critical): {e}")
+                            if su is not None:
+                                asyncio.run_coroutine_threadsafe(
+                                    ws_queue.put({'type': 'stream_update', **su}),
+                                    ws_loop,
+                                )
+                    except Exception as e:
+                        logger.debug(f"Sub-agent final stream_update push failed (non-critical): {e}")
             except Exception as e:
                 logger.debug(f"WebUI final state update for {instance_name} failed (non-critical): {e}")
         finally:
