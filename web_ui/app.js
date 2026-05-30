@@ -184,8 +184,8 @@ const ActivityBar = {
     
     const activeInstance = this.getFilterInstance();
     const agentData = state.subAgents[activeInstance];
-    // Unified active state: prefer agentData.active if available, fall back to global generating flag
-    const isActive = agentData?.active ?? state.generating;
+    // Agent-specific active state only — no global fallback (prevents cross-agent pulsing)
+    const isActive = agentData?.active ?? false;
     
     this.el.classList.toggle('active', isActive);
     const dot = this.el.querySelector('.activity-dot');
@@ -1352,18 +1352,18 @@ function getAgentConfig(name) {
  * @param {number} depth        - nesting level (0=root, 1=direct sub-agent, etc.)
  * @param {Array}  [indexMap]   - optional mapping from filtered-index → original-index
  *                                (needed when messages have been pre-filtered, e.g., system msgs removed)
- * @param {Object} [configOverride] - optional config override (e.g., isGenerating for sub-agent streaming state)
+ * @param {Object} [renderOpts] - optional render options (isGenerating flag for streaming state)
  * @returns {DocumentFragment}  fragment containing all rendered message elements
  */
-function renderAgentConversation(instanceName, messages, depth, indexMap, configOverride) {
+function renderAgentConversation(instanceName, messages, depth, indexMap, renderOpts) {
     if (!messages || messages.length === 0) return document.createDocumentFragment();
 
     // All agents use the same config path — no special handling needed
     let config = getAgentConfig(instanceName);
     
-    // Merge any override (e.g., isGenerating from agentData.active)
-    if (configOverride) {
-        config = Object.assign({}, config, configOverride);
+    // Merge any render options (e.g., isGenerating from agentData.active)
+    if (renderOpts) {
+        config = Object.assign({}, config, renderOpts);
     }
 
     const fragment = document.createDocumentFragment();
@@ -1462,10 +1462,10 @@ function createMessageEl(msg, index, config) {
   contentDiv.className = contentClass();
 
   let html = '';
-  // Check config.isGenerating first (per-panel), then fall back to checking subAgents for this instance
-  const isGenerating = (config.isGenerating !== undefined) 
-    ? config.isGenerating 
-    : (state.generating && index === (state.subAgents[config.instanceName]?.messages?.length || 0) - 1);
+  // Check config.isGenerating first (per-panel), then fall back to agent-specific active state
+  const isGenerating = (config.isGenerating !== undefined)
+    ? config.isGenerating
+    : (state.subAgents[config.instanceName]?.active ?? false);
 
   // Handle reasoning/thinking content first (always shown if present)
   if (msg.reasoning_content) {
@@ -1518,8 +1518,10 @@ function updateBubbleContent(bubble, msg, config) {
   const prevContent = bubble.dataset.prevContent;
   const curContent = msg.content || '';
   
-  // Use config.isGenerating if provided (for sub-agent streaming), otherwise check state.generating
-  const isGenerating = config.isGenerating !== undefined ? config.isGenerating : state.generating;
+  // Use config.isGenerating if provided (for sub-agent streaming), otherwise check agent-specific active state
+  const isGenerating = config.isGenerating !== undefined
+    ? config.isGenerating
+    : (state.subAgents[config.instanceName]?.active ?? false);
   
   if (isGenerating && prevContent !== undefined && !msg.function_call && msg.role !== 'function') {
     // Force full re-render if reasoning_content changed — incremental path only handles plain content
@@ -2234,9 +2236,8 @@ function renderSubAgents() {
     // Behavioral check only: root agent's close button terminates the session instead of closing the tab
     const isRoot = isRootAgentName(name);
     const agentData = sa[name];
-    // Unified active state: prefer agentData.active if available, fall back to global generating flag.
-    // Note: this means sub-agent tabs will pulse during ANY agent's generation, not just their own.
-    const isActive = agentData?.active ?? state.generating;
+    // Agent-specific active state only — no global fallback (prevents cross-agent pulsing)
+    const isActive = agentData?.active ?? false;
 
     // Create tab button if it doesn't exist
     let tabBtn = mainTabBar.querySelector(`.main-tab[data-tab="${tabId}"]`);
@@ -2336,9 +2337,8 @@ function renderSubAgentPanel(panel, agentData, name) {
   const isVisible = state.activeSubTab === 'sub-' + name;
   const msgs = (agentData && agentData.messages) ? agentData.messages : [];
   
-  // Unified active state: prefer agentData.active if available, fall back to global generating flag.
-  // Note: this means sub-agent tabs will pulse during ANY agent's generation, not just their own.
-  const isActive = agentData?.active ?? state.generating;
+  // Agent-specific active state only — no global fallback (prevents cross-agent pulsing)
+  const isActive = agentData?.active ?? false;
   
   // Unified token/word counts: use agent-level stats if available, fall back to global
   const tokCount = agentData?.total_tokens ?? state.totalTokens;
@@ -2405,8 +2405,8 @@ function renderSubAgentPanel(panel, agentData, name) {
     return String(lastMsg.content || '').length;
   })();
   const funcCallLen = (lastMsg && lastMsg.function_call && lastMsg.function_call.arguments) ? String(lastMsg.function_call.arguments).length : 0;
-  // Unified active flag: use the same derivation as isActive above
-  const activeFlag = agentData?.active ?? state.generating;
+  // Agent-specific active flag only — no global fallback (prevents cross-agent pulsing)
+  const activeFlag = agentData?.active ?? false;
   const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + (lastMsg ? String(lastMsg.reasoning_content || '').length : 0) + ':' + funcCallLen + ':' + activeFlag;
   
   if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === displayMsgs.length) {
