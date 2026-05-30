@@ -3,7 +3,6 @@ import copy
 from typing import Any, Dict, List
 from agent_cascade.prompts.dna import (
     COMPRESSION_BASELINE_TEMPLATE,
-    COMPRESSION_NOTICE_TEMPLATE,
 )
 from agent_cascade.llm.schema import USER, ASSISTANT, FUNCTION, ROLE, Message
 from agent_cascade.utils.utils import extract_text_from_message
@@ -73,25 +72,31 @@ def compute_discard_count(active_set, fraction, force):
     return discard
 
 
-def build_marker_message(summary_text, fraction):
+def build_marker_message(summary_text, start_idx, end_idx):
     """
     Wrap a raw summary in the COMPRESSION_BASELINE_TEMPLATE to create a marker message.
 
     Args:
         summary_text: The raw summary text (before template wrapping).
-        fraction: Fraction of history that was discarded (e.g., 0.5 for 50%).
+        start_idx: Index of the first message that was compressed (0-based).
+        end_idx: Index of the last message that was compressed (inclusive, 0-based).
 
     Returns:
         A Message object (USER role) with the formatted compression marker.
+
+    Raises:
+        ValueError: If start_idx > end_idx (invalid range).
     """
-    pct = int(fraction * 100)
-    header = f"{pct}% of history summarized"
-    compression_notice = COMPRESSION_NOTICE_TEMPLATE.format(fraction=pct)
+    if start_idx > end_idx:
+        raise ValueError(
+            f"Invalid compression range: start_idx ({start_idx}) > end_idx ({end_idx}) "
+            f"— discard count must be >= 1"
+        )
 
     content = COMPRESSION_BASELINE_TEMPLATE.format(
-        header=header,
+        start_idx=start_idx,
+        end_idx=end_idx,
         summary=summary_text,
-        compression_notice=compression_notice,
     )
     return Message(role=USER, content=str(content))
 

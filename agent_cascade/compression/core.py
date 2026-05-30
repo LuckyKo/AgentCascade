@@ -223,7 +223,9 @@ def compress_context(
         )
 
     # ── 9. Build the marker message ──
-    marker_message = build_marker_message(generated_summary, fraction)
+    compressed_start = active_start_idx
+    compressed_end = active_start_idx + target_discard_count - 1
+    marker_message = build_marker_message(generated_summary, compressed_start, compressed_end)
 
     # ── Dry run: return early with summary but don't mutate pool ──
     if dry_run:

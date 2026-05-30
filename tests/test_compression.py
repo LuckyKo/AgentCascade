@@ -10,6 +10,7 @@ All tests are self-contained — no LLM or API server required.
 """
 
 import copy
+import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
@@ -193,31 +194,40 @@ class TestBuildMarkerMessage:
 
     def test_returns_message_object(self):
         """build_marker_message returns a Message with role=USER."""
-        msg = build_marker_message("test summary", 0.5)
+        msg = build_marker_message("test summary", 5, 10)
         assert isinstance(msg, Message)
         assert msg.role == USER
 
     def test_contains_compression_marker(self):
         """Marker message content starts with COMPRESSION_MARKER."""
-        msg = build_marker_message("test summary", 0.5)
+        msg = build_marker_message("test summary", 5, 10)
         assert msg.content.startswith(COMPRESSION_MARKER)
 
     def test_contains_summary_text(self):
         """Marker message includes the raw summary text."""
         summary = "The agent was building a web app"
-        msg = build_marker_message(summary, 0.75)
+        msg = build_marker_message(summary, 0, 20)
         assert summary in msg.content
 
-    def test_contains_percentage_header(self):
-        """Marker message includes the percentage of history summarized."""
-        msg = build_marker_message("summary", 0.6)
-        assert "60% of history summarized" in msg.content
+    def test_contains_message_range(self):
+        """Marker message includes the range of compressed messages."""
+        msg = build_marker_message("summary", 5, 15)
+        assert "[SYSTEM]: Compressed messages [5-15]" in msg.content
 
-    def test_fraction_rounding(self):
-        """Fraction is converted to int percentage (truncates)."""
-        msg = build_marker_message("summary", 0.333)
-        # int(0.333 * 100) = 33
-        assert "33% of history summarized" in msg.content
+    def test_single_message_compression(self):
+        """Single message compression uses same start and end index."""
+        msg = build_marker_message("summary", 3, 3)
+        assert "[SYSTEM]: Compressed messages [3-3]" in msg.content
+
+    def test_full_template_format(self):
+        """Marker message matches the expected template structure."""
+        msg = build_marker_message("Test summary", 5, 10)
+        assert "--- CONTEXT COMPRESSED ---\n[SYSTEM]: Compressed messages [5-10]\n<context_summary>\nTest summary\n</context_summary>" in msg.content
+
+    def test_raises_on_invalid_range(self):
+        """build_marker_message raises ValueError when start > end."""
+        with pytest.raises(ValueError, match="start.*end"):
+            build_marker_message("summary", 10, 5)
 
 
 # ──────────────────────────────────────────────
