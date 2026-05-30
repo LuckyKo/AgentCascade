@@ -342,12 +342,10 @@ def build_state_from_pool(
             logger.debug(f"API router waiting check failed for {instance_name} (using default): {e}")
 
     return {
+        # Kept for backward compat — frontend fallback reads data.messages if root not in agent_instances
         'messages': [serialize_message(m, i) for i, m in enumerate(msgs)],
         'instances': all_instances,
-        'agent_instances': {
-            name: state for name, state in all_instances.items()
-            if state.get('parent_instance') is not None
-        },
+        'agent_instances': all_instances,
         'active_stack': active_stack,
         'approvals': _get_approvals(pool),
         'generating': generating,
@@ -399,17 +397,10 @@ def build_stream_update_from_pool(
     if instance is None:
         return None
 
-    # Calculate history count from the active slice (single snapshot)
+    # Get active working set for token stats (single snapshot)
     with instance._compression_lock:
         conv_snapshot = list(instance.conversation)
     active_h = pool.slice_history_for_llm(conv_snapshot) if conv_snapshot else conv_snapshot
-    history_count = len(active_h)
-
-    # Serialize only the response messages (they're what's changing)
-    response_msgs = [
-        serialize_message(m, history_count + i)
-        for i, m in enumerate(responses or [])
-    ]
 
     # Calculate token stats
     try:
@@ -428,16 +419,14 @@ def build_stream_update_from_pool(
     # Build active stack
     active_stack = list(pool._execution.active_stack) if hasattr(pool, '_execution') else []
 
-    # Build sub-agent snapshot (C3: take snapshot before iterating)
+    # Build ALL instances snapshot (C3: take snapshot before iterating)
+    # Root agent is included alongside sub-agents — no special treatment.
+    # Each agent carries its own messages/history_count via _serialize_instance.
     instance_snapshot_data = dict(pool.instances)
     all_instances = {
         # Streaming=True → only send tail (last 3 msgs) to avoid O(N²) serialisation
         name: _serialize_instance(inst, pool, include_messages=True, streaming=True)
         for name, inst in instance_snapshot_data.items()
-    }
-    agent_instances_data = {
-        name: state for name, state in all_instances.items()
-        if state.get('parent_instance') is not None
     }
 
     # Get current model from template's LLM (for frontend display)
@@ -455,10 +444,8 @@ def build_stream_update_from_pool(
             logger.debug(f"Telemetry summary fetch failed for {instance_name} in stream (non-critical): {e}")
 
     return {
-        'history_count': history_count,
-        'response_messages': response_msgs,
         'instances': all_instances,
-        'agent_instances': agent_instances_data,
+        'agent_instances': all_instances,
         'active_stack': active_stack,
         'approvals': _get_approvals(pool),
         'generating': True,

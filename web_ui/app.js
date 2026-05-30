@@ -856,16 +856,22 @@ function handleServerMessage(data) {
   switch (data.type) {
     case 'state':
     case 'done':
-      // Full state update — root agent messages go into subAgents just like other agents
+      // Full state update — ALL agents flow through agent_instances, root included
       const rootName = getRootAgentName();
-      
+
       // When paused mid-stream, preserve the last streamed message in case it wasn't committed yet
       const rootData = state.subAgents[rootName];
-      const partialContent = (state.generating && data.instance_halted && rootData?.messages?.length > 0) 
+      const partialContent = (state.generating && data.instance_halted && rootData?.messages?.length > 0)
         ? String(rootData.messages[rootData.messages.length - 1].content || '') : null;
-      
-      // Route server's data.messages into subAgents under the root agent name
-      if (data.messages) {
+
+      // Merge ALL agent_instances including root — no special root path
+      if (data.agent_instances) {
+        for (const [name, sa] of Object.entries(data.agent_instances)) {
+          state.subAgents[name] = sa;
+        }
+      }
+      // Fallback: if root wasn't in agent_instances, use data.messages (legacy support)
+      if (!state.subAgents[rootName]?.messages && data.messages) {
         state.subAgents[rootName] = Object.assign({}, state.subAgents[rootName], {
           messages: data.messages,
           is_partial: false,
@@ -877,15 +883,6 @@ function handleServerMessage(data) {
         const lastServerContent = String(rootMsgs[rootMsgs.length - 1]?.content || '');
         if (!lastServerContent.startsWith(partialContent)) {
           rootMsgs.push({ role: 'assistant', content: partialContent });
-        }
-      }
-      
-      // Merge agent_instances (sub-agents) — skip root agent; its messages come from data.messages above
-      if (data.agent_instances) {
-        for (const [name, sa] of Object.entries(data.agent_instances)) {
-          if (!isRootAgentName(name)) {
-            state.subAgents[name] = sa;
-          }
         }
       }
       state.activeStack = data.active_stack || [];
@@ -1000,44 +997,19 @@ function handleServerMessage(data) {
       // Only block stream updates when the ROOT agent itself is halted, not when any sub-agent is halted
       const rootName = getRootAgentName();
       if (state.subAgents[rootName]?.is_halted) break;
-
-      // Lightweight streaming delta — root agent messages go into subAgents just like other agents
-      const historyCount = data.history_count || 0;
-      const responseMsgs = data.response_messages || [];
-
-      // Merge root agent: truncate local messages to historyCount before pushing response messages,
-             // but only when historyCount <= local length (to discard uncommitted streaming content).
-             // If historyCount > local length (reconnect/race condition), keep existing messages —
-             // the server's responseMsgs will fill in any gaps rather than wiping our state.
-      const rootData = state.subAgents[rootName];
-      if (rootData && rootData.messages) {
-        // Guard against server reporting a higher historyCount than we have locally
-               // (can happen on reconnect or race conditions — keep existing messages instead of wiping them,
-               // the server's responseMsgs will fill in any gaps; only truncate when historyCount is lower)
-        if (historyCount > rootData.messages.length) {
-                 console.warn(`[stream_update] historyCount (${historyCount}) > local length (${rootData.messages.length}), keeping existing messages`);
-                 // Do NOT reset — server's responseMsgs below will fill in gaps
-        } else {
-                 rootData.messages.length = historyCount;  // discard uncommitted streaming content
-        }
-        rootData.messages.push(...responseMsgs);
-      } else if (rootData) {
-        // Root exists but has no messages yet — initialize from response_messages
-        rootData.messages = [...responseMsgs];
-      }
-
+      
       const oldStackStr = (state.activeStack || []).join(',');
-      // Track subagent changes to decide render urgency:
+      // Track changes to decide render urgency:
       //   subAgentNewVisibleMessage — a new bubble was added to a VISIBLE panel (force immediate render)
-      //   subAgentContentChanged   — any subagent state changed (content streaming or new messages).
-      //     Note: subAgentNewVisibleMessage only covers new-message arrivals on visible panels;
-      //     streaming content updates rely on the flat ~200ms throttle timer below.
+      //   subAgentContentChanged   — any agent state changed (content streaming or new messages).
+      //     All agents (including root) contribute to these flags via the unified agent_instances loop.
+
       let subAgentNewVisibleMessage = false;
       let subAgentContentChanged = false;
+      
+            // All agents (including root) flow through agent_instances — no special root path
       if (data.agent_instances) {
                for (const [name, sa] of Object.entries(data.agent_instances)) {
-                // Skip root agent in stream_update — its messages are handled separately above
-                if (isRootAgentName(name)) continue;
           const existing = state.subAgents[name];
           const prevMsgCount = existing ? existing.messages.length : 0;
           
@@ -1049,13 +1021,12 @@ function handleServerMessage(data) {
               // Use strict < so that updates with the same history_count are still processed —
               // during content streaming, history_count stays constant while message content grows.
               if (hCount < (existing._lastHistoryCount || 0)) {
-                // Stale: only sync metadata, don't touch message array.
-                // Exclude sa.messages from Object.assign to prevent overwriting our local array.
-                const saCopy = { ...sa };
-                delete saCopy.messages;
-                Object.assign(existing, saCopy);
+                 // Stale: only sync metadata fields explicitly, don't touch message array.
+                 const metaFields = ['active', 'is_halted', 'agent_class', 'has_queued_messages', 'is_waiting'];
+                 for (const f of metaFields) {
+                   if (sa[f] !== undefined) existing[f] = sa[f];
+                 }
                 existing._lastHistoryCount = hCount;
-                delete existing.is_partial;
               } else {
                 // Normal merge path
                 const startIdx = hCount - sa.messages.length;
@@ -1081,7 +1052,7 @@ function handleServerMessage(data) {
               state.subAgents[name] = sa;
             }
           } else {
-            state.subAgents[name] = sa;
+            state.subAgents[name] = { ...sa, _lastHistoryCount: sa.history_count || 0 };
           }
           
           // Detect changes to decide render urgency:

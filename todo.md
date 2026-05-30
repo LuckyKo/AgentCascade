@@ -29,9 +29,9 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 - [x] system prompt metadata lacks RO/RW paths set in UI — FIXED: reads from operation_manager now
 - [ ] chat window must auto scroll on bottom, decouple if user scrolls up, recouple if he scrolls back to bottom
-- [ ] no streaming can be seen in the message bubbles
+- [ ] no streaming can be seen in the message bubbles, not even the bubbles popping in. i have to fiddle with the UI to get any updates.
 - [ ] no words change in activity bar during streaming
-- [ ] secondary agent tabs pop on late after call_agent and they are blank.
+- [x] secondary agent tabs pop on late after call_agent and they are blank.
 
 
 # EOF

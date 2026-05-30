@@ -850,14 +850,14 @@ def create_app(agents, agent_pool, config=None):
         if result is None:
             approvals = _get_approvals(agent_pool) if agent_pool else []
             stopped = agent_pool.stopped if agent_pool else False
-            
+
             # Get current model
             current_model = 'Unknown'
             if agents:
                 orch = agents[0]
                 if hasattr(orch, 'llm') and orch.llm:
                     current_model = getattr(orch.llm, 'model', 'Unknown')
-            
+
             # Resolve max_tokens via API router (same as build_state fallback)
             stream_max_tokens = DEFAULT_MAX_INPUT_TOKENS
             if agent_pool and hasattr(agent_pool, 'api_router') and agent_pool.api_router:
@@ -867,12 +867,27 @@ def create_app(agents, agent_pool, config=None):
                         stream_max_tokens = rl
                 except Exception as e:
                     logger.debug(f"API router max_tokens lookup failed in stream (using fallback): {e}")
-            
+
+            # Build minimal root instance state — frontend reads from agent_instances now
+            serialized_msgs = [serialize_message(m, i) for i, m in enumerate(responses or [])]
+            root_state = {
+                'instance_name': instance_name,
+                'agent_class': 'orchestrator',
+                'active': True,
+                'is_halted': False,
+                'parent_instance': None,
+                'has_queued_messages': False,
+                'messages': serialized_msgs,
+                'history_count': len(responses or []),
+                'is_partial': True,
+                'total_tokens': 0,
+                'total_words': 0,
+                'max_tokens': stream_max_tokens,
+            }
+
             return {
-                'history_count': len(_get_main_history(agent_pool, instance_name)),
-                'response_messages': [serialize_message(m, i) for i, m in enumerate(responses or [])],
-                'instances': {},
-                'agent_instances': {},
+                'instances': {instance_name: root_state},
+                'agent_instances': {instance_name: root_state},
                 'active_stack': [],
                 'approvals': approvals,
                 'generating': True,
