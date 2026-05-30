@@ -23,15 +23,26 @@ from agent_cascade.settings import MAX_LLM_CALL_PER_RUN
 from agent_cascade.tools import BaseTool
 from agent_cascade.utils.utils import extract_files_from_messages
 
-
 # ===========================================================================
-    # TODO(CLEANUP-LEGACY): Migrate FnCallAgent to route tool execution through
-    # ExecutionEngine._execute_tool() instead of its own _call_tool().
-    # Until then, __USE_PREV_ARG__ resolution and arg caching work via the
-    # base Agent class path (self._resolve_tool_args) but not via the pool cache.
-    # Affected: Assistant, ReActChat, TIRMathAgent, assistant.py,
-    #   assistant_qwen3vl.py, qwen2vl_assistant_tooluse.py
-    # ===========================================================================
+# DEPRECATED LEGACY CODE — Partially unused by the main execution path
+# ===========================================================================
+# The FnCallAgent class is NOT used by ExecutionEngine's main loop.
+# All agent execution in the unified system routes through ExecutionEngine.run()
+# which handles LLM calls via _execute_llm_call() and tool calls via
+# _execute_tool().
+#
+# However, FnCallAgent methods ARE still exercised via Python MRO:
+#   • FnCallAgent._run()        — called by Assistant._run() → super()._run(),
+#     which is invoked when standalone Assistant instances are created outside
+#     the ExecutionEngine pipeline (e.g., WriteFromScratch creates them directly).
+#   • FnCallAgent._call_tool()  — in the MRO chain when ExecutionEngine calls
+#     template._call_tool() on Assistant/ReActChat/TIRMathAgent instances.
+#     Its unique file_access branch (line ~137) only triggers for tools with
+#     file_access=True, which none of the standard tools have.
+#
+# These classes remain as stubs for backward compatibility (external code imports them).
+# They should be removed in a future major version after a deprecation period.
+# ===========================================================================
 
 class FnCallAgent(Agent):
     """This is a widely applicable function call agent integrated with llm and tool use ability."""

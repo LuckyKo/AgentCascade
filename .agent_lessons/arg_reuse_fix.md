@@ -30,16 +30,50 @@ The `__USE_PREV_ARG__` placeholder was documented in the system prompt but never
 - **Sticky**: Cached values persist until overwritten by a new call providing the same arg name.
 - **Safe**: Unresolvable placeholders pass through as-is — regular tool use is unaffected.
 
-## Legacy Path Still Broken (TODO)
-`FnCallAgent._call_tool()` and `Agent._call_tool()` have their own execution loops that bypass `ExecutionEngine._execute_tool()` entirely. They do NOT get `__USE_PREV_ARG__` resolution or arg caching.
+## Legacy Path — Already Migrated (ExecutionEngine is the main path)
+The legacy execution path (`FnCallAgent._run()` → `FnCallAgent._call_tool()`) is **not**
+the primary execution path. All agent execution in the unified system routes through
+`ExecutionEngine.run()` which handles:
+- LLM calls via `_execute_llm_call()`
+- Tool calls via `_execute_tool()` → `template._call_tool()`
 
-Affected agent classes:
-- **FnCallAgent** — used by Assistant, ReActChat, TIRMathAgent
-- **BasicAgent** — the simplest Agent subclass
+The full MRO dispatch chain for tool calls is:
+```
+ExecutionEngine._execute_tool() → template._call_tool() → FnCallAgent._call_tool() → Agent._call_tool() → tool.call()
+```
 
-TODO markers added in:
-- `agent_cascade/agent.py` (before `_call_tool`)
-- `agent_cascade/agents/fncall_agent.py` (before `FnCallAgent` class)
+### What's Truly Dead Code
+- **Nothing in FnCallAgent is truly dead code** — its methods are all exercised via MRO.
+  The only thing that changed is that ExecutionEngine no longer calls `_run()` directly;
+  it has its own LLM/tool loop instead.
 
-## Migration Priority
-The legacy path should be migrated to route through ExecutionEngine. Until then, agents using FnCallAgent won't benefit from arg reuse.
+### What's Live (via MRO from ExecutionEngine)
+| Method | Status | Reason |
+|--------|--------|--------|
+| `FnCallAgent._run()` | **Live** | Called by `Assistant._run() → super()._run()` when standalone Assistant instances are used outside ExecutionEngine (e.g., WriteFromScratch). Classes like ArticleAgent, ReActChat, TIRMathAgent define their own `_run()` and do NOT call `super()._run()`. |
+| `FnCallAgent._call_tool()` | **Live** | In MRO chain when ExecutionEngine calls `template._call_tool()` on Assistant instances; file_access branch unused by standard tools |
+| `Agent._call_tool()` | **Live** | Called via super() from FnCallAgent._call_tool() |
+| `Agent._resolve_tool_args()` | **Live** | Called by Agent._call_tool() for __USE_PREV_ARG__ resolution |
+
+### Classes That Inherit from FnCallAgent (still live)
+- **Assistant** — used as AgentPool template; `_run()` also called when standalone instances created outside ExecutionEngine (e.g., WriteFromScratch creates them directly)
+- **ReActChat** — ReAct chat agent
+- **TIRMathAgent** — math reasoning agent
+
+Note: ReActChat and TIRMathAgent are defined but never instantiated in the codebase.
+They exercise `FnCallAgent._call_tool()` only if loaded as templates; their `_run()` methods
+are independent (no `super()._run()` call).
+
+These classes are instantiated as templates in AgentPool. ExecutionEngine uses their `llm`,
+`function_map`, and `system_message` attributes directly — it never calls their `_run()` method.
+However, `_run()` IS still exercised from non-ExecutionEngine code paths (e.g., WriteFromScratch
+creates standalone Assistant instances and calls `.run()` on them).
+
+### Migration Status
+✅ Already migrated. The legacy path was superseded by the ExecutionEngine refactor (Phase 3).
+The FnCallAgent class remains for backward compatibility (external code imports it) and its
+methods are exercised via MRO from both ExecutionEngine and standalone agent paths.
+
+## Future Cleanup
+Consider whether `BasicAgent` is still needed — it may be dead code (check if any templates use it).
+FnCallAgent should remain until external code stops importing it directly.
