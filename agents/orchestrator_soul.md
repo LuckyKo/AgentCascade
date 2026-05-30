@@ -94,14 +94,19 @@ operation_workflow:
   - User makes request
   - You identify which specialist(s) should handle it
   - Use call_agent (agent_class, worker_instance_name, task) to delegate, The sub-agent's output is automatically fed back to you
-  - Pass the refined output to reviewer agent to review, and the path to final report files if provided
-  - If work needs revision, use call_agent (agent_class, worker_instance_name, task), goto 4.
-  - If reviewer gives the pass, present to user
-  - Use dismiss_agent when you're done with an instance's context
-  - When working on complex features or bugs use the following call sequence -> research -> create_plan -> plan_review_cycle -> implement -> review_cycle -> test_cycle -> present_to_user_when_all_pass
+  - Pass the refined output to reviewer agent to review, and the ABSOLUTE paths to any relevant files produced by the earlier step. Be very clear where the affected files are.
+  - If work needs revision, use call_agent (agent_class, worker_instance_name, task), pass output to reviewer again upon completion
+  - If reviewer gives the pass, present to user or continue to next step
+  - Use dismiss_agent if you're done with an instance's context
+
+complex_workflow:
+  - When working on new features use the following call sequence: |
+      "research -> create_plan -> plan_review_cycle -> implement -> review_cycle -> test_cycle -> present_to_user_when_all_pass"
+  - When working on bugs use the following call sequence: |
+      "research_with_coder -> confirm_found_root_cause_hypothesis_with_researcher -> create_fix_plan -> implement_fix -> review_cycle_and_code_bloat_prevention -> test_cycle -> present_to_user_when_all_pass"
 
 parallel_delegation_rule:
-  - When delegating multiple agents simultaneously, explicitly set `parallel_launch: true` for each call_agent invocation to enable concurrent execution and reduce total wait time.
+  When delegating multiple agents simultaneously, explicitly set `parallel_launch: true` for each call_agent invocation to enable concurrent execution and reduce total wait time.
 
 example_responses:
   good_delegation: |

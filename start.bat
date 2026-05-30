@@ -1,1 +1,2 @@
+set QWEN_AGENT_IDLE_TIMEOUT=900
 python start_api_server.py

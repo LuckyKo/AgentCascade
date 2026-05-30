@@ -763,7 +763,7 @@ class TestFindLastMarker:
 class TestNestedCompressionGuard:
     """Integration tests for nested compression guard using real orchestrator code.
 
-    The guard lives in agent_orchestrator.py line 2049:
+    The guard lives in agent_orchestrator.py line 2072:
         if not instance_name.startswith('compression_agent'):
             hook_forced = self._inject_compression_warning_for_agent(...)
 
@@ -787,7 +787,7 @@ class TestNestedCompressionGuard:
 
         mock_orch._inject_compression_warning_for_agent = track_inject
 
-        # Simulate what hooked_call_llm does for compression_agent (agent_orchestrator.py:2049)
+        # Simulate what hooked_call_llm does for compression_agent (agent_orchestrator.py:2072)
         instance_name = "compression_agent"
         hook_forced = False
 
@@ -844,7 +844,7 @@ class TestNestedCompressionGuard:
 
         mock_orch._inject_compression_warning_for_agent = track_inject
 
-        # Simulate what hooked_call_llm does for compression_agent child (agent_orchestrator.py:2049)
+        # Simulate what hooked_call_llm does for compression_agent child (agent_orchestrator.py:2072)
         instance_name = "compression_agent_child1"
         hook_forced = False
 

@@ -769,6 +769,13 @@ class OrchestratorAgent(Assistant):
         current_tokens = self._get_history_tokens(messages)
         usage_pct = (current_tokens / max_tokens) * 100
 
+        # Exempt compression agents from forced compression to prevent infinite recursion.
+        # If a compression agent fills its context, it should fail gracefully rather than
+        # spawn child compressors. This is a belt-and-suspenders guard — the primary guard
+        # is at line 2072 in hooked_call_llm.
+        if instance_name == 'compression_agent' or instance_name.startswith('compression_agent'):
+            return False
+
         # ── Forced compression at >95% ──
         if usage_pct > 95.0:
             # Prevent double-compression in same turn (per-agent tracking)

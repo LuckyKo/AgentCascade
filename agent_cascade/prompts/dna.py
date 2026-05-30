@@ -343,14 +343,14 @@ TOOL_METADATA = {
     'compress_context': {
         'description': (
             'Summarize the oldest part of the conversation history to free up context space. '
-            'Supports two modes: "auto" (generated via LLM) and "manual" (provided via summary_text). '
+            'Supports two modes: "auto" (generated via specialized compression LLM) and "manual" (provided by agent via summary_text). '
             'A fraction of history is replaced by a concise summary.'
         ),
         'parameters': {
             'fraction': 'The fraction of history to summarize (e.g. 0.5 for 50%). Max 1.0.',
             'mode': "Compression mode: 'auto' (default) or 'manual'.",
             'justification': 'Why compression is needed now.',
-            'summary_text': 'Your own summary of the conversation history. Required when mode=manual.',
+            'summary_text': 'Your own summary of the conversation history portion that will be trimmed out. Required when mode=manual.',
             'force': 'Bypass validation guards (e.g., minimum message count). Used for critical threshold compression.'
         }
     },
