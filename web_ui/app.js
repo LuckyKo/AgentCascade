@@ -172,9 +172,9 @@ const ActivityBar = {
   },
   
   render(streamingText) {
-    // Throttle: skip re-render if less than 500ms since last render
+    // Throttle: skip re-render if less than 200ms since last render (reduced from 500ms for snappier updates)
     const now = performance.now();
-    if (now - this.lastRenderTime < 500) return;
+    if (now - this.lastRenderTime < 200) return;
     this.lastRenderTime = now;
     
     if (!this.el || !this.fifoEl) return;
@@ -193,7 +193,11 @@ const ActivityBar = {
       if (!isRootAgentName(activeInstance) && agentData?.is_waiting) {
         status = 'Waiting for API slot...';
       } else if (streamingText !== undefined) {
-        status = streamingText;
+        // When streamingText is empty but the agent IS generating, show "Streaming..." instead of blank.
+        // Guard with isActive to avoid showing "Streaming..." for idle agents with no messages.
+        status = (isActive && (streamingText === '' || !streamingText.trim())) 
+            ? 'Streaming...' 
+            : (streamingText !== undefined ? streamingText : '');
       } else {
         // Fallback or tab switch: get from last message of agent
         const msgs = agentData?.messages || [];
@@ -2396,23 +2400,26 @@ function renderSubAgentPanel(panel, agentData, name) {
     scrollContainer.className = 'messages messages-scroll';
     panel.appendChild(scrollContainer);
     
-    // Step 8: Set up per-panel scroll lock state and listener for sub-agent panels
-    if (!subAgentScrollLocks[name]) {
-      subAgentScrollLocks[name] = { locked: true, listenerAdded: false }; // Start locked at bottom
-      
-      // Scroll listener: unlock when user scrolls up, re-lock when they scroll to bottom
-      // Only add once — guard is on listenerAdded, not on lock state
-      if (!subAgentScrollLocks[name].listenerAdded) {
-        scrollContainer.addEventListener('scroll', () => {
-          const distFromBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
-          subAgentScrollLocks[name].locked = (distFromBottom < 50);
-        });
-        subAgentScrollLocks[name].listenerAdded = true;
-      }
-    }
+    // Reset scroll lock state for fresh panel (prevents stale listenerAdded on session reset)
+    subAgentScrollLocks[name] = { locked: true, listenerAdded: false };
   }
 
   const scrollContainer = panel.querySelector('.messages');
+  
+  // Set up per-panel scroll lock state and listener (runs every call but guarded by listenerAdded).
+  // Placed OUTSIDE the dataset.initialized guard so that if a stream_update fires before
+  // initialization completes, the scroll listener is still attached — prevents Bug #1
+  // where scrolling decoupling breaks on newly-created panels.
+  if (!subAgentScrollLocks[name]) {
+    subAgentScrollLocks[name] = { locked: true, listenerAdded: false }; // Start locked at bottom
+  }
+  if (!subAgentScrollLocks[name].listenerAdded && scrollContainer) {
+    scrollContainer.addEventListener('scroll', () => {
+      const distFromBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
+      subAgentScrollLocks[name].locked = (distFromBottom < 50);
+    });
+    subAgentScrollLocks[name].listenerAdded = true;
+  }
   
   // Update global activity bar if this is the active visible tab
   if (isVisible) {
@@ -2462,6 +2469,15 @@ function renderSubAgentPanel(panel, agentData, name) {
     subConfig.isGenerating = isActive;
     scrollContainer.appendChild(renderAgentConversation(name, displayMsgs, 1, null, subConfig));
     
+    // Show a loading placeholder when agent is active but has no messages yet
+    if (currentCount === 0 && isActive) {
+      const loadingDiv = document.createElement('div');
+      loadingDiv.className = 'message msg-system';
+      loadingDiv.dataset.placeholder = 'initializing';
+      loadingDiv.innerHTML = '<div class="msg-content">⏳ Initializing…</div>';
+      scrollContainer.appendChild(loadingDiv);
+    }
+    
     // Update context bar with unified token counts
     updateContextBar(document.getElementById('subContextFill-' + name), displayMsgs, tokCount, maxTok);
   } else {
@@ -2475,10 +2491,27 @@ function renderSubAgentPanel(panel, agentData, name) {
       const subConfig = getAgentConfig(name);
       subConfig.isGenerating = isActive;
       scrollContainer.appendChild(renderAgentConversation(name, displayMsgs, 1, null, subConfig));
+      
+      // Show a loading placeholder when agent is active but has no messages yet
+      if (currentCount === 0 && isActive) {
+        const loadingDiv = document.createElement('div');
+        loadingDiv.className = 'message msg-system';
+        loadingDiv.dataset.placeholder = 'initializing';
+        loadingDiv.innerHTML = '<div class="msg-content">⏳ Initializing…</div>';
+        scrollContainer.appendChild(loadingDiv);
+      }
+      
       // Update context bar since we just did a full re-render
       updateContextBar(document.getElementById('subContextFill-' + name), displayMsgs, tokCount, maxTok);
     } else {
       // Safe to append — DOM matches expected state
+      // Remove loading placeholder if it exists (messages have arrived)
+      if (currentCount > 0) {
+        const existingPlaceholder = scrollContainer.querySelector('[data-placeholder="initializing"]');
+        if (existingPlaceholder) {
+          existingPlaceholder.remove();
+        }
+      }
       const newMsgs = [];
       const newIndexMap = [];
       for (let i = lastCount; i < currentCount; i++) {

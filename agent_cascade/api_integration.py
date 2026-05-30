@@ -289,7 +289,8 @@ def build_state_from_pool(
     instance_snapshot = dict(pool.instances)
     all_instances = {}
     for name, inst in instance_snapshot.items():
-        all_instances[name] = _serialize_instance(inst, pool)
+        # Full state includes messages; streaming=False so we send the whole history
+        all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=False)
 
     # Derive session name from root instance (M1/M4 fix)
     root_instances = [
@@ -430,7 +431,8 @@ def build_stream_update_from_pool(
     # Build sub-agent snapshot (C3: take snapshot before iterating)
     instance_snapshot_data = dict(pool.instances)
     all_instances = {
-        name: _serialize_instance(inst, pool)
+        # Streaming=True → only send tail (last 3 msgs) to avoid O(N²) serialisation
+        name: _serialize_instance(inst, pool, include_messages=True, streaming=True)
         for name, inst in instance_snapshot_data.items()
     }
     agent_instances_data = {
@@ -613,16 +615,81 @@ def serialize_message(msg: Any, index: Optional[int] = None) -> dict:
     return result
 
 
-def _serialize_instance(inst: AgentInstance, pool: AgentPool) -> dict:
-    """Serialize an AgentInstance for UI state display."""
-    return {
+def _check_is_waiting(pool: AgentPool, instance_name: str) -> bool:
+    """Check if an agent is waiting for an API slot (with defensive error handling)."""
+    try:
+        api_router = getattr(pool, 'api_router', None)
+        if api_router and callable(getattr(api_router, 'is_waiting', None)):
+            return api_router.is_waiting(instance_name)
+    except Exception as e:
+        logger.debug(f"is_waiting check failed for {instance_name}: {e}")
+    return False
+
+
+def _serialize_instance(
+    inst: AgentInstance, pool: AgentPool,
+    include_messages: bool = False, streaming: bool = False,
+) -> dict:
+    """Serialize an AgentInstance for UI state display.
+
+    When *include_messages* is True, the full conversation (or just the tail
+    during streaming) is appended to the result dict along with token stats
+    and max_tokens — matching what get_instance_state() used to provide.
+
+    Streaming optimisation: during active generation for large conversations (>30
+    messages), only the last 3 are sent to avoid O(N²) serialisation on every
+    ~150ms tick. Smaller conversations are sent in full.
+    """
+    result = {
         'instance_name': inst.instance_name,
         'agent_class': inst.agent_class,
-        'is_active': inst.is_active,
+        'active': inst.is_active,                              # Maps to frontend's agentData.active
         'is_halted': pool.is_instance_halted(inst.instance_name),
         'parent_instance': inst.parent_instance,
         'has_queued_messages': pool.has_messages(inst.instance_name),
+        # Include is_waiting so ActivityBar can show "Waiting for API slot..."
+        'is_waiting': _check_is_waiting(pool, inst.instance_name),
     }
+
+    if not include_messages:
+        return result
+
+    # ── Serialise messages ───────────────────────────────────────────────
+    with inst._compression_lock:
+        msgs = list(inst.conversation)
+
+    if streaming and len(msgs) > 30:
+        # During active generation only send the tail (last 3 messages) for large
+        # conversations to avoid O(N²) serialisation on every ~150ms tick.
+        # Smaller conversations are sent in full — dropping early context during
+        # mid-conversation streaming would break incremental rendering.
+        start_idx = max(0, len(msgs) - 3)
+        serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-3:], start_idx)]
+        result['is_partial'] = True
+    else:
+        serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
+        result['is_partial'] = False
+
+    # ── Token stats ──────────────────────────────────────────────────────
+    active_msgs = pool.slice_history_for_llm(msgs) if msgs else msgs
+    try:
+        from agent_cascade.utils.utils import get_history_stats
+        stats = get_history_stats(active_msgs)
+    except Exception as e:
+        logger.debug(f"Token stats calculation failed for {inst.instance_name} (using estimate): {e}")
+        stats = {'tokens': len(msgs) * 4, 'words': 0}
+
+    max_tokens = _get_max_tokens_for_instance(pool, inst)
+
+    result.update({
+        'messages': serialized_msgs,
+        'history_count': len(msgs),
+        'total_tokens': stats['tokens'],
+        'total_words': stats['words'],
+        'max_tokens': max_tokens,
+    })
+
+    return result
 
 
 def _get_approvals(pool: AgentPool) -> list:

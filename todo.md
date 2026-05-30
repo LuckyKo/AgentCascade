@@ -23,36 +23,15 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] warn agents about message limit at 90%
 [ ] make cmd_shell pop open a console window in the back so the user can inspect or interact with it if needed.
 [ ] improve list_dir tool to be as useful and even more than any shell command
-[ ] add a tool validator function before calling the tool, preventing reliance on the error dump in case of bad usage and providing accurate feedback to the agent how to use the tool properly.
+[ ] add a banner above the user chat entry that shows queued messages (with an X to dismiss each one individually)
 
 # BUGS:
 
-- [x] stop button should halt all operations too (like code_intepreter or shell_cmds)
-- [x] resume button does not restart halted processes
-- [x] cmd_shell timeout does not kill some python processes that hang, just the cmd window, leaving the python process stray and blocking the system
-- [x] having issues with edit_file heuristic match mode, duplicating comments and messing up indentation. <- FIXED: removed comment stripping from heuristic matching pipeline. Heuristic mode now matches on raw content with only whitespace normalization. If old_content comments differ from file → match fails → LLM gets feedback to retry with correct content. Simpler, more predictable, prevents silent data loss.
-- [x] make the sub-agent tab names shrink to fit the width of the screen when they multiply beyond the visible limit / or they could pile on additional rows — FIXED: Added flex-wrap: wrap for multi-row tabs, text-overflow: ellipsis on labels, icons and close buttons always visible via flex-shrink: 0, max-height cap with vertical scrollbar.
-- [x] compression agent polling times out at max_polls=1000 during forced compression (>95% context) — each LLM streaming chunk = one iteration, large tasks exceed 1000. Fix: replaced with time-based timeout (300s, monotonic clock).
-- [x] dismiss_agent tool should return the list of log paths of closed agents in case they need to be resurrected.
-- [x] dismissing an agent does not close the UI tab in real time, it current needs f5 to clear it.
-- [x] unused/idle agents should be automatically dismissed after a period of inactivity — they sit idle consuming memory and context when not needed [x] FIXED: configurable idle_timeout (default 5min) with activity heartbeat on dispatch + completion, CLI args (--idle-timeout/--idle-check-interval) and env var fallbacks
-- [x] system_info tool does not show the mapped Docker paths for each work dir — FIXED: shows host → container mount mappings (e.g. N:\work\WD\AgentWorkspace → /workspace)
-- [x] when grep spillover is toggled in options we don't inform the model of the destination file — FIXED: spill path passed from orchestrator down through Grep tool to operation_manager; all 4 truncation points (subprocess early-trunc, subprocess re-check, Python fallback, single-file) write full output to spill file and include its workspace-relative path in the truncation notice. Orchestrator skips its own spillover writes for grep to avoid double-writing degraded content. Subprocess returns was_truncated flag for clean coordination.
-- [x] orchestrator _truncate_tool_result strips grep truncation notice with spill path — FIXED: check for existing "[TOOL RESPONSE TRUNCATED" in tool_result and skip replacement if found, preserving operation_manager's spill file notice
-- [x] subprocess grep truncation can result in "Found 0 matches" when all lines exceed char_limit — FIXED: _sub_truncated=True with count==0 no longer falls through to Python fallback; summary shows "Matches found [TRUNCATED]" instead of misleading "Found 0 matches"
-- [x] inconsistent truncation notices — subprocess path omitted character count but Python fallback included it — FIXED: all 4 truncation points now include ({chars} chars); _try_subprocess_grep returns original_output_size for consistent reporting
-- [x] both grep spillover and grep char limit get reset on refresh — FIXED: added explicit save lines with correct hyphenated keys in saveSettings()
-- [x] user injected messages cause context reprocessing. investigate message stack trashing — INVESTIGATED: No full reprocessing in normal flow. Messages are appended to existing working sets. Loop recovery and forced compression do rebuild from scratch (expected behavior). Edge case: continue command spawns new thread while old one may still be running — potential race condition worth monitoring.
-- [x] continue should not insert a new user message, just send the active agent_pool to the LLM so it can resume if it wants. — FIXED: unified branch sends {type: 'continue'} without text and has dedicated backend handler that doesn't inject user messages. Main branch still has this bug (sends [SYSTEM]: Please continue as a regular message).
-- [x] the approval window sometimes disappears (when there are a lot of agent tabs mostly), have to hit F5 to make it show up again. — FIXED: Added min-height: 60px + flex-shrink: 0 to prevent flex container from squeezing it away, raised z-index to 90 for visibility above tab panels, changed scrollIntoView from 'nearest' to 'start', made renderApprovals() unconditional in state/done/stream_update handlers.
-- [x] message bubbles use no `md` formatting sometimes, its inconsistent. — FIXED: renderToolResult now uses hybrid approach (prose tools via renderMarkdown, code tools via pre/code), allowThinking parameter made consistent across all rendering paths, added CSS for markdown-rendered tool content
-- [x] auto agent discard timer value should be added to agent settings — Already exists as "Auto-Discard Idle Agents (seconds)" in UI, wired to backend via idle_timeout_seconds setting.
-
-- [ ] fix tool use to match main (currently not working at all), LLM does not receive native tool info.
+- [x] system prompt metadata lacks RO/RW paths set in UI — FIXED: reads from operation_manager now
 - [ ] chat window must auto scroll on bottom, decouple if user scrolls up, recouple if he scrolls back to bottom
-- [ ] implement finished sounds on end/user aproval pop - just like main
-- [ ] system prompt metadata lacks RO/RW paths set in UI
-
+- [ ] no streaming can be seen in the message bubbles
+- [ ] no words change in activity bar during streaming
+- [ ] secondary agent tabs pop on late after call_agent and they are blank.
 
 
 # EOF
