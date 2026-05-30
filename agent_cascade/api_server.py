@@ -70,26 +70,7 @@ except ImportError:
 # Pre-compiled regexes moved to agent_cascade.utils.thinking_block
 
 
-def _get_main_history(agent_pool, session_name):
-    """Get the main agent's conversation history from the pool.
-    
-    Replaces reads of session['history']. Returns a defensive copy of the
-    conversation list from the pool instance, or an empty list if not found.
-    
-    Args:
-        agent_pool: The AgentPool instance managing all instances.
-        session_name: Name of the main session/instance
-        
-    Returns:
-        list of message objects
-    """
-    if not agent_pool:
-        return []
-    inst = agent_pool.get_instance(session_name)
-    if inst is not None:
-        with inst._compression_lock:
-            return list(inst.conversation)
-    return []
+
 
 
 def _get_msg_role(msg):
@@ -443,7 +424,8 @@ def create_app(agents, agent_pool, config=None):
                 with inst._compression_lock:
                     history = list(inst.conversation)
             else:
-                history = list(agent_pool.instance_conversations.get(name, []))
+                logger.warning(f"Session instance '{name}' not found in pool during save — skipping history sync")
+                history = []
             
             # Use the standardized logger to ensure append-only behavior
             logger_inst = agent_pool.get_logger(name, 'Orchestrator')
@@ -592,7 +574,10 @@ def create_app(agents, agent_pool, config=None):
     api_sessions: Dict[str, bytes] = {}
 
     ws_connections: Set[WebSocket] = set()
-    send_queue: asyncio.Queue = asyncio.Queue()
+    # Bounded queue to prevent stale event buildup during sustained streaming.
+    # When full, the oldest pending stream_update is dropped (put_nowait raises QueueFull).
+    # Non-stream events (state, done, dismissal) still get priority via regular put().
+    send_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
 
     # Lock for session state accessed across threads (asyncio loop + agent thread).
     # Protects: session['generating'], session['stop_requested'].
@@ -1705,7 +1690,9 @@ def create_app(agents, agent_pool, config=None):
                         if inst.conversation and _get_msg_role(inst.conversation[-1]) == USER:
                             last_user_msg = inst.conversation.pop()
 
-                    if not (agent_pool and agent_pool.get_instance(instance_name)) and not _get_main_history(agent_pool, instance_name) and not last_user_msg:
+                    # Post-unification: use pool instance directly — no legacy fallback needed
+                    inst = agent_pool.get_instance(instance_name) if agent_pool else None
+                    if not inst and not (inst.conversation if inst else []) and not last_user_msg:
                         _save_session_history()
                         await broadcast({'type': 'state', **build_state()})
                         continue
@@ -1941,7 +1928,6 @@ def create_app(agents, agent_pool, config=None):
                                                 'agent_name': f"Security Advisor (security_advisor)",
                                                 'messages': list(history),
                                             }
-                                            agent_pool.instance_conversations[sec_state_key] = list(history)
                                             if sec_state_key not in agent_pool.active_stack:
                                                 agent_pool._execution.active_stack.append(sec_state_key)
                                         # Broadcast initial state so the tab appears immediately
@@ -2059,9 +2045,6 @@ def create_app(agents, agent_pool, config=None):
                                                 with agent_pool._execution._state_lock:
                                                     agent_pool.instance_state[sec_state_key]['messages'] = (
                                                         list(history) + (list(final_msgs) if isinstance(final_msgs, list) else [final_msgs])
-                                                    )
-                                                    agent_pool.instance_conversations[sec_state_key] = list(
-                                                        agent_pool.instance_state[sec_state_key]['messages']
                                                     )
                                                 # Only broadcast at start and end of security check (not every token)
                                                 if sec_first_broadcast:
@@ -2324,8 +2307,6 @@ def create_app(agents, agent_pool, config=None):
                         if inst is not None:
                             with inst._compression_lock:
                                 history = list(inst.conversation)  # Defensive copy under lock
-                        elif target_name in agent_pool.instance_conversations:
-                            history = agent_pool.instance_conversations[target_name]
                     
                     # Phase 6: No fallback to session['history'] — pool is the source of truth
                     
@@ -2371,17 +2352,10 @@ def create_app(agents, agent_pool, config=None):
                             logger_inst.reset_history(history, rewrite=True)
                             
                             # Sync instance_state so build_state() sees the edit
-                            # (instance_state[name]['messages'] may be a separate reference and won't
-                            #  reflect in-place edits to instance_conversations)
                             if target_name != session['session_name'] and target_name in agent_pool.instance_state:
                                 agent_pool.instance_state[target_name]['messages'] = list(history)
-                            
-                            # Also sync main session back to pool so next generation doesn't
-                            # overwrite the edit (pool is source of truth)
-                            if target_name == session['session_name']:
-                                agent_pool.instance_conversations[target_name] = list(history)
                     await broadcast({'type': 'state', **build_state()})
-
+                            
                 elif msg_type == 'delete_messages':
                     if session['generating']:
                         continue
@@ -2394,8 +2368,6 @@ def create_app(agents, agent_pool, config=None):
                         if inst is not None:
                             with inst._compression_lock:
                                 history = list(inst.conversation)  # Defensive copy under lock
-                        elif target_name in agent_pool.instance_conversations:
-                            history = agent_pool.instance_conversations[target_name]
                     
                     # Phase 6: No fallback to session['history'] — pool is the source of truth
                     
@@ -2416,11 +2388,6 @@ def create_app(agents, agent_pool, config=None):
                         # Sync instance_state so build_state() sees the deletion
                         if target_name != session['session_name'] and target_name in agent_pool.instance_state:
                             agent_pool.instance_state[target_name]['messages'] = list(history)
-                        
-                        # Also sync main session back to pool so next generation doesn't
-                        # re-deep-copy the un-deleted version (pool is source of truth)
-                        if target_name == session['session_name']:
-                            agent_pool.instance_conversations[target_name] = list(history)
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'select_agent':
@@ -2432,9 +2399,7 @@ def create_app(agents, agent_pool, config=None):
                     new_name = data.get('name', 'Maine')
                     session['session_name'] = new_name
                     if agent_pool:
-                        # Migrate history to new name in pool
-                        if old_name in agent_pool.instance_conversations:
-                            agent_pool.instance_conversations[new_name] = agent_pool.instance_conversations.pop(old_name)
+                        # Migrate instance_summaries to new name in pool
                         if old_name in agent_pool.instance_summaries:
                             agent_pool.instance_summaries[new_name] = agent_pool.instance_summaries.pop(old_name)
                     
