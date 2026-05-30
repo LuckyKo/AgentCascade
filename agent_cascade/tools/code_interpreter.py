@@ -51,6 +51,11 @@ CODE_EXECUTION_TIMEOUT = int(os.getenv('M6_CODE_INTERPRETER_EXEC_TIMEOUT', '120'
 # for this many seconds, kill and restart the container.
 CONTAINER_WATCHDOG_TIMEOUT = int(os.getenv('M6_CODE_INTERPRETER_WATCHDOG_TIMEOUT', '300'))
 
+# Resource limits for Docker containers (configurable via env vars)
+CONTAINER_MEMORY_LIMIT = os.getenv('M6_CODE_INTERPRETER_CONTAINER_MEMORY', '2g')
+CONTAINER_CPU_LIMIT = float(os.getenv('M6_CODE_INTERPRETER_CONTAINER_CPUS', '2.0'))
+CONTAINER_PID_LIMIT = int(os.getenv('M6_CODE_INTERPRETER_CONTAINER_PIDS', '100'))
+
 LAUNCH_KERNEL_PY = """
 from ipykernel import kernelapp as app
 app.launch_new_instance()
@@ -343,12 +348,14 @@ class CodeInterpreter(BaseToolWithFileAccess):
         try:
             result = self._execute_code(kc, fixed_code, timeout=exec_timeout, kernel_id=kernel_id)
         except TimeoutError as e:
-            # On timeout, attempt to interrupt the kernel to recover it
-            logger.warning(f"Code interpreter execution timed out ({exec_timeout}s), attempting kernel interrupt...")
+            # On timeout, escalate through 3 tiers to recover the kernel (Fix A3)
+            logger.warning(f"Code interpreter execution timed out ({exec_timeout}s), escalating...")
+            
+            interrupted = False
+            
+            # Tier 1: Jupyter-level interrupt + poll for idle status
             try:
                 kc.interrupt()
-                # Retry loop: wait for kernel to become idle after interrupt (3 × 0.5s)
-                interrupted = False
                 for _ in range(3):
                     time.sleep(0.5)
                     try:
@@ -360,20 +367,74 @@ class CodeInterpreter(BaseToolWithFileAccess):
                         continue
                     except Exception:
                         break
-                
-                if not interrupted:
-                    logger.warning("Kernel did not return to idle after interrupt — may need restart")
             except Exception as interrupt_err:
-                logger.warning(f"Kernel interrupt failed: {interrupt_err}")
+                logger.warning(f"Tier 1 interrupt failed: {interrupt_err}")
             
-            # Update activity timestamp so watchdog doesn't double-kill (thread-safe)
+            # Tier 2: Docker-level SIGINT if still not interrupted
+            if not interrupted:
+                with _KERNEL_LOCK:
+                    container_id = _DOCKER_CONTAINERS.get(kernel_id)
+                
+                if container_id:
+                    try:
+                        subprocess.run(
+                            ['docker', 'exec', container_id, 'kill', '-INT', '1'],
+                            timeout=5, capture_output=True, encoding='utf-8', errors='replace'
+                        )
+                        time.sleep(2)
+                        
+                        # Check again if interrupt succeeded after SIGINT
+                        try:
+                            msg = kc.get_iopub_msg(timeout=2)
+                            if msg['msg_type'] == 'status' and msg['content'].get('execution_state') == 'idle':
+                                interrupted = True
+                        except Exception:
+                            pass
+                    except Exception as sigint_err:
+                        logger.warning(f"Tier 2 docker SIGINT failed: {sigint_err}")
+            
+            # Tier 3: Kill the container entirely if still unresponsive
+            if not interrupted:
+                with _KERNEL_LOCK:
+                    container_id = _DOCKER_CONTAINERS.get(kernel_id)
+                
+                if container_id:
+                    try:
+                        subprocess.run(
+                            ['docker', 'kill', '-s', 'KILL', container_id],
+                            timeout=10, capture_output=True, encoding='utf-8', errors='replace'
+                        )
+                        # Remove the dead container from Docker (prevents accumulation of stopped containers)
+                        subprocess.run(
+                            ['docker', 'rm', container_id],
+                            timeout=10, capture_output=True, encoding='utf-8', errors='replace'
+                        )
+                        # Clean up container record so next call starts fresh
+                        with _KERNEL_LOCK:
+                            if kernel_id in _DOCKER_CONTAINERS:
+                                del _DOCKER_CONTAINERS[kernel_id]
+                        
+                        logger.warning(f"Tier 3: Container {container_id} killed due to unresponsive kernel")
+                    except Exception as kill_err:
+                        logger.warning(f"Tier 3 container kill failed: {kill_err}")
+                
+                # Also clean up the dead kernel client so next call starts fresh
+                with _KERNEL_LOCK:
+                    if kernel_id in _KERNEL_CLIENTS:
+                        try:
+                            _KERNEL_CLIENTS[kernel_id].shutdown()
+                        except Exception:
+                            pass
+                        del _KERNEL_CLIENTS[kernel_id]
+            
+            # Update activity timestamp so watchdog doesn't double-kill
             with _KERNEL_LOCK:
-                # Preserve the dict structure (watchdog reads _KERNEL_ACTIVITY[kernel_id].get('work_dir'))
                 if kernel_id in _KERNEL_ACTIVITY and isinstance(_KERNEL_ACTIVITY[kernel_id], dict):
                     _KERNEL_ACTIVITY[kernel_id]['last_active'] = time.time()
                 else:
                     _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
             
+            # Return timeout message to caller (same behavior as before, just actually enforced)
             if exec_timeout and isinstance(e, TimeoutError):
                 return f'Timeout: Code execution exceeded the {exec_timeout}-second time limit. Please optimize your code or break it into smaller steps.'
             raise
@@ -398,6 +459,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         if exec_timeout:
             self._execute_code(kc, '_M6CountdownTimer.cancel()', timeout=10, kernel_id=kernel_id)
+
+        # Mark activity after successful execution so watchdog knows this kernel is still healthy (Fix D3)
+        with _KERNEL_LOCK:
+            if kernel_id in _KERNEL_ACTIVITY and isinstance(_KERNEL_ACTIVITY[kernel_id], dict):
+                _KERNEL_ACTIVITY[kernel_id]['last_active'] = time.time()
 
         if not result.strip():
             return 'Finished execution.'
@@ -615,7 +681,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
         with open(host_connection_file, 'w') as f:
             json.dump(host_conn_data, f)
 
-        # prepare container connection file 
+        # prepare container connection file (Fix B4 reverted: use 0.0.0.0 inside container)
+        # Rationale: allow_remote_access=False + 127.0.0.1 caused kernel to reject its own 
+        # connections on Windows Docker port forwarding. Kernel binds to all interfaces 
+        # inside the container, but host-side port binding is restricted to 127.0.0.1 (Fix C2)
         container_conn_data = host_conn_data.copy()
         container_conn_data["ip"] = "0.0.0.0"
         with open(container_connection_file, 'w') as f:
@@ -625,9 +694,16 @@ class CodeInterpreter(BaseToolWithFileAccess):
         docker_run_cmd = [
             'docker', 'run', '-d',
             '--name', f'code_interpreter_{kernel_id}',
-            '--add-host', 'host.docker.internal:host-gateway',
+            # Fix B3: Removed --add-host host.docker.internal:host-gateway (reduces network surface)
             '-v', f'{os.path.abspath(self.work_dir)}:{self.container_work_dir}',
             '-w', self.container_work_dir,
+            # Fix B1: Drop all Linux capabilities and prevent privilege escalation
+            '--cap-drop=ALL',
+            '--security-opt=no-new-privileges',
+            # Fix B2: Resource constraints (memory, CPU, PID limit) to prevent resource exhaustion
+            '--memory=' + CONTAINER_MEMORY_LIMIT,
+            '--cpus=' + str(CONTAINER_CPU_LIMIT),
+            '--pids-limit=' + str(CONTAINER_PID_LIMIT),
         ]
         
         # Resolve extra folders dynamically (picks up runtime config changes if operation_manager is set)
@@ -678,18 +754,26 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Store file path for writing after container confirmation
         path_mapping_file = os.path.join(self.work_dir, f'path_mapping_{kernel_id}.json')
 
+        # Fix C2: Bind forwarded ports to 127.0.0.1 only (not all interfaces)
         for p in ports:
-            docker_run_cmd.extend(['-p', f'{p}:{p}'])
+            docker_run_cmd.extend(['-p', f'127.0.0.1:{p}:{p}'])
 
         docker_run_cmd.extend([
             self.docker_image_name,
             'python', f'{self.container_work_dir}/{os.path.basename(launch_kernel_script)}',
             '--IPKernelApp.connection_file',
             f'{self.container_work_dir}/{os.path.basename(container_connection_file)}',
-            '--KernelApp.allow_remote_access=True',
+            '--KernelApp.allow_remote_access=False',
             '--matplotlib=inline',
             '--quiet',
         ])
+        
+        # Fix D2: Remove any leftover container with the same name from a previous crash
+        container_name = f'code_interpreter_{kernel_id}'
+        subprocess.run(
+            ['docker', 'rm', '-f', container_name],
+            capture_output=True, text=True, timeout=10, encoding='utf-8', errors='replace'
+        )
         
         # start Docker container
         result = subprocess.run(docker_run_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
@@ -787,8 +871,15 @@ class CodeInterpreter(BaseToolWithFileAccess):
         if timeout is None:
             timeout = CODE_EXECUTION_TIMEOUT
 
-        kc.wait_for_ready()
+        # Fix A2: Add timeout to wait_for_ready() to prevent permanent hang on stuck kernel
+        kc.wait_for_ready(timeout=30)
         kc.execute(code)
+        
+        # Mark execution start as "active" so watchdog doesn't kill during CPU-bound computation (Fix D3)
+        with _KERNEL_LOCK:
+            if kernel_id in _KERNEL_ACTIVITY and isinstance(_KERNEL_ACTIVITY[kernel_id], dict):
+                _KERNEL_ACTIVITY[kernel_id]['last_active'] = time.time()
+        
         result = ''
         image_idx = 0
         
@@ -813,10 +904,9 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 break
             
             # Check overall wall-clock budget at the top of each iteration
+            # Raise TimeoutError so caller's except block can interrupt the kernel (Fix A1a)
             if time.time() - start_time > timeout:
-                text = f'Timeout: Code execution exceeded the {timeout}-second time limit.'
-                finished = True
-                break
+                raise TimeoutError(f'Code execution exceeded the {timeout}-second time limit.')
             
             text = ''
             image = ''
@@ -867,9 +957,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     if 'M6_CODE_INTERPRETER_TIMEOUT' in text:
                         text = f'Timeout: Code execution exceeded the {timeout}-second time limit.'
             except queue.Empty:
-                # This is raised by get_iopub_msg() when timeout expires
-                text = f'Timeout: Code execution exceeded the {timeout}-second time limit.'
-                finished = True
+                # This is raised by get_iopub_msg() when timeout expires (Fix A1b)
+                raise TimeoutError(f'Code execution exceeded the {timeout}-second time limit.')
             except Exception:
                 text = 'The code interpreter encountered an unexpected error.'
                 print_traceback()

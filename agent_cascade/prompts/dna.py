@@ -161,8 +161,7 @@ TOOL_METADATA = {
             '- Respects .gitignore/.rgignore when ignore_vcs is True (default).\n'
             '- Use "context" to show surrounding lines (like -C N in grep/ripgrep).\n'
             '- Matched text is prefixed with ">>>" when context is used; context lines have spaces.\n'
-            '- Groups of matches are separated by "---".\n'
-            'NOTE: All paths are relative to the workspace root.'
+            '- Groups of matches are separated by "---".'
         ),
         'parameters': {
             'pattern': 'Text or regex pattern to search for (Python regex syntax)',
@@ -234,7 +233,8 @@ TOOL_METADATA = {
         'parameters': {
             'command': 'The exact shell command to execute.',
             'justification': 'Why you need to execute this command.',
-            'cwd': 'Optional working directory, absolute or relative to workspace root.'
+                            'cwd': 'Optional working directory, absolute or relative to workspace root.',
+                            'timeout': 'Optional timeout in seconds (default: 30). Use a higher value for long-running commands.'
         }
     },
     'system_info': {
@@ -243,8 +243,7 @@ TOOL_METADATA = {
             'This includes the operating system, current time and date, '
             'current work directories with their Docker container mount paths (e.g., host N:\\work\\WD\\AgentWorkspace maps to /workspace inside containers), '
             'Python version, and basic session stats. '
-            'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted. '
-            'NOTE: All file tool paths must still be relative to workspace root, not absolute host paths.'
+            'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted.'
         ),
         'parameters': {}
     },
@@ -344,14 +343,14 @@ TOOL_METADATA = {
     'compress_context': {
         'description': (
             'Summarize the oldest part of the conversation history to free up context space. '
-            'Supports two modes: "auto" (generated via LLM) and "manual" (provided via summary_text). '
+            'Supports two modes: "auto" (generated via specialized compression LLM) and "manual" (provided by agent via summary_text). '
             'A fraction of history is replaced by a concise summary.'
         ),
         'parameters': {
             'fraction': 'The fraction of history to summarize (e.g. 0.5 for 50%). Max 1.0.',
             'mode': "Compression mode: 'auto' (default) or 'manual'.",
             'justification': 'Why compression is needed now.',
-            'summary_text': 'Your own summary of the conversation history. Required when mode=manual.',
+            'summary_text': 'Your own summary of the conversation history portion that will be trimmed out. Required when mode=manual.',
             'force': 'Bypass validation guards (e.g., minimum message count). Used for critical threshold compression.'
         }
     },

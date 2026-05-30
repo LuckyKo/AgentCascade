@@ -1619,12 +1619,24 @@ class OperationManager:
 
         return True
 
-    def execute_shell_command(self, command: str, justification: str, agent_name: str, cwd: str = ".", char_limit: int = 2000) -> str:
+    def execute_shell_command(self, command: str, justification: str, agent_name: str, cwd: str = ".", char_limit: int = 2000, timeout: Optional[int] = None) -> str:
         """Execute a shell command — auto-approved for safe read-only commands (find, dir, ls), requires user approval for everything else."""
         try:
             resolved_cwd = self._resolve_path(cwd, mode="rw") # shell commands usually need RW for artifacts
         except Exception as e:
             return f"ERROR: Invalid working directory: {str(e)}"
+
+        # Enforce maximum command length to prevent abuse via extremely long commands
+        if len(command) > char_limit:
+            return f"ERROR: Command exceeds maximum length of {char_limit} characters."
+
+        # Validate and set effective timeout — default 30s, override if specified
+        DEFAULT_SHELL_TIMEOUT = 30
+        MAX_SHELL_TIMEOUT = 3600  # 1 hour max
+        # Reject bools explicitly: isinstance(True, int) == True in Python
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0 or timeout > MAX_SHELL_TIMEOUT):
+            return f"ERROR: Invalid timeout value: {timeout}. Must be a positive integer between 1 and {MAX_SHELL_TIMEOUT}."
+        effective_timeout = timeout if timeout is not None else DEFAULT_SHELL_TIMEOUT
 
         # Check if this is a safe read-only command that can be auto-approved
         is_safe = self._is_safe_readonly_shell_command(command)
@@ -1655,8 +1667,6 @@ class OperationManager:
         try:
             import subprocess
 
-            SHELL_TIMEOUT = 120  # seconds — prevent hanging indefinitely
-
             # Execute the command in the workspace directory.
             # On Windows, use CREATE_NEW_PROCESS_GROUP so we can kill the entire
             # process tree (including child python.exe processes) on timeout.
@@ -1677,7 +1687,7 @@ class OperationManager:
             )
 
             try:
-                stdout, stderr = proc.communicate(timeout=SHELL_TIMEOUT)
+                stdout, stderr = proc.communicate(timeout=effective_timeout)
                 result_ok = True
             except subprocess.TimeoutExpired:
                 # ── Timeout: kill the ENTIRE process tree, not just cmd.exe ──
@@ -1827,7 +1837,7 @@ class OperationManager:
                     output += f"STDERR (partial):\n{stderr}\n"
 
                 timeout_msg = (
-                    f"ERROR: Command timed out after {SHELL_TIMEOUT} seconds. "
+                    f"ERROR: Command timed out after {effective_timeout} seconds. "
                     f"All child processes have been forcibly terminated. "
                     f"Command was: `{command[:200]}`. "
                     f"If the process is expected to take a long time, consider using a background command "
