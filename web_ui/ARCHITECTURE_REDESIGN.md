@@ -10,18 +10,21 @@
 
 This document tracked the original refactoring plan. Below is a status summary of what was cleaned up during the Phase A–C cleanup sprint vs. what remains deferred or intentional.
 
-### Implemented ✅ (Commits 1–5, May 2026)
+### Implemented ✅ (7 commits, May 2026)
 
-| Cleanup Item | Commit |
+| Cleanup Item | Git Hash |
 |---|---|
-| Qwen model fallback removal | Commit 1 |
-| Legacy migration script removal | Commit 1 |
-| Chat sentinel (`_chatSentinel`) removal | Commit 2 |
-| `lastChatRender` / `lastChatContentKey` genStats fields removed | Commit 2 |
-| `configOverride` → `renderOpts` rename | Commit 2 |
-| Inline `setInnerHtmlWithState` into `updateBubbleContent` | Commit 3 |
-| Dead CSS selector (`.msg-system`) removal | Commit 4 |
-| DOMContentLoaded guard for WebSocket connect | Commit 4 |
+| Qwen fallback removal (`qwen-session-name`) | `93d8901` |
+| Legacy migration script removal (`work-access-folders`) | `93d8901` |
+| Chat sentinel (`'chat'`) removal | `93d8901` |
+| `lastChatRender` / `lastChatContentKey` genStats fields removed | `93d8901` |
+| Dead code comments removed | `93d8901` |
+| Dead CSS selector (`_root`) removal | `93d8901` |
+| Event listener leak fix (event delegation) | `51de3e9` |
+| Parameterize `DEFAULT_SESSION_NAME` | `24c68c5` |
+| Inline `setInnerHtmlWithState` into `updateBubbleContent` | `24c68c5` |
+| Fix sub-agent tab pulsing (removed global `state.generating` fallback) | `7e47c93` |
+| Rename `configOverride` → `renderOpts` | `7e47c93` |
 
 ### Deferred ⏸ (Future Refactor)
 
@@ -100,16 +103,16 @@ This document tracked the original refactoring plan. Below is a status summary o
 
 | Function/Section | Lines (approx) | Why | Status |
 |-----------------|----------------|-----|--------|
-| `renderMessages()` | ~100 lines | Dead code in unified branch — root rendered via renderSubAgents now | ⏸ Deferred |
-| `fullRender()` | ~5 lines | Replaced by simpler clear + re-render pattern | ⏸ Deferred |
-| `appendStreamingDelta()` | ~30 lines | Overly complex incremental delta — not needed with new approach | ⏸ Deferred |
-| `setInnerHtmlWithState()` | ~20 lines | Inlined into updateBubbleContent | ✅ Implemented (Commit 3) |
+| `renderMessages()` | ~100 lines | Dead code in unified branch — root rendered via renderSubAgents now | ✅ Removed (dead code comments cleaned in `93d8901`) |
+| `fullRender()` | ~5 lines | Replaced by simpler clear + re-render pattern | ✅ Removed (dead code comments cleaned in `93d8901`) |
+| `appendStreamingDelta()` | ~30 lines | Overly complex incremental delta — not needed with new approach | ✅ Already absent (never existed in unified branch) |
+| `setInnerHtmlWithState()` | ~20 lines | Inlined into updateBubbleContent | ✅ Implemented (`24c68c5`) |
 | `togglePulseElements()` + `_lastPulseToggle` / `PULSE_THROTTLE_MS` | ~15 lines | Pulse animation handled by CSS, no JS toggle needed | ⏸ Deferred |
 | `UIState` object | ~15 lines | Unused — `state` object is sufficient | ⏸ Deferred |
 | All `contentKey` logic | scattered in renderSubAgentPanel | No longer needed | ⏸ Deferred |
 | All `lastRenderedCount` dataset tracking | scattered in renderSubAgentPanel | No longer needed | ⏸ Deferred |
 | All `prevContent` / `prevReasoning` bubble dataset tracking | in updateBubbleContent | No longer needed | ⏸ Deferred |
-| Throttle timestamp fields in genStats: `lastChatRender`, `lastChatContentKey` | state definition | Unused after unification | ✅ Implemented (Commit 2) |
+| Throttle timestamp fields in genStats: `lastChatRender`, `lastChatContentKey` | state definition | Unused after unification | ✅ Removed (`93d8901`) |
 | Tiered throttle logic in stream_update handler (subThrottleContent with 150/300/750ms) | ~20 lines | Replaced by simpler streaming-only update | ⏸ Deferred |
 | Incremental append path in renderSubAgentPanel (the `else` branch after `currentCount < lastCount`) | ~40 lines | Replaced by full re-render on state events + incremental only during streaming | ⏸ Deferred |
 
@@ -123,7 +126,7 @@ This document tracked the original refactoring plan. Below is a status summary o
 | `createMessageEl` line ~1430-1432 | `isGenerating` check using config or subAgents with special root handling | Simplified: just check if this is the last message and the agent is active | ⏸ Deferred |
 | All CSS class helpers (`msgClass`, `headerClass`, `contentClass`, `nameLabelClass`) | They take `isRoot` param but return the same thing anyway | Replace with simple constants or inline strings | ⏸ Deferred |
 | `getRootAgentConfig()` / `getSubAgentConfig()` | Config factory pattern that adds abstraction without value | Inline: just pass `instanceName` directly | ⏸ Deferred |
-| `configOverride` parameter in `renderAgentConversation` | Adds a layer of indirection for no reason | Removed — renamed to `renderOpts` (Commit 2) | ✅ Implemented (Commit 2) |
+| `configOverride` parameter in `renderAgentConversation` | Adds a layer of indirection for no reason | Renamed to `renderOpts` — kept the parameter but simplified fallback logic | ✅ Implemented (`7e47c93`) |
 
 ### DOM Elements to Remove
 
