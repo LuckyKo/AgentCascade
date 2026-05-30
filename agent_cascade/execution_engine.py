@@ -11,10 +11,11 @@ Key design principle: Engine is stateless. It receives AgentInstance as a parame
 and orchestrates phases. Each phase method (~20-60 lines) is independently testable.
 """
 
+import copy
 import json
 import os
 import time
-from typing import Any, Iterator, List, Tuple
+from typing import Any, Iterator, List, Optional, Tuple
 
 from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
@@ -865,6 +866,89 @@ class ExecutionEngine:
     #  Tool Execution — unified path for ALL tools including call_agent
     # ═══════════════════════════════════════════════════════════════════════
 
+    def _cache_tool_args(self, instance_name: str, tool_name: str, tool_args: Any) -> None:
+        """Store resolved tool arguments in the per-instance cache for __USE_PREV_ARG__ reuse.
+
+        Args are deep-copied to prevent later mutation of cached values.
+        Each argument key is stored under the instance scope so that any
+        subsequent tool call can reuse it by name — regardless of which tool
+        originally provided it, or whether the previous call succeeded.
+
+        Args:
+            instance_name: The agent instance name (scope key).
+            tool_name: Name of the tool whose args are being cached.
+            tool_args: Resolved arguments (after placeholder substitution).
+        """
+        if not isinstance(tool_args, dict):
+            return  # Nothing to cache for non-dict args
+
+        try:
+            scope = self.pool.last_tool_args.setdefault(instance_name, {})
+            # Per-tool cache: most recent resolved args for this exact tool
+            scope[tool_name] = copy.deepcopy(tool_args)
+            # Global arg cache: union of all argument keys seen in this instance
+            global_cache = scope.setdefault("__GLOBAL__", {})
+            global_cache.update(copy.deepcopy(tool_args))
+        except (AttributeError, TypeError):
+            # Defensive: pool may not have last_tool_args in unusual setups
+            logger.warning(f"Failed to cache args for tool '{tool_name}' on instance '{instance_name}': deepcopy failed")
+
+    def _resolve_placeholders(self, tool_args: Any, instance_name: str,
+                              tool_name: str) -> Optional[dict]:
+        """Resolve __USE_PREV_ARG__ placeholders in tool arguments.
+
+        If *tool_args* is a JSON string it is parsed first, then resolved.
+        Resolution looks up each argument name in the global cache (which
+        aggregates args from all previous tool calls in this instance).
+        Unresolvable placeholders are left as-is — no error is raised so
+        that regular tool use is unaffected.
+
+        Args:
+            tool_args: Raw tool arguments (dict or JSON string).
+            instance_name: Agent instance name (scope key).
+            tool_name: Name of the tool being called.
+
+        Returns:
+            Resolved dict on success (with or without placeholder resolution),
+            or None on JSON parse failure / unexpected type.
+        """
+        # ── Step 1: ensure we have a dict to work with ──────────────────────
+        if isinstance(tool_args, dict):
+            parsed = tool_args
+        elif isinstance(tool_args, str):
+            try:
+                parsed = json.loads(tool_args)
+            except json.JSONDecodeError:
+                return None  # JSON parse failure — signal error to caller
+            if not isinstance(parsed, dict):
+                return None  # Parsed to non-dict — signal error
+        else:
+            return None  # Unexpected type — signal error
+
+        # ── Step 2: scan for placeholders (whitespace-tolerant) ────────────────
+        placeholders_found = [k for k, v in parsed.items()
+                              if isinstance(v, str) and v.strip() == "__USE_PREV_ARG__"]
+        if not placeholders_found:
+            return parsed  # No placeholders — nothing to do
+
+        resolved_args = copy.deepcopy(parsed)
+
+        # ── Step 3: look up each placeholder by arg name ────────────────────
+        scope_cache = getattr(self.pool, 'last_tool_args', {}).get(instance_name, {})
+
+        prev_args = scope_cache.get(tool_name)           # tool-specific fallback
+        global_args = scope_cache.get("__GLOBAL__", {})  # primary lookup (all tools)
+
+        for arg_key in placeholders_found:
+            # Try global cache first (any previous tool), then tool-specific
+            if arg_key in global_args:
+                resolved_args[arg_key] = copy.deepcopy(global_args[arg_key])
+            elif prev_args and arg_key in prev_args:
+                resolved_args[arg_key] = copy.deepcopy(prev_args[arg_key])
+            # else: leave the placeholder as-is — no error, just pass through
+
+        return resolved_args
+
     def _execute_tool(
         self, instance: AgentInstance, tool_name: str,
         tool_args, messages: List[Message]
@@ -884,34 +968,40 @@ class ExecutionEngine:
             Tool execution result as a string.
         """
         if tool_name == 'call_agent':
-            return self._handle_call_agent(tool_args, messages, instance)
+            resolved = self._resolve_placeholders(tool_args, instance.instance_name, tool_name)
+            result = self._handle_call_agent(resolved, messages, instance)
+            self._cache_tool_args(instance.instance_name, tool_name, resolved)
+            return result
         elif tool_name == 'dismiss_agent':
-            return self._handle_dismiss_agent(tool_args, instance)
+            resolved = self._resolve_placeholders(tool_args, instance.instance_name, tool_name)
+            result = self._handle_dismiss_agent(resolved, instance)
+            self._cache_tool_args(instance.instance_name, tool_name, resolved)
+            return result
         elif tool_name == 'compress_context':
-            return self._handle_compress_context(tool_args, messages, instance.instance_name)
+            resolved = self._resolve_placeholders(tool_args, instance.instance_name, tool_name)
+            result = self._handle_compress_context(resolved, messages, instance.instance_name)
+            self._cache_tool_args(instance.instance_name, tool_name, resolved)
+            return result
         else:
             # Standard tool execution via template's function_map
             template = self.pool.templates.get(instance.agent_class)
             if not template:
                 raise ValueError(f"No template for agent class {instance.agent_class}")
 
-            # Resolve __USE_PREV_ARG__ placeholders
-            if isinstance(tool_args, dict):
-                from agent_cascade.tool_utils import resolve_prev_arg_placeholders
-                tool_args, prev_err = resolve_prev_arg_placeholders(
-                    tool_args, instance.instance_name, tool_name, self.pool
-                )
-                if prev_err:
-                    return prev_err
+            resolved = self._resolve_placeholders(tool_args, instance.instance_name, tool_name)
+            if resolved is None:
+                return f"Error: Invalid JSON arguments for tool '{tool_name}'."
 
-            return template._call_tool(
-                tool_name, tool_args,
+            result = template._call_tool(
+                tool_name, resolved,
                 agent_instance_name=instance.instance_name,
                 agent_obj=self,
                 messages=messages,
             )
+            self._cache_tool_args(instance.instance_name, tool_name, resolved)
+            return result
 
-    def _handle_call_agent(self, args: dict, messages: List[Message], instance: AgentInstance) -> str:
+    def _handle_call_agent(self, args: Any, messages: List[Message], instance: AgentInstance) -> str:
         """Handle call_agent tool call — the unified path replacing the old sub-agent execution.
 
         Works the same for any agent calling another agent. No special paths.
@@ -924,11 +1014,9 @@ class ExecutionEngine:
         Returns:
             Result string from the called agent.
         """
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except json.JSONDecodeError:
-                return f'Error: Invalid JSON arguments: {args}'
+        if args is None:
+            # JSON parsing failed in _resolve_placeholders — return error
+            return 'Error: Invalid JSON arguments.'
 
         instance_name = args.get('instance_name', '')
         agent_class = (args.get('agent_class') or '').strip().lower()
@@ -978,7 +1066,7 @@ class ExecutionEngine:
         # Synchronous execution — the unified path
         return self._execute_agent_sync(agent_class, instance_name, args, messages, instance.instance_name)
 
-    def _handle_dismiss_agent(self, args: dict, instance: AgentInstance) -> str:
+    def _handle_dismiss_agent(self, args: Any, instance: AgentInstance) -> str:
         """Handle dismiss_agent tool call — removes another agent from pool.
 
         Args:
@@ -988,11 +1076,9 @@ class ExecutionEngine:
         Returns:
             Result string confirming dismissal.
         """
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except json.JSONDecodeError:
-                return f'Error: Invalid JSON arguments: {args}'
+        if args is None:
+            # JSON parsing failed in _resolve_placeholders — return error
+            return 'Error: Invalid JSON arguments.'
 
         target_name = args.get('instance_name', '')
         if not target_name:
@@ -1012,7 +1098,7 @@ class ExecutionEngine:
     # ═══════════════════════════════════════════════════════════════════════
 
     def _handle_compress_context(
-        self, args: dict, messages: List[Message], target_agent_name: str
+        self, args: Any, messages: List[Message], target_agent_name: str
     ) -> str:
         """Handle compress_context tool call — delegates to compression module.
 
@@ -1024,11 +1110,9 @@ class ExecutionEngine:
         Returns:
             Result string with compression outcome.
         """
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except json.JSONDecodeError:
-                return f'Error: Invalid JSON arguments: {args}'
+        if args is None:
+            # JSON parsing failed in _resolve_placeholders — return error
+            return 'Error: Invalid JSON arguments.'
 
         # Fix #7: Validate fraction to prevent extreme values
         fraction = max(0.1, min(0.9, args.get('fraction', 0.5)))
@@ -1057,7 +1141,7 @@ class ExecutionEngine:
 
         if result.success:
             # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
-            instance._last_token_count_conversation_length = -1
+            inst._last_token_count_conversation_length = -1
 
             # Sync logger's internal data["history"] to match pool state (Item 11)
             # Without this, update_history() will treat pool messages not yet seen by

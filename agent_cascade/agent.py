@@ -69,6 +69,9 @@ class Agent(ABC):
         self.system_message = system_message
         self.name = name
         self.description = description
+        # Per-agent arg reuse cache: maps arg_name -> last known value.
+        # Shared across all tool calls for this agent instance (legacy path).
+        self._prev_tool_args: Dict[str, Any] = {}
 
     def run_nonstream(self, messages: List[Union[Dict, Message]], **kwargs) -> Union[List[Message], List[Dict]]:
         """Same as self.run, but with stream=False,
@@ -226,6 +229,49 @@ class Agent(ABC):
             
         return disabled
 
+    def _resolve_tool_args(self, tool_args: Union[str, dict]) -> Any:
+        """Resolve __USE_PREV_ARG__ placeholders for legacy agent path.
+
+        Parses JSON strings, replaces placeholder values with cached previous
+        arg values by name (global cache — not scoped per tool), and updates
+        the cache with the resolved args. Unresolvable placeholders pass
+        through silently. Malformed JSON is passed through unchanged so the
+        tool fails with a clear error.
+
+        Args:
+            tool_args: Raw arguments (JSON string or dict).
+
+        Returns:
+            Resolved argument dict, or the original value if parsing failed.
+        """
+        # Parse JSON string if needed
+        if isinstance(tool_args, str):
+            try:
+                parsed = json.loads(tool_args)
+            except json.JSONDecodeError:
+                return tool_args  # Pass through so tool fails with clear error
+            if not isinstance(parsed, dict):
+                return parsed
+        elif isinstance(tool_args, dict):
+            parsed = tool_args
+        else:
+            return tool_args
+
+        # Scan for placeholders and resolve from cache
+        resolved = copy.deepcopy(parsed)
+        for key, val in resolved.items():
+            if isinstance(val, str) and val.strip() == "__USE_PREV_ARG__":
+                cached_val = self._prev_tool_args.get(key)
+                if cached_val is not None:
+                    resolved[key] = copy.deepcopy(cached_val)
+                # else: leave placeholder as-is — tool will receive it
+
+        # Update cache with all resolved arg values (most recent wins)
+        for key, val in resolved.items():
+            self._prev_tool_args[key] = copy.deepcopy(val)
+
+        return resolved
+
     def _call_tool(self, tool_name: str, tool_args: Union[str, dict] = '{}', **kwargs) -> Union[str, List[ContentItem]]:
         """The interface of calling tools for the agent.
 
@@ -238,14 +284,17 @@ class Agent(ABC):
         """
         if tool_name not in self.function_map:
             return f'Tool {tool_name} does not exists.'
-        
+
+        # Resolve __USE_PREV_ARG__ placeholders (legacy agent path)
+        resolved_args = self._resolve_tool_args(tool_args)
+
         tool = self.function_map[tool_name]
         try:
             # Pass the agent itself as agent_obj so tools (like compress_context) 
             # can sync back to its base system_message for persistence across turns.
             if 'agent_obj' not in kwargs:
                 kwargs['agent_obj'] = self
-            tool_result = tool.call(tool_args, **kwargs)
+            tool_result = tool.call(resolved_args, **kwargs)
         except (ToolServiceError, DocParserError) as ex:
             error_message = str(ex)
             logger.warning(f'Tool `{tool_name}` reported a service error:\n{error_message}')

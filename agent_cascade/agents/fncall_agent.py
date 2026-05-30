@@ -24,6 +24,15 @@ from agent_cascade.tools import BaseTool
 from agent_cascade.utils.utils import extract_files_from_messages
 
 
+# ===========================================================================
+    # TODO(CLEANUP-LEGACY): Migrate FnCallAgent to route tool execution through
+    # ExecutionEngine._execute_tool() instead of its own _call_tool().
+    # Until then, __USE_PREV_ARG__ resolution and arg caching work via the
+    # base Agent class path (self._resolve_tool_args) but not via the pool cache.
+    # Affected: Assistant, ReActChat, TIRMathAgent, assistant.py,
+    #   assistant_qwen3vl.py, qwen2vl_assistant_tooluse.py
+    # ===========================================================================
+
 class FnCallAgent(Agent):
     """This is a widely applicable function call agent integrated with llm and tool use ability."""
 
