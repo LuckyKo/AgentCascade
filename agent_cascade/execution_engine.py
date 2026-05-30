@@ -1276,6 +1276,16 @@ class ExecutionEngine:
             compression_summary=None,
             latest_marker_index=-1,
         )
+
+        # Fix #6: Warn if reusing an instance name that already exists with the same class
+        existing = self.pool.instances.get(instance_name)
+        if existing is not None:
+            old_active = getattr(existing, 'is_active', False)
+            logger.warning(
+                f"[INSTANCE REUSE] '{instance_name}' ({agent_class}) is being reused. "
+                f"Previous instance was {'active' if old_active else 'inactive'} — conversation will be replaced."
+            )
+
         self.pool.instances[instance_name] = inst
 
         # Build system message for new agent
@@ -1513,19 +1523,38 @@ class ExecutionEngine:
         self, agent_class: str, instance_name: str,
         args: dict, caller_history: List[Message], caller: str
     ) -> str:
-        """Execute an agent synchronously through the unified loop. Replaces _stream_agent_instance_call()."""
+        """Execute an agent synchronously through the unified loop. Replaces _stream_agent_instance_call().
+
+        Fix #5: Acquires endpoint scheduling slot before execution (matching parallel tasks in submit_task).
+        """
         from agent_cascade.compression.helpers import extract_instance_output
 
         template = self.pool.templates.get(agent_class)
         if not template:
             return f"Error: Agent class '{agent_class}' not found."
 
-        # Create and run via shared helper
-        inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller)
+        # ── Fix #5: Acquire endpoint scheduling slot before sync execution ──
+        endpoint_release = None
+        if hasattr(self.pool, '_execution') and hasattr(self.pool._execution, '_acquire_slot'):
+            try:
+                endpoint_release = self.pool._execution._acquire_slot(agent_class, instance_name)
+            except Exception as e:
+                logger.warning(f"Failed to acquire endpoint slot for {instance_name}: {e}")
 
-        # Note: _create_and_run_agent handles active_stack cleanup via its own finally block.
-        result_str = extract_instance_output(conv, instance_name)
-        return f"[{instance_name}\'s output]:\n{result_str}"
+        try:
+            # Create and run via shared helper
+            inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller)
+
+            # Note: _create_and_run_agent handles active_stack cleanup via its own finally block.
+            result_str = extract_instance_output(conv, instance_name)
+            return f"[{instance_name}\'s output]:\n{result_str}"
+        finally:
+            # Fix #5: Release endpoint slot when sync execution completes
+            if endpoint_release is not None:
+                try:
+                    endpoint_release()
+                except Exception as e:
+                    logger.warning(f"Failed to release endpoint slot for {instance_name}: {e}")
 
     def _get_max_tokens(self, instance: AgentInstance) -> int:
         """Resolve the effective max_input_tokens from LLM config."""

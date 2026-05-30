@@ -1881,6 +1881,7 @@ def create_app(agents, agent_pool, config=None):
                             loop = asyncio.get_running_loop()
                             def _security_check():
                                 sec_state_key = None  # Defined early so finally can reference it directly (Fix #4)
+                                sec_endpoint_release = None  # Fix #3: endpoint slot release callback
                                 try:
                                     import platform
                                     import json
@@ -1910,16 +1911,24 @@ def create_app(agents, agent_pool, config=None):
                                             {'role': USER, 'content': prompt},
                                         ]
                                         
-                                        # Register security advisor in instance_state so it shows a tab
+                                        # ── Fix #3: Acquire endpoint scheduling slot before execution ──
+                                        if hasattr(agent_pool, '_execution') and hasattr(agent_pool._execution, '_acquire_slot'):
+                                            try:
+                                                sec_endpoint_release = agent_pool._execution._acquire_slot('security_advisor', 'security_advisor')
+                                            except Exception as e:
+                                                logger.warning(f"Failed to acquire endpoint slot for security_advisor: {e}")
+
+                                        # Register security advisor in instance_state so it shows a tab (Fix #4: thread-safe)
                                         sec_state_key = 'security_advisor'
-                                        agent_pool.instance_state[sec_state_key] = {
-                                            'active': True,
-                                            'agent_name': f"Security Advisor (security_advisor)",
-                                            'messages': list(history),
-                                        }
-                                        agent_pool.instance_conversations[sec_state_key] = list(history)
-                                        if sec_state_key not in agent_pool.active_stack:
-                                            agent_pool.active_stack_append(sec_state_key)  # active_stack returns defensive copy; use mutation method
+                                        with agent_pool._execution._state_lock:
+                                            agent_pool.instance_state[sec_state_key] = {
+                                                'active': True,
+                                                'agent_name': f"Security Advisor (security_advisor)",
+                                                'messages': list(history),
+                                            }
+                                            agent_pool.instance_conversations[sec_state_key] = list(history)
+                                            if sec_state_key not in agent_pool.active_stack:
+                                                agent_pool._execution.active_stack.append(sec_state_key)
                                         # Broadcast initial state so the tab appears immediately
                                         asyncio.run_coroutine_threadsafe(
                                             send_queue.put({'type': 'stream_update', **build_stream_update([], agent_instances=get_instance_state(streaming=True))}),
@@ -1944,9 +1953,64 @@ def create_app(agents, agent_pool, config=None):
                                         sec_start_time = time.monotonic()
                                         sec_timeout_reached = False
                                         sec_elapsed_at_timeout = None  # Fix #5: store elapsed at the moment of timeout
-                    
-                                        # Fix #1: Extract generator to close it on timeout (prevents resource leak)
-                                        run_gen = sec_agent.run(history, agent_instance_name='security_advisor', **llm_safe_cfg)
+
+                                        # ── Fix #2: Route LLM call through API router instead of direct sec_agent.run() ──
+                                        api_router_sec = getattr(agent_pool, 'api_router', None)
+
+                                        if api_router_sec and hasattr(api_router_sec, 'call_with_fallback'):
+                                            def _security_llm_call(llm_cfg: dict):
+                                                """Execute the security advisor's LLM call with the given config."""
+                                                # Build messages list — prepend system message like Agent.run() does
+                                                messages_to_send = list(history)
+                                                if sec_agent.system_message and (not messages_to_send or
+                                                        messages_to_send[0].get('role') != SYSTEM):
+                                                    messages_to_send.insert(
+                                                        0, {'role': SYSTEM, 'content': sec_agent.system_message}
+                                                    )
+
+                                                # Merge configs: agent extra → LLM generate_cfg → UI settings → router config
+                                                merged_cfg = {}
+                                                if hasattr(sec_agent, 'extra_generate_cfg') and sec_agent.extra_generate_cfg:
+                                                    merged_cfg.update(sec_agent.extra_generate_cfg)
+                                                if hasattr(sec_agent.llm, 'generate_cfg'):
+                                                    merged_cfg.update(sec_agent.llm.generate_cfg)
+                                                # Apply non-LLM config (max_turns, etc.) from UI settings
+                                                merged_cfg.update(llm_safe_cfg)
+                                                # Apply router-provided LLM config (model, api_base, etc.) — overrides
+                                                merged_cfg.update(llm_cfg)
+                                                merged_cfg['agent_name'] = sec_agent.name
+
+                                                return sec_agent.llm.chat(
+                                                    messages=messages_to_send,
+                                                    stream=True,
+                                                    delta_stream=False,
+                                                    extra_generate_cfg=merged_cfg,
+                                                )
+
+                                            # call_with_fallback handles retries, per-endpoint concurrency semaphores, and failover
+                                            run_gen = api_router_sec.call_with_fallback('security_advisor', _security_llm_call)
+                                        else:
+                                            # Fallback: direct LLM call if no router available (preserves old behavior)
+                                            logger.warning("API router unavailable — using direct LLM call for security advisor")
+                                            # Prepend system message like Agent.run() does
+                                            messages_to_send = list(history)
+                                            if sec_agent.system_message and (not messages_to_send or
+                                                    messages_to_send[0].get('role') != SYSTEM):
+                                                messages_to_send.insert(
+                                                    0, {'role': SYSTEM, 'content': sec_agent.system_message}
+                                                )
+                                            # Include agent_name in config for proper tracking
+                                            fallback_cfg = {}
+                                            if hasattr(sec_agent, 'extra_generate_cfg') and sec_agent.extra_generate_cfg:
+                                                fallback_cfg.update(sec_agent.extra_generate_cfg)
+                                            fallback_cfg.update(llm_safe_cfg)
+                                            fallback_cfg['agent_name'] = sec_agent.name
+                                            run_gen = sec_agent.llm.chat(
+                                                messages=messages_to_send,
+                                                stream=True,
+                                                delta_stream=False,
+                                                extra_generate_cfg=fallback_cfg,
+                                            )
                                         
                                         # Schedule warning AFTER generator creation so timer is only created if gen succeeded
                                         def _sec_warning_injector():
@@ -1976,9 +2040,14 @@ def create_app(agents, agent_pool, config=None):
                                                     break
                                                 
                                                 final_msgs = partial
-                                                # Update instance_state with current message history during streaming
-                                                agent_pool.instance_state[sec_state_key]['messages'] = list(history) + list(final_msgs) if isinstance(final_msgs, list) else [history[0]] + list(final_msgs)
-                                                agent_pool.instance_conversations[sec_state_key] = list(agent_pool.instance_state[sec_state_key]['messages'])
+                                                # Fix #4: Update instance_state with lock protection during streaming
+                                                with agent_pool._execution._state_lock:
+                                                    agent_pool.instance_state[sec_state_key]['messages'] = (
+                                                        list(history) + (list(final_msgs) if isinstance(final_msgs, list) else [final_msgs])
+                                                    )
+                                                    agent_pool.instance_conversations[sec_state_key] = list(
+                                                        agent_pool.instance_state[sec_state_key]['messages']
+                                                    )
                                                 # Only broadcast at start and end of security check (not every token)
                                                 if sec_first_broadcast:
                                                     asyncio.run_coroutine_threadsafe(
@@ -2208,12 +2277,20 @@ def create_app(agents, agent_pool, config=None):
                                             loop
                                         )
                                 finally:
-                                    # Always clean up security advisor state when done
-                                    # sec_state_key is defined at function scope (as 'security_advisor'), so direct reference is safe
+                                    # Always clean up security advisor state when done (Fix #4: thread-safe)
                                     if sec_state_key and sec_state_key in agent_pool.instance_state:
-                                        agent_pool.instance_state[sec_state_key]['active'] = False
-                                        if sec_state_key in agent_pool.active_stack:
-                                            agent_pool.active_stack_remove(sec_state_key)  # active_stack returns defensive copy; use mutation method
+                                        with agent_pool._execution._state_lock:
+                                            agent_pool.instance_state[sec_state_key]['active'] = False
+                                            if sec_state_key in agent_pool.active_stack:
+                                                agent_pool._execution.active_stack.remove(sec_state_key)
+
+                                    # Fix #3: Release endpoint slot when done
+                                    if sec_endpoint_release is not None:
+                                        try:
+                                            sec_endpoint_release()
+                                        except Exception as e:
+                                            logger.warning(f"Failed to release endpoint slot for security_advisor: {e}")
+
                                     if hasattr(app, 'active_security_checks') and rid:
                                         with app.active_security_checks_lock:
                                             app.active_security_checks.discard(rid)
