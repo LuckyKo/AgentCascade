@@ -6,6 +6,40 @@
 
 ---
 
+## Cleanup Sprint Summary (Phase A–C, May 2026)
+
+This document tracked the original refactoring plan. Below is a status summary of what was cleaned up during the Phase A–C cleanup sprint vs. what remains deferred or intentional.
+
+### Implemented ✅ (Commits 1–5, May 2026)
+
+| Cleanup Item | Commit |
+|---|---|
+| Qwen model fallback removal | Commit 1 |
+| Legacy migration script removal | Commit 1 |
+| Chat sentinel (`_chatSentinel`) removal | Commit 2 |
+| `lastChatRender` / `lastChatContentKey` genStats fields removed | Commit 2 |
+| `configOverride` → `renderOpts` rename | Commit 2 |
+| Inline `setInnerHtmlWithState` into `updateBubbleContent` | Commit 3 |
+| Dead CSS selector (`.msg-system`) removal | Commit 4 |
+| DOMContentLoaded guard for WebSocket connect | Commit 4 |
+
+### Deferred ⏸ (Future Refactor)
+
+| Item | Reason |
+|---|---|
+| Full innerHTML audit across the codebase | Low risk, high effort — not urgent |
+| Browser dialog replacement (`prompt`/`confirm`) | UI polish, no functional impact |
+| Inline style extraction to CSS | Cosmetic cleanup |
+| `$()` helper rename (jQuery conflict) | No actual jQuery usage found; safe to leave |
+
+### Not Legacy — Intentional Design ❌
+
+| Item | Reason |
+|---|---|
+| `isRoot` checks in tab rendering | Used only for tab title icon differentiation (💬 vs 🤖) and message routing — intentional design, not legacy baggage |
+
+---
+
 ## Table of Contents
 
 1. [Current Problems](#current-problems)
@@ -64,32 +98,32 @@
 
 ### Functions / Sections to Remove Entirely
 
-| Function/Section | Lines (approx) | Why |
-|-----------------|----------------|-----|
-| `renderMessages()` | ~100 lines | Dead code in unified branch — root rendered via renderSubAgents now |
-| `fullRender()` | ~5 lines | Replaced by simpler clear + re-render pattern |
-| `appendStreamingDelta()` | ~30 lines | Overly complex incremental delta — not needed with new approach |
-| `setInnerHtmlWithState()` | ~20 lines | Inlined into updateBubbleContent |
-| `togglePulseElements()` + `_lastPulseToggle` / `PULSE_THROTTLE_MS` | ~15 lines | Pulse animation handled by CSS, no JS toggle needed |
-| `UIState` object | ~15 lines | Unused — `state` object is sufficient |
-| All `contentKey` logic | scattered in renderSubAgentPanel | No longer needed |
-| All `lastRenderedCount` dataset tracking | scattered in renderSubAgentPanel | No longer needed |
-| All `prevContent` / `prevReasoning` bubble dataset tracking | in updateBubbleContent | No longer needed |
-| Throttle timestamp fields in genStats: `lastChatRender`, `lastChatContentKey` | state definition | Unused after unification |
-| Tiered throttle logic in stream_update handler (subThrottleContent with 150/300/750ms) | ~20 lines | Replaced by simpler streaming-only update |
-| Incremental append path in renderSubAgentPanel (the `else` branch after `currentCount < lastCount`) | ~40 lines | Replaced by full re-render on state events + incremental only during streaming |
+| Function/Section | Lines (approx) | Why | Status |
+|-----------------|----------------|-----|--------|
+| `renderMessages()` | ~100 lines | Dead code in unified branch — root rendered via renderSubAgents now | ⏸ Deferred |
+| `fullRender()` | ~5 lines | Replaced by simpler clear + re-render pattern | ⏸ Deferred |
+| `appendStreamingDelta()` | ~30 lines | Overly complex incremental delta — not needed with new approach | ⏸ Deferred |
+| `setInnerHtmlWithState()` | ~20 lines | Inlined into updateBubbleContent | ✅ Implemented (Commit 3) |
+| `togglePulseElements()` + `_lastPulseToggle` / `PULSE_THROTTLE_MS` | ~15 lines | Pulse animation handled by CSS, no JS toggle needed | ⏸ Deferred |
+| `UIState` object | ~15 lines | Unused — `state` object is sufficient | ⏸ Deferred |
+| All `contentKey` logic | scattered in renderSubAgentPanel | No longer needed | ⏸ Deferred |
+| All `lastRenderedCount` dataset tracking | scattered in renderSubAgentPanel | No longer needed | ⏸ Deferred |
+| All `prevContent` / `prevReasoning` bubble dataset tracking | in updateBubbleContent | No longer needed | ⏸ Deferred |
+| Throttle timestamp fields in genStats: `lastChatRender`, `lastChatContentKey` | state definition | Unused after unification | ✅ Implemented (Commit 2) |
+| Tiered throttle logic in stream_update handler (subThrottleContent with 150/300/750ms) | ~20 lines | Replaced by simpler streaming-only update | ⏸ Deferred |
+| Incremental append path in renderSubAgentPanel (the `else` branch after `currentCount < lastCount`) | ~40 lines | Replaced by full re-render on state events + incremental only during streaming | ⏸ Deferred |
 
 ### ALL isRoot-specific Logic to Remove
 
-| Location | What to Remove | Why |
-|----------|---------------|-----|
-| `renderSubAgentPanel` line ~2337 | `displayMsgs = isRoot ? msgs.filter(m => m.role !== 'system') : msgs` | System messages shown for ALL agents equally |
-| `renderSubAgentPanel` line ~2334 | `const isActive = isRoot ? (state.generating && !agentData?.is_halted) : (agentData?.active ?? false)` | Use `agentData.active` for all. Root agent gets `active` flag from server like everyone else |
-| `renderSubAgentPanel` lines ~2448-2457 | Special token/word count handling for root | Use `agentData.total_tokens` / `state.totalTokens` uniformly — pass via a simple helper |
-| `createMessageEl` line ~1430-1432 | `isGenerating` check using config or subAgents with special root handling | Simplified: just check if this is the last message and the agent is active |
-| All CSS class helpers (`msgClass`, `headerClass`, `contentClass`, `nameLabelClass`) | They take `isRoot` param but return the same thing anyway | Replace with simple constants or inline strings |
-| `getRootAgentConfig()` / `getSubAgentConfig()` | Config factory pattern that adds abstraction without value | Inline: just pass `instanceName` directly |
-| `configOverride` parameter in `renderAgentConversation` | Adds a layer of indirection for no reason | Remove — config is simple enough to pass directly |
+| Location | What to Remove | Why | Status |
+|----------|---------------|-----|--------|
+| `renderSubAgentPanel` line ~2337 | `displayMsgs = isRoot ? msgs.filter(m => m.role !== 'system') : msgs` | System messages shown for ALL agents equally | ⏸ Deferred |
+| `renderSubAgentPanel` line ~2334 | `const isActive = isRoot ? (state.generating && !agentData?.is_halted) : (agentData?.active ?? false)` | Use `agentData.active` for all. Root agent gets `active` flag from server like everyone else | ⏸ Deferred |
+| `renderSubAgentPanel` lines ~2448-2457 | Special token/word count handling for root | Use `agentData.total_tokens` / `state.totalTokens` uniformly — pass via a simple helper | ⏸ Deferred |
+| `createMessageEl` line ~1430-1432 | `isGenerating` check using config or subAgents with special root handling | Simplified: just check if this is the last message and the agent is active | ⏸ Deferred |
+| All CSS class helpers (`msgClass`, `headerClass`, `contentClass`, `nameLabelClass`) | They take `isRoot` param but return the same thing anyway | Replace with simple constants or inline strings | ⏸ Deferred |
+| `getRootAgentConfig()` / `getSubAgentConfig()` | Config factory pattern that adds abstraction without value | Inline: just pass `instanceName` directly | ⏸ Deferred |
+| `configOverride` parameter in `renderAgentConversation` | Adds a layer of indirection for no reason | Removed — renamed to `renderOpts` (Commit 2) | ✅ Implemented (Commit 2) |
 
 ### DOM Elements to Remove
 
@@ -566,14 +600,11 @@ This means system prompts are invisible in the chat, which is confusing — user
 
 **Additionally**, when a system message arrives during an active session (not initial load), a temporary banner appears above the input area — similar to how the approval bar works:
 
-```javascript
 // In handleServerMessage, stream_update handler — for each new message:
 if (msg.role === 'system') {
-    showSystemMessageBanner(msg.content);  // Temp banner for 5 seconds
+    showSystemMessageBanner(msg.content);  // Banner auto-hides to avoid cluttering chat
 }
-```
 
-The banner auto-hides after 5 seconds. This gives the user awareness that the system context changed without cluttering the chat.
 
 ### Visual Distinction for System Messages
 
