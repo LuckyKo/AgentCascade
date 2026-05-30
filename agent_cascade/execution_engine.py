@@ -14,6 +14,7 @@ and orchestrates phases. Each phase method (~20-60 lines) is independently testa
 import copy
 import json
 import os
+import re
 import time
 from typing import Any, Iterator, List, Optional, Tuple
 
@@ -38,21 +39,104 @@ def _get_active_functions_from_template(template) -> list:
     # Read disabled_tools from template.llm.generate_cfg (same source as Agent)
     # Templates are always created via load_agent() → create_agent_from_soul(),
     # so llm and generate_cfg are guaranteed to exist by construction.
-    disabled_map = getattr(template.llm, 'generate_cfg', {}).get('disabled_tools', {})
+    raw_disabled = getattr(template.llm, 'generate_cfg', {}).get('disabled_tools', {})
 
-    # Collect all disabled tool names for this agent (by name, slug, and agent_type)
-    agent_name = getattr(template, 'name', None)
-    disabled = set(disabled_map.get(agent_name, []))  # Mirrors main branch — safe even when name is None
-    if agent_name:
-        slug = agent_name.lower().replace(' ', '_')
-        disabled.update(disabled_map.get(slug, []))
+    # Handle both dict format (per-agent: {"Maine": ["tool1"]}) and flat list format
+    if isinstance(raw_disabled, dict):
+        disabled_map = raw_disabled
+        agent_name = getattr(template, 'name', None)
+        disabled = set(disabled_map.get(agent_name, []))  # Mirrors main branch — safe even when name is None
+        if agent_name:
+            slug = agent_name.lower().replace(' ', '_')
+            disabled.update(disabled_map.get(slug, []))
 
-    agent_type = getattr(template, 'agent_type', None)
-    if agent_type and agent_type in disabled_map:
-        disabled.update(disabled_map[agent_type])
+        agent_type = getattr(template, 'agent_type', None)
+        if agent_type and agent_type in disabled_map:
+            disabled.update(disabled_map[agent_type])
+    elif isinstance(raw_disabled, (list, tuple)):
+        disabled = set(raw_disabled)
+    else:
+        disabled = set()
 
     # Return function schemas for tools NOT in the disabled set
     return [func.function for name, func in template.function_map.items() if name not in disabled]
+
+
+def _build_resources_block(pool, template) -> str:
+    """Build the '--- CURRENT AVAILABLE RESOURCES' block reflecting current disabled_tools.
+
+    This is used both during initial injection and to refresh the block when
+    disabled_tools changes at runtime (e.g., user toggles tools via UI).
+
+    Args:
+        pool: The AgentPool instance (needed to list available agent types).
+        template: The agent template with function_map and llm.generate_cfg.
+
+    Returns:
+        A string containing the full resources block, or empty string if no template.
+    """
+    if not template or not hasattr(template, 'function_map'):
+        return ""
+
+    res = "\n\n--- CURRENT AVAILABLE RESOURCES (Auto-Injected) ---\n"
+
+    # Determine disabled tools for this agent's class
+    disabled_tools = []
+    raw_disabled = getattr(getattr(template, 'llm', None), 'generate_cfg', {}).get('disabled_tools', [])
+    if isinstance(raw_disabled, dict):
+        agent_key = getattr(template, 'agent_class', None) or getattr(template, 'name', '')
+        slug = agent_key.lower().replace(' ', '_') if agent_key else ''
+        disabled_tools = list(set(
+            raw_disabled.get(agent_key, []) + raw_disabled.get(slug, [])
+        ))
+    elif isinstance(raw_disabled, (list, tuple)):
+        disabled_tools = list(set(raw_disabled))
+
+    can_call_agents = 'call_agent' in template.function_map and 'call_agent' not in disabled_tools
+
+    # List available agent types only if this agent can call other agents
+    if can_call_agents:
+        res += "\nAvailable Agent Types (call via call_agent):\n"
+        has_agents = False
+        templates_dict = getattr(pool, 'templates', {})
+        for name in sorted(templates_dict.keys()):
+            if name != getattr(template, 'agent_class', None):
+                agent_obj = templates_dict[name]
+                tagline = getattr(agent_obj, 'description', 'No description provided')
+                res += f"- **{name}**: {tagline}\n"
+                has_agents = True
+        if not has_agents:
+            res += "- None currently available.\n"
+
+    # List enabled tools (excluding disabled ones)
+    res += "\nEnabled Tools (can change per interaction):\n"
+    for t_name in sorted(template.function_map.keys()):
+        if t_name in disabled_tools:
+            continue
+        desc = getattr(template.function_map[t_name], 'description', 'No description provided')
+        res += f"- **{t_name}**: {desc}\n"
+
+    return res
+
+
+def _replace_resources_block(m0_content: str, new_block: str) -> str:
+    """Replace the existing '--- CURRENT AVAILABLE RESOURCES' block in m0 content.
+
+    Uses a regex to find and replace the entire block (from the header line
+    through to just before the next top-level section or end of string).
+
+    Args:
+        m0_content: The current system message content.
+        new_block: The freshly built resources block to insert.
+
+    Returns:
+        The updated m0_content with the resources block replaced.
+    """
+    if not new_block:
+        return m0_content  # Guard: don't delete the block if replacement is empty
+    # Match from the resources header through everything until next top-level section (any ## or ###) or end
+    pattern = r'--- CURRENT AVAILABLE RESOURCES.*?(?=(?:^|\n)\n(?:#{1,6} )|\Z)'
+    return re.sub(pattern, new_block.rstrip(), m0_content, count=1, flags=re.DOTALL)
 
 
 class ExecutionEngine:
@@ -190,12 +274,10 @@ class ExecutionEngine:
             if m0_role == SYSTEM:
                 m0_content = m0.get('content', '') if isinstance(m0, dict) else getattr(m0, 'content', '')
                 if isinstance(m0_content, str):
-                    import re as _re
-                    
                     # 1. Update identity "You are [instance]."
                     pattern = rf"(?i)You are\s+\w+\."
-                    if _re.search(pattern, m0_content):
-                        m0_content = _re.sub(pattern, f"You are {inst_name}.", m0_content, count=1)
+                    if re.search(pattern, m0_content):
+                        m0_content = re.sub(pattern, f"You are {inst_name}.", m0_content, count=1)
                     
                     # 2. Insert Session Metadata section (if not present)
                     if '## Session Metadata' not in m0_content:
@@ -236,55 +318,17 @@ class ExecutionEngine:
                             content_lines.insert(insert_pos + i, ml)
                         m0_content = '\n'.join(content_lines)
                     
-                    # 3. Inject available resources (enabled tools always; agent types only if call_agent is available)
-                    if '--- CURRENT AVAILABLE RESOURCES' not in m0_content:
-                        res_append = "\n\n--- CURRENT AVAILABLE RESOURCES (Auto-Injected) ---\n"
-
-                        # Determine if this agent can call other agents (call_agent in function_map and not disabled)
-                        template = self.pool.templates.get(instance.agent_class)
-                        can_call_agents = False
-                        disabled_tools = []
-                        if template and hasattr(template, 'function_map'):
-                            raw_disabled = getattr(getattr(template, 'llm', None), 'generate_cfg', {}).get('disabled_tools', [])
-                            # Handle both dict format (per-agent: {"Maine": ["tool1"]}) and flat list format
-                            if isinstance(raw_disabled, dict):
-                                agent_key = instance.agent_class
-                                slug = agent_key.lower().replace(' ', '_')
-                                disabled_tools = list(set(
-                                    raw_disabled.get(agent_key, []) + raw_disabled.get(slug, [])
-                                ))
-                            elif isinstance(raw_disabled, (list, tuple)):
-                                disabled_tools = list(set(raw_disabled))
-                            else:
-                                disabled_tools = []  # Invalid format — ignore silently
-                            can_call_agents = 'call_agent' in template.function_map and 'call_agent' not in disabled_tools
-
-                        # Only inject agent types list if the agent can actually call other agents
-                        if can_call_agents:
-                            res_append += "\nAvailable Agent Types (call via call_agent):\n"
-                            
-                            # List available templates
-                            has_agents = False
-                            for name in sorted(self.pool.templates.keys()):
-                                if name != instance.agent_class:
-                                    agent_obj = self.pool.templates[name]
-                                    tagline = getattr(agent_obj, 'description', 'No description provided')
-                                    res_append += f"- **{name}**: {tagline}\n"
-                                    has_agents = True
-                            if not has_agents:
-                                res_append += "- None currently available.\n"
-
-                        # List enabled tools (excluding disabled_tools) — always injected for all agents
-                        res_append += "\nEnabled Tools (can change per interaction):\n"
-                        if template and hasattr(template, 'function_map'):
-                            for t_name in sorted(template.function_map.keys()):
-                                if t_name in disabled_tools:
-                                    continue
-                                desc = getattr(template.function_map[t_name], 'description', 'No description provided')
-                                res_append += f"- **{t_name}**: {desc}\n"
+                    # 3. Inject/update available resources (enabled tools always; agent types only if call_agent is available)
+                    # Always rebuild this block each turn so that changes to disabled_tools are reflected immediately
+                    template = self.pool.templates.get(instance.agent_class)
+                    new_block = _build_resources_block(self.pool, template)
+                    if new_block:
+                        if '--- CURRENT AVAILABLE RESOURCES' in m0_content:
+                            # Replace the existing block with fresh data (handles dynamic tool changes)
+                            m0_content = _replace_resources_block(m0_content, new_block)
                         else:
-                            res_append += "- None currently enabled.\n"
-                        m0_content += res_append
+                            # First injection — append to end
+                            m0_content += new_block
                     
                     # 4. Inject Argument Reuse instructions (static version for caching) — all agents
                     if '### Advanced Feature: Argument Reuse' not in m0_content:

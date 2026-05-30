@@ -22,7 +22,7 @@ from agent_cascade.log import logger
 
 from .agent_instance import AgentInstance, LoopDetectedError
 from .agent_pool import AgentPool
-from .execution_engine import ExecutionEngine
+from .execution_engine import ExecutionEngine, _build_resources_block, _replace_resources_block
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -753,10 +753,12 @@ def _apply_ui_config(
         try:
             with pool._execution._state_lock:  # Thread-safe write to shared config
                 # Re-apply disabled_tools under lock to prevent race with concurrent reads
+                disabled_tools_changed = False
                 if 'disabled_tools' in sanitized and sanitized['disabled_tools'] is not None:
                     dt = sanitized['disabled_tools']
                     if isinstance(dt, (list, dict)):
                         template.llm.generate_cfg['disabled_tools'] = dt
+                        disabled_tools_changed = True
 
                 for _key in (
                     'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
@@ -764,6 +766,30 @@ def _apply_ui_config(
                 ):
                     if _key in sanitized:
                         pool.llm_cfg[_key] = sanitized[_key]
+
+            # If disabled_tools changed, refresh the resources block in m0
+            # so the agent sees the updated tool list on its next turn
+            # NOTE: This runs OUTSIDE _state_lock to avoid nested lock acquisition
+            # with _compression_lock — lock ordering invariant: _state_lock before _compression_lock
+            if disabled_tools_changed and instance.conversation:
+                try:
+                    with instance._compression_lock:
+                        m0 = instance.conversation[0]
+                        m0_content = m0.get('content', '') if isinstance(m0, dict) else getattr(m0, 'content', '')
+                        if isinstance(m0_content, str):
+                            new_block = _build_resources_block(pool, template)
+                            if new_block:
+                                m0_content = _replace_resources_block(m0_content, new_block)
+                                if isinstance(m0, dict):
+                                    m0['content'] = m0_content
+                                else:
+                                    m0.content = m0_content
+                except Exception:
+                    # Don't let m0 refresh break the main flow
+                    logger.debug("Failed to refresh resources block in m0 after disabled_tools change")
+        except AttributeError:
+            # pool._execution or _state_lock doesn't exist — skip safely
+            logger.debug("Execution engine not available for disabled_tools update")
         except Exception:
             # Lock access should always work, but don't let it break generation
             pass
