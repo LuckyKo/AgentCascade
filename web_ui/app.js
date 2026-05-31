@@ -3777,6 +3777,11 @@ function renderAgentApiAssignments() {
     agentTypes.push('compression agent');
     typeToName['compression agent'] = 'Compression Agent';
   }
+  // Ensure security advisor is always in the list so users can assign API endpoints to it (Bug 40)
+  if (!agentTypes.includes('security advisor')) {
+    agentTypes.push('security advisor');
+    typeToName['security advisor'] = 'Security Advisor';
+  }
 
   if (endpoints.length === 0) {
     container.innerHTML = `

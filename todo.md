@@ -37,7 +37,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] stop button should send stop commands to the API in use too
 - [x] dismissing an agent doesn't show the log path of the closed agent (should work similar to main). it also doesn't close the tab of the dismissed agent.
 - [x] no need to insert tool description metadata in the system prompt, it already gets injected in native mode.
-- [ ] security agent does not get called when using ask function from the approval popup banner (currently on no API assigned -> should default to the same API that the caller agent is running on)
+- [x] security agent does not get called when using ask function from the approval popup banner (currently on no API assigned -> should default to the same API that the caller agent is running on) — FIXED Bug 40
 - [x] terminate agent does not stop it and its sub-agents.
 - [x] user messages do not get sent to the active agent (tab in view), they all go to root
 - [x] some agents dont stop after they return to caller, resuming activity in the background

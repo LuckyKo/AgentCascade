@@ -426,7 +426,22 @@ class APIRouter:
                     
                     configs.append(cfg)
 
-        # 2. Always append the default as last resort
+        # 2. If no agent-specific endpoints found, try orchestrator's endpoints as fallback (Bug 40)
+        #    This ensures agents like security_advisor inherit the caller's API configuration
+        if not configs and 'orchestrator' in self.agent_priorities:
+            with self._lock:
+                for eid in self.agent_priorities.get('orchestrator', []):
+                    ep = self.endpoints.get(eid)
+                    if ep and ep.enabled:
+                        cfg = ep.to_llm_cfg()
+                        # Apply MIN logic: min(endpoint_limit, general_limit)
+                        ep_limit = ep.max_input_tokens
+                        if general_limit > 0:
+                            if ep_limit <= 0 or ep_limit > general_limit:
+                                cfg['max_input_tokens'] = general_limit
+                        configs.append(cfg)
+
+        # 3. Always append the default as last resort
         configs.append(copy.deepcopy(self.default_llm_cfg))
         return configs
 
