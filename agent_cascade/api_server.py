@@ -482,30 +482,34 @@ def create_app(agents, agent_pool, config=None):
             logger.error(f"Failed to load session history: {e}")
         return False
 
-    def get_session_history(session, instance_name='root'):
+    def get_session_history(session, instance_name=None):
         """Read session history from the pool (unified single source of truth).
-        
-        Phase 6: Always reads from agent_pool. Legacy fallback removed.
-        
+
+        Phase 2: Always reads from agent_pool.get_instance().conversation.
+        Falls back to instance_state only for very old sessions that might not
+        have instances registered in the pool yet (should be rare post-unification).
+
         Args:
-            session: Flask session dict
-            instance_name: Agent instance name ('root' for main chat, or agent name for agent instances)
-        
+            session: Flask session dict (used to resolve default instance_name)
+            instance_name: Agent instance name. If None, defaults to
+                session['session_name'] (the root/main chat instance).
+
         Returns:
             list of message objects
         """
-        # Read from unified store — always read from pool.instances for live data.
-        # For non-root instances, history comes from instance_state which is updated during streaming.
-        if instance_name == 'root':
-            inst = agent_pool.get_instance(session['session_name']) if agent_pool else None
-            if inst is not None:
-                with inst._compression_lock:
-                    return list(inst.conversation)
-            return []
-        else:
-            # Agent instance history from unified store (instance_state is updated during streaming)
-            state = agent_pool.instance_state.get(instance_name, {}) if agent_pool else {}
-            return state.get('messages', [])
+        # Resolve default: when no instance_name is given, use the session's
+        # session_name so callers don't need to know about "root".
+        if instance_name is None:
+            instance_name = session.get('session_name', 'root')
+
+        # Primary path: read from agent_pool.instances (the single source of truth)
+        inst = agent_pool.get_instance(instance_name) if agent_pool else None
+        if inst and hasattr(inst, 'conversation'):
+            return list(inst.conversation)
+
+        # Fallback for very old sessions that might not have pool instances yet
+        state = agent_pool.instance_state.get(instance_name, {}) if agent_pool else {}
+        return state.get('messages', [])
 
     def get_agent_state(instance_name):
         """Get state for any agent instance, including root.
