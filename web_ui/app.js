@@ -905,7 +905,8 @@ function handleServerMessage(data) {
           msgs.push({ role: 'assistant', content: partialContent });
         }
       }
-      state.activeStack = data.active_stack || [];
+      // Normalize active_stack: backend sends tuples [name, depth], extract just name
+      state.activeStack = (data.active_stack || []).map(e => Array.isArray(e) ? e[0] : e);
       state.generating = data.generating ?? false;
       if (data.agents) {
         const firstLoad = state.agents.length === 0;
@@ -1115,7 +1116,8 @@ function handleServerMessage(data) {
         ActivityBar.push(activeInstance, '');
       }
 
-      if (data.active_stack) state.activeStack = data.active_stack;
+      // Normalize active_stack: backend sends tuples [name, depth], extract just name
+      if (data.active_stack) state.activeStack = data.active_stack.map(e => Array.isArray(e) ? e[0] : e);
       // Reset throttle state if generation just started (was idle before this tick).
       // Server can initiate generation via stream_update without calling resetGenStats().
       if (!state.generating) {

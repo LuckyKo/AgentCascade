@@ -33,7 +33,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] CSS issue in web_ui, edit marker gets inserted all over the UI instead of being limited to edit boxes
 - [ ] max token limit inaccurately extracted from API endpoint, defaults to 65k
 - [ ] Context usage bar (top of agent tabs) uses inaccurate max token limit - should be taken from API endpoint used by agent.
-- [ ] agent activity detector fails and seems to return to root agent even if the invoked subagent is still running
+- [x] agent activity detector fails and seems to return to root agent even if the invoked subagent is still running
 - [ ] stop button should send stop commands to the API in use too
 - [x] dismissing an agent doesn't show the log path of the closed agent (should work similar to main). it also doesn't close the tab of the dismissed agent.
 - [ ] no need to insert tool description metadata in the system prompt, it already gets injected in native mode.
