@@ -597,132 +597,6 @@ def create_app(agents, agent_pool, config=None):
             return agents[idx]
         return agents[0]
 
-    def get_instance_state(streaming=False):
-        result = {}
-        if agent_pool and hasattr(agent_pool, 'instance_state'):
-            for name, state in agent_pool.instance_state.items():
-                msgs = state.get('messages', [])
-                
-                # Extract the actual agent class from agent_name.
-                # agent_name is stored as "instance_name (AgentClass)" by the orchestrator,
-                # e.g. "worker1 (Coder)". We need just "Coder" to look up the agent template.
-                raw_agent_name = state.get('agent_name', name)
-                if ' (' in raw_agent_name and raw_agent_name.endswith(')'):
-                    agent_class = raw_agent_name.split(' (')[-1].rstrip(')')
-                else:
-                    agent_class = raw_agent_name
-                
-                # Get max tokens for this agent instance's own model/endpoint.
-                # Try the agent template first, then fall back to querying the API Router
-                # directly by agent type (handles cases where the template wasn't loaded).
-                agent_template = agent_pool.get_agent(agent_class)
-                if agent_template:
-                    max_tokens = get_agent_max_tokens(agent_template)
-                elif hasattr(agent_pool, 'api_router') and agent_pool.api_router:
-                    # Query the router directly using the agent class as the type key
-                    agent_type = agent_class.lower()
-                    router_limit = agent_pool.api_router.get_effective_max_tokens(agent_type)
-                    max_tokens = router_limit if router_limit > 0 else DEFAULT_MAX_INPUT_TOKENS
-                else:
-                    max_tokens = DEFAULT_MAX_INPUT_TOKENS
-                
-                # FIX1 (agent instance index mismatch): Always compute from the sliced/active set.
-                # slice_history_for_llm can reduce the message count during compression,
-                # so we track active_count (len of sliced history) instead of len(msgs).
-                # This ensures all indexing into active_msgs is consistent.
-                active_msgs = agent_pool.slice_history_for_llm(msgs) if agent_pool else msgs
-                active_count = len(active_msgs)
-                
-                # Incremental token counting for agent instances.
-                # During streaming, agent instance histories are mostly static — they only change
-                # when a new message arrives from that agent instance (rare during main agent ticks).
-                # NOTE: slice_history_for_llm only appends/removes messages (never mutates in-place),
-                # so if active_count == last_active_count the cached stats are guaranteed valid.
-                cache_key = '_sa_stats_' + name
-                last_active_count = session.get(cache_key + '_count', -1)
-                
-                if active_count > last_active_count:
-                    # New message(s) added — compute stats incrementally
-                    if cache_key in session and last_active_count >= 0:
-                        # Incremental update: only tokenize the new messages (from last_active_count onward)
-                        cached_stats = session.get(cache_key, {'tokens': 0, 'words': 0})
-                        new_msgs = active_msgs[last_active_count:] if len(active_msgs) > last_active_count else []
-                        if new_msgs:
-                            new_stats = get_history_stats(new_msgs)
-                            stats = {
-                                'tokens': cached_stats['tokens'] + new_stats['tokens'],
-                                'words': cached_stats['words'] + new_stats['words']
-                            }
-                        else:
-                            stats = cached_stats.copy()
-                    else:
-                        # First access or cache missing — compute full stats
-                        stats = get_history_stats(active_msgs)
-                    
-                    session[cache_key + '_count'] = active_count
-                    session[cache_key] = stats.copy()  # FIX: Store stats so next call can use the cache
-                elif active_count < last_active_count:
-                    # FIX2 (history shrank due to compression): Recompute from scratch.
-                    # slice_history_for_llm may have dropped older messages after a context_summary,
-                    # so the cached stats would overcount tokens if we reused them.
-                    stats = get_history_stats(active_msgs)
-                    session[cache_key + '_count'] = active_count
-                    session[cache_key] = stats.copy()  # FIX: Store stats so next call can use the cache
-                elif cache_key in session:
-                    # Same active count AND cache exists — use cached stats (avoids tiktoken.encode per tick)
-                    stats = session.get(cache_key, {'tokens': 0, 'words': 0}).copy()
-                else:
-                    # First access or cache missing — compute stats to populate the cache
-                    stats = get_history_stats(active_msgs)
-                    session[cache_key + '_count'] = active_count  # FIX: Also store count for next comparison
-                    session[cache_key] = stats.copy()  # FIX: Store stats so next call can use the cache
-                
-                # Dynamically extract summary from messages if missing from tracker (e.g. after restart)
-                summary = agent_pool.instance_summaries.get(name, "")
-                if not summary:
-                    for msg in reversed(msgs):
-                        # Handle both dict and Message object types
-                        if isinstance(msg, dict):
-                            role = msg.get(ROLE)
-                            content = msg.get(CONTENT, '')
-                        else:
-                            role = getattr(msg, 'role', None)
-                            content = getattr(msg, 'content', '') or ''
-                        # Specifically target USER messages for context boundaries
-                        if role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                            import re
-                            # Use the standardized XML-style tag match
-                            match = _CONTEXT_SUMMARY_RE.search(content)
-                            if match:
-                                summary = match.group(1).strip()
-                                break
-                
-                # Optimization: During streaming, we only send the tail of the message list
-                # to avoid O(N^2) JSON traffic and parsing lag in the browser.
-                if streaming and state.get('active') and len(msgs) > 5:
-                    start_idx = max(0, len(msgs) - 3)
-                    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-3:], start_idx)]
-                    is_partial = True
-                else:
-                    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
-                    is_partial = False
-                
-                result[name] = {
-                    'active': state.get('active', False),
-                    'agent_name': agent_class,
-                    'messages': serialized_msgs,
-                    'is_partial': is_partial,
-                    'history_count': len(msgs),
-                    'total_tokens': stats['tokens'],
-                    'total_words': stats['words'],
-                    'max_tokens': max_tokens,
-                    'summary': summary,
-                    'has_queued_messages': agent_pool.has_messages(name),
-                    'is_waiting': agent_pool.api_router.is_waiting(name) if hasattr(agent_pool, 'api_router') else False,
-                    'is_halted': agent_pool.is_halted(name) if hasattr(agent_pool, 'is_halted') else False,
-                }
-        return result
-
     def get_active_stack():
         if agent_pool and hasattr(agent_pool, 'active_stack'):
             return agent_pool.active_stack
@@ -1675,7 +1549,7 @@ def create_app(agents, agent_pool, config=None):
                         agent_pool.enqueue_message(target_instance, cont_msg)
                         logger.info(f"Injected continuation message into agent instance {target_instance}'s queue.")
 
-                elif msg_type == 'terminate_agent_instance':
+                elif msg_type in ('terminate_agent_instance', 'terminate_sub_agent'):
                     instance_name = data.get('instance_name')
                     if instance_name and agent_pool:
                         agent_pool.dismiss_instance(instance_name)
@@ -1957,7 +1831,7 @@ def create_app(agents, agent_pool, config=None):
                                                 agent_pool._execution.active_stack.append((sec_state_key, 1))
                                         # Broadcast initial state so the tab appears immediately
                                         asyncio.run_coroutine_threadsafe(
-                                            send_queue.put({'type': 'stream_update', **build_stream_update([], agent_instances=get_instance_state(streaming=True))}),
+                                            send_queue.put({'type': 'stream_update', **build_stream_update([])}),
                                             loop
                                         )
                                         
@@ -2074,7 +1948,7 @@ def create_app(agents, agent_pool, config=None):
                                                 # Only broadcast at start and end of security check (not every token)
                                                 if sec_first_broadcast:
                                                     asyncio.run_coroutine_threadsafe(
-                                                        send_queue.put({'type': 'stream_update', **build_stream_update([], agent_instances=get_instance_state(streaming=True))}),
+                                                        send_queue.put({'type': 'stream_update', **build_stream_update([])}),
                                                         loop
                                                     )
                                                     sec_first_broadcast = False
@@ -2382,6 +2256,16 @@ def create_app(agents, agent_pool, config=None):
                             # Sync instance_state so build_state() sees the edit
                             if target_name != session['session_name'] and target_name in agent_pool.instance_state:
                                 agent_pool.instance_state[target_name]['messages'] = list(history)
+                    
+                    # Fix #1 & #3: Clear performance caches on message edit
+                    try:
+                        from agent_cascade import api_integration
+                        api_integration._token_stats_cache.clear()
+                        api_integration._last_stream_versions.clear()
+                        api_integration._cached_instance_data.clear()
+                    except Exception:
+                        pass
+                    
                     await broadcast({'type': 'state', **build_state()})
                             
                 elif msg_type == 'delete_messages':
@@ -2416,6 +2300,16 @@ def create_app(agents, agent_pool, config=None):
                         # Sync instance_state so build_state() sees the deletion
                         if target_name != session['session_name'] and target_name in agent_pool.instance_state:
                             agent_pool.instance_state[target_name]['messages'] = list(history)
+                    
+                    # Fix #1 & #3: Clear performance caches on message deletion
+                    try:
+                        from agent_cascade import api_integration
+                        api_integration._token_stats_cache.clear()
+                        api_integration._last_stream_versions.clear()
+                        api_integration._cached_instance_data.clear()
+                    except Exception:
+                        pass
+                    
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'select_agent':
@@ -2450,6 +2344,14 @@ def create_app(agents, agent_pool, config=None):
                                 session['stop_requested'] = False
                                 if agent_pool:
                                     agent_pool.stopped = False
+                                # Fix #1 & #3: Clear performance caches on session load
+                                try:
+                                    from agent_cascade import api_integration
+                                    api_integration._token_stats_cache.clear()
+                                    api_integration._last_stream_versions.clear()
+                                    api_integration._cached_instance_data.clear()
+                                except Exception:
+                                    pass
                                 await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'inject':

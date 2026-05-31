@@ -215,15 +215,19 @@ def invoke_compression_agent(
             # Fix #4: Update instance_state during streaming with lock protection
             with agent_pool._execution._state_lock:
                 agent_pool.instance_state[comp_state_key]['messages'] = (
-                    list(comp_history) + (list(final_msgs) if isinstance(final_msgs, list) else [final_msgs])
+                    list(comp_history) + list(final_msgs) if isinstance(final_msgs, list) else list(comp_history) + [final_msgs]
                 )
                 # Phase 3: Write to instance.conversation if real instance exists, otherwise skip
                 inst = agent_pool.get_instance(comp_state_key)
                 if inst:
                     with inst._compression_lock:
-                        inst.conversation = list(agent_pool.instance_state[comp_state_key]['messages'])
+                        inst.conversation = list(final_msgs) if isinstance(final_msgs, list) else [final_msgs]
                         # Invalidate token count cache — conversation was replaced (Fix #2)
                         inst._last_token_count_conversation_length = -1
+
+        # Normalize final_msgs to a list for downstream consumers (after the loop ends)
+        if not isinstance(final_msgs, list):
+            final_msgs = [final_msgs] if final_msgs else []
 
         # 2. Extract the summary from the last assistant message
         if final_msgs:

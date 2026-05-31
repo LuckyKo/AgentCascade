@@ -445,8 +445,8 @@ class AgentPool:
         """
         if self.is_active(instance_name):
             self.terminate_instance(instance_name)
-        else:
-            self.remove_instance(instance_name)
+        # Always remove the instance from the pool so its tab disappears from the UI
+        self.remove_instance(instance_name)
 
     # ── API bridge methods for api_server.py ────────────────────────────────
     # These methods provide access patterns that api_server.py expects.

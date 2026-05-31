@@ -2280,15 +2280,8 @@ function renderSubAgents() {
       closeBtn.textContent = '\u00d7';
       closeBtn.onclick = (e) => {
         e.stopPropagation();
-        // Sub-agents: just hide the tab (add to closedTabs), don't terminate.
-        // Only the session's primary agent should be terminated via terminate_agent_instance.
-        state.closedTabs.add('sub-' + name);
-        localStorage.setItem('agent-cascade-closed-tabs', JSON.stringify([...state.closedTabs]));
-        if (state.activeSubTab === tabId) {
-          switchMainTab(getAgentTabId(state.sessionName));
-        } else {
-          renderSubAgents();
-        }
+        send({ type: 'terminate_agent_instance', instance_name: name });
+        switchMainTab(getAgentTabId(state.sessionName));
       };
       tabBtn.appendChild(closeBtn);
 

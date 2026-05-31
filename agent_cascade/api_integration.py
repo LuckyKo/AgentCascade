@@ -681,7 +681,7 @@ def _serialize_instance(
 
     When *include_messages* is True, the full conversation (or just the tail
     during streaming) is appended to the result dict along with token stats
-    and max_tokens — matching what get_instance_state() used to provide.
+    and max_tokens — matching the legacy API server path.
 
     Streaming optimisation: during active generation for large conversations (>30
     messages), only the last 3 are sent to avoid O(N²) serialisation on every
@@ -705,7 +705,7 @@ def _serialize_instance(
     with inst._compression_lock:
         msgs = list(inst.conversation)
 
-    if streaming and len(msgs) > 30:
+    if streaming and inst.is_active and len(msgs) > 30:
         # During active generation only send the tail (last 3 messages) for large
         # conversations to avoid O(N²) serialisation on every ~150ms tick.
         # Smaller conversations are sent in full — dropping early context during
