@@ -124,11 +124,17 @@ You are a specialized agent instance.
         if metadata_prompt not in orig_sys:
             agent.system_message = metadata_prompt + "\n" + orig_sys
 
-        messages = self.agent_pool.instance_conversations.get(instance_name)
-        if messages is None:
+        # Phase 3: Use get_conversation() for reads (returns [] if no instance)
+        messages = self.agent_pool.get_conversation(instance_name)
+        if not messages:
             # Initialize with agent's soul (SYSTEM message)
             messages = [Message(role=SYSTEM, content=agent.system_message)]
-            self.agent_pool.instance_conversations[instance_name] = messages
+            # Phase 3: Write to instance.conversation if real instance exists
+            inst = self.agent_pool.get_instance(instance_name)
+            if inst:
+                with inst._compression_lock:
+                    inst.conversation = messages
+                inst._last_token_count_conversation_length = -1
             # Sync to persistent log immediately
             logger_inst.update_history(messages)
         elif not logger_inst.data["history"]:
@@ -263,8 +269,9 @@ class DismissAgent(BaseTool):
 
         if all_idle:
             active_set = set(self.agent_pool.active_stack)
+            # Phase 3: Use pool.instances.keys() instead of instance_conversations.keys()
             all_instances = list(set(self.agent_pool.instance_classes.keys()) | 
-                                 set(self.agent_pool.instance_conversations.keys()))
+                                 set(self.agent_pool.instances.keys()))
             
             dismissed = []
             # Capture log paths BEFORE clearing (clear_conversation removes the logger)
@@ -275,7 +282,7 @@ class DismissAgent(BaseTool):
                     logger_inst = self.agent_pool.instance_loggers.get(inst)
                     if logger_inst:
                         log_path = getattr(logger_inst, 'log_path', None)
-                    elif inst in self.agent_pool.instance_conversations:
+                    elif inst in self.agent_pool.instances:
                         from agent_cascade.log import logger
                         logger.warning(f"Log path not found for instance '{inst}' — may affect resurrection")
                     
@@ -301,7 +308,7 @@ class DismissAgent(BaseTool):
         if not instance_name:
             return json.dumps({"status": "error", "message": "Please provide 'instance_name' or set 'all_idle' to true."})
 
-        if instance_name not in self.agent_pool.instance_conversations:
+        if instance_name not in self.agent_pool.instances:
             return json.dumps({
                 "status": "not_found",
                 "agent": instance_name,
@@ -380,9 +387,9 @@ class ListAgents(BaseTool):
         lines.append("## 2. Active Instances (Sessions)")
         active_set = set(self.agent_pool.active_stack)
         
-        # Get all known instances from classes or conversations
+        # Get all known instances from classes or instances dict (Phase 3)
         all_instances = sorted(list(set(self.agent_pool.instance_classes.keys()) | 
-                                    set(self.agent_pool.instance_conversations.keys())))
+                                    set(self.agent_pool.instances.keys())))
         
         if not all_instances:
             lines.append("- No active or persistent instances.")

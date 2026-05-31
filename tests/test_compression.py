@@ -33,6 +33,23 @@ def _make_msg(role, content):
     return Message(role=role, content=content)
 
 
+class MockInstance:
+    """Mock AgentInstance for testing Phase 3 changes."""
+    
+    class _FakeLock:
+        """A no-op context manager that mimics threading.RLock behavior."""
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+    
+    _compression_lock = _FakeLock()
+
+    def __init__(self, history):
+        self.conversation = list(history)
+        self._last_token_count_conversation_length = -1
+
+
 class MockAgentPool:
     """Lightweight mock of AgentPool that implements the methods compress_context needs.
 
@@ -42,11 +59,24 @@ class MockAgentPool:
 
     def __init__(self, history=None):
         self.history = list(history) if history else []
-        self.instance_conversations = {"TestAgent": self.history}
+        self.instance_conversations = {}  # Will be synced below
         self.instance_loggers = {}  # No logger — avoids notification side-effects
+        # Phase 3: Add instances dict and get_instance for proper pool API access
+        mock_inst = MockInstance(self.history)
+        self.instances = {"TestAgent": mock_inst}
+        # Sync instance_conversations to point to the same list as instance.conversation
+        self.instance_conversations["TestAgent"] = mock_inst.conversation
 
     def get_conversation(self, agent_name):
-        return self.instance_conversations.get(agent_name, [])
+        """Read from instance.conversation (Phase 3 pattern)."""
+        inst = self.instances.get(agent_name)
+        if inst is not None:
+            return list(inst.conversation)
+        return []  # Match production semantics — no fallback to bridge dict
+
+    def get_instance(self, agent_name):
+        """Phase 3: Return a mock instance if it exists."""
+        return self.instances.get(agent_name)
 
     @staticmethod
     def find_last_marker(history):

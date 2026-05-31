@@ -535,8 +535,11 @@ class ExecutionEngine:
                         try:
                             recov = self.pool.get_logger(inst_name, instance.agent_class).data.get('history', [])
                             if recov and validate_message_pool(recov, inst_name):
+                                # Phase 3: Write directly to instance.conversation instead of via bridge
                                 with instance._compression_lock:  # Thread-safe recovery write
-                                    self.pool.instance_conversations[inst_name] = list(recov)
+                                    instance.conversation = list(recov)
+                                # Invalidate token count cache — conversation was replaced (Fix #2)
+                                instance._last_token_count_conversation_length = -1
                                 logger.info(f"Recovered message pool from log for '{inst_name}' ({len(recov)} messages)")
                                 conv = recov
                                 # Rebuild working sets from recovered data
@@ -1411,8 +1414,11 @@ class ExecutionEngine:
                 try:
                     recov = self.pool.get_logger(inst_name, instance.agent_class).data.get('history', [])
                     if recov and validate_message_pool(recov, inst_name):
+                        # Phase 3: Write directly to instance.conversation instead of via bridge
                         with instance._compression_lock:
-                            self.pool.instance_conversations[inst_name] = list(recov)
+                            instance.conversation = list(recov)
+                        # Invalidate token count cache — conversation was replaced (Fix #2)
+                        instance._last_token_count_conversation_length = -1
                         logger.info(f"Recovered message pool after /compress for '{inst_name}' ({len(recov)} messages)")
                         # Rebuild working sets from recovered data (matches forced compression path)
                         self._rebuild_working_set(messages, llm_messages, inst_name)
@@ -1655,6 +1661,28 @@ class ExecutionEngine:
         except Exception as e:
             logger.debug(f"WebUI initial state update for {instance_name} failed (non-critical): {e}")
 
+        # ── Push immediate stream_update so the tab appears without delay ──
+        # Without this, the frontend won't see the new instance until the first
+        # engine yield + throttle cycle (up to 300-500ms later during LLM cold start).
+        try:
+            ws_queue = getattr(self.pool, '_ws_send_queue', None)
+            ws_loop = getattr(self.pool, '_ws_loop', None)
+            if ws_queue and ws_loop and not ws_loop.is_closed():
+                from agent_cascade.api_integration import build_stream_update_from_pool, _put_stream_update
+                su = build_stream_update_from_pool(
+                    pool=self.pool,
+                    instance_name=caller,  # Root instance for header stats
+                    responses=None,        # Reads full conversations from pool
+                )
+                if su is not None:
+                    # Use shared _put_stream_update helper to safely handle QueueFull
+                    asyncio.run_coroutine_threadsafe(
+                        _put_stream_update(ws_queue, {'type': 'stream_update', **su}),
+                        ws_loop,
+                    )
+        except Exception as e:
+            logger.debug(f"Immediate sub-agent tab stream_update failed (non-critical): {e}")
+
         try:
             # Execute through unified loop — push stream_update events so the
             # frontend sees sub-agent tab updates independently of main agent flow.
@@ -1706,7 +1734,7 @@ class ExecutionEngine:
                         ws_loop = getattr(self.pool, '_ws_loop', None)
                         if ws_queue and ws_loop and not ws_loop.is_closed():
                             # Import here to avoid circular import at module level
-                            from agent_cascade.api_integration import build_stream_update_from_pool
+                            from agent_cascade.api_integration import build_stream_update_from_pool, _put_stream_update
                             # Pass root agent name (caller) for token stats — the function
                             # iterates over ALL instances in pool.instances anyway.
                             su = build_stream_update_from_pool(
@@ -1715,8 +1743,9 @@ class ExecutionEngine:
                                 responses=None,        # Use None — reads full conversations from pool
                             )
                             if su is not None:
+                                # Use shared _put_stream_update helper — QueueFull handled inside event loop
                                 asyncio.run_coroutine_threadsafe(
-                                    ws_queue.put({'type': 'stream_update', **su}),
+                                    _put_stream_update(ws_queue, {'type': 'stream_update', **su}),
                                     ws_loop,
                                 )
                             _last_sub_send = now
@@ -1768,15 +1797,16 @@ class ExecutionEngine:
                         ws_queue = getattr(self.pool, '_ws_send_queue', None)
                         ws_loop = getattr(self.pool, '_ws_loop', None)
                         if ws_queue and ws_loop and not ws_loop.is_closed():
-                            from agent_cascade.api_integration import build_stream_update_from_pool
+                            from agent_cascade.api_integration import build_stream_update_from_pool, _put_stream_update
                             su = build_stream_update_from_pool(
                                 pool=self.pool,
                                 instance_name=caller,
                                 responses=None,
                             )
                             if su is not None:
+                                # Use shared _put_stream_update helper — QueueFull handled inside event loop
                                 asyncio.run_coroutine_threadsafe(
-                                    ws_queue.put({'type': 'stream_update', **su}),
+                                    _put_stream_update(ws_queue, {'type': 'stream_update', **su}),
                                     ws_loop,
                                 )
                     except Exception as e:

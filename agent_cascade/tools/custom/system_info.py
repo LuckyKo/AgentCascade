@@ -87,7 +87,8 @@ class SystemInfo(BaseTool):
             logger.warning(f"Failed to calculate stats for {agent_name}: {e}")
             
         if hasattr(self, 'agent_pool') and self.agent_pool:
-            stats_str = f"Number of running sessions: {len(self.agent_pool.instance_conversations)}\n" + stats_str
+            # Phase 3: Use pool.instances count instead of instance_conversations
+            stats_str = f"Number of running sessions: {len(self.agent_pool.instances)}\n" + stats_str
         else:
             stats_str = "Agent Pool not connected.\n" + stats_str
 

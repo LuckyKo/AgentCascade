@@ -144,7 +144,13 @@ def invoke_compression_agent(
             }
             if comp_state_key not in agent_pool.active_stack:
                 agent_pool._execution.active_stack.append(comp_state_key)
-            agent_pool.instance_conversations[comp_state_key] = list(comp_history)
+            # Phase 3: Write to instance.conversation if real instance exists, otherwise skip
+            inst = agent_pool.get_instance(comp_state_key)
+            if inst:
+                with inst._compression_lock:
+                    inst.conversation = list(comp_history)
+                    # Invalidate token count cache — conversation was replaced (Fix #2)
+                    inst._last_token_count_conversation_length = -1
 
         # ── Fix #1: Route LLM call through API router instead of direct comp_agent.run() ──
         logger.info("Compression agent invoked via API router (call_with_fallback)")
@@ -211,9 +217,13 @@ def invoke_compression_agent(
                 agent_pool.instance_state[comp_state_key]['messages'] = (
                     list(comp_history) + (list(final_msgs) if isinstance(final_msgs, list) else [final_msgs])
                 )
-                agent_pool.instance_conversations[comp_state_key] = list(
-                    agent_pool.instance_state[comp_state_key]['messages']
-                )
+                # Phase 3: Write to instance.conversation if real instance exists, otherwise skip
+                inst = agent_pool.get_instance(comp_state_key)
+                if inst:
+                    with inst._compression_lock:
+                        inst.conversation = list(agent_pool.instance_state[comp_state_key]['messages'])
+                        # Invalidate token count cache — conversation was replaced (Fix #2)
+                        inst._last_token_count_conversation_length = -1
 
         # 2. Extract the summary from the last assistant message
         if final_msgs:

@@ -250,13 +250,14 @@ def compress_context(
     # Snapshot pre-mutation state for rollback if anything goes wrong after the pool write.
     # Without this, a failure between mutation and return would leave the pool in partial state.
     import copy as _copy
+    # Phase 3: Use get_conversation() instead of instance_conversations.get()
     pre_mutation_history = _copy.deepcopy(
-        agent_pool.instance_conversations.get(target_agent_name) or []
+        agent_pool.get_conversation(target_agent_name) or []
     )
     
     try:
-        # NOTE: get_conversation returns the same list object as instance_conversations[].
-        # We build new_history as a new list and replace the reference on the next line.
+        # NOTE: get_conversation returns a copy of inst.conversation under lock.
+        # We build new_history as a new list and assign via the proper pool API on the next line.
         history = agent_pool.get_conversation(target_agent_name)
         insert_pos = active_start_idx + target_discard_count
 
@@ -270,7 +271,13 @@ def compress_context(
         # Atomic mutation via copy-and-replace: build new list and assign.
         # This ensures that if an exception occurs, the pool is untouched.
         new_history = history[:active_start_idx] + [marker_message] + history[insert_pos:]
-        agent_pool.instance_conversations[target_agent_name] = new_history
+        # Phase 3: Write to instance.conversation directly (not via bridge)
+        inst = agent_pool.get_instance(target_agent_name)
+        if inst:
+            with inst._compression_lock:
+                inst.conversation = new_history
+            # Invalidate token count cache — conversation was replaced (Fix #2)
+            inst._last_token_count_conversation_length = -1
 
     except Exception as e:
         # Fail-safe: pool mutation failed — this shouldn't happen but protect against it
@@ -311,7 +318,12 @@ def compress_context(
             f"Logger notification failed after compression for agent "
             f"'{target_agent_name}': {e}. Rolling back pool to pre-mutation state."
         )
-        agent_pool.instance_conversations[target_agent_name] = pre_mutation_history
+        # Phase 3: Rollback via instance.conversation (not via bridge)
+        inst = agent_pool.get_instance(target_agent_name)
+        if inst:
+            with inst._compression_lock:
+                inst.conversation = pre_mutation_history
+            inst._last_token_count_conversation_length = -1
         return CompressResult(
             success=False,
             summary_text=generated_summary,
