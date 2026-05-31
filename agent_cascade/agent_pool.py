@@ -269,6 +269,7 @@ class AgentPool:
         self._halted_instances: set = set()                # per-instance halt state
         self._compression_halted: set = set()              # instances halted by forced compression (not manual)
         self.terminated_instances: set = set()             # instances marked for immediate termination
+        self.children: Dict[str, List[str]] = {}           # parent_name -> [child_names] for cascade termination
 
         # ── Attributes required by api_server.py and agent_invoker.py ──
         # These bridge the new unified model with existing call patterns.
@@ -356,6 +357,11 @@ class AgentPool:
         )
         self.instances[instance_name] = instance
         self._instances_version += 1  # Fix #3: signal that instances changed
+        # Track parent-child relationship for cascade termination (Fix Bug41)
+        if parent_instance:
+            if parent_instance not in self.children:
+                self.children[parent_instance] = []
+            self.children[parent_instance].append(instance_name)
         self._mark_activity(instance_name)
         return instance
 
@@ -401,6 +407,13 @@ class AgentPool:
         log_path = log_inst.log_path if log_inst else None
         self._fire_on_dismissed(instance_name, log_path)
 
+        # Clean up children tracking (Fix Bug41)
+        self.children.pop(instance_name, None)
+        # Also remove from parent's children list
+        for parent, kids in self.children.items():
+            if instance_name in kids:
+                kids.remove(instance_name)
+
     def halt_all_instances(self, except_instance: str = None,
                            except_instances: Optional[List[str]] = None):
         """Halt all active instances except the given one(s). Used before forced compression.
@@ -432,23 +445,39 @@ class AgentPool:
         """Mark an instance for immediate termination.
 
         Adds to terminated_instances set and sets the stopped event if active.
+        Also marks the instance itself as terminated (Fix Bug41).
+        Cascade-terminates all child agents recursively (Fix Bug41).
         Mirrors old AgentPool.terminate_instance() semantics.
         """
+        # First cascade-terminate all children (recursive, Fix Bug41)
+        for child_name in list(self.children.get(instance_name, [])):
+            if self.instances.get(child_name):
+                self.terminate_instance(child_name)  # Recursive — handles nested trees
+        
         self.terminated_instances.add(instance_name)
         inst = self.instances.get(instance_name)
         if inst and inst.is_active:
-            self._stopped_event.set()
+            self._stopped_event.set()      # Global signal FIRST (minimize race window)
+            inst.is_terminated = True      # Per-instance mark second
 
     def dismiss_instance(self, instance_name: str):
         """Remove an instance from the pool. If active, terminate it; otherwise clean up.
 
+        Recursively dismisses all child agents first (cascade termination, Fix Bug41).
         This is the UI-initiated termination path (WebSocket terminate_agent_instance message).
         Mirrors old AgentPool.dismiss_instance() semantics.
         """
+        # First dismiss all children (recursive cascade, Fix Bug41)
+        for child_name in list(self.children.get(instance_name, [])):
+            if self.instances.get(child_name):
+                self.dismiss_instance(child_name)  # Recursive — handles nested trees
+        
         if self.is_active(instance_name):
             self.terminate_instance(instance_name)
         # Always remove the instance from the pool so its tab disappears from the UI
         self.remove_instance(instance_name)
+        # Clean up stale entry in terminated_instances set (Fix Bug41 reviewer feedback)
+        self.terminated_instances.discard(instance_name)
 
     # ── API bridge methods for api_server.py ────────────────────────────────
     # These methods provide access patterns that api_server.py expects.
@@ -474,6 +503,7 @@ class AgentPool:
         self._halted_instances.clear()
         self._compression_halted.clear()
         self.terminated_instances.clear()
+        self.children.clear()  # Fix Bug41: clear parent-child tracking on reset
         self.active_stack_clear()
         self.last_tool_args.clear()
         self.instance_state.clear()
@@ -1003,6 +1033,17 @@ class AgentPool:
         """Check if an instance is currently executing."""
         inst = self.instances.get(instance_name)
         return inst.is_active if inst else False
+
+    def is_instance_terminated(self, instance_name: str) -> bool:
+        """Check if an instance has been marked for termination.
+        
+        Per-instance termination check — does NOT affect other agents (unlike _stopped_event).
+        Checks terminated_instances set first (authoritative), then falls back to inst.is_terminated flag.
+        """
+        if instance_name in self.terminated_instances:
+            return True
+        inst = self.instances.get(instance_name)
+        return inst.is_terminated if inst else False
 
     def find_last_marker(self, history: List[Message]) -> int:
         """Find the index of the last COMPRESSION_MARKER message in a conversation.

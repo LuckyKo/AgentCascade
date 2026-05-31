@@ -37,6 +37,7 @@ class AgentInstance:
 
     # ── Execution State ───────────────────────────────────────────────
     is_active: bool                      # Currently executing a run() turn
+    is_terminated: bool = False          # Set when terminate_instance() is called on this instance (Fix Bug41)
     max_turns: Optional[int]             # Per-instance turn limit (None = use default 50)
 
     # NOTE: halt state is NOT stored here — it lives in pool._halted_instances set.

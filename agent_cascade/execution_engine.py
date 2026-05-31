@@ -328,7 +328,7 @@ class ExecutionEngine:
                 # ── Phase 3: LLM Call with Injection Points ────────────────
                 turn_output = list(self._call_llm_with_injection(instance, llm_messages))
 
-                if self.pool.stopped or self.pool.is_instance_halted(instance.instance_name):
+                if self.pool.stopped or self.pool.is_instance_halted(instance.instance_name) or self.pool.is_instance_terminated(instance.instance_name):
                     logger.debug(
                         f"[CALL_AGENT_DEBUG] engine.run() — halted/stopped for instance={instance.instance_name}, "
                         f"pool_stopped={self.pool.stopped}"
@@ -495,7 +495,7 @@ class ExecutionEngine:
         inst_name = instance.instance_name
 
         # ── Stop/halt guard ────────────────────────────────────────────────
-        if self.pool.stopped or self.pool.is_instance_halted(inst_name):
+        if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
             return True  # Skip LLM call, yield and continue loop
 
         # ── Async message injection (drain queue) ──────────────────────────
@@ -702,7 +702,7 @@ class ExecutionEngine:
             for output in self._execute_llm_call(instance, template, llm_messages, active_functions):
                 last_output = output  # keep latest accumulated response FIRST
                 # Check stop/halt mid-stream (after capturing the current result)
-                if self.pool.stopped or self.pool.is_instance_halted(inst_name):
+                if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
                     break
 
             if not last_output or (isinstance(last_output, list) and len(last_output) == 0):
@@ -822,7 +822,7 @@ class ExecutionEngine:
             logger.debug(f"Logging message to file failed for {inst_name} (non-critical): {e}")
 
         # ── Auto-continue on truncation (only if user has enabled the setting) ──
-        if is_truncated and not self.pool.stopped and not self.pool.is_instance_halted(inst_name) and self.pool.settings.auto_continue:
+        if is_truncated and not self.pool.stopped and not self.pool.is_instance_halted(inst_name) and not self.pool.is_instance_terminated(inst_name) and self.pool.settings.auto_continue:
             logger.info(f"Detected message truncation for {inst_name}. Auto-continuing.")
             cont_msg = Message(
                 role=USER,
@@ -846,7 +846,7 @@ class ExecutionEngine:
             used_any_tool = True
 
             # Stop/halt check BEFORE tool execution
-            if self.pool.stopped or self.pool.is_instance_halted(inst_name):
+            if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
                 break
 
             # Track tool success/failure — needed for function_id matching and frontend isToolFailure()
@@ -1024,7 +1024,8 @@ class ExecutionEngine:
             if self.pool._execution.has_active_tasks(inst_name):
                 while (self.pool._execution.has_active_tasks(inst_name) and
                        not self.pool.stopped and
-                       not self.pool.is_instance_halted(inst_name)):
+                       not self.pool.is_instance_halted(inst_name) and
+                       not self.pool.is_instance_terminated(inst_name)):
                     time.sleep(0.5)
 
             # Post-generation queue drain
@@ -1039,7 +1040,8 @@ class ExecutionEngine:
         if self.pool._execution.has_active_tasks(inst_name):
             while (self.pool._execution.has_active_tasks(inst_name) and
                    not self.pool.stopped and
-                   not self.pool.is_instance_halted(inst_name)):
+                   not self.pool.is_instance_halted(inst_name) and
+                   not self.pool.is_instance_terminated(inst_name)):
                 time.sleep(0.5)
                 
         # Post-generation queue drain
@@ -1867,7 +1869,7 @@ class ExecutionEngine:
             _stream_pushing_disabled = False  # Set True after 3 consecutive failures
 
             for resp in self.run(inst):
-                if self.pool.stopped or self.pool.is_instance_halted(instance_name):
+                if self.pool.stopped or self.pool.is_instance_halted(instance_name) or self.pool.is_instance_terminated(instance_name):
                     break
                 final_resp = resp
 
