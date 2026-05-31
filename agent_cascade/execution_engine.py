@@ -1868,6 +1868,19 @@ class ExecutionEngine:
             _ws_error_count = 0       # Track consecutive WebSocket push failures
             _stream_pushing_disabled = False  # Set True after 3 consecutive failures
 
+            # Bug #43 Fix: Pre-execution check — don't start if this instance was terminated while waiting
+            if self.pool.is_instance_terminated(instance_name):
+                inst.is_active = False
+                logger.info(
+                    f"[CALL_AGENT_DEBUG] _create_and_run_agent — instance {instance_name} was terminated "
+                    f"before execution started, skipping"
+                )
+                # Clear leftover queued messages to prevent accumulation
+                q = self.pool.message_queues.get(instance_name)
+                if q:
+                    q.clear()
+                return inst, []
+
             for resp in self.run(inst):
                 if self.pool.stopped or self.pool.is_instance_halted(instance_name) or self.pool.is_instance_terminated(instance_name):
                     break
@@ -2067,6 +2080,14 @@ class ExecutionEngine:
                 )
 
         try:
+            # Bug #43 Fix: Pre-execution check — don't start if this instance was terminated while waiting
+            if self.pool.is_instance_terminated(instance_name):
+                logger.info(
+                    f"[CALL_AGENT_DEBUG] _execute_agent_sync — instance {instance_name} was terminated "
+                    f"before execution started, returning early"
+                )
+                return f"[{instance_name}\'s output]:\n(instance was terminated before execution)"
+
             # Create and run via shared helper
             logger.debug(
                 f"[CALL_AGENT_DEBUG] _execute_agent_sync — calling _create_and_run_agent for {instance_name}"
@@ -2096,6 +2117,12 @@ class ExecutionEngine:
                 f"[CALL_AGENT_DEBUG] _execute_agent_sync — extract_instance_output for {instance_name}: "
                 f"result_preview={str(result_str)[:200]}"
             )
+
+            # Bug #43 Fix: Clear leftover queued messages for this completed sub-agent
+            q = self.pool.message_queues.get(instance_name)
+            if q:
+                q.clear()
+
             return f"[{instance_name}\'s output]:\n{result_str}"
         except Exception as e:
             # Catch exceptions from agent creation/execution and return as clean tool error
