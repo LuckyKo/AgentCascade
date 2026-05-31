@@ -40,9 +40,15 @@ def _format_messages_for_summary(target_messages):
         if isinstance(msg, dict):
             role = msg.get('role', 'unknown').upper()
             content = msg.get('content', '')
+            # Extract function_call data (Fix #44)
+            func_call = msg.get('function_call')
+            name = msg.get('name')
         else:
             role = getattr(msg, 'role', 'unknown').upper()
             content = getattr(msg, 'content', '')
+            # Extract function_call data (Fix #44)
+            func_call = getattr(msg, 'function_call', None)
+            name = getattr(msg, 'name', None)
 
         # Handle multi-modal content (list of items)
         # Only include text parts; skip images and other non-text items to avoid "None" strings
@@ -58,6 +64,32 @@ def _format_messages_for_summary(target_messages):
                     if text:
                         text_parts.append(str(text))
             content = " ".join(text_parts)
+
+        # Include function call info for the compression agent (Fix #44)
+        if func_call:
+            fc_name = func_call.get('name', '') if isinstance(func_call, dict) else getattr(func_call, 'name', '')
+            fc_args = func_call.get('arguments', '') if isinstance(func_call, dict) else getattr(func_call, 'arguments', '')
+            # Only format if we have an actual function name (defensive against empty dicts)
+            if fc_name:
+                fc_info = f" [CALLED: {fc_name}]"
+                if fc_args:
+                    # Truncate long arguments to save tokens for the compressor
+                    args_str = str(fc_args)
+                    truncated = args_str[:500]
+                    if len(args_str) > 500:
+                        args_str = truncated + "... (truncated)"
+                    else:
+                        args_str = truncated
+                    fc_info += f" with args: {args_str}"
+                if not content:
+                    content = fc_info
+                else:
+                    content = f"{content}{fc_info}"
+
+        # Include name for function/tool result messages (Fix #44)
+        if name and role in ('FUNCTION', 'TOOL'):
+            content = f"[{name} RESULT]: {content}"
+
         history_text += f"{role}: {content}\n\n"
     return history_text
 
