@@ -2263,9 +2263,10 @@ function renderSubAgents() {
       closeBtn.textContent = '\u00d7';
       closeBtn.onclick = (e) => {
         e.stopPropagation();
-        send({ type: 'terminate_agent_instance', instance_name: name });
-        // Don't add to closedTabs optimistically — let server state sync handle tab removal.
-        // If termination fails, the agent stays in subAgents and its tab reappears naturally.
+        // Sub-agents: just hide the tab (add to closedTabs), don't terminate.
+        // Only the session's primary agent should be terminated via terminate_agent_instance.
+        state.closedTabs.add('sub-' + name);
+        localStorage.setItem('agent-cascade-closed-tabs', JSON.stringify([...state.closedTabs]));
         if (state.activeSubTab === tabId) {
           switchMainTab(getAgentTabId(state.sessionName));
         } else {
@@ -3622,37 +3623,37 @@ function handleApiEndpointClick(e) {
   const ep = endpoints.find(ep => ep.id === id);
   if (!ep) return;
 
-  if (e.target.matches('.api-endpoint-expand')) {
+  if (e.target.closest('.api-endpoint-expand')) {
     // Expand/Collapse details panel
-    const btn = e.target;
+    const btn = e.target.closest('.api-endpoint-expand');
     const details = card.querySelector('.api-endpoint-details');
     btn.classList.toggle('open');
     details.classList.toggle('open');
-  } else if (e.target.matches('.api-key-toggle')) {
+  } else if (e.target.closest('.api-key-toggle')) {
     // Show/Hide API key
     const input = card.querySelector('.ep-input-key');
     if (input.type === 'password') {
       input.type = 'text';
-      e.target.style.color = 'var(--accent)';
+      e.target.closest('.api-key-toggle').style.color = 'var(--accent)';
     } else {
       input.type = 'password';
-      e.target.style.color = '';
+      e.target.closest('.api-key-toggle').style.color = '';
     }
-  } else if (e.target.matches('.api-endpoint-move-up')) {
+  } else if (e.target.closest('.api-endpoint-move-up')) {
     // Move endpoint up one position
     const idx = endpoints.indexOf(ep);
     if (idx > 0) {
       [endpoints[idx-1], endpoints[idx]] = [endpoints[idx], endpoints[idx-1]];
       sendApiRouterUpdate();
     }
-  } else if (e.target.matches('.api-endpoint-move-down')) {
+  } else if (e.target.closest('.api-endpoint-move-down')) {
     // Move endpoint down one position
     const idx = endpoints.indexOf(ep);
     if (idx < endpoints.length - 1) {
       [endpoints[idx+1], endpoints[idx]] = [endpoints[idx], endpoints[idx+1]];
       sendApiRouterUpdate();
     }
-  } else if (e.target.matches('.api-endpoint-delete')) {
+  } else if (e.target.closest('.api-endpoint-delete')) {
     // Delete endpoint and clean up assignments
     if (confirm(`Delete endpoint "${ep.name}"?`)) {
       state.api_router.endpoints = endpoints.filter(e => e.id !== id);

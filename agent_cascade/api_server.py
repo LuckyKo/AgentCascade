@@ -500,7 +500,7 @@ def create_app(agents, agent_pool, config=None):
         # Resolve default: when no instance_name is given, use the session's
         # session_name so callers don't need to know about "root".
         if instance_name is None:
-            instance_name = session.get('session_name', 'root')
+            instance_name = session.get('session_name') or 'Maine'
 
         # Primary path: read from agent_pool.instances (the single source of truth)
         inst = agent_pool.get_instance(instance_name) if agent_pool else None

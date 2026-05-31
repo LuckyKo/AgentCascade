@@ -4,10 +4,9 @@ After Phase 8 cleanup, USE_UNIFIED_STATE is permanently True — legacy paths
 removed. These tests verify the unified-only behavior of get_session_history(),
 build_state(), and get_agent_state().
 
-We also test the unified token cache integration that build_state uses.
+Unit tests for the AgentTokenCache module used by api_server are also included.
 """
 
-import copy
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,12 +24,12 @@ class TestGetSessionHistoryLogic:
     """
 
     def test_unified_root_reads_from_instance_state(self):
-        """In unified mode, root history comes from instance_state['root']."""
+        """In unified mode, root history comes from instance_state under the session name."""
         instance_state = {
-            "root": {"messages": [{"role": "user", "content": "unified_hello"}]},
+            "Maine": {"messages": [{"role": "user", "content": "unified_hello"}]},
         }
 
-        store = instance_state.get("root", {})
+        store = instance_state.get("Maine", {})
         msgs = store.get("messages", [])
 
         assert len(msgs) == 1
@@ -68,25 +67,24 @@ class TestBuildStateLogic:
     def test_build_state_unified_uses_instance_state(self):
         """In unified mode, root messages come from instance_state."""
         instance_state = {
-            "root": {"messages": [{"role": "user", "content": "unified_msg"}]},
+            "Maine": {"messages": [{"role": "user", "content": "unified_msg"}]},
         }
 
-        root_state = instance_state.get("root")
+        root_state = instance_state.get("Maine")
         msgs = root_state["messages"] if root_state else []
 
         assert len(msgs) == 1
         assert msgs[0]["content"] == "unified_msg"
 
     def test_build_state_writes_to_unified_token_cache(self):
-        """build_state writes root stats to the token cache."""
+        """Token cache can store and retrieve agent stats (unit test for AgentTokenCache)."""
         from config.token_cache import AgentTokenCache
 
         cache = AgentTokenCache(ttl=300)
         if cache._cleanup_timer:
             cache._cleanup_timer.cancel()
 
-        # Simulate what build_state does at lines 793-794:
-        #   unified_token_cache.set('root', len(active_h), h_stats['tokens'])
+        # Test the token cache set/get cycle with a primary-agent key
         active_h_count = 10
         h_stats_tokens = 5000
 
@@ -120,12 +118,12 @@ class TestGetAgentStateLogic:
     """Test the get_agent_state logic with unified mode permanently enabled."""
 
     def test_unified_root_returns_instance_state(self):
-        """In unified mode, root agent state comes from instance_state."""
+        """In unified mode, primary agent state comes from instance_state under the session name."""
         instance_state = {
-            "root": {"messages": [{"role": "user", "content": "unified"}], "active": True},
+            "Maine": {"messages": [{"role": "user", "content": "unified"}], "active": True},
         }
 
-        state = instance_state.get("root")
+        state = instance_state.get("Maine")
         state = state.copy() if state else None
 
         assert state is not None
@@ -145,18 +143,18 @@ class TestGetAgentStateLogic:
         """When agent_pool is None in unified mode, returns None."""
         pool = None
 
-        state = pool.instance_state.get("root") if pool else None
+        state = pool.instance_state.get("Maine") if pool else None
         state = state.copy() if state else None
 
         assert state is None
 
 
 # ===========================================================================
-# Token cache integration in build_state
+# Token cache unit tests (AgentTokenCache module)
 # ===========================================================================
 
 class TestTokenCacheIntegration:
-    """Test that the unified token cache is properly used during state building."""
+    """Unit tests for the AgentTokenCache module used by api_server."""
 
     def test_cache_ttl_is_300(self):
         """The api_server creates a token cache with 300s TTL."""
@@ -166,22 +164,21 @@ class TestTokenCacheIntegration:
             cache._cleanup_timer.cancel()
         assert cache._ttl == 300
 
-    def test_cache_stores_and_retrieves_root_stats(self):
-        """build_state writes root stats; subsequent reads should find them."""
+    def test_cache_stores_and_retrieves_primary_agent_stats(self):
+        """Token cache stores and retrieves stats for primary agent."""
         from config.token_cache import AgentTokenCache
         cache = AgentTokenCache(ttl=60)
         if cache._cleanup_timer:
             cache._cleanup_timer.cancel()
 
-        # Simulate what build_state does in unified mode
         cache.set("root", count=10, tokens=5000)
         result = cache.get("root")
         assert result is not None
         assert result["count"] == 10
         assert result["tokens"] == 5000
 
-    def test_cache_entry_expires_and_build_state_can_write_new(self):
-        """After TTL expires, build_state can write a fresh entry."""
+    def test_cache_entry_expires_and_can_be_refreshed(self):
+        """After TTL expires, a fresh entry can be written."""
         from config.token_cache import AgentTokenCache
         import time
 
@@ -197,7 +194,7 @@ class TestTokenCacheIntegration:
         time.sleep(1.1)
         assert cache.get("root") is None  # expired
 
-        # build_state can write a new entry after expiry
+        # Write a new entry after expiry
         cache.set("root", count=8, tokens=3500)
         result = cache.get("root")
         assert result["count"] == 8
@@ -205,11 +202,11 @@ class TestTokenCacheIntegration:
 
 
 # ===========================================================================
-# Incremental token counting logic (from build_state lines 759-790)
+# Incremental token counting logic (pattern used in build_state)
 # ===========================================================================
 
 class TestIncrementalTokenCounting:
-    """Test the incremental token counting pattern used in build_state."""
+    """Test the incremental token counting pattern used in state building."""
 
     def test_incremental_stats_on_history_growth(self):
         """When history grows, stats are computed incrementally."""

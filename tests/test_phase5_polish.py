@@ -192,11 +192,11 @@ class TestSubAgentStateMainSession:
             system_message_content="You are Maine",
         )
         
-        # instance_state should be populated under 'root'
-        assert 'root' in pool.instance_state
-        assert pool.instance_state['root']['active'] is False
-        assert 'Maine' in pool.instance_state['root']['agent_name']
-        assert len(pool.instance_state['root']['messages']) >= 1
+        # instance_state should be populated under the actual instance name 'Maine'
+        assert 'Maine' in pool.instance_state
+        assert pool.instance_state['Maine']['active'] is False
+        assert 'Maine' in pool.instance_state['Maine']['agent_name']
+        assert len(pool.instance_state['Maine']['messages']) >= 1
         
         # Should also be registered under actual instance name
         assert 'Maine' in pool.instance_state
