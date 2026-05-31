@@ -854,8 +854,8 @@ def create_app(agents, agent_pool, config=None):
                 """Fire a state broadcast when an agent is dismissed (runs from tool thread).
                 
                 Uses agent_pool._ws_loop to access the event loop set by run_agent_thread.
-                Only triggers for LLM-initiated dismissals (during active generation cycle).
-                UI-initiated dismissals have their own direct broadcast in terminate_agent_instance handler.
+                Handles all dismissals: both LLM-initiated (during active generation cycle)
+                and UI-initiated (via terminate_agent_instance handler).
                 """
                 ws_loop = getattr(agent_pool, '_ws_loop', None)
                 if ws_loop and not ws_loop.is_closed() and send_queue:
@@ -864,6 +864,8 @@ def create_app(agents, agent_pool, config=None):
                         asyncio.run_coroutine_threadsafe(send_queue.put(msg), ws_loop)
                     except Exception as e:
                         logger.debug(f"Dismissal callback failed (non-critical): {e}")
+                else:
+                    logger.warning(f"Dismissal broadcast skipped for {instance_name}: ws_loop={ws_loop}, closed={ws_loop.is_closed() if ws_loop else 'N/A'}, queue={'yes' if send_queue else 'no'}")
             
             agent_pool.on_dismissed(_on_dismiss_callback)
 
@@ -1553,8 +1555,7 @@ def create_app(agents, agent_pool, config=None):
                     instance_name = data.get('instance_name')
                     if instance_name and agent_pool:
                         agent_pool.dismiss_instance(instance_name)
-                    # Force immediate state broadcast to update UI (remove tab)
-                    await broadcast({'type': 'state', **build_state()})
+                    # Dismissal callback triggers a state broadcast via the sender loop — no need for a direct one here
 
                 elif msg_type == 'retry':
                     if session['generating']:

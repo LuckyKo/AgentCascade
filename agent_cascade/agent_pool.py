@@ -397,7 +397,9 @@ class AgentPool:
             except Exception as e:
                 logger.debug(f"Logger close failed for {instance_name} (non-critical): {e}")
 
-        self._fire_on_dismissed(instance_name)
+        # Capture log path before it's lost — needed by dismissal callbacks to tell frontend where logs are
+        log_path = log_inst.log_path if log_inst else None
+        self._fire_on_dismissed(instance_name, log_path)
 
     def halt_all_instances(self, except_instance: str = None,
                            except_instances: Optional[List[str]] = None):

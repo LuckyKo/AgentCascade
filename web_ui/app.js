@@ -152,6 +152,22 @@ function getActiveInstanceName() {
   return state.activeSubTab.substring(4);
 }
 
+/** Remove stale sub-agent entries after merging server state.
+ *  Also resets activeSubTab to null if it points to a dismissed agent, preventing blank panel rendering. */
+function cleanupStaleSubAgents(data, state) {
+  // Remove agents that no longer exist on the server (e.g., dismissed agents)
+  for (const name of Object.keys(state.subAgents)) {
+    if (!(name in data.agent_instances)) {
+      delete state.subAgents[name];
+    }
+  }
+  // Reset active tab if it points to a now-dismissed agent — prevents blank panel rendering
+  const activeAgentName = state.activeSubTab?.startsWith('sub-') ? state.activeSubTab.slice(4) : null;
+  if (activeAgentName && !(activeAgentName in data.agent_instances)) {
+    state.activeSubTab = null;
+  }
+}
+
 const ActivityBar = {
   el: null,          // DOM ref to #globalActivityBar
   fifoEl: null,      // DOM ref to .activity-fifo
@@ -878,6 +894,8 @@ function handleServerMessage(data) {
         for (const [name, sa] of Object.entries(data.agent_instances)) {
           state.subAgents[name] = sa;
         }
+        // Remove agents that no longer exist on the server (e.g., dismissed agents)
+        cleanupStaleSubAgents(data, state);
       }
       // Restore partial content for each halted agent if server didn't already include it
       for (const [name, partialContent] of Object.entries(partialContents)) {
@@ -1083,6 +1101,8 @@ function handleServerMessage(data) {
             subAgentContentChanged = true;
           }
       }
+      // Remove agents that no longer exist on the server (e.g., dismissed agents)
+      cleanupStaleSubAgents(data, state);
       }  // end if (data.agent_instances)
       
       // Feed activity bar — happens on EVERY stream_update tick, before throttling
