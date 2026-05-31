@@ -37,8 +37,8 @@ const SYSTEM = 'system';
 const FUNCTION = 'function';
 const DEFAULT_SESSION_NAME = 'Maine'; // Default session/agent name
 
-// Root agent tab ID prefix — root agent uses the same dynamic tab system as sub-agents
-const ROOT_TAB_PREFIX = 'sub-';  // e.g., 'sub-Maine' (root is just another agent)
+// Tab ID prefix — all agents (including session primary) use 'sub-' prefix for their tabs.
+const TAB_PREFIX = 'sub-';  // e.g., 'sub-Maine'
 
 // Pre-compiled regexes for thinking blocks (consistent with backend)
 const _TAG_THINK = 'think';
@@ -119,30 +119,36 @@ const mainTabBar = $('#mainTabBar');
 // Root tab is now created dynamically — no static reference needed
 const mainTabPanels = document.querySelector('.main-tab-panels');
 
-// Helper: Get the root agent's instance name — same as session name, no special suffix.
-// All agents are equal; root is just the first instance with parent_instance=null.
-function getRootAgentName() {
-  return state.sessionName;
+// ── Active Agent Concept ──────────────────────────────────────────────────────
+// All agents are equal — "root" is just the session's primary agent.
+// The active agent is whichever agent the user is currently viewing,
+// or the session's primary agent if no tab is selected.
+
+// Get the name of the currently active (viewed) agent — the one whose tab is selected.
+// Falls back to session name (primary agent) when no tab is selected.
+function getActiveAgentName() {
+    if (!state.activeSubTab) return state.sessionName;
+    const prefix = 'sub-';
+    return state.activeSubTab.startsWith(prefix) ? state.activeSubTab.slice(prefix.length) : state.sessionName;
 }
 
-// Helper: Check if an instance name is the root agent.
-// Root is identified by matching the session name (no _root suffix needed).
+// Get the tab ID for a given agent name.
+function getAgentTabId(name) { return 'sub-' + name; }
+
+// Check if an instance name matches the session's primary agent (was "root").
+// Still needed for legitimate distinctions like supervisor display, session management.
+function isSessionPrimaryAgent(name) {
+  return name === state.sessionName;
+}
+
+// Legacy alias — kept for backward compat during transition.
+// Prefer isSessionPrimaryAgent() in new code.
 function isRootAgentName(name) {
-  return name === getRootAgentName();
-}
-
-// Helper: Get the root agent's tab ID (e.g., 'sub-Maine')
-function getRootTabId() {
-  return ROOT_TAB_PREFIX + getRootAgentName();
-}
-
-// Helper: Get the root agent's panel element ID (e.g., 'panelSub-Maine')
-function getRootPanelId() {
-  return 'panelSub-' + getRootAgentName();
+  return isSessionPrimaryAgent(name);
 }
 
 function getActiveInstanceName() {
-  if (!state.activeSubTab) return getRootAgentName();
+  if (!state.activeSubTab) return state.sessionName;
   return state.activeSubTab.substring(4);
 }
 
@@ -857,12 +863,17 @@ function handleServerMessage(data) {
     case 'state':
     case 'done':
       // Full state update — ALL agents flow through agent_instances, root included
-      const rootName = getRootAgentName();
 
-      // When paused mid-stream, preserve the last streamed message in case it wasn't committed yet
-      const rootData = state.subAgents[rootName];
-      const partialContent = (state.generating && data.instance_halted && rootData?.messages?.length > 0)
-        ? String(rootData.messages[rootData.messages.length - 1].content || '') : null;
+      // When paused mid-stream, preserve the last streamed message for EACH halted agent
+      // in case it wasn't committed yet. Collect partials before merging server data.
+      const partialContents = {};
+      if (state.generating && data.instance_halted) {
+        for (const [name, agentData] of Object.entries(state.subAgents)) {
+          if (agentData?.is_halted && agentData?.messages?.length > 0) {
+            partialContents[name] = String(agentData.messages[agentData.messages.length - 1].content || '');
+          }
+        }
+      }
 
       // Merge ALL agent_instances including root — single source of truth, no legacy fallbacks
       if (data.agent_instances) {
@@ -870,12 +881,12 @@ function handleServerMessage(data) {
           state.subAgents[name] = sa;
         }
       }
-      // Only restore partial content if server didn't already include it
-      if (partialContent) {
-        const rootMsgs = state.subAgents[rootName]?.messages || [];
-        const lastServerContent = String(rootMsgs[rootMsgs.length - 1]?.content || '');
+      // Restore partial content for each halted agent if server didn't already include it
+      for (const [name, partialContent] of Object.entries(partialContents)) {
+        const msgs = state.subAgents[name]?.messages || [];
+        const lastServerContent = String(msgs[msgs.length - 1]?.content || '');
         if (!lastServerContent.startsWith(partialContent)) {
-          rootMsgs.push({ role: 'assistant', content: partialContent });
+          msgs.push({ role: 'assistant', content: partialContent });
         }
       }
       state.activeStack = data.active_stack || [];
@@ -952,27 +963,28 @@ function handleServerMessage(data) {
         p.dataset.lastRenderedCount = '999999999';
       });
 
-      // Render root agent through the same path as sub-agents
+      // Render all agents through the same path — no root/sub distinction
       renderSubAgents();
       
-      // Ensure root tab is active on initial load or if no tab is selected.
+      // Ensure the session primary agent's tab is active on initial load or if no tab is selected.
       if (!state.activeSubTab) {
-        state.activeSubTab = getRootTabId();
-        const rootTab = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
-        if (rootTab) rootTab.classList.add('active');
-        const rootPanel = document.getElementById(getRootPanelId());
-        if (rootPanel) rootPanel.classList.add('active');
+        const primaryTab = getAgentTabId(state.sessionName);
+        state.activeSubTab = primaryTab;
+        const primaryTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${primaryTab}"]`);
+        if (primaryTabEl) primaryTabEl.classList.add('active');
+        const primaryPanel = document.getElementById('panelSub-' + state.sessionName);
+        if (primaryPanel) primaryPanel.classList.add('active');
       }
       updateControls();
 
-      // Update stats if generating — pass root agent messages
+      // Update stats if generating — pass active agent messages
       if (state.generating) {
-        const rootMsgs = state.subAgents[getRootAgentName()]?.messages || [];
-        updateGenStats(rootMsgs);
+        const activeMsgs = state.subAgents[getActiveAgentName()]?.messages || [];
+        updateGenStats(activeMsgs);
       } else if (wasGenerating) {
-        // Final update for stats — use root agent messages
-        const rootMsgs = state.subAgents[getRootAgentName()]?.messages || [];
-        updateGenStats(rootMsgs, true);
+        // Final update for stats — use active agent messages
+        const activeMsgs = state.subAgents[getActiveAgentName()]?.messages || [];
+        updateGenStats(activeMsgs, true);
         state.genStats.active = false;
         
         // Invalidate activity preview cache so next turn computes fresh preview
@@ -987,9 +999,9 @@ function handleServerMessage(data) {
       break;
 
     case 'stream_update': {
-      // Only block stream updates when the ROOT agent itself is halted, not when any sub-agent is halted
-      const rootName = getRootAgentName();
-      if (state.subAgents[rootName]?.is_halted) break;
+      // Only block stream updates when the ACTIVE agent itself is halted
+      const activeName = getActiveAgentName();
+      if (state.subAgents[activeName]?.is_halted) break;
       
       const oldStackStr = (state.activeStack || []).join(',');
       // Track changes to decide render urgency:
@@ -1132,9 +1144,9 @@ function handleServerMessage(data) {
         state.genStats.lastControlsUpdate = now;
       }
 
-      // Throttle sub-agent rendering to ~200ms during streaming
+      // Throttle sub-agent rendering to ~150ms during streaming (matches backend event rate of 0.15s)
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
-      const subThrottleContent = 200;
+      const subThrottleContent = 150;
       if (stackChanged || subAgentNewVisibleMessage || now - state.genStats.lastSubAgentRender > subThrottleContent) {
         // Only call renderSubAgents if we're NOT about to call switchMainTab,
         // since switchMainTab calls renderSubAgents internally at the end.
@@ -1142,7 +1154,7 @@ function handleServerMessage(data) {
         const willSwitchTab = stackChanged && (
           (state.activeStack.length > 0 && state.subAgents?.[state.activeStack[state.activeStack.length - 1]] && 
            state.activeSubTab !== 'sub-' + state.activeStack[state.activeStack.length - 1]) ||
-          (state.activeStack.length === 0 && state.activeSubTab !== getRootTabId())
+          (state.activeStack.length === 0 && state.activeSubTab !== getAgentTabId(state.sessionName))
         );
         
         if (!willSwitchTab) {
@@ -1158,10 +1170,10 @@ function handleServerMessage(data) {
               switchMainTab('sub-' + topAgent);
             }
           } else {
-            // Auto-switch back to root when stack empties (if user isn't already on root)
-            // After unification, all tabs start with 'sub-' so we check against getRootTabId() directly
-            if (state.activeSubTab !== getRootTabId()) {
-              switchMainTab(getRootTabId());
+            // Auto-switch back to session primary agent when stack empties (if user isn't already on it)
+            const primaryTab = getAgentTabId(state.sessionName);
+            if (state.activeSubTab !== primaryTab) {
+              switchMainTab(primaryTab);
             }
           }
         }
@@ -1172,8 +1184,8 @@ function handleServerMessage(data) {
       // from the original frequency.
       if (!state.genStats.lastGenStatsUpdate) state.genStats.lastGenStatsUpdate = 0;
       if (now - state.genStats.lastGenStatsUpdate > 500) {
-        const rootMsgs = state.subAgents[getRootAgentName()]?.messages || [];
-        updateGenStats(rootMsgs);
+        const activeMsgs = state.subAgents[getActiveAgentName()]?.messages || [];
+        updateGenStats(activeMsgs);
         state.genStats.lastGenStatsUpdate = now;
       }
     }
@@ -1381,8 +1393,8 @@ function renderAgentConversation(instanceName, messages, depth, indexMap, render
 }
 
 function createMessageEl(msg, index, config) {
-  // Default to root agent config if not provided (backward compatible)
-  if (!config) config = getAgentConfig(getRootAgentName());
+  // Default to session primary agent config if not provided (backward compatible)
+  if (!config) config = getAgentConfig(state.sessionName);
 
   const div = document.createElement('div');
   div.className = msgClass(msg.role || 'unknown');
@@ -1507,7 +1519,7 @@ function createMessageEl(msg, index, config) {
 // ── Bubble content updater ─────────────────────────────────────────────
 
 function updateBubbleContent(bubble, msg, config) {
-  if (!config) config = getAgentConfig(getRootAgentName());
+  if (!config) config = getAgentConfig(state.sessionName);
 
   const contentDiv = bubble.querySelector('.' + contentClass());
   if (!contentDiv) return;
@@ -2196,20 +2208,10 @@ window.rejectRequest = function (requestId) {
 
 function renderSubAgents() {
   const sa = state.subAgents;
-  const rootName = getRootAgentName();
   
   // Build agent list from subAgents, filtered by closedTabs.
-  // Root is just another agent in the pool — no special inclusion logic needed.
+  // All agents are equal — no root-first sorting needed.
   const namesArr = Object.keys(sa).filter(name => !state.closedTabs.has('sub-' + name));
-  // Ensure root is always first if it exists and isn't closed
-  const rootIdx = namesArr.indexOf(rootName);
-  if (rootIdx > 0) {
-    namesArr.splice(rootIdx, 1);
-    namesArr.unshift(rootName);
-  } else if (rootIdx === -1 && sa[rootName] && !state.closedTabs.has('sub-' + rootName)) {
-    // Root has data but wasn't in the list (shouldn't happen now, defensive)
-    namesArr.unshift(rootName);
-  }
 
   // Remove stale sub-agent tabs and panels for agents that no longer exist
   mainTabBar.querySelectorAll('.main-tab[data-tab^="sub-"]').forEach(tab => {
@@ -2233,8 +2235,8 @@ function renderSubAgents() {
 
   for (const name of namesArr) {
     const tabId = 'sub-' + name;
-    // Behavioral check only: root agent's close button terminates the session instead of closing the tab
-    const isRoot = isRootAgentName(name);
+    // Check if this is the session primary agent (was "root")
+    const isSessionPrimary = isSessionPrimaryAgent(name);
     const agentData = sa[name];
     // Agent-specific active state only — no global fallback (prevents cross-agent pulsing)
     const isActive = agentData?.active ?? false;
@@ -2257,22 +2259,17 @@ function renderSubAgents() {
 
       const closeBtn = document.createElement('span');
       closeBtn.className = 'close-tab';
-      closeBtn.title = isRoot ? 'Terminate Session' : 'Close Tab';
+      closeBtn.title = 'Close Agent';
       closeBtn.textContent = '\u00d7';
       closeBtn.onclick = (e) => {
         e.stopPropagation();
-        if (isRoot) {
-          // Terminating root agent = ending the session
-          send({ type: 'terminate_agent_instance', instance_name: name });
+        send({ type: 'terminate_agent_instance', instance_name: name });
+        // Don't add to closedTabs optimistically — let server state sync handle tab removal.
+        // If termination fails, the agent stays in subAgents and its tab reappears naturally.
+        if (state.activeSubTab === tabId) {
+          switchMainTab(getAgentTabId(state.sessionName));
         } else {
-          send({ type: 'terminate_agent_instance', instance_name: name });
-          // Don't add to closedTabs optimistically — let server state sync handle tab removal.
-          // If termination fails, the agent stays in subAgents and its tab reappears naturally.
-          if (state.activeSubTab === tabId) {
-            switchMainTab(getRootTabId());
-          } else {
-            renderSubAgents();
-          }
+          renderSubAgents();
         }
       };
       tabBtn.appendChild(closeBtn);
@@ -2286,8 +2283,8 @@ function renderSubAgents() {
       // Only update icon innerHTML when active state actually changed to avoid GPU churn
       const prevActive = tabBtn.dataset.isActive === 'true';
       if (prevActive !== isActive) {
-        iconSpan.innerHTML = isActive ? '<span class="sub-tab-pulse"></span>' : 
-          (isRoot ? '<span class="main-tab-icon">💬</span>' : '<span class="main-tab-icon">🤖</span>');
+        const icon = agentData?.agent_class === 'orchestrator' ? '💬' : '🤖';
+        iconSpan.innerHTML = isActive ? '<span class="sub-tab-pulse"></span> ' + `<span class="main-tab-icon">${icon}</span>` : `<span class="main-tab-icon">${icon}</span>`;
       }
       tabBtn.dataset.isActive = String(isActive);
     }
@@ -2667,17 +2664,26 @@ function updateControls() {
     if (isGenerating) {
       sendBtn.classList.add('inject-mode');
       sendBtn.title = 'Inject message into active agent (Enter)';
-      // Update root tab to show pulse indicator immediately. renderSubAgents() also handles icon updates but is throttled (~200ms); this provides instant visual feedback when generation starts/stops.
-      const rootTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
-      if (rootTabEl) rootTabEl.innerHTML = '<span class="sub-tab-pulse"></span> 💬 ' + escapeHtml(state.sessionName || DEFAULT_SESSION_NAME);
+      // Update the active generating agent's tab to show pulse indicator immediately.
+      // renderSubAgents() also handles icon updates but is throttled (~200ms); this provides instant visual feedback when generation starts/stops.
+      const activeAgentName = getActiveAgentName();
+      const activeTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getAgentTabId(activeAgentName)}"]`);
+      if (activeTabEl) {
+        const icon = state.subAgents[activeAgentName]?.agent_class === 'orchestrator' ? '💬' : '🤖';
+        activeTabEl.innerHTML = '<span class="sub-tab-pulse"></span> ' + escapeHtml(activeAgentName || DEFAULT_SESSION_NAME);
+      }
       resetBtn.disabled = true;
       document.body.classList.add('is-generating');
     } else {
       sendBtn.classList.remove('inject-mode');
       sendBtn.title = 'Send (Enter)';
-      // Restore root tab icon
-      const rootTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getRootTabId()}"]`);
-      if (rootTabEl) rootTabEl.innerHTML = '<span class="main-tab-icon">💬</span> ' + escapeHtml(state.sessionName || DEFAULT_SESSION_NAME);
+      // Restore active agent tab icon
+      const activeAgentName = getActiveAgentName();
+      const activeTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getAgentTabId(activeAgentName)}"]`);
+      if (activeTabEl) {
+        const icon = state.subAgents[activeAgentName]?.agent_class === 'orchestrator' ? '💬' : '🤖';
+        activeTabEl.innerHTML = '<span class="main-tab-icon">' + icon + '</span> ' + escapeHtml(activeAgentName || DEFAULT_SESSION_NAME);
+      }
       resetBtn.disabled = false;
       document.body.classList.remove('is-generating');
     }
@@ -2685,10 +2691,11 @@ function updateControls() {
   }
   stopBtn.style.opacity = state.generating ? '1' : '0.4';
   sendBtn.disabled = !state.connected;
-  continueBtn.disabled = state.generating || (state.subAgents[getRootAgentName()]?.messages || []).length === 0;
+  const activeMsgs = state.subAgents[getActiveAgentName()]?.messages || [];
+  continueBtn.disabled = state.generating || activeMsgs.length === 0;
   const refreshBtn = document.getElementById('refreshBtn');
   const mainRB = document.getElementById('mainRetryBtn');
-  const retryDisabled = state.generating || (state.subAgents[getRootAgentName()]?.messages || []).length === 0;
+  const retryDisabled = state.generating || activeMsgs.length === 0;
   if (refreshBtn) refreshBtn.disabled = state.generating;
   if (mainRB) mainRB.disabled = retryDisabled;
 
@@ -2808,7 +2815,8 @@ function resetGenStats() {
     firstTokenTime: 0,
     lastTokenTime: 0,
     activeGenTime: 0,
-    startMsgCount: (state.subAgents[getRootAgentName()]?.messages || []).length,
+    startMsgCount: (state.subAgents[getActiveAgentName()]?.messages || []).length,
+    measuredAgent: getActiveAgentName(), // Track which agent's msgs are passed as main param
     saStartCounts: saStartCounts,
     tokenCount: 0,
     active: true,
@@ -2844,11 +2852,11 @@ function updateGenStats(msgs, isFinal = false) {
     }
   }
 
-  // 2. Sub-Agent Tokens (exclude root agent which is passed as msgs parameter)
-  const rootName = getRootAgentName();
+  // 2. Sub-Agent Tokens (exclude the agent whose msgs were passed as main param)
+  const measuredAgent = state.genStats.measuredAgent || state.sessionName;
   if (state.subAgents) {
     for (const name in state.subAgents) {
-      if (name === rootName) continue; // Root agent handled via msgs param above
+      if (name === measuredAgent) continue; // Agent handled via msgs param above
       const saMsgs = state.subAgents[name].messages || [];
       const saStart = (state.genStats.saStartCounts && state.genStats.saStartCounts[name]) || 0;
       for (let i = saStart; i < saMsgs.length; i++) {
@@ -3307,11 +3315,8 @@ function sendMessage(inputEl) {
   autoResize(targetInput);
 
   if (state.generating) {
-    // Async injection: route to the agent whose tab is active
-    let targetAgent = getRootAgentName();
-    if (state.activeSubTab && state.activeSubTab !== getRootTabId()) {
-      targetAgent = state.activeSubTab.substring(4); // strip 'sub-'
-    }
+    // Async injection: route to the active agent (session primary or selected sub-tab)
+    const targetAgent = getActiveAgentName();
     send({ type: 'message', text, target_agent: targetAgent });
     return;
   }
