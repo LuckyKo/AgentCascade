@@ -28,7 +28,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 # BUGS:
 
 - [x] chat window must auto scroll on bottom, decouple if user scrolls up, recouple if he scrolls back to bottom
-- [ ] very slow UI updates, once every few seconds.
+- [x] very slow UI updates, once every few seconds. — FIXED Bug 31 (increased token stats cache from 100→5000 entries, cached _get_max_tokens_for_instance per instance, reduced render throttle from 100ms→50ms, skip slice_history_for_llm during active generation when conversation unchanged)
 - [x] when a new agent starts we get sent into a no tab zone - blank screen - instead of switching to the active agent tab.
 - [ ] CSS issue in web_ui, edit marker gets inserted all over the UI instead of being limited to edit boxes
 - [x] max token limit inaccurately extracted from API endpoint, defaults to 65k

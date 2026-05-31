@@ -1171,9 +1171,9 @@ function handleServerMessage(data) {
         state.genStats.lastControlsUpdate = now;
       }
 
-      // Throttle sub-agent rendering to ~100ms during streaming (reduced from 150ms for snappier updates)
+      // Throttle sub-agent rendering to ~50ms during streaming (BUG31: reduced from 100ms for snappier updates)
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
-      const subThrottleContent = 100;
+      const subThrottleContent = 50;
       // Force render on: stack change, new visible message, content streaming in existing bubble, or time threshold
       if (stackChanged || subAgentNewVisibleMessage || subAgentContentChanged || now - state.genStats.lastSubAgentRender > subThrottleContent) {
         // Only call renderSubAgents if we're NOT about to call switchMainTab,

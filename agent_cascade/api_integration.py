@@ -32,14 +32,29 @@ from .execution_engine import ExecutionEngine, _build_resources_block, _replace_
 # Fix #1: Token stat cache keyed by (msg_count, last_msg_id) → stats dict.
 # During LLM streaming, the conversation doesn't change — only partial streamed content changes.
 # So stats should be cached aggressively and only recalculated when a new message is added.
+# BUG31: Increased maxsize from 100 to 5000 to prevent premature cache eviction during multi-instance sessions.
 _token_stats_cache: Dict[tuple, dict] = {}
+_TOKEN_STATS_CACHE_MAXSIZE = 5000
+
+# BUG31 Fix #2: Cache _get_max_tokens_for_instance result per instance name.
+# The max tokens value never changes during a session, so caching avoids expensive lookups.
+# Key: instance_name, Value: max_input_tokens (int)
+_max_tokens_cache: Dict[str, int] = {}
 
 # Fix #3: Version tracker per instance. Incremented each time a message is added.
 # Used to skip serializing instances whose conversation hasn't changed.
 # Key: instance_name, Value: (msg_count, id_of_last_msg)
+# NOTE: This dict serves dual purpose — it's used by both Fix #3 (serialization dedup
+# in build_stream_update_from_pool lines ~511-522) AND Fix #4 (token stats cache invalidation
+# at line ~459). Both use the same (msg_count, id(last_msg)) tuple format.
 _last_stream_versions: Dict[str, tuple] = {}
 # Cached serialized instance data for unchanged instances (reused across stream_updates)
 _cached_instance_data: Dict[str, dict] = {}
+
+# BUG31 Fix #4: Cache token stats per instance for build_stream_update_from_pool.
+# During active generation, the conversation doesn't change — skip expensive slice_history_for_llm + get_history_stats.
+# Key: instance_name, Value: (h_stats, r_stats) tuple of dicts
+_stream_token_stats_cache: Dict[str, tuple] = {}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -304,7 +319,10 @@ def build_state_from_pool(
     active_h = pool.slice_history_for_llm(msgs) if msgs else msgs
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
-    max_tokens = _get_max_tokens_for_instance(pool, instance)
+    # BUG31 Fix #2: Cache result per instance to avoid expensive repeated lookups
+    if instance_name not in _max_tokens_cache:
+        _max_tokens_cache[instance_name] = _get_max_tokens_for_instance(pool, instance)
+    max_tokens = _max_tokens_cache[instance_name]
 
     # Calculate history stats
     try:
@@ -435,21 +453,38 @@ def build_stream_update_from_pool(
     # Get active working set for token stats (single snapshot)
     with instance._compression_lock:
         conv_snapshot = list(instance.conversation)
-    active_h = pool.slice_history_for_llm(conv_snapshot) if conv_snapshot else conv_snapshot
+    
+    # BUG31 Fix #4: Skip expensive slice_history_for_llm + get_history_stats during active
+    # generation when the conversation hasn't changed since last stream update.
+    current_version = (len(conv_snapshot), id(conv_snapshot[-1]) if conv_snapshot else None)
+    cached_stats = _stream_token_stats_cache.get(instance_name)
+    
+    if cached_stats is not None and current_version == _last_stream_versions.get(instance_name):
+        # Conversation unchanged — reuse previously computed token stats
+        h_stats, r_stats = cached_stats
+    else:
+        # Conversation changed or first call — compute fresh stats
+        active_h = pool.slice_history_for_llm(conv_snapshot) if conv_snapshot else conv_snapshot
 
-    # Calculate token stats
-    try:
-        from agent_cascade.utils.utils import get_history_stats
-        h_stats = get_history_stats(active_h)
-        r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
-    except Exception as e:
-        logger.debug(f"Token stats calculation failed for stream update (using estimate): {e}")
-        # Fallback: estimate ~4 tokens per message on average (conservative)
-        h_stats = {'tokens': len(active_h) * 4, 'words': 0}
-        r_stats = {'tokens': 0, 'words': 0}
+        # Calculate token stats
+        try:
+            from agent_cascade.utils.utils import get_history_stats
+            h_stats = get_history_stats(active_h)
+            r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
+        except Exception as e:
+            logger.debug(f"Token stats calculation failed for stream update (using estimate): {e}")
+            # Fallback: estimate ~4 tokens per message on average (conservative)
+            h_stats = {'tokens': len(active_h) * 4, 'words': 0}
+            r_stats = {'tokens': 0, 'words': 0}
+        
+        # Cache the computed stats for next tick
+        _stream_token_stats_cache[instance_name] = (h_stats, r_stats)
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
-    max_tokens = _get_max_tokens_for_instance(pool, instance)
+    # BUG31 Fix #2: Cache result per instance to avoid expensive repeated lookups
+    if instance_name not in _max_tokens_cache:
+        _max_tokens_cache[instance_name] = _get_max_tokens_for_instance(pool, instance)
+    max_tokens = _max_tokens_cache[instance_name]
 
     # Build active stack
     active_stack = list(pool._execution.active_stack) if hasattr(pool, '_execution') else []
@@ -781,15 +816,18 @@ def _serialize_instance(
         except Exception as e:
             logger.debug(f"Token stats calculation failed for {inst.instance_name} (using estimate): {e}")
             stats = {'tokens': len(msgs) * 4, 'words': 0}
-        # Evict oldest entry if cache is full (cap at 100 entries to prevent memory leak)
-        if len(_token_stats_cache) >= 100:
+        # BUG31 Fix #1: Evict oldest entry if cache is full (increased from 100 to 5000)
+        if len(_token_stats_cache) >= _TOKEN_STATS_CACHE_MAXSIZE:
             oldest_key = next(iter(_token_stats_cache))
             del _token_stats_cache[oldest_key]
         _token_stats_cache[cache_key] = stats
     else:
         stats = _token_stats_cache[cache_key]
 
-    max_tokens = _get_max_tokens_for_instance(pool, inst)
+    # BUG31 Fix #2: Cache max_tokens per instance name to avoid expensive repeated lookups
+    if inst.instance_name not in _max_tokens_cache:
+        _max_tokens_cache[inst.instance_name] = _get_max_tokens_for_instance(pool, inst)
+    max_tokens = _max_tokens_cache[inst.instance_name]
 
     result.update({
         'messages': serialized_msgs,
