@@ -97,7 +97,14 @@ class QwenVLChatAtOAI(TextChatAtOAI):
                 content = msg.get('content')
                 if content is None:
                     continue
+                # Skip string content (e.g., tool/function messages)
+                # — iterating over a string yields individual characters, not dicts
+                if isinstance(content, str):
+                    continue
                 for item in content:
+                    # Defensive: skip non-dict items (shouldn't occur in normal flow, but protects against future changes)
+                    if not isinstance(item, dict):
+                        continue
                     if item.get('image_url', {}).get('url', '').startswith('data:'):
                         item['image_url']['url'] = item['image_url']['url'][:64] + '...'
                     if item.get('video_url', {}).get('url', '').startswith('data:'):
