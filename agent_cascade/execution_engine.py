@@ -139,12 +139,10 @@ def _build_resources_block(pool, template, instance=None) -> str:
             res += "- None currently available.\n"
 
     # List enabled tools (excluding disabled ones)
-    res += "\nEnabled Tools (can change per interaction):\n"
-    for t_name in sorted(template.function_map.keys()):
-        if t_name in disabled_tools:
-            continue
-        desc = getattr(template.function_map[t_name], 'description', 'No description provided')
-        res += f"- **{t_name}**: {desc}\n"
+    # Descriptions are omitted — LLM already knows them via native function schemas
+    enabled_tools = sorted(t_name for t_name in template.function_map.keys() if t_name not in disabled_tools)
+    if enabled_tools:
+        res += "\nEnabled Tools (can change per interaction): " + ", ".join(enabled_tools) + "\n"
 
     return res
 
