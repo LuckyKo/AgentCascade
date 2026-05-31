@@ -42,7 +42,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] user messages do not get sent to the active agent (tab in view), they all go to root
 - [x] some agents dont stop after they return to caller, resuming activity in the background
 - [x] verify that the agent's function call content are properly sent to compressor when building the message list to compact (they are missing on main) — BUG44: Root cause in _format_messages_for_summary(), see BUG44_ROOT_CAUSE.md
-- [ ] no system documentation. all we have is the code and a loose assembly of lessons from building/fixing it. comprehensive document should be based on n:\work\WD\AgentCascade_unified\DESIGN_REWRITE.md and focused on how different pieces are supposed to work instead of code details.
+- [x] no system documentation. all we have is the code and a loose assembly of lessons from building/fixing it. comprehensive document should be based on n:\work\WD\AgentCascade_unified\DESIGN_REWRITE.md and focused on how different pieces are supposed to work instead of code details. — FIXED (SYSTEM_DOCS.md created, 837 lines covering all major components)
 
 
 # EOF
