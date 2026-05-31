@@ -46,7 +46,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from agent_cascade.log import logger
-from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_MAX_INPUT_TOKENS
+from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX
 from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_MARKER
@@ -379,38 +379,19 @@ def create_app(agents, agent_pool, config=None):
         _apply_ui_config,
         _build_agents_list,
         _get_approvals,
+        _resolve_max_tokens,
     )
 
     # ── Helpers ───────────────────────────────────────────────────────────
-    def get_agent_max_tokens(agent) -> int:
-        """Resolve the effective max_input_tokens from agent LLM config."""
-        # 1. Try API Router if available
-        if agent_pool and hasattr(agent_pool, 'api_router') and agent_pool.api_router:
-            agent_type = getattr(agent, 'agent_type', 'orchestrator').lower()
-            router_limit = agent_pool.api_router.get_effective_max_tokens(agent_type)
-            if router_limit > 0:
-                return router_limit
+    # DEPRECATED: get_agent_max_tokens() is dead code — never called anywhere.
+    # Kept for API compatibility; may be removed in a future version.
+    def get_agent_max_tokens(agent, pool=None) -> int:
+        """Resolve the effective max_input_tokens from agent LLM config.
 
-        # 2. Try the agent instance logic
-        if hasattr(agent, 'llm'):
-            if hasattr(agent.llm, 'generate_cfg'):
-                agent_max = agent.llm.generate_cfg.get('max_input_tokens')
-                if agent_max:
-                    return int(agent_max)
-            if hasattr(agent.llm, 'cfg'):
-                cfg = agent.llm.cfg
-                agent_max = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens')
-                if agent_max:
-                    return int(agent_max)
-        
-        # 3. Fallback to pool/global settings
-        if agent_pool:
-            llm_cfg = getattr(agent_pool, 'llm_cfg', {})
-            pool_max = llm_cfg.get('generate_cfg', {}).get('max_input_tokens') or llm_cfg.get('max_input_tokens')
-            if pool_max:
-                return int(pool_max)
-
-        return DEFAULT_MAX_INPUT_TOKENS
+        Delegates to shared helper _resolve_max_tokens to eliminate code
+        duplication and fix OAI detection read-path bug.
+        """
+        return _resolve_max_tokens(pool or agent_pool, None)
 
     def _save_session_history():
         try:
@@ -646,15 +627,9 @@ def create_app(agents, agent_pool, config=None):
                 if hasattr(orch, 'llm') and orch.llm:
                     current_model = getattr(orch.llm, 'model', 'Unknown')
             
-            # Resolve max_tokens via API router (same logic as _get_max_tokens_for_instance)
-            fallback_max_tokens = DEFAULT_MAX_INPUT_TOKENS
-            if agent_pool and hasattr(agent_pool, 'api_router') and agent_pool.api_router:
-                try:
-                    router_limit = agent_pool.api_router.get_effective_max_tokens('orchestrator')
-                    if router_limit > 0:
-                        fallback_max_tokens = router_limit
-                except Exception as e:
-                    logger.debug(f"API router max_tokens lookup failed (using fallback): {e}")
+            # Resolve max_tokens via shared helper (same logic as _get_max_tokens_for_instance)
+            orch_inst = agent_pool.get_instance(instance_name) if agent_pool else None
+            fallback_max_tokens = _resolve_max_tokens(agent_pool, orch_inst)
             
             # Get API router state
             api_router_state = {'endpoints': [], 'agent_priorities': {}}
@@ -722,15 +697,9 @@ def create_app(agents, agent_pool, config=None):
                 if hasattr(orch, 'llm') and orch.llm:
                     current_model = getattr(orch.llm, 'model', 'Unknown')
 
-            # Resolve max_tokens via API router (same as build_state fallback)
-            stream_max_tokens = DEFAULT_MAX_INPUT_TOKENS
-            if agent_pool and hasattr(agent_pool, 'api_router') and agent_pool.api_router:
-                try:
-                    rl = agent_pool.api_router.get_effective_max_tokens('orchestrator')
-                    if rl > 0:
-                        stream_max_tokens = rl
-                except Exception as e:
-                    logger.debug(f"API router max_tokens lookup failed in stream (using fallback): {e}")
+            # Resolve max_tokens via shared helper (same logic as _get_max_tokens_for_instance)
+            orch_inst = agent_pool.get_instance(instance_name) if agent_pool else None
+            stream_max_tokens = _resolve_max_tokens(agent_pool, orch_inst)
 
             # Build minimal root instance state — frontend reads from agent_instances now
             serialized_msgs = [serialize_message(m, i) for i, m in enumerate(responses or [])]
@@ -786,16 +755,17 @@ def create_app(agents, agent_pool, config=None):
 
     # ── Agent execution thread ────────────────────────────────────────────
 
-    def run_agent_thread(history_for_agent, agent_runner, gen_id, loop):
+    def run_agent_thread(history_for_agent, agent_runner, gen_id, loop, target_instance_name=None):
         """
         Unified agent execution entry point. Delegates to run_agent_thread_unified
         which uses ExecutionEngine and pool.instances instead of session['history'].
         
-        Signature preserved for existing call sites.
+        Signature:
           - history_for_agent → used to extract system message content (can be None if instance exists in pool)
           - agent_runner → not used (engine is stateless, reads from pool)
           - gen_id → tracked in session for stop detection
           - loop → asyncio event loop for send_queue
+          - target_instance_name → override the target instance (for sub-agent routing, bug #42 fix)
         """
         with session_lock:
             session['generation_id'] = gen_id
@@ -814,7 +784,8 @@ def create_app(agents, agent_pool, config=None):
 
         # If no history provided but instance exists in pool, extract system message from it
         if system_message_content is None and agent_pool:
-            inst = agent_pool.get_instance(session['session_name'])
+            target_inst_name = target_instance_name or session['session_name']
+            inst = agent_pool.get_instance(target_inst_name)
             if inst:
                 with inst._compression_lock:
                     if inst.conversation:
@@ -827,7 +798,7 @@ def create_app(agents, agent_pool, config=None):
                     elif first_msg is not None and hasattr(first_msg, 'role'):
                         if getattr(first_msg, 'role', None) == SYSTEM:
                             system_message_content = str(getattr(first_msg, 'content', '') or '')
-        instance_name = session['session_name']
+        instance_name = target_instance_name or session['session_name']
         ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
 
         # Delegate to the unified execution thread (handles everything internally)
@@ -1323,7 +1294,7 @@ def create_app(agents, agent_pool, config=None):
                     # Add user message to the pool instance's conversation (unified path).
                     # This replaces: session['history'].append(...) + sync to pool.
                     parsed_content = _parse_multimodal_content(text)
-                    instance_name = session['session_name']
+                    instance_name = data.get('target_agent') or session['session_name']
                     
                     # Ensure the main agent instance exists before adding the message.
                     # If it doesn't, create it with the system message from the agent runner.
@@ -1365,7 +1336,7 @@ def create_app(agents, agent_pool, config=None):
 
                     thread = threading.Thread(
                         target=run_agent_thread,
-                        args=(None, agent_runner, gen_id, loop),
+                        args=(None, agent_runner, gen_id, loop, instance_name),
                         daemon=True,
                     )
                     thread.start()
@@ -1383,6 +1354,12 @@ def create_app(agents, agent_pool, config=None):
                     if 'generate_cfg' in data:
                         session['generate_cfg'] = data['generate_cfg']
 
+                    # Resolve the target instance (prefer target_agent from frontend, fallback to session)
+                    continue_instance_name = data.get('target_agent') or session['session_name']
+                    inst = None
+                    if agent_pool:
+                        inst = agent_pool.get_instance(continue_instance_name)
+                    
                     # Start agent generation with existing history (no new user message)
                     with session_lock:
                         session['stop_requested'] = False
@@ -1395,12 +1372,14 @@ def create_app(agents, agent_pool, config=None):
                     loop = asyncio.get_event_loop()
 
                     # Get the current history from the pool (unified path)
-                    assert inst is not None, "No agent instance found for session"
+                    if inst is None:
+                        await broadcast({'type': 'error', 'message': 'No agent instance found to continue'})
+                        continue
                     history_copy = copy.deepcopy(inst.conversation)
 
                     thread = threading.Thread(
                         target=run_agent_thread,
-                        args=(history_copy, agent_runner, gen_id, loop),
+                        args=(history_copy, agent_runner, gen_id, loop, continue_instance_name),
                         daemon=True,
                     )
                     thread.start()
@@ -1534,7 +1513,7 @@ def create_app(agents, agent_pool, config=None):
 
                             thread = threading.Thread(
                                 target=run_agent_thread,
-                                args=(None, agent_runner, gen_id, loop),
+                                args=(None, agent_runner, gen_id, loop, target_instance),
                                 daemon=True,
                             )
                             thread.start()
@@ -1561,7 +1540,7 @@ def create_app(agents, agent_pool, config=None):
                     if session['generating']:
                         continue
                     
-                    instance_name = session['session_name']
+                    instance_name = data.get('target_agent') or session['session_name']
                     
                     # Remove trailing assistant/function messages from the pool instance's conversation (unified path)
                     if agent_pool:
@@ -1634,7 +1613,7 @@ def create_app(agents, agent_pool, config=None):
 
                     thread = threading.Thread(
                         target=run_agent_thread,
-                        args=(None, agent_runner, gen_id, loop),
+                        args=(None, agent_runner, gen_id, loop, instance_name),
                         daemon=True,
                     )
                     thread.start()

@@ -581,48 +581,99 @@ def execute_agent_turn(
 # 5. Utility Functions
 # ═══════════════════════════════════════════════════════════════════════
 
-def _get_max_tokens_for_instance(pool: AgentPool, instance: AgentInstance) -> int:
-    """Get the effective max_input_tokens for an agent instance.
+def _resolve_max_tokens(pool, instance=None):
+    """Resolve effective max_input_tokens using unified priority order.
 
-    Module-level helper that replaces creating a full ExecutionEngine instance
-    just to call _get_max_tokens(). Called from build_state_from_pool and
-    build_stream_update_from_pool on every tick — must be fast.
+    Shared helper to eliminate code duplication across execution_engine,
+    api_integration, and api_server. Called from all 5 resolution sites.
 
-    Resolution order (same as ExecutionEngine._get_max_tokens):
-      1. API Router per-endpoint limit
-      2. Template's LLM config max_input_tokens
-      3. Fallback default of 128000
+    Priority:
+      1. Per-instance override from execution engine propagation (short-circuits all)
+      2. User-set router limit (not equal to DEFAULT_MAX_INPUT_TOKENS)
+      3. Runtime-detected LLM limit from OAI detection (llm.generate_cfg directly)
+      4. Template LLM config max_input_tokens (static from settings, via llm.cfg)
+      5. Default-ish router value as fallback
+      6. 128000 hard-coded default
+
+    Note: Per-instance override (step 1) short-circuits before the router limit
+    check because supervisor-propagated overrides should be absolute.
+
+    CRITICAL FIX: OAI detection writes to llm.generate_cfg['max_input_tokens']
+    (an attribute dict), but old resolution only read from llm.cfg['generate_cfg']
+    (a nested dict in cfg). These are DIFFERENT objects. We now check both paths.
 
     Args:
-        pool: The AgentPool.
-        instance: The agent instance to get max tokens for.
+        pool: The AgentPool (or None for safe fallback).
+        instance: The agent instance (or None for orchestrator-only lookups).
 
     Returns:
         Maximum input token count as integer.
     """
-    # 1. Try API Router (handles per-endpoint MIN logic)
-    if pool.api_router:
+    # Import DEFAULT_MAX_INPUT_TOKENS locally to avoid circular import issues
+    try:
+        from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
+    except ImportError:
+        DEFAULT_MAX_INPUT_TOKENS = 58000
+
+    # ── Step 1: API Router (per-endpoint MIN logic) ──
+    router_limit = 0
+    if pool and hasattr(pool, 'api_router') and pool.api_router:
         try:
-            router_limit = pool.api_router.get_effective_max_tokens(instance.agent_class.lower())
-            if router_limit > 0:
-                return router_limit
+            agent_class = instance.agent_class.lower() if instance else 'orchestrator'
+            router_limit = pool.api_router.get_effective_max_tokens(agent_class)
         except Exception as e:
-            logger.debug(f"API Router lookup failed for {instance.agent_class}: {e}")
+            logger.debug(f"API Router lookup failed for {agent_class}: {e}")
 
-    # 2. Try template's LLM config
-    template = pool.templates.get(instance.agent_class)
-    if template and hasattr(template, 'llm'):
-        llm = template.llm
-        cfg = getattr(llm, 'cfg', {})
-        agent_max = (
-            cfg.get('generate_cfg', {}).get('max_input_tokens') or
-            cfg.get('max_input_tokens')
-        )
-        if agent_max:
-            return int(agent_max)
+    # ── Step 2: Per-instance override (from execution engine propagation) ──
+    if instance and hasattr(instance, '_generate_cfg_override') and instance._generate_cfg_override:
+        inst_override = instance._generate_cfg_override.get('max_input_tokens')
+        if inst_override:
+            return int(inst_override)
 
-    # 3. Fallback to reasonable default
-    return 128000
+    # ── Step 3: Runtime-detected LLM limit (OAI detection writes here directly) ──
+    llm_limit = 0
+    if instance and hasattr(pool, 'templates'):
+        template = pool.templates.get(instance.agent_class)
+        if template and hasattr(template, 'llm'):
+            llm = template.llm
+            # OAI detection in oai.py writes to self.generate_cfg['max_input_tokens'] directly
+            runtime_max = getattr(llm, 'generate_cfg', {}).get('max_input_tokens')
+            if runtime_max:
+                llm_limit = int(runtime_max)
+
+    # ── Step 4: Template LLM config (static from settings, via llm.cfg dict) ──
+    static_llm_limit = 0
+    if instance and hasattr(pool, 'templates'):
+        template = pool.templates.get(instance.agent_class)
+        if template and hasattr(template, 'llm'):
+            llm = template.llm
+            cfg = getattr(llm, 'cfg', {})
+            agent_max = (
+                cfg.get('generate_cfg', {}).get('max_input_tokens') or
+                cfg.get('max_input_tokens')
+            )
+            if agent_max:
+                static_llm_limit = int(agent_max)
+
+    # ── Step 5: Resolve priority ──
+    if router_limit > 0 and router_limit != DEFAULT_MAX_INPUT_TOKENS:
+        return router_limit       # User-set explicit limit
+    if llm_limit > 0:
+        return llm_limit         # Runtime-detected from OAI endpoint
+    if static_llm_limit > 0:
+        return static_llm_limit  # Static config from settings
+    if router_limit > 0:
+        return router_limit      # Default-ish router value as last resort
+    return 128000               # Hard-coded fallback
+
+
+def _get_max_tokens_for_instance(pool: AgentPool, instance: AgentInstance) -> int:
+    """Get the effective max_input_tokens for an agent instance.
+
+    Thin wrapper around _resolve_max_tokens — kept for backward compatibility
+    since it's called from build_state_from_pool and build_stream_update_from_pool.
+    """
+    return _resolve_max_tokens(pool, instance)
 
 
 def serialize_message(msg: Any, index: Optional[int] = None) -> dict:

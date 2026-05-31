@@ -39,10 +39,10 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] no need to insert tool description metadata in the system prompt, it already gets injected in native mode.
 - [ ] security agent does not get called when using ask function from the approval popup banner (currently on no API assigned -> should default to the same API that the caller agent is running on)
 - [ ] terminate agent does not stop it and its sub-agents.
-- [ ] user messages do not get sent to the active agent (tab in view), they all go to root
+- [x] user messages do not get sent to the active agent (tab in view), they all go to root
 - [ ] some agents dont stop after they return to caller, resuming activity in the background
-- verify that the agent's function call content are properly sent to compressor when building the message list to compact (they are missing on main)
--  
+- [ ] verify that the agent's function call content are properly sent to compressor when building the message list to compact (they are missing on main)
+- [ ] no system documentation. all we have is the code and a loose assembly of lessons from building/fixing it. comprehensive document should be based on n:\work\WD\AgentCascade_unified\DESIGN_REWRITE.md and focused on how different pieces are supposed to work instead of code details.
 
 
 # EOF

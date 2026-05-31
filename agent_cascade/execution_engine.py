@@ -2112,31 +2112,13 @@ class ExecutionEngine:
                     logger.warning(f"Failed to release endpoint slot for {instance_name}: {e}")
 
     def _get_max_tokens(self, instance: AgentInstance) -> int:
-        """Resolve the effective max_input_tokens from LLM config."""
-        # 1. Try API Router (handles per-endpoint MIN logic)
-        if self.pool.api_router:
-            try:
-                router_limit = self.pool.api_router.get_effective_max_tokens(instance.agent_class.lower())
-                if router_limit > 0:
-                    return router_limit
-            except Exception as e:
-                logger.debug(f"API router max_tokens lookup failed for {instance.agent_class} (using fallback): {e}")
+        """Resolve the effective max_input_tokens from LLM config.
 
-        # 2. Try per-instance override first (from settings propagation)
-        if instance._generate_cfg_override and 'max_input_tokens' in instance._generate_cfg_override:
-            return int(instance._generate_cfg_override['max_input_tokens'])
-
-        # 3. Try template's LLM config
-        template = self.pool.templates.get(instance.agent_class)
-        if template and hasattr(template, 'llm'):
-            llm = template.llm
-            cfg = getattr(llm, 'cfg', {})
-            agent_max = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens')
-            if agent_max:
-                return int(agent_max)
-
-        # 3. Fallback to reasonable default
-        return 128000
+        Delegates to shared helper _resolve_max_tokens from api_integration
+        to eliminate code duplication and fix OAI detection read-path bug.
+        """
+        from agent_cascade.api_integration import _resolve_max_tokens
+        return _resolve_max_tokens(self.pool, instance)
 
     def _count_history_tokens(self, messages: List[Message], instance: AgentInstance = None) -> int:
         """Calculate total tokens in a message list (with caching — Fix #2)."""

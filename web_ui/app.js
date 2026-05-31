@@ -3363,9 +3363,11 @@ function sendMessage(inputEl) {
   }
 
   resetGenStats();
+  const targetAgent = getActiveAgentName();
   send({
     type: 'message',
     text,
+    target_agent: targetAgent,
     agent_index: state.agentIndex,
     session_name: state.sessionName,
     generate_cfg: getGenerateCfg()
@@ -3378,8 +3380,10 @@ function continueMessage() {
   // FIX: Send a 'continue' type instead of a regular 'message'.
   // This tells the server to resume generation without inserting a new user message.
   resetGenStats();
+  const targetAgent = getActiveAgentName();
   send({
     type: 'continue',
+    target_agent: targetAgent,
     agent_index: state.agentIndex,
     session_name: state.sessionName,
     generate_cfg: getGenerateCfg()
@@ -3389,8 +3393,10 @@ function continueMessage() {
 function retryGeneration() {
   if (state.generating) return;
   resetGenStats();
+  const targetAgent = getActiveAgentName();
   send({
     type: 'retry',
+    target_agent: targetAgent,
     agent_index: state.agentIndex,
     session_name: state.sessionName,
     generate_cfg: getGenerateCfg()
