@@ -27,14 +27,13 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 # BUGS:
 
-- [x] chat window must auto scroll on bottom, decouple if user scrolls up, recouple if he scrolls back to bottom
-- [x] very slow UI updates, once every few seconds. — FIXED Bug 31 (increased token stats cache from 100→5000 entries, cached _get_max_tokens_for_instance per instance, reduced render throttle from 100ms→50ms, skip slice_history_for_llm during active generation when conversation unchanged)
-- [x] when a new agent starts we get sent into a no tab zone - blank screen - instead of switching to the active agent tab.
-- [ ] CSS issue in web_ui, edit marker gets inserted all over the UI instead of being limited to edit boxes
-- [x] max token limit inaccurately extracted from API endpoint, defaults to 65k
-- [x] Context usage bar (top of agent tabs) uses inaccurate max token limit - should be taken from API endpoint used by agent.
+- [ ] very slow UI updates, once every few seconds, then stops completely <- still a major issue
+- [x] max token limit inaccurately extracted from API endpoint setting, defaults to 65k - FIXED: execution_engine.py now queries API router for target agent type's effective max_input_tokens; api_router.py thread safety fixes; api_integration.py fallback corrected
+- [x] Context usage bar (top of agent tabs) uses inaccurate max token limit - should be taken from API endpoint setting used by agent. <- FIXED via same changes as above
+- [ ] sub-agent gets kicked back to caller out post compression
+- [ ] not properly holding active streaming agent flag, we get finish sound while agents are still working
 - [x] agent activity detector fails and seems to return to root agent even if the invoked subagent is still running
-- [x] stop button should send stop commands to the API in use too — FIXED Bug 37 (added response.close() in try/finally for all streaming LLM methods)
+- [ ] stop button should send stop generation, stop processing, stop all terminals or docker actions, stop all agents, safely.
 - [x] dismissing an agent doesn't show the log path of the closed agent (should work similar to main). it also doesn't close the tab of the dismissed agent.
 - [x] no need to insert tool description metadata in the system prompt, it already gets injected in native mode.
 - [x] security agent does not get called when using ask function from the approval popup banner (currently on no API assigned -> should default to the same API that the caller agent is running on) — FIXED Bug 40

@@ -379,14 +379,20 @@ class APIRouter:
     def get_effective_max_tokens(self, agent_type: str) -> int:
         """
         Returns the effective max_input_tokens for an agent type.
-        Calculates the MIN of (general settings limit) and (highest priority endpoint limit).
-        """
-        defaults = self.default_llm_cfg or {}
-        general_limit = defaults.get('max_input_tokens', 0)
         
-        # Find the first enabled endpoint for this agent_type
+        If general settings has a non-zero max_input_tokens, returns MIN of
+        (general settings limit) and (highest priority endpoint limit).
+        Otherwise (general_limit = 0), returns the endpoint limit directly
+        with no capping — allowing each agent type its own configured limit.
+        """
+        # Read general_limit AND resolve endpoint chain inside a single lock scope
+        # to ensure atomicity — no risk of general_limit changing mid-computation.
         ep_limit = 0
+        general_limit = 0
         with self._lock:
+            defaults = self.default_llm_cfg or {}
+            general_limit = defaults.get('max_input_tokens', 0)
+            
             for eid in self.agent_priorities.get(agent_type, []):
                 ep = self.endpoints.get(eid)
                 if ep and ep.enabled:
@@ -406,13 +412,16 @@ class APIRouter:
           1. Agent-specific endpoints (priority order, enabled only)
           2. General Settings default (always last)
         """
-        defaults = self.default_llm_cfg or {}
-        general_limit = defaults.get('max_input_tokens', 0)
+        # Read general_limit inside lock scope for thread safety (same pattern as get_effective_max_tokens)
+        general_limit = 0
         configs = []
 
         # 1. Agent-specific endpoints — under lock to prevent RuntimeError
         # from concurrent dict modification during iteration
         with self._lock:
+            defaults = self.default_llm_cfg or {}
+            general_limit = defaults.get('max_input_tokens', 0)
+            
             for eid in self.agent_priorities.get(agent_type, []):
                 ep = self.endpoints.get(eid)
                 if ep and ep.enabled:
@@ -646,7 +655,8 @@ class APIRouter:
 
     def update_default_llm_cfg(self, new_cfg: dict):
         """Update the default fallback config (from General Settings changes)."""
-        self.default_llm_cfg.update(new_cfg)
+        with self._lock:
+            self.default_llm_cfg.update(new_cfg)
 
     def is_waiting(self, agent_name: str) -> bool:
         """Check if a specific agent instance is currently waiting for a semaphore."""

@@ -199,6 +199,8 @@ def invoke_compression_agent(
                     merged_cfg.update(comp_agent.extra_generate_cfg)
                 if hasattr(comp_agent.llm, 'generate_cfg'):
                     merged_cfg.update(comp_agent.llm.generate_cfg)
+                # Endpoint config (from router) overwrites — including max_input_tokens.
+                # This allows user's configured limit to take effect naturally via merge order.
                 merged_cfg.update(llm_cfg)
                 merged_cfg['agent_name'] = comp_agent.name
 

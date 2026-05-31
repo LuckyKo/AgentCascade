@@ -1707,6 +1707,10 @@ def create_app(agents, agent_pool, config=None):
                         # Apply auto_continue immediately (takes effect without waiting for next agent run)
                         if 'auto_continue' in ui_cfg and agent_pool and hasattr(agent_pool, 'settings'):
                             agent_pool.settings.auto_continue = bool(ui_cfg['auto_continue'])
+                        # Update API router's default_llm_cfg so sub-agents that query the router
+                        # get the user's current settings (not stale initial_llm_cfg)
+                        if agent_pool and hasattr(agent_pool, 'api_router'):
+                            agent_pool.api_router.update_default_llm_cfg(ui_cfg)
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'update_endpoints':
@@ -1856,7 +1860,8 @@ def create_app(agents, agent_pool, config=None):
                                                     merged_cfg.update(sec_agent.llm.generate_cfg)
                                                 # Apply non-LLM config (max_turns, etc.) from UI settings
                                                 merged_cfg.update(llm_safe_cfg)
-                                                # Apply router-provided LLM config (model, api_base, etc.) — overrides
+                                                # Endpoint config (from router) overwrites — including max_input_tokens.
+                                                # This allows user's configured limit to take effect naturally via merge order.
                                                 merged_cfg.update(llm_cfg)
                                                 merged_cfg['agent_name'] = sec_agent.name
 

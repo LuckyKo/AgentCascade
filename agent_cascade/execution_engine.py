@@ -735,6 +735,8 @@ class ExecutionEngine:
                     merged_cfg.update(instance._generate_cfg_override)
                 elif hasattr(llm, 'generate_cfg'):
                     merged_cfg.update(llm.generate_cfg)
+                # Endpoint config (from router) overwrites — including max_input_tokens.
+                # This allows user's General Settings / endpoint limit to take effect.
                 merged_cfg.update(llm_cfg)
                 merged_cfg['agent_name'] = template.name
 
@@ -749,12 +751,20 @@ class ExecutionEngine:
             agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
             return self.pool.api_router.call_with_fallback(agent_type, _do_call)
         else:
-            # Direct call without router
+            # Direct call without router — still respect instance override for max_input_tokens etc.
+            merged_cfg = {}
+            if instance._generate_cfg_override is not None:
+                merged_cfg.update(instance._generate_cfg_override)
+            elif hasattr(llm, 'generate_cfg'):
+                merged_cfg.update(llm.generate_cfg)
+            merged_cfg['agent_name'] = template.name
+
             return llm.chat(
                 messages=messages,
                 functions=active_functions,
                 stream=True,
                 delta_stream=False,
+                extra_generate_cfg=merged_cfg,
             )
 
     def _process_response(
@@ -1772,9 +1782,11 @@ class ExecutionEngine:
                 if caller_inst:
                     caller_template = self.pool.templates.get(caller_inst.agent_class)
                     if caller_template and hasattr(caller_template, 'llm'):
-                        llm_cfg = getattr(caller_template.llm, 'generate_cfg', {})
+                        # Use caller instance's override first (has user's UI settings),
+                        # fall back to template's generate_cfg
+                        llm_cfg = getattr(caller_inst, '_generate_cfg_override', None) or getattr(caller_template.llm, 'generate_cfg', {})
 
-                        # Propagate max_turns from caller's template config
+                        # Propagate max_turns from caller's config
                         caller_max_turns = llm_cfg.get('max_turns') or 50
                         inst.max_turns = caller_max_turns
 
@@ -1786,12 +1798,25 @@ class ExecutionEngine:
                                 f"skipping settings propagation (max_input_tokens and disabled_tools)"
                             )
                         else:
+                            # Query router BEFORE acquiring _state_lock to reduce lock contention
+                            propagated_max = llm_cfg.get('max_input_tokens')
+                            # Fallback: if caller's config doesn't have max_input_tokens (e.g., because 
+                            # initial_llm_cfg was missing it), query the API router for the target agent type's 
+                            # effective limit. This ensures sub-agents get proper limits even when the 
+                            # caller has no specific endpoint configured.
+                            if not propagated_max and self.pool.api_router:
+                                try:
+                                    propagated_max = self.pool.api_router.get_effective_max_tokens(
+                                        agent_class.lower()
+                                    )
+                                except Exception:
+                                    pass
+                            
                             with self.pool._execution._state_lock:
-                                # Propagate max_input_tokens (context window limit) — store on instance, NOT template
-                                supervisor_max = llm_cfg.get('max_input_tokens')
-                                if supervisor_max:
+                                # Propagate max_input_tokens from caller's config (context window limit) — store on instance, NOT template
+                                if propagated_max:
                                     cfg = (target_template.llm.generate_cfg or {}).copy()
-                                    cfg['max_input_tokens'] = supervisor_max
+                                    cfg['max_input_tokens'] = propagated_max
                                     inst._generate_cfg_override = cfg
 
                                 # Propagate disabled_tools — merge with any existing instance override (not overwrite)

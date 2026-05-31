@@ -140,7 +140,8 @@ class ReadFile(BaseTool):
             # --- Simple per-tool chunk limit ---
             # Cap a single read to ~25% of the context window (in chars).
             # The orchestrator's _truncate_tool_result() handles the 95% context guard.
-            max_input_tokens = 58000
+            from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
+            max_input_tokens = DEFAULT_MAX_INPUT_TOKENS
             if hasattr(self, 'agent_pool') and self.agent_pool:
                 llm_cfg = getattr(self.agent_pool, 'llm_cfg', {})
                 pool_max = llm_cfg.get('max_input_tokens') or llm_cfg.get('generate_cfg', {}).get('max_input_tokens')
@@ -149,7 +150,7 @@ class ReadFile(BaseTool):
             agent_obj = kwargs.get('agent_obj')
             if agent_obj and hasattr(agent_obj, 'llm') and hasattr(agent_obj.llm, 'generate_cfg'):
                 agent_max = agent_obj.llm.generate_cfg.get('max_input_tokens')
-                if agent_max and agent_max != 58000:
+                if agent_max:
                     max_input_tokens = int(agent_max)
             
             # 25% of context * ~2.5 chars/token (Hard Context Safety Limit)

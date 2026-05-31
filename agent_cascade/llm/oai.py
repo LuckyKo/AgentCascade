@@ -199,9 +199,13 @@ class TextChatAtOAI(BaseFnCallModel):
                     
                     if ctx_len:
                         detected_len = int(ctx_len)
-                        # Only auto-update if not manually set by user, or if we are upgrading from a default/small value
                         current_val = self.generate_cfg.get('max_input_tokens')
-                        if not current_val or current_val == 58000 or current_val == 4096:
+                        # If user explicitly set max_input_tokens in their endpoint/general settings,
+                        # respect it — don't overwrite with the detected value.
+                        cfg_max = self.cfg.get('max_input_tokens')
+                        if cfg_max and cfg_max > 0:
+                            logger.debug(f"Detected context window {detected_len} for {target_model.get('id')}, but user has configured limit of {cfg_max}. Keeping user setting.")
+                        elif not current_val or current_val == 58000 or current_val == 4096:
                             logger.info(f"Dynamically detected context window for {target_model.get('id')}: {detected_len}")
                             self.generate_cfg['max_input_tokens'] = detected_len
                         else:

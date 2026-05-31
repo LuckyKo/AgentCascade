@@ -622,15 +622,14 @@ def _resolve_max_tokens(pool, instance=None):
     Shared helper to eliminate code duplication across execution_engine,
     api_integration, and api_server. Called from all 5 resolution sites.
 
-    Priority:
-      1. Per-instance override from execution engine propagation (short-circuits all)
-      2. User-set router limit (not equal to DEFAULT_MAX_INPUT_TOKENS)
-      3. Runtime-detected LLM limit from OAI detection (llm.generate_cfg directly)
-      4. Template LLM config max_input_tokens (static from settings, via llm.cfg)
-      5. Default-ish router value as fallback
-      6. 128000 hard-coded default
+    Resolution Order (short-circuit on first hit):
+      1. Per-instance override (absolute, set by execution engine propagation)
+      2. API router effective limit (per-endpoint MIN logic)
+      3. Runtime-detected LLM limit (OAI detection writes to llm.generate_cfg)
+      4. Template static config (from settings, via llm.cfg)
+      5. User-configured DEFAULT_MAX_INPUT_TOKENS from settings
 
-    Note: Per-instance override (step 1) short-circuits before the router limit
+    Note: Per-instance override (step 1 in code = step 2 above) short-circuits before the router limit
     check because supervisor-propagated overrides should be absolute.
 
     CRITICAL FIX: OAI detection writes to llm.generate_cfg['max_input_tokens']
@@ -691,15 +690,14 @@ def _resolve_max_tokens(pool, instance=None):
                 static_llm_limit = int(agent_max)
 
     # ── Step 5: Resolve priority ──
-    if router_limit > 0 and router_limit != DEFAULT_MAX_INPUT_TOKENS:
-        return router_limit       # User-set explicit limit
+    if router_limit > 0:
+        return router_limit       # User-set or configured limit
     if llm_limit > 0:
         return llm_limit         # Runtime-detected from OAI endpoint
     if static_llm_limit > 0:
         return static_llm_limit  # Static config from settings
-    if router_limit > 0:
-        return router_limit      # Default-ish router value as last resort
-    return 128000               # Hard-coded fallback
+    
+    return DEFAULT_MAX_INPUT_TOKENS   # User-configured default from settings
 
 
 def _get_max_tokens_for_instance(pool: AgentPool, instance: AgentInstance) -> int:
