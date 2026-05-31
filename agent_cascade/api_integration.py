@@ -26,6 +26,28 @@ from .execution_engine import ExecutionEngine, _build_resources_block, _replace_
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# WebSocket Queue Helper — safely put stream_update events without blocking
+# ═══════════════════════════════════════════════════════════════════════
+
+async def _put_stream_update(queue: 'asyncio.Queue', event: dict) -> None:
+    """Put a stream_update event onto the queue, dropping it if full.
+
+    This helper is used with run_coroutine_threadsafe to push events from
+    the agent thread into the async send_queue. It calls put_nowait() directly
+    (synchronous) so stale stream_updates are dropped rather than blocking
+    the agent thread.
+
+    The function is async only so it can be scheduled via run_coroutine_threadsafe.
+    QueueFull is caught inside the event loop — never propagated to caller.
+    """
+    import asyncio  # Lazy import to avoid module-level dependency
+    try:
+        queue.put_nowait(event)  # Synchronous, raises QueueFull if full
+    except asyncio.QueueFull:
+        pass  # Drop stale event; a newer one will arrive soon
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 1. Main Agent Instance Creation
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -75,20 +97,16 @@ def create_main_agent_instance(
         conversation=conversation,
     )
 
-    # Populate instance_state for the main instance so get_session_history() in
-    # unified mode can read it. Register under both 'root' (what api_server expects)
-    # and the actual instance name for consistency with agent instance registration.
+    # Populate instance_state for the main instance so get_session_history() can read it.
+    # Register under the actual instance name — no legacy 'root' key needed post-unification.
     agent_label = f"{instance_name} (Orchestrator)"
-    # Read conversation under lock for thread safety
     with instance._compression_lock:
         conv_snapshot = list(instance.conversation)
-    pool.instance_state['root'] = {
+    pool.instance_state[instance_name] = {
         'active': False,
         'agent_name': agent_label,
         'messages': conv_snapshot,
     }
-    if instance_name != 'root':
-        pool.instance_state[instance_name] = pool.instance_state['root'].copy()
 
     logger.info(f"Created main agent instance: {instance_name}")
     return instance
