@@ -1841,6 +1841,18 @@ def create_app(agents, agent_pool, config=None):
                         if 'idle_timeout_seconds' in ui_cfg and agent_pool and hasattr(agent_pool, 'settings'):
                             val = float(ui_cfg['idle_timeout_seconds'])
                             agent_pool.settings.idle_timeout_seconds = max(0.0, val)  # 0 disables auto-dismissal
+                        # Update max parallel agents — resize ThreadPoolExecutor (Bug #16 fix)
+                        if 'max_parallel_agents' in ui_cfg and agent_pool and hasattr(agent_pool, 'settings'):
+                            val = int(ui_cfg['max_parallel_agents'])
+                            agent_pool.settings.max_workers = max(1, val)  # Clamp to at least 1
+                            # Resize the executor if it exists
+                            if hasattr(agent_pool._execution, 'executor') and agent_pool._execution.executor is not None:
+                                agent_pool._execution.resize_executor(agent_pool.settings.max_workers)
+                            else:
+                                logger.warning("[THREAD_POOL] resize_executor skipped — executor is None (pool just initialized?)")
+                        # Apply auto_continue immediately (takes effect without waiting for next agent run)
+                        if 'auto_continue' in ui_cfg and agent_pool and hasattr(agent_pool, 'settings'):
+                            agent_pool.settings.auto_continue = bool(ui_cfg['auto_continue'])
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'update_endpoints':

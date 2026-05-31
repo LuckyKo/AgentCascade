@@ -102,3 +102,5 @@ class PoolSettings:
     security_check_timeout: float = 120.0     # Max seconds for security advisor
     max_auto_rollbacks: int = 3               # Max loop recovery retries
     max_nesting_depth: int = 10               # Max depth of nested agent calls (prevent infinite chains)
+    max_workers: int = 10                     # ThreadPoolExecutor workers for parallel agent execution
+    auto_continue: bool = True                # Auto-continue on message truncation (respects user toggle)

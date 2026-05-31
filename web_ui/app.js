@@ -537,7 +537,6 @@ function saveSettings() {
 
   if ($('#setting-max-turns')) s['max-turns'] = $('#setting-max-turns').value;
   if ($('#setting-auto-continue')) s['auto-continue'] = $('#setting-auto-continue').checked;
-  if ($('#setting-show-active-only')) s['show-active-only'] = $('#setting-show-active-only').checked;
   if ($('#setting-tool-result-max-chars')) s['tool-result-max-chars'] = $('#setting-tool-result-max-chars').value;
   if ($('#setting-idle-timeout')) s['idle-timeout'] = $('#setting-idle-timeout').value;
   if (settingVisionEnabled) s['vision-enabled'] = settingVisionEnabled.checked;
@@ -620,7 +619,6 @@ function loadSettings() {
     if (s['vision-enabled'] !== undefined) $('#setting-vision-enabled').checked = s['vision-enabled'];
     if (s['max-turns'] !== undefined) $('#setting-max-turns').value = s['max-turns'];
     if (s['auto-continue'] !== undefined) $('#setting-auto-continue').checked = s['auto-continue'];
-    if (s['show-active-only'] !== undefined) $('#setting-show-active-only').checked = s['show-active-only'];
     if (s['tool-result-max-chars'] !== undefined) {
       $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
       $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
@@ -3287,7 +3285,6 @@ function getGenerateCfg() {
   if ($('#setting-max-turns')) cfg.max_turns = parseInt($('#setting-max-turns').value) || 50;
   if ($('#setting-max-parallel')) cfg.max_parallel_agents = parseInt($('#setting-max-parallel').value) || 3;
   if ($('#setting-auto-continue')) cfg.auto_continue = $('#setting-auto-continue').checked;
-  if ($('#setting-show-active-only')) cfg.show_active_only = $('#setting-show-active-only').checked;
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
   if ($('#setting-max-rollbacks')) cfg.max_auto_rollbacks = parseInt($('#setting-max-rollbacks').value);

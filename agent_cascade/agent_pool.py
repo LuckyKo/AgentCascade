@@ -11,6 +11,7 @@ See DESIGN_REWRITE.md §2.2 for design rationale.
 
 import time
 import threading
+import concurrent.futures
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -1150,13 +1151,49 @@ class ParallelAgentManager:
         # which may already hold this lock. Using RLock prevents deadlock.
         self._state_lock = threading.RLock()
 
-        # Thread pool for parallel execution
+        # Thread pool for parallel execution — uses pool.settings.max_workers (default 10)
         try:
-            import concurrent.futures
-            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+            max_workers = pool.settings.max_workers
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         except Exception as e:
             logger.debug(f"Parallel executor initialization failed (non-critical): {e}")
             self.executor = None
+
+    def resize_executor(self, max_workers: int) -> bool:
+        """Resize the ThreadPoolExecutor to a new worker count.
+        
+        Shuts down the old executor and creates a new one with the specified number
+        of workers. Any tasks still running on the old executor will be lost — this
+        is intended for configuration changes between sessions, not during active work.
+        
+        All submitted-but-not-started tasks are cancelled. Running tasks are NOT
+        interrupted (ThreadPoolExecutor.shutdown(wait=False) default behavior).
+
+        Args:
+            max_workers: New maximum number of worker threads.
+
+        Returns:
+            True if resize succeeded, False if executor was None or exception occurred.
+        """
+        if self.executor is None:
+            return False
+
+        old_executor = self.executor
+        try:
+            # Cancel pending tasks (don't wait for running ones to finish)
+            old_executor.shutdown(wait=False, cancel_futures=True)
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+            logger.info(f"[THREAD_POOL] Resized executor: {max_workers} workers (was {old_executor._max_workers})")
+            return True
+        except Exception as e:
+            # Restore old executor if resize fails
+            logger.error(f"[THREAD_POOL] Failed to resize executor to {max_workers}: {e}")
+            try:
+                old_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            self.executor = None
+            return False
 
     def has_active_tasks(self, instance_name: str) -> bool:
         """Check if there are active parallel tasks for a given instance (caller)."""

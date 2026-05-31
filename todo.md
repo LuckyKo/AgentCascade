@@ -29,7 +29,6 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 - [x] chat window must auto scroll on bottom, decouple if user scrolls up, recouple if he scrolls back to bottom
 - [ ] very slow UI updates, once every few seconds.
-- [ ] very agressive global response truncation when there's plenty of context window left
 - [ ] when a new agent starts we get sent into a no tab zone - blank screen - instead of switching to the active agent tab.
 - [ ] CSS issue in web_ui, edit marker gets inserted all over the UI instead of being limited to edit boxes
 - [ ] max token limit inaccurately extracted from API endpoint, defaults to 65k
@@ -42,6 +41,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] terminate agent does not stop it and its sub-agents.
 - [ ] user messages do not get sent to the active agent (tab in view), they all go to root
 - [ ] some agents dont stop after they return to caller, resuming activity in the background
+- verify that the agent's function call content are properly sent to compressor when building the message list to compact (they are missing on main)
 -  
 
 

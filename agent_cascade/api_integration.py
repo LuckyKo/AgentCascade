@@ -852,7 +852,7 @@ def _apply_ui_config(
     # we sanitize it as an int but then strip it from LLM config; it goes to instance.max_turns.
     NON_LLM_KEYS = (
         'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue',
-        'max_turns', 'mcpServers', 'work_access_folders',
+        'max_turns', 'max_parallel_agents', 'mcpServers', 'work_access_folders',
         'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
         'shell_char_limit', 'code_char_limit', 'disabled_tools'
     )
@@ -868,6 +868,11 @@ def _apply_ui_config(
     # Apply max_turns to instance (extracted from NON_LLM_KEYS, applied separately)
     if 'max_turns' in ui_cfg:
         instance.max_turns = ui_cfg['max_turns']
+
+    # Apply auto_continue to pool settings (extracted from NON_LLM_KEYS, applied separately)
+    # This makes the setting available to execution_engine.py for conditional auto-continue logic
+    if 'auto_continue' in ui_cfg and hasattr(pool, 'settings'):
+        pool.settings.auto_continue = bool(ui_cfg['auto_continue'])
 
     # Update agent_pool.llm_cfg and disabled_tools under thread-safe lock
     # (pool is passed as a parameter to this function — no need to look it up)

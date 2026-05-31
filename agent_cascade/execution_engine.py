@@ -821,8 +821,8 @@ class ExecutionEngine:
         except Exception as e:
             logger.debug(f"Logging message to file failed for {inst_name} (non-critical): {e}")
 
-        # ── Auto-continue on truncation ─────────────────────────────────────
-        if is_truncated and not self.pool.stopped and not self.pool.is_instance_halted(inst_name):
+        # ── Auto-continue on truncation (only if user has enabled the setting) ──
+        if is_truncated and not self.pool.stopped and not self.pool.is_instance_halted(inst_name) and self.pool.settings.auto_continue:
             logger.info(f"Detected message truncation for {inst_name}. Auto-continuing.")
             cont_msg = Message(
                 role=USER,
