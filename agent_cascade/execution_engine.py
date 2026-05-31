@@ -17,6 +17,8 @@ import json
 import os
 import re
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Iterator, List, Optional, Tuple
 
 from agent_cascade.llm.schema import (
@@ -30,6 +32,9 @@ from agent_cascade.log import logger
 from agent_cascade.utils.utils import extract_text_from_message
 
 from .agent_instance import AgentInstance, LoopDetectedError
+
+# Maximum size for spillover files (tool output saved to disk). Prevents disk exhaustion.
+MAX_SPILL_SIZE = 50 * 1024 * 1024  # 50MB
 
 
 def _get_active_functions_from_template(template, instance=None) -> list:
@@ -2300,7 +2305,14 @@ class ExecutionEngine:
         self, tool_result: str, tool_name: str,
         messages: List[Message], instance_name: str
     ) -> str:
-        """Truncate a tool result if it would push context past 95% capacity."""
+        """Truncate a tool result if it would push context past 95% capacity.
+
+        Writes the full original content to a spillover file on disk when truncation occurs,
+        and appends the spillover path to the truncation notice so the agent can read it back.
+
+        call_agent is exempt from wild-read detection (the 10K char limit) — sub-agent outputs
+        are structured responses, not raw data dumps.
+        """
         if not isinstance(tool_result, str):
             return tool_result
 
@@ -2340,29 +2352,118 @@ class ExecutionEngine:
             per_tool_threshold = int(available_tokens * 0.25)
             result_tokens = max(1, len(tool_result) // 3)
 
-            # Wild read detection
-            wild_read_limit = 10000
-            is_wild_read = len(tool_result) > wild_read_limit
+            # Wild read detection — exempt call_agent (sub-agent outputs are not raw data dumps)
+            # Tier 1: Start with settings constant (env-var configurable via QWEN_AGENT_TOOL_RESULT_MAX_CHARS)
+            from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS
+            wild_read_limit = DEFAULT_TOOL_RESULT_MAX_CHARS
+            # Tier 2: Override from pool runtime config if set by UI slider (takes immediate effect)
+            if hasattr(self.pool, 'llm_cfg') and self.pool.llm_cfg:
+                wild_read_limit = self.pool.llm_cfg.get('tool_result_max_chars', wild_read_limit)
+            is_wild_read = (len(tool_result) > wild_read_limit and tool_name != 'call_agent')
 
             if (result_tokens <= per_tool_threshold and
                     non_system_tokens + result_tokens <= total_threshold and
                     not is_wild_read):
                 return tool_result
 
-            # Truncation required
+            # ── Truncation required — write spillover file first ─────────────────────
+            spill_rel = self._write_spillover_file(tool_result, tool_name, instance_name)
+
             target_tokens = min(result_tokens, per_tool_threshold) if not is_wild_read else 500
             if non_system_tokens + target_tokens > total_threshold:
                 target_tokens = max(200, total_threshold - non_system_tokens)
 
             truncated = tool_result[:target_tokens * 3]
-            return f"{truncated}\n\n[TOOL RESPONSE TRUNCATED — reason: token budget exceeded]"
+
+            # Build truncation notice with spillover path — matches format used by
+            # operation_manager.py and code_interpreter.py across the unified branch
+            if spill_rel:
+                return (
+                    f"{truncated}\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. "
+                    f"Full output ({len(tool_result)} chars) saved to: {spill_rel}"
+                    f"\nYou can read it with read_file if needed. "
+                    f"Consider compressing context before continuing.]"
+                )
+            else:
+                return (
+                    f"{truncated}\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. "
+                    f"Spillover file could not be saved (disk error). "
+                    f"Consider compressing context before continuing.]"
+                )
 
         except Exception as e:
             logger.debug(f"Tool result truncation calculation failed (using fallback): {e}")
             # Fallback: just truncate to a reasonable size
             if len(tool_result) > 8000:
-                return f"{tool_result[:8000]}\n\n[TOOL RESPONSE TRUNCATED]"
+                spill_rel = self._write_spillover_file(tool_result, tool_name, instance_name)
+                if spill_rel:
+                    return (
+                        f"{tool_result[:8000]}\n\n[TOOL RESPONSE TRUNCATED — fallback path. "
+                        f"Full output ({len(tool_result)} chars) saved to: {spill_rel}"
+                        f"\nYou can read it with read_file if needed. "
+                        f"Consider compressing context before continuing.]"
+                    )
+                return f"{tool_result[:8000]}\n\n[TOOL RESPONSE TRUNCATED — fallback path. Spillover file could not be saved (disk error).]"
             return tool_result
+
+    def _write_spillover_file(
+        self, tool_result: str, tool_name: str, instance_name: str
+    ) -> Optional[str]:
+        """Write the full tool result to a spillover file on disk.
+
+        Returns a workspace-relative path string that the agent can use with read_file,
+        or None if writing failed.
+
+        Follows the pattern from the old branch (agent_orchestrator.py):
+            - Files go to <workspace>/logs/spillover/
+            - Filenames are {instance}_{tool}_{timestamp}.txt
+            - Paths are normalized to forward slashes for cross-platform compatibility
+            - Output is capped at MAX_SPILL_SIZE (50MB) to prevent disk exhaustion
+        """
+        try:
+            # Resolve workspace directory via the logger manager (defensive guard)
+            if not hasattr(self.pool, '_logger') or self.pool._logger is None:
+                return None
+            workspace_dir = self.pool._logger.workspace_dir
+            log_dir = workspace_dir / 'logs' / 'spillover'
+            log_dir.mkdir(parents=True, exist_ok=True)
+
+            # Cap output to prevent disk exhaustion from massive tool results
+            if len(tool_result) > MAX_SPILL_SIZE:
+                tool_result = tool_result[:MAX_SPILL_SIZE] + "\n\n[SPILL FILE TRUNCATED — exceeded maximum size]"
+
+            # Use microsecond-precision timestamp to reduce collision risk
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            safe_tool = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name)
+            safe_instance = re.sub(r'[^a-zA-Z0-9_-]', '_', instance_name)
+            spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}.txt"
+            spill_path = log_dir / spill_filename
+
+            # Duplicate filename detection — append counter if file already exists
+            counter = 1
+            while spill_path.exists():
+                spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}_{counter}.txt"
+                spill_path = log_dir / spill_filename
+                counter += 1
+
+            spill_path.write_text(tool_result, encoding='utf-8')
+
+            # Convert to workspace-relative path so agent can use it with read_file
+            try:
+                spill_rel = str(spill_path.relative_to(workspace_dir)).replace('\\', '/')
+            except ValueError:
+                # Fallback if spill_path is outside workspace_dir
+                spill_rel = str(spill_path).replace('\\', '/')
+
+            logger.info(
+                f"Wrote spillover file for '{tool_name}' result of {instance_name}: "
+                f"{len(tool_result)} chars -> {spill_rel}"
+            )
+            return spill_rel
+
+        except Exception as e:
+            logger.error(f"Failed to write spillover file for {instance_name}/{tool_name}: {e}")
+            return None
 
 
 # ═══════════════════════════════════════════════════════════════════════

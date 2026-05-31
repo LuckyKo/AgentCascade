@@ -40,6 +40,8 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] no need to insert tool description metadata in the system prompt, it already gets injected in native mode.
 - [ ] security agent does not get called when using ask function from the approval popup banner (currently on no API assigned -> should default to the same API that the caller agent is running on)
 - [ ] terminate agent does not stop it and its sub-agents.
+- [ ] user messages do not get sent to the active agent (tab in view), they all go to root
+- [ ] some agents dont stop after they return to caller, resuming activity in the background
 -  
 
 
