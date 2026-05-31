@@ -95,68 +95,82 @@ class QwenChatAtDS(BaseFnCallModel):
 
     @staticmethod
     def _delta_stream_output(response) -> Iterator[List[Message]]:
-        for chunk in response:
-            if chunk.status_code == HTTPStatus.OK:
-                yield [
-                    Message(role=ASSISTANT,
-                            content=chunk.output.choices[0].message.content,
-                            reasoning_content=chunk.output.choices[0].message.reasoning_content,
-                            extra={'model_service_info': chunk})
-                ]
-            else:
-                raise ModelServiceError(code=chunk.code, message=chunk.message, extra={'model_service_info': chunk})
+        try:
+            for chunk in response:
+                if chunk.status_code == HTTPStatus.OK:
+                    yield [
+                        Message(role=ASSISTANT,
+                                content=chunk.output.choices[0].message.content,
+                                reasoning_content=chunk.output.choices[0].message.reasoning_content,
+                                extra={'model_service_info': chunk})
+                    ]
+                else:
+                    raise ModelServiceError(code=chunk.code, message=chunk.message, extra={'model_service_info': chunk})
+        finally:
+            # Bug #37 Fix: Close the streaming connection even if interrupted (e.g. user clicks stop)
+            try:
+                response.close()
+            except Exception as e:
+                logger.warning(f"Failed to close streaming response for qwen_dashscope: {e}")
 
     @staticmethod
     def _full_stream_output(response) -> Iterator[List[Message]]:
-        full_content = ''
-        full_reasoning_content = ''
-        full_tool_calls = []
-        for chunk in response:
-            if chunk.status_code == HTTPStatus.OK:
-                if chunk.output.choices[0].message.get('reasoning_content', ''):
-                    full_reasoning_content += chunk.output.choices[0].message.reasoning_content
-                if chunk.output.choices[0].message.content:
-                    full_content += chunk.output.choices[0].message.content
-                tool_calls = chunk.output.choices[0].message.get('tool_calls', None)
-                if tool_calls:
-                    for tc in tool_calls:
-                        if full_tool_calls and (not tc['id'] or
-                                                tc['id'] == full_tool_calls[-1]['extra']['function_id']):
-                            if tc['function'].get('name', ''):
-                                full_tool_calls[-1].function_call['name'] += tc['function']['name']
-                            if tc['function'].get('arguments', ''):
-                                full_tool_calls[-1].function_call['arguments'] += tc['function']['arguments']
-                        else:
-                            full_tool_calls.append(
-                                Message(role=ASSISTANT,
-                                        content='',
-                                        function_call=FunctionCall(name=tc['function'].get('name', ''),
-                                                                   arguments=tc['function'].get('arguments', '')),
-                                        extra={
-                                            'model_service_info': json.loads(str(chunk)),
-                                            'function_id': tc['id']
-                                        }))
-                res = []
-                if full_reasoning_content:
-                    res.append(
-                        Message(role=ASSISTANT,
-                                content='',
-                                reasoning_content=full_reasoning_content,
-                                extra={
-                                    'model_service_info': json.loads(str(chunk)),
-                                }))
-                if full_content:
-                    res.append(
-                        Message(role=ASSISTANT,
-                                content=full_content,
-                                extra={
-                                    'model_service_info': json.loads(str(chunk)),
-                                }))
-                if full_tool_calls:
-                    res += full_tool_calls
-                yield res
-            else:
-                raise ModelServiceError(code=chunk.code, message=chunk.message, extra={'model_service_info': chunk})
+        try:
+            full_content = ''
+            full_reasoning_content = ''
+            full_tool_calls = []
+            for chunk in response:
+                if chunk.status_code == HTTPStatus.OK:
+                    if chunk.output.choices[0].message.get('reasoning_content', ''):
+                        full_reasoning_content += chunk.output.choices[0].message.reasoning_content
+                    if chunk.output.choices[0].message.content:
+                        full_content += chunk.output.choices[0].message.content
+                    tool_calls = chunk.output.choices[0].message.get('tool_calls', None)
+                    if tool_calls:
+                        for tc in tool_calls:
+                            if full_tool_calls and (not tc['id'] or
+                                                    tc['id'] == full_tool_calls[-1]['extra']['function_id']):
+                                if tc['function'].get('name', ''):
+                                    full_tool_calls[-1].function_call['name'] += tc['function']['name']
+                                if tc['function'].get('arguments', ''):
+                                    full_tool_calls[-1].function_call['arguments'] += tc['function']['arguments']
+                            else:
+                                full_tool_calls.append(
+                                    Message(role=ASSISTANT,
+                                            content='',
+                                            function_call=FunctionCall(name=tc['function'].get('name', ''),
+                                                                       arguments=tc['function'].get('arguments', '')),
+                                            extra={
+                                                'model_service_info': json.loads(str(chunk)),
+                                                'function_id': tc['id']
+                                            }))
+                    res = []
+                    if full_reasoning_content:
+                        res.append(
+                            Message(role=ASSISTANT,
+                                    content='',
+                                    reasoning_content=full_reasoning_content,
+                                    extra={
+                                        'model_service_info': json.loads(str(chunk)),
+                                    }))
+                    if full_content:
+                        res.append(
+                            Message(role=ASSISTANT,
+                                    content=full_content,
+                                    extra={
+                                        'model_service_info': json.loads(str(chunk)),
+                                    }))
+                    if full_tool_calls:
+                        res += full_tool_calls
+                    yield res
+                else:
+                    raise ModelServiceError(code=chunk.code, message=chunk.message, extra={'model_service_info': chunk})
+        finally:
+            # Bug #37 Fix: Close the streaming connection even if interrupted (e.g. user clicks stop)
+            try:
+                response.close()
+            except Exception as e:
+                logger.warning(f"Failed to close streaming response for qwen_dashscope: {e}")
 
 
 def initialize_dashscope(cfg: Optional[Dict] = None) -> None:

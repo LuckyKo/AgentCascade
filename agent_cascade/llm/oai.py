@@ -258,96 +258,103 @@ class TextChatAtOAI(BaseFnCallModel):
             
         try:
             response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
-            if delta_stream:
-                for chunk in response:
-                    # Update local model info if returned by the server (e.g. LM Studio)
-                    if hasattr(chunk, 'model') and chunk.model:
-                        if chunk.model != self.model:
-                            self.model = chunk.model
-                            if self.dynamic_model and self.api_base:
-                                self._detect_context_window(self.api_base, self.api_key)
-                        
-                    if chunk.choices:
-                        reasoning = chunk.choices[0].delta.reasoning_content if hasattr(chunk.choices[0].delta, 'reasoning_content') else ''
-                        content = chunk.choices[0].delta.content if hasattr(chunk.choices[0].delta, 'content') else ''
-                        if reasoning or content:
-                            yield [Message(role=ASSISTANT, content=content or '', reasoning_content=reasoning or '')]
-            else:
-                full_response = ''
-                full_reasoning_content = ''
-                full_tool_calls = []
-                for chunk in response:
-                    # Update local model info if returned by the server
-                    if hasattr(chunk, 'model') and chunk.model:
-                        if chunk.model != self.model:
-                            self.model = chunk.model
-                            if self.dynamic_model and self.api_base:
-                                self._detect_context_window(self.api_base, self.api_key)
-                        
-                    if chunk.choices:
-                        if hasattr(chunk.choices[0].delta,
-                                   'reasoning_content') and chunk.choices[0].delta.reasoning_content:
-                            full_reasoning_content += chunk.choices[0].delta.reasoning_content
-                        if hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
-                            full_response += chunk.choices[0].delta.content
-                        if hasattr(chunk.choices[0].delta, 'tool_calls') and chunk.choices[0].delta.tool_calls:
-                            for tc in chunk.choices[0].delta.tool_calls:
-                                tc_index = getattr(tc, 'index', None)
-                                tc_id = getattr(tc, 'id', None)
-                                tc_func = getattr(tc, 'function', None)
-                                tc_name = getattr(tc_func, 'name', None) or '' if tc_func else ''
-                                tc_args = getattr(tc_func, 'arguments', None) or '' if tc_func else ''
-                                
-                                # Find existing tool call to append to (by ID or index)
-                                matched = None
-                                if tc_id:
-                                    # New tool call with an ID
-                                    for existing in full_tool_calls:
-                                        if existing.extra.get('function_id') == tc_id:
-                                            matched = existing
-                                            break
-                                elif tc_index is not None:
-                                    # Continuation chunk — match by index
-                                    for existing in full_tool_calls:
-                                        if existing.extra.get('tool_index') == tc_index:
-                                            matched = existing
-                                            break
-                                elif full_tool_calls:
-                                    # No ID or index — append to last
-                                    matched = full_tool_calls[-1]
-                                
-                                if matched:
-                                    if tc_name:
-                                        matched.function_call.name = (matched.function_call.name or '') + tc_name
-                                    if tc_args:
-                                        matched.function_call.arguments = (matched.function_call.arguments or '') + tc_args
-                                else:
-                                    full_tool_calls.append(
-                                        Message(role=ASSISTANT,
-                                                content='',
-                                                function_call=FunctionCall(name=tc_name,
-                                                                           arguments=tc_args),
-                                                extra={'function_id': tc_id or f'call_{len(full_tool_calls)}',
-                                                       'tool_index': tc_index if tc_index is not None else len(full_tool_calls)}))
-
-                        res = []
-                        finish_reason = getattr(chunk.choices[0], 'finish_reason', None)
-                        extra = {'finish_reason': finish_reason} if finish_reason else {}
-                        
-                        if full_reasoning_content or full_response:
-                            res.append(Message(
-                                role=ASSISTANT,
-                                content=full_response,
-                                reasoning_content=full_reasoning_content,
-                                extra=extra
-                            ))
-                        if full_tool_calls:
-                            for tc in full_tool_calls:
-                                if not tc.extra:
-                                    tc.extra = {}
-                                tc.extra.update(extra)
-                            res += full_tool_calls
-                        yield res
+            try:
+                if delta_stream:
+                    for chunk in response:
+                        # Update local model info if returned by the server (e.g. LM Studio)
+                        if hasattr(chunk, 'model') and chunk.model:
+                            if chunk.model != self.model:
+                                self.model = chunk.model
+                                if self.dynamic_model and self.api_base:
+                                    self._detect_context_window(self.api_base, self.api_key)
+                            
+                        if chunk.choices:
+                            reasoning = chunk.choices[0].delta.reasoning_content if hasattr(chunk.choices[0].delta, 'reasoning_content') else ''
+                            content = chunk.choices[0].delta.content if hasattr(chunk.choices[0].delta, 'content') else ''
+                            if reasoning or content:
+                                yield [Message(role=ASSISTANT, content=content or '', reasoning_content=reasoning or '')]
+                else:
+                    full_response = ''
+                    full_reasoning_content = ''
+                    full_tool_calls = []
+                    for chunk in response:
+                        # Update local model info if returned by the server
+                        if hasattr(chunk, 'model') and chunk.model:
+                            if chunk.model != self.model:
+                                self.model = chunk.model
+                                if self.dynamic_model and self.api_base:
+                                    self._detect_context_window(self.api_base, self.api_key)
+                            
+                        if chunk.choices:
+                            if hasattr(chunk.choices[0].delta,
+                                       'reasoning_content') and chunk.choices[0].delta.reasoning_content:
+                                full_reasoning_content += chunk.choices[0].delta.reasoning_content
+                            if hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
+                                full_response += chunk.choices[0].delta.content
+                            if hasattr(chunk.choices[0].delta, 'tool_calls') and chunk.choices[0].delta.tool_calls:
+                                for tc in chunk.choices[0].delta.tool_calls:
+                                    tc_index = getattr(tc, 'index', None)
+                                    tc_id = getattr(tc, 'id', None)
+                                    tc_func = getattr(tc, 'function', None)
+                                    tc_name = getattr(tc_func, 'name', None) or '' if tc_func else ''
+                                    tc_args = getattr(tc_func, 'arguments', None) or '' if tc_func else ''
+                                    
+                                    # Find existing tool call to append to (by ID or index)
+                                    matched = None
+                                    if tc_id:
+                                        # New tool call with an ID
+                                        for existing in full_tool_calls:
+                                            if existing.extra.get('function_id') == tc_id:
+                                                matched = existing
+                                                break
+                                    elif tc_index is not None:
+                                        # Continuation chunk — match by index
+                                        for existing in full_tool_calls:
+                                            if existing.extra.get('tool_index') == tc_index:
+                                                matched = existing
+                                                break
+                                    elif full_tool_calls:
+                                        # No ID or index — append to last
+                                        matched = full_tool_calls[-1]
+                                    
+                                    if matched:
+                                        if tc_name:
+                                            matched.function_call.name = (matched.function_call.name or '') + tc_name
+                                        if tc_args:
+                                            matched.function_call.arguments = (matched.function_call.arguments or '') + tc_args
+                                    else:
+                                        full_tool_calls.append(
+                                            Message(role=ASSISTANT,
+                                                    content='',
+                                                    function_call=FunctionCall(name=tc_name,
+                                                                               arguments=tc_args),
+                                                    extra={'function_id': tc_id or f'call_{len(full_tool_calls)}',
+                                                           'tool_index': tc_index if tc_index is not None else len(full_tool_calls)}))
+    
+                            res = []
+                            finish_reason = getattr(chunk.choices[0], 'finish_reason', None)
+                            extra = {'finish_reason': finish_reason} if finish_reason else {}
+                            
+                            if full_reasoning_content or full_response:
+                                res.append(Message(
+                                    role=ASSISTANT,
+                                    content=full_response,
+                                    reasoning_content=full_reasoning_content,
+                                    extra=extra
+                                ))
+                            if full_tool_calls:
+                                for tc in full_tool_calls:
+                                    if not tc.extra:
+                                        tc.extra = {}
+                                    tc.extra.update(extra)
+                                res += full_tool_calls
+                            yield res
+            finally:
+                # Bug #37 Fix: Ensure the HTTP streaming connection is closed even if interrupted (e.g. user clicks stop)
+                try:
+                    response.close()
+                except Exception as e:
+                    logger.warning(f"Failed to close streaming response for TextChatAtOAI: {e}")
         except OpenAIError as ex:
             raise ModelServiceError(exception=ex)
 

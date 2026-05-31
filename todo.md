@@ -34,7 +34,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] max token limit inaccurately extracted from API endpoint, defaults to 65k
 - [x] Context usage bar (top of agent tabs) uses inaccurate max token limit - should be taken from API endpoint used by agent.
 - [x] agent activity detector fails and seems to return to root agent even if the invoked subagent is still running
-- [ ] stop button should send stop commands to the API in use too
+- [x] stop button should send stop commands to the API in use too — FIXED Bug 37 (added response.close() in try/finally for all streaming LLM methods)
 - [x] dismissing an agent doesn't show the log path of the closed agent (should work similar to main). it also doesn't close the tab of the dismissed agent.
 - [x] no need to insert tool description metadata in the system prompt, it already gets injected in native mode.
 - [x] security agent does not get called when using ask function from the approval popup banner (currently on no API assigned -> should default to the same API that the caller agent is running on) — FIXED Bug 40
