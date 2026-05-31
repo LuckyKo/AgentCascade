@@ -29,13 +29,13 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 - [x] chat window must auto scroll on bottom, decouple if user scrolls up, recouple if he scrolls back to bottom
 - [ ] very slow UI updates, once every few seconds.
-- [ ] when a new agent starts we get sent into a no tab zone - blank screen - instead of switching to the active agent tab.
+- [x] when a new agent starts we get sent into a no tab zone - blank screen - instead of switching to the active agent tab.
 - [ ] CSS issue in web_ui, edit marker gets inserted all over the UI instead of being limited to edit boxes
 - [ ] max token limit inaccurately extracted from API endpoint, defaults to 65k
 - [ ] Context usage bar (top of agent tabs) uses inaccurate max token limit - should be taken from API endpoint used by agent.
 - [ ] agent activity detector fails and seems to return to root agent even if the invoked subagent is still running
 - [ ] stop button should send stop commands to the API in use too
-- [ ] dismissing an agent doesn't show the log path of the closed agent (should work similar to main). it also doesn't close the tab of the dismissed agent.
+- [x] dismissing an agent doesn't show the log path of the closed agent (should work similar to main). it also doesn't close the tab of the dismissed agent.
 - [ ] no need to insert tool description metadata in the system prompt, it already gets injected in native mode.
 - [ ] security agent does not get called when using ask function from the approval popup banner (currently on no API assigned -> should default to the same API that the caller agent is running on)
 - [ ] terminate agent does not stop it and its sub-agents.

@@ -2570,6 +2570,14 @@ function switchMainTab(tabId) {
   
   // Trigger immediate render of the newly visible content — all agents use same path now
   renderSubAgents();
+  
+  // Ensure active class is set on tab and panel after renderSubAgents()
+  // (When switching to a brand-new agent, the tab/panel didn't exist when
+  // we tried to add 'active' above — re-apply now that they've been created.)
+  const targetTab = mainTabBar.querySelector(`.main-tab[data-tab="${tabId}"]`);
+  if (targetTab) targetTab.classList.add('active');
+  const targetPanel = document.getElementById('panelSub-' + name);
+  if (targetPanel) targetPanel.classList.add('active');
 }
 
 // Root tab is now created dynamically via renderSubAgents() — no static wiring needed
