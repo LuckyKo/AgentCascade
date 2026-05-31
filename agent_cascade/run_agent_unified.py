@@ -77,6 +77,7 @@ def run_agent_thread_unified(
         build_state_from_pool,
         build_stream_update_from_pool,
         _apply_ui_config,
+        _put_stream_update,
     )
 
     try:
@@ -166,17 +167,19 @@ def run_agent_thread_unified(
                     responses=turn_output,
                 )
                 if stream_update is not None:
+                    event = {
+                        'type': 'stream_update',
+                        **stream_update,
+                    }
+                    # Use put_nowait to avoid blocking the agent thread when
+                    # the send_queue is full (stale events are dropped).
+                    # QueueFull is raised inside the event loop; since we don't
+                    # check the Future's result, it's silently swallowed — which
+                    # is exactly what we want (drop stale stream_updates).
                     asyncio.run_coroutine_threadsafe(
-                        send_queue.put({
-                            'type': 'stream_update',
-                            **stream_update,
-                        }),
+                        _put_stream_update(send_queue, event),
                         loop,
                     )
-                    # Note: We don't check the Future's result — if the client
-                    # disconnected, the WebSocket write will fail silently.
-                    # This is intentional: we don't want a dead client to crash
-                    # the agent execution thread.
                     last_send = now
 
                 # ── Loop detection (throttled to every 10 ticks) ─────────
@@ -225,8 +228,9 @@ def run_agent_thread_unified(
                 responses=[error_msg],
             )
             if stream_update is not None:
+                # Use put_nowait via helper - QueueFull handled inside event loop
                 asyncio.run_coroutine_threadsafe(
-                    send_queue.put({
+                    _put_stream_update(send_queue, {
                         'type': 'stream_update',
                         **stream_update,
                     }),

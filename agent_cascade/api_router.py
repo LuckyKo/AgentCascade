@@ -105,9 +105,14 @@ class EndpointScheduler:
             A callable that releases the slot when called, or None if no scheduling needed.
         """
         if concurrency_limit == -1:  # unlimited — no scheduling needed
+            logger.debug(f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — api_base={api_base}, concurrency=-1 (unlimited), returning None")
             return None
         
-        new_max = concurrency_limit if concurrency_limit > 0 else 1  # 0 means strictly one at a time
+        new_max = concurrency_limit if concurrency_limit > 0 else 1  # 0→1 (sequential), -1 handled above
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — api_base={api_base}, "
+            f"concurrency_limit={concurrency_limit}, new_max={new_max}"
+        )
         
         with self._lock:
             if api_base not in self._schedules:
@@ -142,6 +147,7 @@ class EndpointScheduler:
             sched = self._schedules[api_base]
         
         # Semaphore.acquire() blocks atomically if at capacity — no TOCTOU race
+        logger.debug(f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — blocking on semaphore for api_base={api_base}")
         sched['sem'].acquire()
         
         with self._lock:
@@ -149,6 +155,10 @@ class EndpointScheduler:
             current = sched['active_count']
             logger.info(f"[EndpointScheduler] Agent acquired slot on '{api_base}' "
                        f"(active: {current}, limit: {sched['max_active']})")
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — successfully acquired, "
+                f"api_base={api_base}, active_count={current}, max_active={sched['max_active']}"
+            )
         
         # Return cleanup callback that releases the semaphore when called.
         # IMPORTANT: reads the CURRENT semaphore from the live schedule entry,
@@ -163,6 +173,10 @@ class EndpointScheduler:
                     new_count = current_sched['active_count']
                     logger.info(f"[EndpointScheduler] Agent released slot on '{api_base}' "
                                f"(active: {new_count}, limit: {current_sched['max_active']})")
+                    logger.debug(
+                        f"[CALL_AGENT_DEBUG] EndpointScheduler.release — api_base={api_base}, "
+                        f"active_count={new_count}, max_active={current_sched['max_active']}"
+                    )
                     # Release the CURRENT semaphore (may differ from acquire-time sem after resize)
                     current_sched['sem'].release()
         

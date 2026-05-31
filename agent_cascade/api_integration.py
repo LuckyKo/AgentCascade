@@ -26,6 +26,23 @@ from .execution_engine import ExecutionEngine, _build_resources_block, _replace_
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Performance Caches — Fix #1 (Token Stat Caching) & Fix #3 (Incremental Serialization)
+# ═══════════════════════════════════════════════════════════════════════
+
+# Fix #1: Token stat cache keyed by (msg_count, last_msg_id) → stats dict.
+# During LLM streaming, the conversation doesn't change — only partial streamed content changes.
+# So stats should be cached aggressively and only recalculated when a new message is added.
+_token_stats_cache: Dict[tuple, dict] = {}
+
+# Fix #3: Version tracker per instance. Incremented each time a message is added.
+# Used to skip serializing instances whose conversation hasn't changed.
+# Key: instance_name, Value: (msg_count, id_of_last_msg)
+_last_stream_versions: Dict[str, tuple] = {}
+# Cached serialized instance data for unchanged instances (reused across stream_updates)
+_cached_instance_data: Dict[str, dict] = {}
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # WebSocket Queue Helper — safely put stream_update events without blocking
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -446,11 +463,31 @@ def build_stream_update_from_pool(
     # is acceptable — worst case is a stale or partially-complete snapshot,
     # which the frontend handles gracefully via history_count merging.
     instance_snapshot_data = dict(pool.instances)
-    all_instances = {
-        # Streaming=True → only send tail (last 3 msgs) to avoid O(N²) serialisation
-        name: _serialize_instance(inst, pool, include_messages=True, streaming=True)
-        for name, inst in instance_snapshot_data.items()
-    }
+
+    # Fix #3: Incremental serialization — only serialize instances whose
+    # conversation changed since the last stream_update. Version is derived
+    # from (msg_count, id_of_last_msg) which changes only when a new message
+    # is appended. During LLM streaming, the conversation doesn't change.
+    all_instances = {}
+    for name, inst in instance_snapshot_data.items():
+        with inst._compression_lock:
+            current_msgs = list(inst.conversation)
+        current_version = (len(current_msgs), id(current_msgs[-1]) if current_msgs else None)
+
+        # Always serialize the primary instance (it's actively streaming)
+        # and any instance whose version changed since last stream_update
+        if name == instance_name or current_version != _last_stream_versions.get(name):
+            all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=True)
+            _last_stream_versions[name] = current_version
+            _cached_instance_data[name] = all_instances[name]
+        else:
+            # Reuse the previously serialized data for unchanged instances
+            all_instances[name] = _cached_instance_data.get(name)
+            # If for some reason the cached data is missing, serialize fresh
+            if all_instances[name] is None:
+                all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=True)
+                _cached_instance_data[name] = all_instances[name]
+                _last_stream_versions[name] = current_version
 
     # Get current model from template's LLM (for frontend display)
     template = pool.templates.get(instance.agent_class)
@@ -680,14 +717,26 @@ def _serialize_instance(
         serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
         result['is_partial'] = False
 
-    # ── Token stats ──────────────────────────────────────────────────────
-    active_msgs = pool.slice_history_for_llm(msgs) if msgs else msgs
-    try:
-        from agent_cascade.utils.utils import get_history_stats
-        stats = get_history_stats(active_msgs)
-    except Exception as e:
-        logger.debug(f"Token stats calculation failed for {inst.instance_name} (using estimate): {e}")
-        stats = {'tokens': len(msgs) * 4, 'words': 0}
+    # ── Token stats (Fix #1: cached by conversation identity) ─────────────
+    # Cache key: (message_count, id_of_last_message). During LLM streaming,
+    # the conversation doesn't change — only partial streamed content changes.
+    # So stats are only recalculated when a new message is appended.
+    cache_key = (len(msgs), id(msgs[-1]) if msgs else None)
+    if cache_key not in _token_stats_cache:
+        active_msgs = pool.slice_history_for_llm(msgs) if msgs else msgs
+        try:
+            from agent_cascade.utils.utils import get_history_stats
+            stats = get_history_stats(active_msgs)
+        except Exception as e:
+            logger.debug(f"Token stats calculation failed for {inst.instance_name} (using estimate): {e}")
+            stats = {'tokens': len(msgs) * 4, 'words': 0}
+        # Evict oldest entry if cache is full (cap at 100 entries to prevent memory leak)
+        if len(_token_stats_cache) >= 100:
+            oldest_key = next(iter(_token_stats_cache))
+            del _token_stats_cache[oldest_key]
+        _token_stats_cache[cache_key] = stats
+    else:
+        stats = _token_stats_cache[cache_key]
 
     max_tokens = _get_max_tokens_for_instance(pool, inst)
 
@@ -748,12 +797,10 @@ def _apply_ui_config(
     """Apply sanitized UI configuration to the LLM for an agent instance.
 
     Sanitizes config values (floats/ints) and filters out non-LLM keys before
-    applying them to the template's LLM config.
+    applying them as a per-instance LLM config override (instance._generate_cfg_override).
 
-    NOTE: The old api_server.run_agent_thread() also mutated template.llm.generate_cfg
-    directly — this is a known limitation of the current architecture. In a future phase,
-    per-instance LLM config overrides should be supported via instance._generate_cfg_override.
-    For now, we use copy.deepcopy to avoid mutating the shared template config.
+    Per-instance overrides are merged into generate_cfg at call time in _execute_llm_call,
+    so the shared template is never mutated.
 
     Args:
         pool: The AgentPool managing all instances.
@@ -811,14 +858,12 @@ def _apply_ui_config(
     )
     llm_safe = {k: v for k, v in sanitized.items() if k not in NON_LLM_KEYS}
 
-    # Apply to LLM config using deepcopy of generate_cfg, then reassign the reference.
-    # Deepcopy prevents multi-session interference on the inner dict, but we still
-    # mutate the template in-place (replacing generate_cfg). A future phase should
-    # support per-instance overrides via instance._generate_cfg_override.
+    # Apply to instance override using deepcopy of generate_cfg, then store on instance.
+    # This prevents multi-session interference AND avoids mutating the shared template.
     import copy as _copy
     llm_cfg_copy = _copy.deepcopy(template.llm.generate_cfg)
     llm_cfg_copy.update(llm_safe)
-    template.llm.generate_cfg = llm_cfg_copy
+    instance._generate_cfg_override = llm_cfg_copy
 
     # Apply max_turns to instance (extracted from NON_LLM_KEYS, applied separately)
     if 'max_turns' in ui_cfg:
@@ -834,7 +879,9 @@ def _apply_ui_config(
                 if 'disabled_tools' in sanitized and sanitized['disabled_tools'] is not None:
                     dt = sanitized['disabled_tools']
                     if isinstance(dt, (list, dict)):
-                        template.llm.generate_cfg['disabled_tools'] = dt
+                        cfg = dict(instance._generate_cfg_override or {})
+                        cfg['disabled_tools'] = dt
+                        instance._generate_cfg_override = cfg
                         disabled_tools_changed = True
 
                 for _key in (
@@ -861,7 +908,7 @@ def _apply_ui_config(
                                 m0_content = _replace_section(m0_content, "## Session Metadata", meta_block)
                             # Refresh resources block if disabled_tools changed
                             if disabled_tools_changed:
-                                res_block = _build_resources_block(pool, template)
+                                res_block = _build_resources_block(pool, template, instance)
                                 if res_block:
                                     m0_content = _replace_resources_block(m0_content, res_block)
                             if isinstance(m0, dict):

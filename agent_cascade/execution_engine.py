@@ -32,7 +32,7 @@ from agent_cascade.utils.utils import extract_text_from_message
 from .agent_instance import AgentInstance, LoopDetectedError
 
 
-def _get_active_functions_from_template(template) -> list:
+def _get_active_functions_from_template(template, instance=None) -> list:
     """
     Build the list of active function schemas from a template's function_map,
     filtering out any tools disabled via the template's LLM generate_cfg.
@@ -40,11 +40,19 @@ def _get_active_functions_from_template(template) -> list:
     Mirrors Agent._get_active_functions() from the main branch so that tool
     filtering works correctly for all agents — including the orchestrator which
     no longer has a class-specific _get_active_functions method.
+
+    Args:
+        template: The agent template with function_map and llm.generate_cfg.
+        instance: Optional AgentInstance — if provided, its _generate_cfg_override
+                  takes precedence over the template config for disabled_tools.
     """
-    # Read disabled_tools from template.llm.generate_cfg (same source as Agent)
-    # Templates are always created via load_agent() → create_agent_from_soul(),
-    # so llm and generate_cfg are guaranteed to exist by construction.
-    raw_disabled = getattr(template.llm, 'generate_cfg', {}).get('disabled_tools', {})
+    # Read disabled_tools from instance override first, then fall back to template
+    if instance is not None and instance._generate_cfg_override:
+        raw_disabled = instance._generate_cfg_override.get('disabled_tools', {})
+    else:
+        # Defensive: template.llm may be None for templates without LLM config
+        llm = getattr(template, 'llm', None)
+        raw_disabled = getattr(llm, 'generate_cfg', {}).get('disabled_tools', {})
 
     # Handle both dict format (per-agent: {"Maine": ["tool1"]}) and flat list format
     if isinstance(raw_disabled, dict):
@@ -63,11 +71,14 @@ def _get_active_functions_from_template(template) -> list:
     else:
         disabled = set()
 
-    # Return function schemas for tools NOT in the disabled set
-    return [func.function for name, func in template.function_map.items() if name not in disabled]
+    # Defensive: template.function_map may be None for templates without tools
+    func_map = getattr(template, 'function_map', None)
+    if not func_map:
+        return []
+    return [func.function for name, func in func_map.items() if name not in disabled]
 
 
-def _build_resources_block(pool, template) -> str:
+def _build_resources_block(pool, template, instance=None) -> str:
     """Build the '--- CURRENT AVAILABLE RESOURCES' block reflecting current disabled_tools.
 
     This is used both during initial injection and to refresh the block when
@@ -76,6 +87,8 @@ def _build_resources_block(pool, template) -> str:
     Args:
         pool: The AgentPool instance (needed to list available agent types).
         template: The agent template with function_map and llm.generate_cfg.
+        instance: Optional AgentInstance — if provided, its _generate_cfg_override
+                  takes precedence over the template config for disabled_tools.
 
     Returns:
         A string containing the full resources block, or empty string if no template.
@@ -87,7 +100,14 @@ def _build_resources_block(pool, template) -> str:
 
     # Determine disabled tools for this agent's class
     disabled_tools = []
-    raw_disabled = getattr(getattr(template, 'llm', None), 'generate_cfg', {}).get('disabled_tools', [])
+    # Check instance override first, then fall back to template config
+    if instance is not None and instance._generate_cfg_override is not None:
+        raw_disabled = instance._generate_cfg_override.get('disabled_tools')
+        if raw_disabled is None:
+            # Override exists but lacks 'disabled_tools' key — fall back to template
+            raw_disabled = getattr(getattr(template, 'llm', None), 'generate_cfg', {}).get('disabled_tools', [])
+    else:
+        raw_disabled = getattr(getattr(template, 'llm', None), 'generate_cfg', {}).get('disabled_tools', [])
     if isinstance(raw_disabled, dict):
         agent_key = getattr(template, 'agent_class', None) or getattr(template, 'name', '')
         slug = agent_key.lower().replace(' ', '_') if agent_key else ''
@@ -272,12 +292,20 @@ class ExecutionEngine:
         Yields:
             List[Message]: Current conversation state after each phase.
         """
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] engine.run() ENTRY — instance={instance.instance_name}, "
+            f"class={instance.agent_class}, nest_depth={getattr(instance, '_nest_depth', 'N/A')}"
+        )
         instance.is_active = True  # Mark active before execution starts
         self._current_instance = instance  # Fix #2: set for token count cache lookups
         try:
             # ── Phase 1: Setup ─────────────────────────────────────────────
             messages, llm_messages, response = self._setup_turn(instance)
             if not messages:
+                logger.warning(
+                    f"[CALL_AGENT_DEBUG] engine.run() — early exit for instance={instance.instance_name}, "
+                    f"reason=_setup_turn returned None (empty conversation or error)"
+                )
                 return  # Manual command handled or error
 
             max_turns = instance.max_turns or 50
@@ -296,11 +324,19 @@ class ExecutionEngine:
                 turn_output = list(self._call_llm_with_injection(instance, llm_messages))
 
                 if self.pool.stopped or self.pool.is_instance_halted(instance.instance_name):
+                    logger.debug(
+                        f"[CALL_AGENT_DEBUG] engine.run() — halted/stopped for instance={instance.instance_name}, "
+                        f"pool_stopped={self.pool.stopped}"
+                    )
                     yield response
                     continue
 
                 # ── Phase 4: Response Processing and Tool Execution ─────────
                 if self._process_response(instance, turn_output, messages, llm_messages, response):
+                    logger.debug(
+                        f"[CALL_AGENT_DEBUG] engine.run() — tool used by instance={instance.instance_name}, "
+                        f"looping for next turn (turns_available={turns_available})"
+                    )
                     yield response
                     continue
 
@@ -322,13 +358,20 @@ class ExecutionEngine:
             raise
         except Exception as e:
             # C4 fix: Catch unhandled exceptions — log and yield error state
-            logger.error(f"ExecutionEngine.run() failed for {instance.instance_name}: {e}")
+            logger.error(
+                f"[CALL_AGENT_DEBUG] engine.run() EXCEPTION for instance={instance.instance_name}: "
+                f"error_type={type(e).__name__}, error={e}"
+            )
             error_msg = Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {e}]")
             yield [error_msg]
 
         finally:
             # C4 fix: Always clean up — mark inactive regardless of how we exit
             instance.is_active = False
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] engine.run() EXIT — instance={instance.instance_name}, "
+                f"is_active=False (cleanup in finally)"
+            )
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Phase Methods — each ~20-60 lines, independently testable
@@ -343,12 +386,20 @@ class ExecutionEngine:
         Returns:
             Tuple of (messages, llm_messages, response) or (None, None, None) on error.
         """
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] _setup_turn ENTRY — instance={instance.instance_name}, "
+            f"agent_class={instance.agent_class}"
+        )
         inst_name = instance.instance_name
 
         # Load conversation from pool (single source of truth)
         with instance._compression_lock:
             conv = list(instance.conversation)
         if not conv:
+            logger.warning(
+                f"[CALL_AGENT_DEBUG] _setup_turn — empty conversation for instance={inst_name}, "
+                f"early exit returning None"
+            )
             return None, None, None
 
         # Load template to get system message if needed
@@ -395,7 +446,7 @@ class ExecutionEngine:
                     # 3. Inject/update available resources (enabled tools always; agent types only if call_agent is available)
                     # Always rebuild this block each turn so that changes to disabled_tools are reflected immediately
                     template = self.pool.templates.get(instance.agent_class)
-                    new_block = _build_resources_block(self.pool, template)
+                    new_block = _build_resources_block(self.pool, template, instance)
                     if new_block:
                         if '--- CURRENT AVAILABLE RESOURCES' in m0_content:
                             # Replace the existing block with fresh data (handles dynamic tool changes)
@@ -636,7 +687,7 @@ class ExecutionEngine:
 
         # Get active functions (tool schemas) from template
         # Mirrors Agent._get_active_functions(): filter out disabled tools from function_map
-        active_functions = _get_active_functions_from_template(template)
+        active_functions = _get_active_functions_from_template(template, instance)
 
         # Build the LLM call — with delta_stream=False each yielded item is a List[Message]
         # (the accumulated response so far). We iterate through all items (or until stop/halt),
@@ -663,18 +714,28 @@ class ExecutionEngine:
         
         Returns an iterator of List[Message] (each item is the accumulated response).
         """
+        # Defensive: template.llm may be None for templates without LLM config
+        llm = getattr(template, 'llm', None)
+        if llm is None:
+            def _empty_iter():
+                yield [Message(role=ASSISTANT, content=f"[SYSTEM ERROR: Template '{getattr(template, 'name', instance.agent_class)}' has no LLM configured]")]
+            return _empty_iter()
+
         if self.pool.api_router and hasattr(self.pool.api_router, 'call_with_fallback'):
             # Route through API router for multi-endpoint failover
             agent_type = instance.agent_class.lower()
 
             def _do_call(llm_cfg: dict) -> Iterator[List[Message]]:
                 merged_cfg = {}
-                if hasattr(template.llm, 'generate_cfg'):
-                    merged_cfg.update(template.llm.generate_cfg)
+                # Use per-instance override if present, otherwise fall back to template config
+                if instance._generate_cfg_override is not None:
+                    merged_cfg.update(instance._generate_cfg_override)
+                elif hasattr(llm, 'generate_cfg'):
+                    merged_cfg.update(llm.generate_cfg)
                 merged_cfg.update(llm_cfg)
                 merged_cfg['agent_name'] = template.name
 
-                return template.llm.chat(
+                return llm.chat(
                     messages=messages,
                     functions=active_functions,
                     stream=True,
@@ -686,7 +747,7 @@ class ExecutionEngine:
             return self.pool.api_router.call_with_fallback(agent_type, _do_call)
         else:
             # Direct call without router
-            return template.llm.chat(
+            return llm.chat(
                 messages=messages,
                 functions=active_functions,
                 stream=True,
@@ -1040,10 +1101,22 @@ class ExecutionEngine:
             try:
                 parsed = json.loads(tool_args)
             except json.JSONDecodeError:
+                logger.debug(
+                    f"[CALL_AGENT_DEBUG] _resolve_placeholders — JSON parse failure for instance={instance_name}, "
+                    f"tool={tool_name}, args_preview={str(tool_args)[:200]}"
+                )
                 return None  # JSON parse failure — signal error to caller
             if not isinstance(parsed, dict):
+                logger.debug(
+                    f"[CALL_AGENT_DEBUG] _resolve_placeholders — parsed to non-dict for instance={instance_name}, "
+                    f"tool={tool_name}, type={type(parsed).__name__}"
+                )
                 return None  # Parsed to non-dict — signal error
         else:
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] _resolve_placeholders — unexpected type for instance={instance_name}, "
+                f"tool={tool_name}, type={type(tool_args).__name__}"
+            )
             return None  # Unexpected type — signal error
 
         # ── Step 2: scan for placeholders (whitespace-tolerant) ────────────────
@@ -1089,8 +1162,26 @@ class ExecutionEngine:
             Tool execution result as a string.
         """
         if tool_name == 'call_agent':
+            # ── CALL_AGENT DEBUG: Entry point ──
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] _execute_tool ENTRY — instance={instance.instance_name}, "
+                f"tool_args_type={type(tool_args).__name__}, tool_args_preview={str(tool_args)[:200]}"
+            )
             resolved = self._resolve_placeholders(tool_args, instance.instance_name, tool_name)
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] _resolve_placeholders returned — resolved_type={type(resolved).__name__}, "
+                f"resolved_preview={str(resolved)[:200]}"
+            )
+            if resolved is None:
+                logger.warning(
+                    f"[CALL_AGENT_DEBUG] _resolve_placeholders returned None for instance {instance.instance_name} — "
+                    f"this means JSON parsing failed in tool args: {str(tool_args)[:300]}"
+                )
             result = self._handle_call_agent(resolved, messages, instance)
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] _handle_call_agent returned — result_type={type(result).__name__}, "
+                f"result_preview={str(result)[:200]}"
+            )
             self._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
         elif tool_name == 'dismiss_agent':
@@ -1135,32 +1226,71 @@ class ExecutionEngine:
         Returns:
             Result string from the called agent.
         """
+        caller_name = instance.instance_name
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] _handle_call_agent ENTRY — caller={caller_name}, "
+            f"args_type={type(args).__name__}, args_preview={str(args)[:300]}"
+        )
+
         if args is None:
             # JSON parsing failed in _resolve_placeholders — return error
+            logger.warning(f"[CALL_AGENT_DEBUG] EXIT (early) — caller={caller_name}, reason=args_is_None")
             return 'Error: Invalid JSON arguments.'
 
         instance_name = args.get('instance_name', '')
         agent_class = (args.get('agent_class') or '').strip().lower()
 
         if not instance_name or not agent_class:
+            logger.warning(
+                f"[CALL_AGENT_DEBUG] EXIT (early) — caller={caller_name}, "
+                f"reason=missing_instance_name_or_agent_class, instance_name='{instance_name}', agent_class='{agent_class}'"
+            )
             return "Error: call_agent requires instance_name and agent_class."
+
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] _handle_call_agent — caller={caller_name}, target={instance_name}, class={agent_class}"
+        )
 
         # P2: Recursive self-call cloning — prevent state corruption on self-delegation
         with self.pool._execution._state_lock:
-            if instance_name in self.pool._execution.active_stack:
-                count = self.pool._execution.active_stack.count(instance_name)
+            if any(n == instance_name for n, _depth in self.pool._execution.active_stack):
+                count = sum(1 for n, _depth in self.pool._execution.active_stack if n == instance_name)
                 original_instance = instance_name
                 instance_name = f"{instance_name}_child{count}"
-                logger.info(f"Recursive self-call detected for '{original_instance}'. Cloning to '{instance_name}'.")
+                logger.debug(f"[CALL_AGENT_DEBUG] Recursive self-call detected for '{original_instance}'. Cloning to '{instance_name}'.")
+                logger.debug(
+                    f"[CALL_AGENT_DEBUG] EXIT (self-call clone) — caller={caller_name}, "
+                    f"original={original_instance}, cloned={instance_name}"
+                )
 
         # P5: Class mismatch detection — clear history if class differs on existing instance
         existing_class = self.pool.instance_classes.get(instance_name)
         if existing_class and agent_class and existing_class != agent_class:
-            logger.info(
-                f"Class mismatch for '{instance_name}': existing={existing_class}, requested={agent_class}"
+            logger.warning(
+                f"[CALL_AGENT_DEBUG] EXIT (early) — caller={caller_name}, reason=class_mismatch, "
+                f"target={instance_name}, existing={existing_class}, requested={agent_class}"
             )
             return (f"Error: Agent '{instance_name}' already exists as '{existing_class}'. "
                     f"Cannot create as '{agent_class}'. Use a different instance name.")
+
+        # Nesting depth check — prevent infinite agent chains
+        caller_depth = 0
+        if caller_inst := self.pool.get_instance(instance.instance_name):
+            caller_depth = getattr(caller_inst, '_nest_depth', 0)
+        child_depth = caller_depth + 1
+        max_depth = self.pool.settings.max_nesting_depth if hasattr(self.pool, 'settings') else 10
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] Nesting depth — caller={caller_name}, caller_depth={caller_depth}, "
+            f"child_depth={child_depth}, max_depth={max_depth}"
+        )
+        if child_depth > max_depth:
+            logger.warning(
+                f"[CALL_AGENT_DEBUG] EXIT (early) — caller={caller_name}, reason=nesting_depth_exceeded, "
+                f"child_depth={child_depth}, max_depth={max_depth}"
+            )
+            return (f"Error: Nesting depth limit ({max_depth}) exceeded. "
+                    f"The caller '{instance.instance_name}' is at depth {caller_depth}. "
+                    f"Cannot create agent '{instance_name}' at depth {child_depth}.")
 
         # Check concurrency limits
         is_parallel_allowed = True
@@ -1178,14 +1308,31 @@ class ExecutionEngine:
             if active_count >= effective_concurrency:
                 is_parallel_allowed = False
 
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] Concurrency — is_parallel_allowed={is_parallel_allowed}, "
+            f"effective_concurrency={effective_concurrency}, parallel_launch_arg={args.get('parallel_launch')}"
+        )
+
         # Parallel launch path
         if is_parallel_allowed and args.get('parallel_launch') is True:
-            return self.pool.submit_parallel(
-                agent_class, instance_name, args, messages, instance.instance_name
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] Taking PARALLEL path — caller={caller_name}, target={instance_name}, "
+                f"class={agent_class}, child_depth={child_depth}"
             )
+            result = self.pool.submit_parallel(
+                agent_class, instance_name, args, messages, instance.instance_name, child_depth
+            )
+            logger.debug(f"[CALL_AGENT_DEBUG] EXIT (parallel) — caller={caller_name}, target={instance_name}, result_preview={str(result)[:200]}")
+            return result
 
         # Synchronous execution — the unified path
-        return self._execute_agent_sync(agent_class, instance_name, args, messages, instance.instance_name)
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] Taking SYNC path — caller={caller_name}, target={instance_name}, "
+            f"class={agent_class}, child_depth={child_depth}"
+        )
+        result = self._execute_agent_sync(agent_class, instance_name, args, messages, instance.instance_name, child_depth)
+        logger.debug(f"[CALL_AGENT_DEBUG] EXIT (sync) — caller={caller_name}, target={instance_name}, result_preview={str(result)[:200]}")
+        return result
 
     def _handle_dismiss_agent(self, args: Any, instance: AgentInstance) -> str:
         """Handle dismiss_agent tool call — removes another agent from pool.
@@ -1459,7 +1606,7 @@ class ExecutionEngine:
 
     def _create_and_run_agent(
         self, agent_class: str, instance_name: str,
-        args: dict, caller: str
+        args: dict, caller: str, nest_depth: int = 0
     ) -> tuple:
         """Create an AgentInstance and run it through the unified loop.
 
@@ -1469,7 +1616,16 @@ class ExecutionEngine:
 
         Returns:
             Tuple of (AgentInstance, conversation history).
+
+        Args:
+            nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
         """
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target={instance_name}, class={agent_class}, "
+            f"caller={caller}, nest_depth={nest_depth}"
+        )
+        self._create_completed = False  # Reset for this execution cycle
+
         # Create the instance
         now = time.monotonic()
         inst = AgentInstance(
@@ -1483,6 +1639,7 @@ class ExecutionEngine:
             last_activity=now,
             compression_summary=None,
             latest_marker_index=-1,
+            _nest_depth=nest_depth,
         )
 
         # Fix #6: Warn if reusing an instance name that already exists with the same class
@@ -1495,10 +1652,15 @@ class ExecutionEngine:
             )
 
         self.pool.instances[instance_name] = inst
+        logger.debug(f"[CALL_AGENT_DEBUG] _create_and_run_agent — instance registered in pool for {instance_name}")
 
         # Build system message for new agent
         template = self.pool.templates.get(agent_class)
         if not template:
+            logger.error(
+                f"[CALL_AGENT_DEBUG] _create_and_run_agent — NO TEMPLATE for agent_class={agent_class}, "
+                f"target={instance_name}, caller={caller}"
+            )
             raise ValueError(f"No template for agent class {agent_class}")
 
         sys_content = getattr(template, 'base_system_message',
@@ -1596,8 +1758,9 @@ class ExecutionEngine:
             except Exception as e:
                 logger.debug(f"Logging initial messages for {instance_name} failed (non-critical): {e}")
 
-        # P6: Settings propagation from caller agent
-        # Propagate max_turns, auto_continue_enabled, and max_input_tokens
+        # P6+P3: Settings propagation from caller agent — merged under single lock scope
+        # to prevent a race window where another thread reads partial state.
+        # Propagates max_turns, max_input_tokens, and disabled_tools.
         if hasattr(self.pool, 'api_router') and self.pool.api_router:
             try:
                 caller_inst = self.pool.get_instance(caller)
@@ -1610,42 +1773,42 @@ class ExecutionEngine:
                         caller_max_turns = llm_cfg.get('max_turns') or 50
                         inst.max_turns = caller_max_turns
 
-                        # Propagate max_input_tokens (context window limit) — thread-safe copy-write
-                        supervisor_max = llm_cfg.get('max_input_tokens')
-                        if supervisor_max:
-                            target_template = self.pool.templates.get(agent_class)
-                            if target_template and hasattr(target_template, 'llm'):
-                                with self.pool._execution._state_lock:
+                        target_template = self.pool.templates.get(agent_class)
+                        if not target_template or not getattr(target_template, 'llm', None):
+                            # Target template has no LLM — skip settings propagation but continue execution
+                            logger.warning(
+                                f"Target agent '{instance_name}' ({agent_class}) template has no LLM config — "
+                                f"skipping settings propagation (max_input_tokens and disabled_tools)"
+                            )
+                        else:
+                            with self.pool._execution._state_lock:
+                                # Propagate max_input_tokens (context window limit) — store on instance, NOT template
+                                supervisor_max = llm_cfg.get('max_input_tokens')
+                                if supervisor_max:
                                     cfg = (target_template.llm.generate_cfg or {}).copy()
                                     cfg['max_input_tokens'] = supervisor_max
-                                    target_template.llm.generate_cfg = cfg
+                                    inst._generate_cfg_override = cfg
+
+                                # Propagate disabled_tools — merge with any existing instance override (not overwrite)
+                                caller_disabled_tools = llm_cfg.get('disabled_tools')
+                                if caller_disabled_tools:
+                                    cfg = dict(inst._generate_cfg_override or {}) if inst._generate_cfg_override else (target_template.llm.generate_cfg or {}).copy()
+                                    existing_disabled = cfg.get('disabled_tools', [])
+                                    if isinstance(existing_disabled, list):
+                                        # Merge: combine existing with caller's disabled tools (deduplicated)
+                                        cfg['disabled_tools'] = list(set(existing_disabled + list(caller_disabled_tools)))
+                                    else:
+                                        cfg['disabled_tools'] = list(caller_disabled_tools)
+                                    inst._generate_cfg_override = cfg
+                                    logger.debug(
+                                        f"Propagated disabled_tools to agent '{instance_name}': {caller_disabled_tools}"
+                                    )
             except Exception as e:
                 logger.debug(f"Settings propagation from {caller} to {instance_name} failed (non-critical): {e}")
 
-        # P3: Disabled tools propagation to other agents (security/UX) — thread-safe copy-write
-        if hasattr(self.pool, 'api_router') and self.pool.api_router:
-            try:
-                caller_inst = self.pool.get_instance(caller)
-                if caller_inst:
-                    caller_template = self.pool.templates.get(caller_inst.agent_class)
-                    if caller_template and hasattr(caller_template, 'llm'):
-                        caller_disabled_tools = getattr(caller_template.llm, 'generate_cfg', {}).get('disabled_tools')
-                        if caller_disabled_tools:
-                            target_template = self.pool.templates.get(agent_class)
-                            if target_template and hasattr(target_template, 'llm'):
-                                with self.pool._execution._state_lock:
-                                    cfg = (target_template.llm.generate_cfg or {}).copy()
-                                    cfg['disabled_tools'] = caller_disabled_tools
-                                    target_template.llm.generate_cfg = cfg
-                                logger.debug(
-                                    f"Propagated disabled_tools to agent '{instance_name}': {caller_disabled_tools}"
-                                )
-            except Exception as e:
-                logger.warning(f"Failed to propagate disabled_tools from {caller} to {instance_name}: {e}")
-
-        # Track in active stack (thread-safe via RLock)
+        # Track in active stack with depth info (thread-safe via RLock)
         with self.pool._execution._state_lock:
-            self.pool._execution.active_stack.append(instance_name)
+            self.pool._execution.active_stack.append((instance_name, inst._nest_depth))
 
         # Item 12: Initialize sub-agent WebUI state before execution begins (Fix #3: lighter snapshot)
         try:
@@ -1688,6 +1851,9 @@ class ExecutionEngine:
             # frontend sees sub-agent tab updates independently of main agent flow.
             # Without this, the main streaming loop is blocked during tool execution
             # and no WebSocket events arrive until the sub-agent finishes.
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] _create_and_run_agent — starting engine.run() for {instance_name}"
+            )
             final_resp = []
             _update_counter = 0
             _last_sub_send = 0.0
@@ -1771,6 +1937,7 @@ class ExecutionEngine:
                             _stream_pushing_disabled = True
 
             conv.extend(final_resp)
+            self._create_completed = True  # Mark for finally-block EXIT log reason tracking
 
             # Item 12: Always emit final sub-agent state after loop completes (Fix #3: lighter snapshot)
             # Ensures even short-lived agents (<5 turns) appear in the WebUI
@@ -1816,8 +1983,19 @@ class ExecutionEngine:
         finally:
             # Always clean up active stack — even on halt or error
             with self.pool._execution._state_lock:
-                if instance_name in self.pool._execution.active_stack:
-                    self.pool._execution.active_stack.remove(instance_name)
+                for i, (name, _depth) in enumerate(self.pool._execution.active_stack):
+                    if name == instance_name:
+                        self.pool._execution.active_stack.pop(i)
+                        break
+
+            # Determine exit reason for debugging
+            _completed = getattr(self, '_create_completed', False)
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target={instance_name}, "
+                f"reason={'completed' if _completed else 'aborted'}, "
+                f"inst_type={type(inst).__name__}, conv_len={len(conv)}, "
+                f"final_resp_len={len(final_resp)}"
+            )
 
         return inst, conv
 
@@ -1827,38 +2005,104 @@ class ExecutionEngine:
 
     def _execute_agent_sync(
         self, agent_class: str, instance_name: str,
-        args: dict, caller_history: List[Message], caller: str
+        args: dict, caller_history: List[Message], caller: str, nest_depth: int = 0
     ) -> str:
         """Execute an agent synchronously through the unified loop. Replaces _stream_agent_instance_call().
 
         Fix #5: Acquires endpoint scheduling slot before execution (matching parallel tasks in submit_task).
+
+        Args:
+            nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
         """
         from agent_cascade.compression.helpers import extract_instance_output
 
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] _execute_agent_sync ENTRY — target={instance_name}, class={agent_class}, "
+            f"caller={caller}, nest_depth={nest_depth}"
+        )
+
         template = self.pool.templates.get(agent_class)
         if not template:
+            logger.error(
+                f"[CALL_AGENT_DEBUG] _execute_agent_sync EXIT (early) — target={instance_name}, "
+                f"reason=no_template, class={agent_class}"
+            )
             return f"Error: Agent class '{agent_class}' not found."
 
-        # ── Fix #5: Acquire endpoint scheduling slot before sync execution ──
+        # ── Endpoint scheduling: acquire slot for root agents, skip for nested ──
+        # Root agents (nest_depth=0) acquire a slot via _acquire_slot.
+        # Nested agents (nest_depth>0) skip — the parent already holds the slot.
+        # This prevents deadlock where both parent and child try to acquire the same slot.
+        # Known trade-off: nested sync agents bypass per-endpoint concurrency enforcement.
+        # This is acceptable because nested calls are serialized by the caller anyway,
+        # and top-level concurrency control (via parallel task slots) limits total capacity.
         endpoint_release = None
-        if hasattr(self.pool, '_execution') and hasattr(self.pool._execution, '_acquire_slot'):
+        if nest_depth > 0:
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] _execute_agent_sync — SKIPPING endpoint slot acquisition for {instance_name} "
+                f"(nest_depth={nest_depth}, caller already holds the slot)"
+            )
+        else:
+            # Root-level call: acquire a slot (or log why we can't)
+            if not hasattr(self.pool, '_execution') or not hasattr(self.pool._execution, '_acquire_slot'):
+                logger.error(
+                    f"[CALL_AGENT_DEBUG] _execute_agent_sync — fatal: pool missing _ExecutionManager "
+                    f"or _acquire_slot for {instance_name}. Endpoint scheduling is unavailable."
+                )
+                return f"Error: Endpoint scheduling not available for '{instance_name}'."
             try:
                 endpoint_release = self.pool._execution._acquire_slot(agent_class, instance_name)
+                logger.debug(f"[CALL_AGENT_DEBUG] _execute_agent_sync — acquired endpoint slot for {instance_name}")
             except Exception as e:
-                logger.warning(f"Failed to acquire endpoint slot for {instance_name}: {e}")
+                logger.warning(
+                    f"[CALL_AGENT_DEBUG] _execute_agent_sync — warning: failed to acquire endpoint slot for {instance_name}, "
+                    f"continuing without slot constraint (error={e})"
+                )
 
         try:
             # Create and run via shared helper
-            inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller)
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] _execute_agent_sync — calling _create_and_run_agent for {instance_name}"
+            )
+            inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller, nest_depth)
+
+            # Check return values — Bug #1 check: ensure _create_and_run_agent didn't return None
+            if inst is None or conv is None:
+                logger.error(
+                    f"[CALL_AGENT_DEBUG] BUG DETECTED — _create_and_run_agent returned None for {instance_name}: "
+                    f"inst={inst}, conv_type={type(conv).__name__}"
+                )
+                return f"Error running agent '{instance_name}': Internal error — agent creation returned None."
+
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] _execute_agent_sync — _create_and_run_agent returned for {instance_name}: "
+                f"inst_type={type(inst).__name__}, conv_len={len(conv)}"
+            )
 
             # Note: _create_and_run_agent handles active_stack cleanup via its own finally block.
             result_str = extract_instance_output(conv, instance_name)
+            if not result_str:
+                logger.warning(
+                    f"[CALL_AGENT_DEBUG] _execute_agent_sync — extract_instance_output returned empty for {instance_name}"
+                )
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] _execute_agent_sync — extract_instance_output for {instance_name}: "
+                f"result_preview={str(result_str)[:200]}"
+            )
             return f"[{instance_name}\'s output]:\n{result_str}"
+        except Exception as e:
+            # Catch exceptions from agent creation/execution and return as clean tool error
+            logger.error(
+                f"[CALL_AGENT_DEBUG] _execute_agent_sync EXIT (exception) — target={instance_name}, "
+                f"error_type={type(e).__name__}, error={e}"
+            )
+            return f"Error running agent '{instance_name}': {e}"
         finally:
-            # Fix #5: Release endpoint slot when sync execution completes
+            # Release endpoint slot when sync execution completes (only for root-level calls)
             if endpoint_release is not None:
                 try:
                     endpoint_release()
+                    logger.debug(f"[CALL_AGENT_DEBUG] _execute_agent_sync — released endpoint slot for {instance_name}")
                 except Exception as e:
                     logger.warning(f"Failed to release endpoint slot for {instance_name}: {e}")
 
@@ -1873,7 +2117,11 @@ class ExecutionEngine:
             except Exception as e:
                 logger.debug(f"API router max_tokens lookup failed for {instance.agent_class} (using fallback): {e}")
 
-        # 2. Try template\'s LLM config
+        # 2. Try per-instance override first (from settings propagation)
+        if instance._generate_cfg_override and 'max_input_tokens' in instance._generate_cfg_override:
+            return int(instance._generate_cfg_override['max_input_tokens'])
+
+        # 3. Try template's LLM config
         template = self.pool.templates.get(instance.agent_class)
         if template and hasattr(template, 'llm'):
             llm = template.llm

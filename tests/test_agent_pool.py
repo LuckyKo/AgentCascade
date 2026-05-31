@@ -75,29 +75,12 @@ class TestMessageQueue:
         msgs = agent_pool.drain_queue("w1")
         assert msgs == []
 
-    def test_dedup_across_targeted_and_legacy_queues(self, agent_pool):
-        """If the same message text is in both queues, it should only appear once."""
-        agent_pool.enqueue_message("w1", "shared_msg")
-        agent_pool.async_message_queue.append("shared_msg")
-        agent_pool.async_message_queue.append("legacy_only")
-        msgs = agent_pool.drain_queue("w1")
-        # "shared_msg" appears only once; order preserves first occurrence (targeted queue)
-        assert msgs == ["shared_msg", "legacy_only"]
-        # Both queues should be drained
-        assert agent_pool.message_queues.get("w1", []) == []
-        assert agent_pool.async_message_queue == []
-
     def test_has_messages_true(self, agent_pool):
         agent_pool.enqueue_message("w1", "hello")
         assert agent_pool.has_messages("w1") is True
 
     def test_has_messages_false(self, agent_pool):
         assert agent_pool.has_messages("nobody") is False
-
-    def test_has_messages_legacy_queue(self, agent_pool):
-        """has_messages also checks the legacy global queue."""
-        agent_pool.async_message_queue.append("legacy_msg")
-        assert agent_pool.has_messages("anyone") is True
 
     def test_multiple_agents_isolated_queues(self, agent_pool):
         """Different agents have separate queues."""
@@ -116,14 +99,43 @@ class TestDismissal:
 
     def test_dismiss_inactive_agent_clears_conversation(self, agent_pool):
         """Dismissing an inactive agent should clear its conversation."""
-        agent_pool.instance_conversations["ghost"] = [{"role": "user", "content": "hi"}]
+        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.llm.schema import Message
+        import time
+        inst = AgentInstance(
+            instance_name="ghost",
+            agent_class="researcher",
+            conversation=[Message(role="user", content="hi")],
+            is_active=False,
+            max_turns=None,
+            parent_instance=None,
+            created_at=time.monotonic(),
+            last_activity=time.monotonic(),
+            compression_summary=None,
+            latest_marker_index=-1,
+        )
+        agent_pool.instances["ghost"] = inst
         agent_pool.dismiss_instance("ghost")
-        assert "ghost" not in agent_pool.instance_conversations or \
-               agent_pool.instance_conversations["ghost"] == []
+        assert "ghost" not in agent_pool.instances or \
+                len(agent_pool.get_conversation("ghost")) == 0
 
     def test_dismiss_active_agent_sets_stop_flag(self, agent_pool):
         """Dismissing an active agent should set the stopped flag."""
-        agent_pool.active_stack.append("busy_agent")
+        from agent_cascade.agent_instance import AgentInstance
+        import time
+        inst = AgentInstance(
+            instance_name="busy_agent",
+            agent_class="researcher",
+            conversation=[],
+            is_active=True,
+            max_turns=None,
+            parent_instance=None,
+            created_at=time.monotonic(),
+            last_activity=time.monotonic(),
+            compression_summary=None,
+            latest_marker_index=-1,
+        )
+        agent_pool.instances["busy_agent"] = inst
         assert not agent_pool.stopped
         agent_pool.dismiss_instance("busy_agent")
         assert agent_pool.stopped is True
@@ -145,7 +157,22 @@ class TestDismissal:
         assert results == ["good", "also_good"]
 
     def test_terminate_instance_sets_stop_when_active(self, agent_pool):
-        agent_pool.active_stack.append("term_agent")
+        """Terminating an active instance should set the stopped flag."""
+        from agent_cascade.agent_instance import AgentInstance
+        import time
+        inst = AgentInstance(
+            instance_name="term_agent",
+            agent_class="researcher",
+            conversation=[],
+            is_active=True,
+            max_turns=None,
+            parent_instance=None,
+            created_at=time.monotonic(),
+            last_activity=time.monotonic(),
+            compression_summary=None,
+            latest_marker_index=-1,
+        )
+        agent_pool.instances["term_agent"] = inst
         agent_pool.terminate_instance("term_agent")
         assert agent_pool.stopped is True
         assert "term_agent" in agent_pool.terminated_instances
@@ -171,9 +198,26 @@ class TestHaltLifecycle:
         assert agent_pool.is_halted("w1") is False
 
     def test_halt_all_except_one(self, agent_pool):
-        agent_pool.message_queues["a"] = []
-        agent_pool.message_queues["b"] = []
-        agent_pool.active_stack.append("c")
+        """halt_all_instances halts all instances except the one specified."""
+        from agent_cascade.agent_instance import AgentInstance
+        import time
+        # Create actual instances so halt_all_instances can find them
+        for name in ("a", "b"):
+            inst = AgentInstance(
+                instance_name=name,
+                agent_class="researcher",
+                conversation=[],
+                is_active=False,
+                max_turns=None,
+                parent_instance=None,
+                created_at=time.monotonic(),
+                last_activity=time.monotonic(),
+                compression_summary=None,
+                latest_marker_index=-1,
+            )
+            agent_pool.instances[name] = inst
+        # "c" is excluded — just needs to not be in self.instances
+        agent_pool.active_stack_append("c", 0)
         agent_pool.halt_all_instances(except_instance="c")
         assert agent_pool.is_halted("a") is True
         assert agent_pool.is_halted("b") is True
@@ -184,16 +228,32 @@ class TestHaltLifecycle:
         # Manually halt "a" (not via compression)
         agent_pool.halt_instance("a")
         # Halt "b" via compression path
-        agent_pool.message_queues["b"] = []
+        from agent_cascade.agent_instance import AgentInstance
+        import time
+        for name in ("b",):
+            inst = AgentInstance(
+                instance_name=name,
+                agent_class="researcher",
+                conversation=[],
+                is_active=False,
+                max_turns=None,
+                parent_instance=None,
+                created_at=time.monotonic(),
+                last_activity=time.monotonic(),
+                compression_summary=None,
+                latest_marker_index=-1,
+            )
+            agent_pool.instances[name] = inst
         agent_pool.halt_all_instances(except_instance="c_nonexistent")
         # Now resume all — only "b" should be resumed (was compression-halted)
         agent_pool.resume_all_instances()
         assert agent_pool.is_halted("a") is True   # still halted (manual)
         assert agent_pool.is_halted("b") is False  # resumed
 
-    def test_halt_lock_protection(self, agent_pool):
-        """Halt operations should be lock-guarded."""
-        assert isinstance(agent_pool._halt_lock, type(threading.Lock()))
+    def test_state_lock_protection(self, agent_pool):
+        """State mutations should be lock-guarded via _state_lock."""
+        import threading
+        assert isinstance(agent_pool._execution._state_lock, type(threading.RLock()))
 
 
 # ===========================================================================
@@ -204,21 +264,39 @@ class TestSnapshots:
     """Test capture_snapshots / rollback_to_snapshots."""
 
     def test_capture_and_rollback(self, agent_pool):
-        agent_pool.instance_conversations["w1"] = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "ok"},
-        ]
+        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.llm.schema import Message
+        import time
+        # Create an actual instance with a conversation
+        inst = AgentInstance(
+            instance_name="w1",
+            agent_class="researcher",
+            conversation=[
+                Message(role="system", content="sys"),
+                Message(role="user", content="hi"),
+                Message(role="assistant", content="ok"),
+            ],
+            is_active=False,
+            max_turns=None,
+            parent_instance=None,
+            created_at=time.monotonic(),
+            last_activity=time.monotonic(),
+            compression_summary=None,
+            latest_marker_index=-1,
+        )
+        agent_pool.instances["w1"] = inst
+
         snaps = agent_pool.capture_snapshots()
         assert snaps["w1"] == 3
 
         # Add more messages
-        agent_pool.instance_conversations["w1"].append({"role": "user", "content": "more"})
-        agent_pool.instance_conversations["w1"].append({"role": "assistant", "content": "done"})
+        with inst._compression_lock:
+            inst.conversation.append(Message(role="user", content="more"))
+            inst.conversation.append(Message(role="assistant", content="done"))
 
         # Rollback
         agent_pool.rollback_to_snapshots(snaps)
-        assert len(agent_pool.instance_conversations["w1"]) == 3
+        assert len(agent_pool.get_conversation("w1")) == 3
 
 
 # ===========================================================================

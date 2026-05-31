@@ -96,7 +96,7 @@ limitations under the License.
 ## Core Features
 
 ### 🤖 Multi-Agent Orchestration
-- **OrchestratorAgent** (`agent_orchestrator.py`): A supervisor agent that manages sub-agent lifecycles, intercepts `call_agent`/`dismiss_agent` tool calls, and handles multi-agent streaming as a unified generator.
+- **Orchestrator** (`execution_engine.py`): A supervisor agent that manages sub-agent lifecycles, intercepts `call_agent`/`dismiss_agent` tool calls, and handles multi-agent streaming as a unified generator.
 - **AgentPool** (`agent_pool.py`): Centralized agent management with per-instance conversation persistence (JSONL), context compression (auto + manual modes), and real-time state synchronization.
 
 ### 🛡️ Production Safety & Control

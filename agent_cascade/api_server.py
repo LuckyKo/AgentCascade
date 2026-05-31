@@ -581,7 +581,8 @@ def create_app(agents, agent_pool, config=None):
     # Bounded queue to prevent stale event buildup during sustained streaming.
     # When full, the oldest pending stream_update is dropped (put_nowait raises QueueFull).
     # Non-stream events (state, done, dismissal) still get priority via regular put().
-    send_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
+    # Increased from 32 to 128 to reduce dropped updates during heavy multi-agent activity.
+    send_queue: asyncio.Queue = asyncio.Queue(maxsize=128)
 
     # Lock for session state accessed across threads (asyncio loop + agent thread).
     # Protects: session['generating'], session['stop_requested'].
@@ -724,7 +725,7 @@ def create_app(agents, agent_pool, config=None):
 
     def get_active_stack():
         if agent_pool and hasattr(agent_pool, 'active_stack'):
-            return list(agent_pool.active_stack)
+            return agent_pool.active_stack
         return []
 
     def get_approvals():
@@ -1155,6 +1156,14 @@ def create_app(agents, agent_pool, config=None):
                     logger.debug(f"Logger reset during new session failed (non-critical): {e}")
         
         # Phase 6: No need to clear session['history'] — pool is the source of truth
+        # Fix #1 & #3: Clear performance caches on session reset
+        try:
+            from agent_cascade import api_integration
+            api_integration._token_stats_cache.clear()
+            api_integration._last_stream_versions.clear()
+            api_integration._cached_instance_data.clear()
+        except Exception:
+            pass  # Non-critical — caches will self-correct
         session['generating'] = False
         session['generation_id'] += 1
         if agent_pool:
@@ -1932,8 +1941,8 @@ def create_app(agents, agent_pool, config=None):
                                                 'agent_name': f"Security Advisor (security_advisor)",
                                                 'messages': list(history),
                                             }
-                                            if sec_state_key not in agent_pool.active_stack:
-                                                agent_pool._execution.active_stack.append(sec_state_key)
+                                            if not any(n == sec_state_key for n, _depth in agent_pool._execution.active_stack):
+                                                agent_pool._execution.active_stack.append((sec_state_key, 1))
                                         # Broadcast initial state so the tab appears immediately
                                         asyncio.run_coroutine_threadsafe(
                                             send_queue.put({'type': 'stream_update', **build_stream_update([], agent_instances=get_instance_state(streaming=True))}),
@@ -2283,8 +2292,11 @@ def create_app(agents, agent_pool, config=None):
                                     if sec_state_key and sec_state_key in agent_pool.instance_state:
                                         with agent_pool._execution._state_lock:
                                             agent_pool.instance_state[sec_state_key]['active'] = False
-                                            if sec_state_key in agent_pool.active_stack:
-                                                agent_pool._execution.active_stack.remove(sec_state_key)
+                                            if any(n == sec_state_key for n, _depth in agent_pool._execution.active_stack):
+                                                for i, (n, _depth) in enumerate(agent_pool._execution.active_stack):
+                                                    if n == sec_state_key:
+                                                        agent_pool._execution.active_stack.pop(i)
+                                                        break
 
                                     # Fix #3: Release endpoint slot when done
                                     if sec_endpoint_release is not None:

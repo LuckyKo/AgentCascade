@@ -142,8 +142,8 @@ def invoke_compression_agent(
                 'agent_name': f"Compression Agent (compression_agent)",
                 'messages': list(comp_history),
             }
-            if comp_state_key not in agent_pool.active_stack:
-                agent_pool._execution.active_stack.append(comp_state_key)
+            if not any(n == comp_state_key for n, _depth in agent_pool._execution.active_stack):
+                agent_pool._execution.active_stack.append((comp_state_key, 1))
             # Phase 3: Write to instance.conversation if real instance exists, otherwise skip
             inst = agent_pool.get_instance(comp_state_key)
             if inst:
@@ -259,8 +259,11 @@ def invoke_compression_agent(
         with agent_pool._execution._state_lock:
             if comp_state_key in agent_pool.instance_state:
                 agent_pool.instance_state[comp_state_key]['active'] = False
-            if comp_state_key in agent_pool.active_stack:
-                agent_pool._execution.active_stack.remove(comp_state_key)
+            if any(n == comp_state_key for n, _depth in agent_pool._execution.active_stack):
+                for i, (n, _depth) in enumerate(agent_pool._execution.active_stack):
+                    if n == comp_state_key:
+                        agent_pool._execution.active_stack.pop(i)
+                        break
 
         # Fix #3: Release endpoint slot when done
         if endpoint_release is not None:

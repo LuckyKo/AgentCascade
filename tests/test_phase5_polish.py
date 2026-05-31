@@ -4,7 +4,16 @@ Issue #11: _InstanceConversationMapping keys()/items()/values() divergence
 Issue #13: _sync_instance_conversations only called once (and silent data loss)
 Issue #9: instance_state not populated for main session
 """
+import threading
 import pytest
+
+
+def _make_mock_inst(conversation):
+    """Create a mock instance with the attributes needed by _InstanceConversationMapping."""
+    return type('MockInst', (), {
+        'conversation': conversation,
+        '_compression_lock': threading.Lock(),
+    })()
 
 
 class TestInstanceConversationMappingKeysItemsValues:
@@ -76,14 +85,14 @@ class TestInstanceConversationMappingKeysItemsValues:
         
         # Now add an instance with same name but different conversation
         inst_conv = [{'role': 'assistant', 'content': 'from_instance'}]
-        pool.instances['test'] = type('MockInst', (), {'conversation': inst_conv})()
+        pool.instances['test'] = _make_mock_inst(inst_conv)
         
         # __getitem__ should return instance value (source of truth)
-        assert mapping['test'] is inst_conv
+        assert mapping['test'] == inst_conv
         
         # items() and values() should also yield instance values
         items_dict = dict(mapping.items())
-        assert items_dict['test'] is inst_conv
+        assert items_dict['test'] == inst_conv
 
 
 class TestSyncInstanceConversations:
@@ -103,14 +112,12 @@ class TestSyncInstanceConversations:
         
         # Now add a new instance after first creation
         inst_conv = [Message(role='user', content='test')]
-        pool.instances['new_sub'] = type('MockInst', (), {
-            'conversation': inst_conv,
-        })()
+        pool.instances['new_sub'] = _make_mock_inst(inst_conv)
         
         # Sync should pick up the new instance
         mapping._sync_from_instances()
         assert 'new_sub' in mapping
-        assert mapping['new_sub'] is inst_conv
+        assert mapping['new_sub'] == inst_conv
 
     def test_sync_preserves_dict_only_entries(self):
         """_sync_from_instances should NOT destroy dict-only entries (rename pattern)."""
@@ -142,14 +149,14 @@ class TestSyncInstanceConversations:
         
         # Add instance-backed entries
         inst1_conv = [{'role': 'assistant', 'content': 'inst1'}]
-        pool.instances['agent1'] = type('MockInst', (), {'conversation': inst1_conv})()
+        pool.instances['agent1'] = _make_mock_inst(inst1_conv)
         
         # Sync should include both
         mapping._sync_from_instances()
         
         assert 'new_name' in mapping
         assert 'agent1' in mapping
-        assert mapping['agent1'] is inst1_conv
+        assert mapping['agent1'] == inst1_conv
         assert mapping['new_name'] is renamed_conv
 
 

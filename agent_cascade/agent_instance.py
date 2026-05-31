@@ -57,6 +57,12 @@ class AgentInstance:
     _cached_token_count: int = field(default=0)                  # Cached cumulative token count for conversation
     _last_token_count_conversation_length: int = field(default=0)  # Length of conversation when tokens were last counted
 
+    # ── Nesting Depth (Fix: prevent infinite nesting) ──────────────────────
+    _nest_depth: int = field(default=0)                           # Depth in the agent call chain (0 = root)
+
+    # ── Per-instance LLM config override (Fix: avoid template mutation) ────
+    _generate_cfg_override: Optional[dict] = field(default=None)  # Merged into generate_cfg at call time without mutating template
+
 
 @dataclass
 class CompressResult:
@@ -95,3 +101,4 @@ class PoolSettings:
     compression_timeout: float = 120.0        # Max seconds for compression to complete
     security_check_timeout: float = 120.0     # Max seconds for security advisor
     max_auto_rollbacks: int = 3               # Max loop recovery retries
+    max_nesting_depth: int = 10               # Max depth of nested agent calls (prevent infinite chains)

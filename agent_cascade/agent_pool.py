@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from agent_cascade.agents import Assistant
 from agent_cascade.llm.schema import Message
+from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
@@ -306,7 +307,6 @@ class AgentPool:
 
     @stopped.setter
     def stopped(self, value: bool):
-        from agent_cascade.log import logger
         
         if value:
             self._stopped_event.set()
@@ -372,8 +372,6 @@ class AgentPool:
         Used by IdleManager for auto-dismissal and by dismiss_agent tool execution.
         Fires dismissal callbacks and cleans up message queues.
         """
-        from agent_cascade.log import logger
-        
         self._instances_version += 1  # Fix #3: signal that instances changed
         self.instances.pop(instance_name, None)
         self.message_queues.pop(instance_name, None)
@@ -501,9 +499,10 @@ class AgentPool:
         return self._execution._state_lock
 
     @property
-    def active_stack(self) -> List[str]:
+    def active_stack(self) -> List[tuple]:
         """Active execution stack — delegates to ParallelAgentManager (thread-safe read).
 
+        Returns a list of (instance_name, nest_depth) tuples.
         Lock is held during copy to ensure a consistent snapshot even under concurrent mutation.
         Writes go through mutation methods which acquire _execution._state_lock.
         """
@@ -514,16 +513,18 @@ class AgentPool:
     # The active_stack property returns a defensive copy, so mutations must go
     # through these methods to actually modify the underlying stack.
 
-    def active_stack_append(self, name: str):
-        """Append an instance name to the active execution stack (thread-safe)."""
+    def active_stack_append(self, name: str, depth: int = 0):
+        """Append an instance name with nesting depth to the active execution stack (thread-safe)."""
         with self._execution._state_lock:
-            self._execution.active_stack.append(name)
+            self._execution.active_stack.append((name, depth))
 
     def active_stack_remove(self, name: str):
         """Remove an instance name from the active execution stack (thread-safe)."""
         with self._execution._state_lock:
-            if name in self._execution.active_stack:
-                self._execution.active_stack.remove(name)
+            for i, (n, _depth) in enumerate(self._execution.active_stack):
+                if n == name:
+                    self._execution.active_stack.pop(i)
+                    break
 
     def active_stack_clear(self):
         """Clear the entire active execution stack (thread-safe)."""
@@ -587,7 +588,6 @@ class AgentPool:
         """
         import json
         from agent_cascade.llm.schema import ASSISTANT, CONTENT, FUNCTION, ROLE, SYSTEM, USER
-        from agent_cascade.log import logger
 
         log_input = log_input.strip()
         if not log_input:
@@ -786,7 +786,6 @@ class AgentPool:
     def load_agent(self, name: str):
         """Load a single agent template by name (if not already loaded)."""
         from agent_cascade.agent_factory import load_agent_template
-        from agent_cascade.log import logger
 
         if name in self.templates:
             return self.templates[name]
@@ -811,12 +810,11 @@ class AgentPool:
 
     def _fire_on_dismissed(self, instance_name: str, log_path=None):
         """Fire all registered dismissal callbacks for a dismissed agent."""
-        from agent_cascade.log import logger as _logger
         for cb in self._on_dismissed_callbacks:
             try:
                 cb(instance_name, log_path)
             except Exception as e:
-                _logger.error(f"Error in on_dismissed callback for {instance_name}: {e}")
+                logger.error(f"Error in on_dismissed callback for {instance_name}: {e}")
 
     # ── Conversation management ────────────────────────────────────────────
 
@@ -1034,7 +1032,6 @@ class AgentPool:
             3. Refines pop_count to avoid leaving dangling tool calls
         """
         from agent_cascade.llm.schema import ASSISTANT, FUNCTION, SYSTEM
-        from agent_cascade.log import logger
 
         if pop_count <= 0:
             return
@@ -1090,10 +1087,20 @@ class AgentPool:
     # ── Parallel execution delegation ──────────────────────────────────────
 
     def submit_parallel(
-        self, agent_class: str, instance_name: str, args: dict, history: List[Message], caller: str
+        self, agent_class: str, instance_name: str, args: dict, history: List[Message], caller: str, nest_depth: int = 0
     ):
-        """Submit a parallel agent task."""
-        return self._execution.submit_task(agent_class, instance_name, args, history, caller)
+        """Submit a parallel agent task.
+
+        Args:
+            nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
+        """
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] submit_parallel ENTRY — target={instance_name}, class={agent_class}, "
+            f"caller={caller}, nest_depth={nest_depth}"
+        )
+        result = self._execution.submit_task(agent_class, instance_name, args, history, caller, nest_depth)
+        logger.debug(f"[CALL_AGENT_DEBUG] submit_parallel EXIT — target={instance_name}, result_preview={str(result)[:200]}")
+        return result
 
     # ── Logger delegation ──────────────────────────────────────────────────
 
@@ -1110,7 +1117,6 @@ class AgentPool:
         and loads each one via load_agent_template().
         """
         from agent_cascade.agent_factory import load_agent_template
-        from agent_cascade.log import logger
 
         agents_path = Path(agents_dir)
         if not agents_path.exists():
@@ -1136,10 +1142,9 @@ class ParallelAgentManager:
     """Manages parallel agent execution via thread pool. Active_stack, task lifecycle."""
 
     def __init__(self, pool: AgentPool):
-        from agent_cascade.log import logger
         
         self.pool = pool
-        self.active_stack: List[str] = []  # Stack of currently executing agent names
+        self.active_stack: List[tuple] = []  # Stack of (instance_name, nest_depth) tuples for active agents
         self.active_tasks: Dict[str, tuple] = {}  # instance_name → (Future, caller, agent_class)
         # RLock (re-entrant) — compression can run in the same thread as outer ExecutionEngine.run()
         # which may already hold this lock. Using RLock prevents deadlock.
@@ -1160,12 +1165,11 @@ class ParallelAgentManager:
     def count_by_class(self, agent_class: str) -> int:
         """Count active instances of a given class. Thread-safe via _state_lock."""
         with self._state_lock:
-            return sum(1 for name in self.active_stack if self.pool.get_instance(name) and
+            return sum(1 for (name, _depth) in self.active_stack if self.pool.get_instance(name) and
                        self.pool.get_instance(name).agent_class.lower() == agent_class.lower())
 
     def _acquire_slot(self, agent_class: str, instance_name: str):
         """Acquire an endpoint scheduling slot. Returns a release callback or None for unlimited endpoints."""
-        from agent_cascade.log import logger
 
         if not hasattr(self.pool, 'api_router') or not self.pool.api_router:
             return None
@@ -1179,27 +1183,41 @@ class ParallelAgentManager:
             llm_cfg = router.get_llm_config(agent_class)
             api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
 
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] _acquire_slot — agent_class={agent_class}, "
+                f"instance_name={instance_name}, api_base={api_base}, concurrency_limit={concurrency_limit}"
+            )
+
             # Acquire a slot on the endpoint scheduler (blocks if at capacity)
             return router.scheduler.acquire(api_base, concurrency_limit)
         except Exception as e:
             logger.error(f"Failed to acquire endpoint slot for {instance_name}: {e}")
             raise
 
-    def submit_task(self, agent_class, instance_name, args, history, caller):
+    def submit_task(self, agent_class, instance_name, args, history, caller, nest_depth: int = 0):
         """Submit an agent to run in the background thread pool. Returns immediately.
         
         Item 13: Acquires endpoint scheduling slot BEFORE submitting to thread pool,
         with proper release in finally block when the task completes.
+
+        Args:
+            nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
         """
-        from agent_cascade.log import logger
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] submit_task ENTRY — target={instance_name}, class={agent_class}, "
+            f"caller={caller}, nest_depth={nest_depth}"
+        )
 
         if not self.executor:
+            logger.error(f"[CALL_AGENT_DEBUG] submit_task EXIT (early) — target={instance_name}, reason=no_executor")
             return f"[Agent '{instance_name}' requested in parallel mode but no thread pool available.]"
 
         # Acquire endpoint slot before submitting (blocks if at capacity)
         try:
             endpoint_release = self._acquire_slot(agent_class, instance_name)
+            logger.debug(f"[CALL_AGENT_DEBUG] submit_task — acquired endpoint slot for {instance_name}")
         except Exception as e:
+            logger.error(f"[CALL_AGENT_DEBUG] submit_task EXIT (early) — target={instance_name}, reason=slot_acquisition_failed, error={e}")
             return f"[Agent '{instance_name}' failed to acquire endpoint slot: {e}]"
 
         # Deep copy history for thread safety
@@ -1207,20 +1225,62 @@ class ParallelAgentManager:
         safe_history = _copy.deepcopy(history)
 
         def task_wrapper():
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] task_wrapper START — target={instance_name}, class={agent_class}, "
+                f"caller={caller}, nest_depth={nest_depth}"
+            )
             try:
                 from agent_cascade.execution_engine import ExecutionEngine
                 from agent_cascade.compression.helpers import extract_instance_output
 
+                # NOTE: This creates a NEW ExecutionEngine instance per parallel task.
+                # This is intentional — each thread gets its own engine to avoid shared state issues.
                 engine = ExecutionEngine(self.pool)
+                logger.debug(
+                    f"[CALL_AGENT_DEBUG] task_wrapper — created new ExecutionEngine for {instance_name}, "
+                    f"engine_id={id(engine)}"
+                )
+
                 # Use shared helper for agent creation and execution
-                inst, conv = engine._create_and_run_agent(agent_class, instance_name, args, caller)
+                # _create_and_run_agent handles active_stack append/cleanup in its finally block
+                logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — calling engine._create_and_run_agent for {instance_name}")
+                inst, conv = engine._create_and_run_agent(agent_class, instance_name, args, caller, nest_depth)
+
+                # Check return values — Bug #1 check
+                if inst is None or conv is None:
+                    logger.error(
+                        f"[CALL_AGENT_DEBUG] BUG DETECTED in task_wrapper — _create_and_run_agent returned None for {instance_name}: "
+                        f"inst={inst}, conv_type={type(conv).__name__}"
+                    )
+                    error_msg = f"[Parallel Agent '{instance_name}' Failed]: Internal error — agent creation returned None."
+                    self.pool.send_message(instance_name, caller, error_msg)
+                    return
+
+                logger.debug(
+                    f"[CALL_AGENT_DEBUG] task_wrapper — _create_and_run_agent returned for {instance_name}: "
+                    f"inst_type={type(inst).__name__}, conv_len={len(conv)}"
+                )
 
                 # Notify caller via async message queue
                 result = extract_instance_output(conv, instance_name)
+                if not result:
+                    logger.warning(
+                        f"[CALL_AGENT_DEBUG] task_wrapper — extract_instance_output returned empty for {instance_name}"
+                    )
+                logger.debug(
+                    f"[CALL_AGENT_DEBUG] task_wrapper — extract_instance_output for {instance_name}: "
+                    f"result_preview={str(result)[:200]}"
+                )
                 completion_msg = f"[Parallel Agent '{instance_name}' Finished]:\n{result}"
+
+                logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — sending completion message to caller {caller}")
                 self.pool.send_message(instance_name, caller, completion_msg)
 
             except Exception as e:
+                logger.error(
+                    f"[CALL_AGENT_DEBUG] task_wrapper EXCEPTION — target={instance_name}, "
+                    f"error_type={type(e).__name__}, error={e}"
+                )
                 error_msg = f"[Parallel Agent '{instance_name}' Failed]:\n{str(e)}"
                 self.pool.send_message(instance_name, caller, error_msg)
             finally:
@@ -1228,22 +1288,18 @@ class ParallelAgentManager:
                 if endpoint_release is not None:
                     try:
                         endpoint_release()
+                        logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — released endpoint slot for {instance_name}")
                     except Exception as e:
                         logger.error(f"Failed to release endpoint slot for {instance_name}: {e}")
 
-                # Clean up active stack and tasks
-                with self._state_lock:
-                    # In-place mutation to avoid breaking external references
-                    self.active_stack[:] = [n for n in self.active_stack if n != instance_name]
-                    self.active_tasks.pop(instance_name, None)
-
                 self.pool._mark_activity(instance_name)
+                logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper EXIT — target={instance_name}")
 
         future = self.executor.submit(task_wrapper)
-
-        with self._state_lock:
-            self.active_stack.append(instance_name)
-            self.active_tasks[instance_name] = (future, caller, agent_class)
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] submit_task EXIT (success) — target={instance_name}, "
+            f"future_id={id(future)}"
+        )
 
         return f"[Started agent '{instance_name}' in parallel. You will be notified when it finishes.]"
 
@@ -1379,7 +1435,7 @@ class IdleManager:
 
         # Must NOT be actively running
         with self.pool._execution._state_lock:
-            if instance_name in self.pool._execution.active_stack:
+            if any(n == instance_name for n, _depth in self.pool._execution.active_stack):
                 return False
 
         # Must NOT be halted (halted agents are intentionally paused, e.g. during compression)

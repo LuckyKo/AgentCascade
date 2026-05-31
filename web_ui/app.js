@@ -999,6 +999,13 @@ function handleServerMessage(data) {
       break;
 
     case 'stream_update': {
+      // DEBUG: trace stream update frequency
+      if (!state._debugStreamCount) state._debugStreamCount = 0;
+      state._debugStreamCount++;
+      if (state._debugStreamCount % 10 === 1) {
+        console.log(`[STREAM] Received ${state._debugStreamCount} stream_updates, generating=${state.generating}, activeStack=[${(state.activeStack||[]).join(',')}]`);
+      }
+      
       // Only block stream updates when the ACTIVE agent itself is halted
       const activeName = getActiveAgentName();
       if (state.subAgents[activeName]?.is_halted) break;
@@ -1144,10 +1151,11 @@ function handleServerMessage(data) {
         state.genStats.lastControlsUpdate = now;
       }
 
-      // Throttle sub-agent rendering to ~150ms during streaming (matches backend event rate of 0.15s)
+      // Throttle sub-agent rendering to ~100ms during streaming (reduced from 150ms for snappier updates)
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
-      const subThrottleContent = 150;
-      if (stackChanged || subAgentNewVisibleMessage || now - state.genStats.lastSubAgentRender > subThrottleContent) {
+      const subThrottleContent = 100;
+      // Force render on: stack change, new visible message, content streaming in existing bubble, or time threshold
+      if (stackChanged || subAgentNewVisibleMessage || subAgentContentChanged || now - state.genStats.lastSubAgentRender > subThrottleContent) {
         // Only call renderSubAgents if we're NOT about to call switchMainTab,
         // since switchMainTab calls renderSubAgents internally at the end.
         // This avoids redundant rendering when stackChanged triggers a tab switch.
@@ -1547,7 +1555,18 @@ function updateBubbleContent(bubble, msg, config) {
       // The throttle loop will trigger a full re-render at the next tick, which avoids
       // the "chunked lines" bug where raw text injection creates visible gaps mid-paragraph.
       bubble.dataset.prevContent = curContent;
-      return;
+      
+      // PERIODIC FLUSH: Force a full re-render every 3 ticks to ensure streaming content
+      // actually appears in the DOM. Without this, incremental tracking can skip indefinitely.
+      const flushCount = parseInt(bubble.dataset.flushCounter || '0');
+      bubble.dataset.flushCounter = String(flushCount + 1);
+      if (flushCount >= 3) {
+        bubble.dataset.flushCounter = '0';
+        console.log(`[STREAM-FLUSH] Bubble flush after ${flushCount} incremental ticks — re-rendering`); // DEBUG: remove or gate with window.__DEBUG_STREAM__ before shipping
+        delete bubble.dataset.prevContent; // Force full re-render on next pass
+      } else {
+        return;
+      }
     }
   }
   
@@ -2828,6 +2847,7 @@ function resetGenStats() {
     lastUiUpdate: 0,
     lastControlsUpdate: 0,
     lastTelemetryUpdate: 0,
+    subContextBarThrottle: {},  // Per-agent context bar throttle timestamps (~1Hz during streaming)
   };
   if (statusTokensSec) statusTokensSec.textContent = '— t/s';
   if (statusGenInfo) statusGenInfo.textContent = 'Starting...';

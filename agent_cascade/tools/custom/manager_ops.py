@@ -268,7 +268,7 @@ class DismissAgent(BaseTool):
         all_idle = params.get('all_idle', False)
 
         if all_idle:
-            active_set = set(self.agent_pool.active_stack)
+            active_set = set(n for n, _depth in self.agent_pool.active_stack)
             # Phase 3: Use pool.instances.keys() instead of instance_conversations.keys()
             all_instances = list(set(self.agent_pool.instance_classes.keys()) | 
                                  set(self.agent_pool.instances.keys()))
@@ -385,7 +385,7 @@ class ListAgents(BaseTool):
 
         # 2. Active & Persistent Instances
         lines.append("## 2. Active Instances (Sessions)")
-        active_set = set(self.agent_pool.active_stack)
+        active_set = set(n for n, _depth in self.agent_pool.active_stack)
         
         # Get all known instances from classes or instances dict (Phase 3)
         all_instances = sorted(list(set(self.agent_pool.instance_classes.keys()) | 
