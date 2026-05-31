@@ -314,17 +314,17 @@ Agent A (caller)                    AgentPool                      Agent B (call
                               ┌───────────────┐                       8. ExecutionEngine.run()
                               │ Parallel?     │                       loop: Phases 1-5
                               └───────┬───────┘                            │
-                         Yes (parallel)│                  No (sync)          │
-                                       ▼                               ▼
+                         Yes (parallel)│                  No (sync)        │
+                                       ▼                                   ▼
                               ThreadPoolExecutor                    Execute through
                               .submit(task_wrapper)                 same ExecutionEngine
                                       │                               loop
-                                      │                               9. On completion:
-                                      │                        pool.send_message() →
-                                      │                        Agent A's queue
-                                      │                            │
-                                      │                         10. Agent A drains
-                                      │                            queue on next iteration
+                                      │                            9. On completion:
+                                      │                               pool.send_message() →
+                                      │                               Agent A's queue
+                                      │                                    │
+                                      │                           10. Agent A drains
+                                      │                               queue on next iteration
 ```
 
 ### 4.3 State Broadcasting Flow

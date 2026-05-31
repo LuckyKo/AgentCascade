@@ -37,21 +37,23 @@ class AgentInstance:
 
     # ── Execution State ───────────────────────────────────────────────
     is_active: bool                      # Currently executing a run() turn
-    is_terminated: bool = False          # Set when terminate_instance() is called on this instance (Fix Bug41)
-    max_turns: Optional[int]             # Per-instance turn limit (None = use default 50)
 
     # NOTE: halt state is NOT stored here — it lives in pool._halted_instances set.
     #       ExecutionEngine checks via self.pool.is_instance_halted(instance.instance_name)
     #       to ensure a single source of truth across threads.
 
     # ── Metadata ──────────────────────────────────────────────────────
-    parent_instance: Optional[str]       # Who called this agent (None for root/main)
     created_at: float                    # time.monotonic() timestamp
     last_activity: float                 # time.monotonic() timestamp of last message
 
     # ── Compression State ─────────────────────────────────────────────
-    compression_summary: Optional[str]   # Current cumulative summary (if any)
     latest_marker_index: int             # Index in conversation where latest summary marker was inserted
+
+    # ── Fields with defaults (must come after non-default fields) ──────
+    is_terminated: bool = False          # Set when terminate_instance() is called on this instance (Fix Bug41)
+    max_turns: Optional[int] = None      # Per-instance turn limit (None = use default 50)
+    parent_instance: Optional[str] = None  # Who called this agent (None for root/main)
+    compression_summary: Optional[str] = None  # Current cumulative summary (if any)
     _compression_lock: threading.RLock = field(default_factory=threading.RLock)  # RLock: recovery paths may re-acquire via instance_conversations.__setitem__
 
     # ── Token Count Cache (Fix #2) ────────────────────────────────────────
