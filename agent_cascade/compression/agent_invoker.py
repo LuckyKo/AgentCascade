@@ -90,17 +90,18 @@ def invoke_compression_agent(
         raise RuntimeError("agent_pool not connected")
 
     # 1. Ensure the compression agent is loaded
-    if not agent_pool.get_agent('compression_agent'):
+    # Agent type identifier: 'Compressor' (renamed from 'compression_agent')
+    if not agent_pool.get_agent('Compressor'):
         try:
-            agent_pool.load_agent('compression_agent')
+            agent_pool.load_agent('Compressor')
         except Exception as e:
-            raise RuntimeError(f"Could not load compression_agent: {e}") from e
+            raise RuntimeError(f"Could not load Compressor: {e}") from e
 
-    comp_agent = agent_pool.get_agent('compression_agent')
+    comp_agent = agent_pool.get_agent('Compressor')
     if not comp_agent:
-        raise RuntimeError("compression_agent is None after loading")
+        raise RuntimeError("Compressor is None after loading")
 
-    comp_state_key = 'compression_agent'
+    comp_state_key = 'Compressor'
 
     # Build the history text for the summary prompt
     history_text = _format_messages_for_summary(target_messages)
@@ -129,7 +130,7 @@ def invoke_compression_agent(
             # Build tool_args matching what call_agent expects
             tool_args = {
                 'instance_name': comp_state_key,
-                'agent_class': 'compression_agent',
+                'agent_class': 'Compressor',
                 'task': summary_prompt,
                 'context': None,
             }
@@ -186,7 +187,7 @@ def invoke_compression_agent(
             # Initialize sub-agent state for WebUI visibility (direct path)
             agent_pool.sub_agent_state[comp_state_key] = {
                 'active': True,
-                'agent_name': f"Compression Agent (compression_agent)",
+                'agent_name': f"Compressor",
                 'messages': list(comp_history),
             }
             if comp_state_key not in agent_pool.active_stack:

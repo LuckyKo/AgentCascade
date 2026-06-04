@@ -2201,9 +2201,9 @@ def create_app(agents, agent_pool, config=None):
                                     import copy
 
                                     with app.security_check_lock:
-                                        if not agent_pool.get_agent('security_advisor'):
-                                            agent_pool.load_agent('security_advisor')
-                                        sec_agent = agent_pool.get_agent('security_advisor')
+                                        if not agent_pool.get_agent('Security'):
+                                            agent_pool.load_agent('Security')
+                                        sec_agent = agent_pool.get_agent('Security')
                                         workspace_info = f"Main workspace: {agent_pool.operation_manager.base_dir}\n"
                                         if agent_pool.operation_manager.extra_work_folders_ro:
                                             extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_ro]
@@ -2225,10 +2225,10 @@ def create_app(agents, agent_pool, config=None):
                                         ]
                                         
                                         # Register security advisor in sub_agent_state so it shows a tab
-                                        sec_state_key = 'security_advisor'
+                                        sec_state_key = 'Security'
                                         agent_pool.sub_agent_state[sec_state_key] = {
                                             'active': True,
-                                            'agent_name': f"Security Advisor (security_advisor)",
+                                            'agent_name': f"Security",
                                             'messages': list(history),
                                         }
                                         agent_pool.instance_conversations[sec_state_key] = list(history)
@@ -2260,13 +2260,13 @@ def create_app(agents, agent_pool, config=None):
                                         sec_elapsed_at_timeout = None  # Fix #5: store elapsed at the moment of timeout
                     
                                         # Fix #1: Extract generator to close it on timeout (prevents resource leak)
-                                        run_gen = sec_agent.run(history, agent_instance_name='security_advisor', **llm_safe_cfg)
+                                        run_gen = sec_agent.run(history, agent_instance_name='Security', **llm_safe_cfg)
                                         
                                         # Schedule warning AFTER generator creation so timer is only created if gen succeeded
                                         def _sec_warning_injector():
                                             try:
                                                 agent_pool.enqueue_message(
-                                                    'security_advisor',
+                                                    'Security',
                                                     "[SYSTEM WARNING] Your analysis is taking longer than expected. "
                                                     "Please provide a verdict as soon as possible — the approval request may timeout soon."
                                                 )
@@ -2435,7 +2435,7 @@ def create_app(agents, agent_pool, config=None):
                                         # Halt the security advisor instance to stop it cleanly.
                                         # Note: This is best-effort — only works between turns, not during active LLM calls.
                                         # The actual timeout enforcement happens inside the for loop via `break` + generator.close().
-                                        agent_pool.halt_instance('security_advisor')
+                                        agent_pool.halt_instance('Security')
                                         
                                         # Common timeout handling for BOTH modes: reject and notify UI
                                         reject_msg = (
@@ -2523,7 +2523,7 @@ def create_app(agents, agent_pool, config=None):
                                         )
                                 finally:
                                     # Always clean up security advisor state when done
-                                    # sec_state_key is defined at function scope (as 'security_advisor'), so direct reference is safe
+                                    # sec_state_key is defined at function scope (as 'Security'), so direct reference is safe
                                     if sec_state_key and sec_state_key in agent_pool.sub_agent_state:
                                         agent_pool.sub_agent_state[sec_state_key]['active'] = False
                                         if sec_state_key in agent_pool.active_stack:

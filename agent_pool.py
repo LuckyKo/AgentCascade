@@ -500,8 +500,10 @@ rules:
         # Load agent with file tools
         agent = load_sub_agent_with_tools(self, agent_name, self.llm_cfg)
         
-        self.agents[agent_name] = agent
-        self.agent_configs[agent_name] = agent.agent_configs.get(agent_name, {})
+        # Normalize agent name: strip whitespace and convert to lowercase for case-insensitive lookup
+        normalized_name = agent_name.strip().lower()
+        self.agents[normalized_name] = agent
+        self.agent_configs[normalized_name] = agent.agent_configs.get(agent_name, {})
         
         return agent
     
@@ -1090,7 +1092,7 @@ rules:
     
     def get_agent_info(self, agent_name: str) -> Optional[dict]:
         """Get info about a specific agent."""
-        config = self.agent_configs.get(agent_name)
+        config = self.agent_configs.get(agent_name.strip().lower())
         if not config:
             return None
         

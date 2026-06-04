@@ -3619,6 +3619,15 @@ function renderAgentApiAssignments() {
   const endpoints = state.api_router.endpoints || [];
   const priorities = state.api_router.agent_priorities || {};
 
+  // Cleanup stale agent type keys (old names like compression_agent, security_advisor)
+  // These are agent types that are no longer valid and should be removed from saved data
+  const staleKeys = Object.keys(priorities).filter(key => {
+    // Known stale/old agent type names to clean up
+    const staleNames = ['compression_agent', 'security_advisor', 'coder_agent'];
+    return staleNames.includes(key);
+  });
+  staleKeys.forEach(key => delete priorities[key]);
+
   // Extract unique agent types and their friendly names
   const typeToName = {};
   if (state.agents) {
@@ -3626,6 +3635,13 @@ function renderAgentApiAssignments() {
       const type = (a.agent_type || 'orchestrator').toLowerCase();
       if (!typeToName[type]) typeToName[type] = a.name;
     });
+  }
+  
+  // Also include any agent types that have priorities assigned but aren't in the agents list
+  for (const type of Object.keys(priorities)) {
+    if (!typeToName[type]) {
+      typeToName[type] = type.charAt(0).toUpperCase() + type.slice(1);
+    }
   }
   
   const agentTypes = Object.keys(typeToName);
@@ -3638,10 +3654,15 @@ function renderAgentApiAssignments() {
     agentTypes.push('coder');
     typeToName['coder'] = 'Coder';
   }
-  // Ensure compression agent is always in the list so users can assign API endpoints to it
-  if (!agentTypes.includes('compression agent')) {
-    agentTypes.push('compression agent');
-    typeToName['compression agent'] = 'Compression Agent';
+  // Ensure compressor is always in the list so users can assign API endpoints to it
+  if (!agentTypes.includes('compressor')) {
+    agentTypes.push('compressor');
+    typeToName['compressor'] = 'Compressor';
+  }
+  // Ensure security is always in the list so users can assign API endpoints to it
+  if (!agentTypes.includes('security')) {
+    agentTypes.push('security');
+    typeToName['security'] = 'Security';
   }
 
   if (endpoints.length === 0) {

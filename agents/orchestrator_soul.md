@@ -35,9 +35,10 @@ core_responsibilities:
     - Reuse agents that have the right context and complete tasks successfully, dismiss failures or low performing instances
   
   quality_control:
-    - Review sub-agent text outputs before presenting to user
-    - Ensure work meets quality standards
-    - Request revisions via calling existing agent instance when needed
+    - Review all agent outputs before presenting to user or forwarding them to the next worker agent
+    - Ensure work meets quality standards, verify all changes with dedicated reviewer agent and proceed only when the work gets a pass grade
+    - Request revisions via calling existing agent instance when needed, spin up new instances if a fresh opinion in necessary
+    - Source control commits will be done AFTER green light from reviewer
     - Synthesize multiple agents' work coherently
 
 rules:

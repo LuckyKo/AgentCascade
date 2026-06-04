@@ -773,7 +773,7 @@ class OrchestratorAgent(Assistant):
         # If a compression agent fills its context, it should fail gracefully rather than
         # spawn child compressors. This is a belt-and-suspenders guard — the primary guard
         # is at line 2072 in hooked_call_llm.
-        if instance_name == 'compression_agent' or instance_name.startswith('compression_agent'):
+        if instance_name == 'Compressor' or instance_name.startswith('Compressor'):
             return False
 
         # ── Forced compression at >95% ──
@@ -799,8 +799,8 @@ class OrchestratorAgent(Assistant):
 
             self._compress_tracker[instance_name] = True
             try:
-                # Halt other agents (exempt the target, compression_agent, and orchestrator)
-                exempt = [instance_name, 'compression_agent', self.session_name]
+                # Halt other agents (exempt the target, Compressor, and orchestrator)
+                exempt = [instance_name, 'Compressor', self.session_name]
                 self.agent_pool.halt_all_instances(except_instances=exempt)
 
                 logger.info(
@@ -2074,9 +2074,9 @@ class OrchestratorAgent(Assistant):
 
                             # Skip compression checks during Compression Agent execution
                             # Prevents nested compression (circular dependency)
-                            # Exempt ALL compression agent instances (including spawned children like compression_agent_child1)
+                            # Exempt ALL compression agent instances (including spawned children like Compressor_child1)
                             hook_forced = False
-                            if not instance_name.startswith('compression_agent'):
+                            if not instance_name.startswith('Compressor'):
                                 hook_forced = self._inject_compression_warning_for_agent(self_agent, instance_name, messages)
                             
                             # If forced compression ran, halt this LLM call — don't proceed.

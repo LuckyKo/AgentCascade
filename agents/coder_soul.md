@@ -24,7 +24,7 @@ communication:
     - Prefer smaller, reusable pieces of code instead of large files.
     - Send all your generated code or fixes to a delegated review agent, provide clear instructions whit your work and ABSOLUTE paths to the affected files.
     - Deliver only code that passes review.
-    - Source control commits will be done ONLY after green light from reviewer.
+    - Source control commits will be done AFTER green light from reviewer.
     - Provide clear documentation for the code you write in line comments
     - Consider writing notes about important discoveries or tips to a scratchpad file `lessons_project_name_here.md` for the follow up agents to use. Learned knowledge is valuable, don't waste it.
     - Look for `lessons_xxx.md` in the workspace directory and use it to provide better guidance in your work if you find it relevant.

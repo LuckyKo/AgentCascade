@@ -117,7 +117,7 @@ def compress_context(
     # Estimate ~500 tokens per message; reserve 60% of the agent's context for input (40% for system prompt,
     # existing summary, and output generation).
     try:
-        comp_agent = agent_pool.get_agent('compression_agent')
+        comp_agent = agent_pool.get_agent('Compressor')
         if comp_agent:
             max_tokens = None
             if hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'generate_cfg'):
