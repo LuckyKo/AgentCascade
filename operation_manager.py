@@ -377,7 +377,7 @@ class OperationManager:
             if dirs:
                 result += "Directories:\n"
                 for d in sorted(dirs):
-                    result += f"  {d}/\n"
+                    result += f"  [dir] {d}\n"
 
             if files:
                 result += "\nFiles:\n"
@@ -386,7 +386,7 @@ class OperationManager:
                         size_str = f"{size:,} bytes" if size > 1000 else f"{size} bytes"
                     else:
                         size_str = "?"
-                    result += f"  {fname} ({size_str})\n"
+                    result += f"  [file] {fname} ({size_str})\n"
 
             if not dirs and not files:
                 result += "  (empty directory)"
@@ -436,188 +436,184 @@ class OperationManager:
 
     # ── Subprocess grep fast path (P0-1) ────────────────────────────────────
 
-    def _try_subprocess_grep(self, pattern: str, path: Path, include: str, char_limit: int, timeout: float,
+    def _try_subprocess_grep(self, pattern: str, path: Path, include: str, timeout: float,
                              exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True,
                              spill_file_path: Optional[str] = None):
         """Fast-path grep using system ripgrep or grep via subprocess.
-        
-        Returns (results_list, count, was_timed_out, was_truncated, original_output_size) on success, 
-        or (None, 0, False, False, 0) on failure.
+
+        Returns (results_list, count, was_timed_out, was_truncated, original_output_size) on success,
+        or (None, 0, False, False, 0) on failure. Note: was_truncated is always False and 
+        original_output_size is always 0 since truncation/spill logic was removed from subprocess path.
         Output format matches Python fallback: "relative_path:line_number: content"
         """
         # Only try subprocess path if at least one tool is available (cached at module level)
         if not _RIPGREP_AVAILABLE and not _GREP_AVAILABLE:
             return None, 0, False, False, 0
-        
+
         try:
             if _RIPGREP_AVAILABLE:
-                # ripgrep command — supports Perl regex, fast recursive search
+                # Use JSON output for reliable parsing across platforms
+                # JSON preserves whitespace exactly and avoids text format issues on Windows
+                import json as json_module
+                
                 cmd = [
                     'rg',
-                    '-r',           # recursive
-                    '--no-heading', # don't print filename before each match group
-                    '-n',           # line numbers
-                    '--color', 'never',  # no ANSI color codes
-                    '--no-mmap',    # disable mmap — handle binary files gracefully like Python fallback
+                    '--json',       # JSON output for reliable parsing
                 ]
-                
-                # H1: VCS/ignore support — default ripgrep respects .gitignore; disable with --no-ignore
+
+                # VCS/ignore support — default ripgrep respects .gitignore; disable with --no-ignore
                 if not ignore_vcs:
-                    cmd.extend(['--no-ignore'])
-                
-                # H3: Context lines
-                if context > 0:
-                    cmd.extend(['-C', str(context)])
-                
-                # M1: Smart case — ripgrep default is smart_case; only add -i when pattern has no uppercase
-                # Issue 4: Check for inline flags like (?-i:) that explicitly set case sensitivity
+                    cmd.append('--no-ignore')
+
+                # Smart case — ripgrep default is smart_case; only add -i when pattern has no uppercase
                 has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
                 if smart_case:
-                    # Smart case: only add -i if pattern has no uppercase letters
                     if not re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
                         cmd.append('-i')
-                # else: Not smart case — always case-sensitive (no -i flag)
-                
-                # H1: Exclude glob pattern
-                if exclude:
-                    cmd.extend(['--glob', f'!{exclude}'])
-                
-                cmd.extend([
-                    '--glob', include,  # file filter (include pattern)
-                    pattern,
-                ])
+
+                # Context lines - for now, fall back to Python implementation when context is requested
+                # because JSON mode doesn't provide context lines easily
+                if context > 0:
+                    return None, 0, False, False, 0
+
+                # File filters using --glob (supports ** for recursive patterns)
+                # Note: ripgrep uses AND logic for multiple globs, so we need to handle include/exclude carefully
+                if exclude and include != "*":
+                    # Both include and exclude specified - use include glob, filter excludes in Python
+                    cmd.extend(['--glob', include])
+                elif include != "*":
+                    # Only include specified - straightforward
+                    cmd.extend(['--glob', include])
+                # If only exclude is specified (include == "*"), search all files and filter in Python below
+
+                # Add pattern and search path
+                cmd.append(pattern)
+                cmd.append(str(path))  # Search directory as argument
+
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout
+                )
+
+                if result.returncode in (0, 1):  # 0 = matches found, 1 = no matches
+                    formatted = []
+                    match_count = 0
+                    
+                    # Get the absolute path of the search directory for relative path computation
+                    search_dir = path.resolve() if isinstance(path, Path) else Path(path).resolve()
+
+                    # Parse JSON output (one JSON object per line)
+                    # Handle case where stdout is None or empty (e.g., no files match include filter)
+                    output = result.stdout or ''
+                    for json_line in output.split('\n'):
+                        if not json_line.strip():
+                            continue
+                        
+                        try:
+                            event = json_module.loads(json_line)
+                            if event.get('type') == 'match':
+                                data = event.get('data', {})
+                                path_info = data.get('path', {})
+                                
+                                # Get absolute path from JSON
+                                abs_path_text = path_info.get('text', '')
+                                if not abs_path_text:
+                                    continue
+                                    
+                                # Compute relative path to search directory
+                                try:
+                                    rel_path_text = str(Path(abs_path_text).relative_to(search_dir))
+                                except ValueError:
+                                    # If path is not under search_dir, just use the filename
+                                    rel_path_text = Path(abs_path_text).name
+
+                                lines_data = data.get('lines', {})
+                                content = lines_data.get('text', '')
+                                line_number = data.get('line_number') or 0
+
+                                # Normalize path separators to forward slashes
+                                rel_path_text = rel_path_text.replace('\\', '/')
+
+                                # Apply exclude filter if specified (use Path.match for ** glob support)
+                                if exclude and Path(rel_path_text).match(exclude):
+                                    continue  # Skip this file
+
+                                # Remove trailing newline/carriage return from content
+                                content = content.rstrip('\r\n')
+
+                                match_count += 1
+                                formatted.append(f"{rel_path_text}:{line_number}: {content}")
+                            
+                        except json_module.JSONDecodeError:
+                            continue
+                    
+                    return formatted, match_count, False, False, 0
+
+                # Non-zero return code other than 1 means error
+                return None, 0, False, False, 0
+
             else:
-                # Standard grep — only reached on Unix-like systems (Windows grep may hang)
+                # Standard grep fallback (Unix-like systems only)
                 cmd = [
                     'grep',
-                    '-r',           # recursive
-                    '--include=' + include,  # file filter
-                    '-n',           # line numbers
+                    '-r',
+                    '--include=' + include,
+                    '-n',
                 ]
-                
-                # M1: Smart case for standard grep too
+
                 has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
                 if smart_case:
-                    # Smart case: only add -i if pattern has no uppercase letters
                     if not re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
                         cmd.append('-i')
-                # else: Not smart case — always case-sensitive (no -i flag)
-                
-                # H3: Context lines (standard grep supports -C)
+
                 if context > 0:
                     cmd.extend(['-C', str(context)])
-                
-                # H1: Exclude glob for standard grep
+
                 if exclude:
                     cmd.append('--exclude=' + exclude)
-                
-                cmd.append(pattern)
-            
-            result = subprocess.run(
-                cmd,
-                cwd=str(path),
-                capture_output=True,
-                text=True,
-                timeout=timeout
-            )
-            
-            if result.returncode == 0:
-                lines = result.stdout.split('\n') if result.stdout.strip() else []
-                # Convert grep/rg output (file:line:content) to our format (file:line: content)
-                formatted = []
-                # H3: When context is active, we need to distinguish match lines from context lines.
-                # ripgrep uses space prefix for context; standard grep uses "-" in filename part.
-                _match_re = re.compile(r'^(.+?):(\d+):(.*)$')  # file:linenum:content
-                _ctx_re = re.compile(r'^(.+?)-(\d+)-(.*)$')   # file-linenum-content (std grep context)
-                
-                for line in lines:
-                    if not line:
-                        continue
-                    # H3: When context is active, ripgrep outputs "---" separators and includes
-                    # line numbers for context lines. Standard grep uses "--" as separator.
-                    if line == "---" or line == "--":
-                        formatted.append("---")  # Normalize both to "---"
-                        continue
-                    
-                    # First try to parse as a match line (file:linenum:content)
-                    m = _match_re.match(line)
-                    if m:
-                        raw_path, linenum, content = m.groups()
-                        normalized_path = raw_path.replace('\\', '/')
-                        # M3: Don't strip content — preserve whitespace (important for Python/YAML)
-                        if _RIPGREP_AVAILABLE and context > 0 and normalized_path.startswith(' '):
-                            # Context line from ripgrep (path starts with space)
-                            normalized_path = normalized_path[1:]
-                            formatted.append(f"{normalized_path}:{linenum}:     {content}")
-                        elif context > 0:
-                            # Match line in context mode (ripgrep or standard grep)
-                            formatted.append(f"{normalized_path}:{linenum}: >>>{content}")
-                        else:
-                            # No context mode — just normalize
-                            formatted.append(f"{normalized_path}:{linenum}: {content}")
-                    elif not _RIPGREP_AVAILABLE and context > 0:
-                        # Standard grep with context: try to parse as context line (file-linenum-content)
-                        c = _ctx_re.match(line)
-                        if c:
-                            ctx_path, ctx_linenum, ctx_content = c.groups()
-                            normalized_ctx_path = ctx_path.replace('\\', '/')
-                            formatted.append(f"{normalized_ctx_path}:{ctx_linenum}:     {ctx_content}")
-                        else:
-                            # Can't parse — keep raw line
-                            formatted.append(line)
-                    else:
-                        formatted.append(line)
-                
-                # Count only actual match lines, not context lines or separators
-                if context > 0:
-                    count = sum(1 for l in formatted if ">>>" in l)
-                else:
-                    count = sum(1 for l in formatted if l != "---")
-                
-                # If char_limit is set and output exceeds it, truncate within subprocess path too
-                _was_truncated = False
-                _original_output_size = 0
-                if char_limit != -1 and count > 0:
-                    output_size = sum(len(l) for l in formatted) + count  # +count for newlines
-                    if output_size > char_limit:
-                        # Capture original size before truncation (for consistent truncation notices)
-                        _original_output_size = output_size
-                        # Write full output to spill file before truncating
-                        if spill_file_path is not None:
-                            try:
-                                full_text = '\n'.join(formatted)
-                                spill_abs = self.base_dir / spill_file_path
-                                spill_abs.parent.mkdir(parents=True, exist_ok=True)
-                                with open(spill_abs, 'w', encoding='utf-8') as f:
-                                    f.write(full_text)
-                            except Exception as e:
-                                logger.warning(f"Failed to write grep spill file {spill_file_path}: {e}")
 
-                        # Truncate to fit within char_limit
-                        byte_budget = char_limit
-                        truncated = []
-                        for line in formatted:
-                            if byte_budget < len(line) + 1:
-                                break
-                            truncated.append(line)
-                            byte_budget -= len(line) + 1
-                        formatted = truncated
-                        # Recount after truncation (count only match lines)
-                        if context > 0:
-                            count = sum(1 for l in formatted if ">>>" in l)
+                cmd.append(pattern)
+
+                result = subprocess.run(
+                    cmd,
+                    cwd=str(path),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout
+                )
+
+                if result.returncode == 0:
+                    lines = result.stdout.split('\n') if result.stdout.strip() else []
+                    formatted = []
+                    
+                    for line in lines:
+                        if not line or line == "---" or line == "--":
+                            if line == "---":
+                                formatted.append("---")
+                            continue
+                        
+                        # Parse grep output: file:line:content
+                        parts = line.split(':', 2)
+                        if len(parts) >= 3:
+                            raw_path, linenum, content = parts[0], parts[1], parts[2]
+                            normalized_path = raw_path.replace('\\', '/')
+                            formatted.append(f"{normalized_path}:{linenum}: {content}")
                         else:
-                            count = sum(1 for l in formatted if l != "---")
-                        _was_truncated = True
+                            formatted.append(line)
+
+                    count = len([l for l in formatted if l != "---"])
+                    return formatted, count, False, False, 0
                 
-                return formatted, count, False, _was_truncated, _original_output_size
-            
-            # Non-zero return code (e.g., grep returns 1 for no matches) — still valid
-            if result.returncode == 1:
-                return [], 0, False, False, 0
-                
+                if result.returncode == 1:
+                    return [], 0, False, False, 0
+
+            return None, 0, False, False, 0
+
         except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass  # Fall through to Python implementation
-        
+            pass
+
         return None, 0, False, False, 0
 
     def _grep_single_file(self, file_path: Path, pattern: str, char_limit: int,
@@ -760,25 +756,20 @@ class OperationManager:
 
             # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
             results, count, was_timed_out, _sub_truncated, _orig_output_size = self._try_subprocess_grep(
-                pattern=pattern, path=resolved, include=include,
-                char_limit=char_limit, timeout=30.0,
+                pattern=pattern, path=resolved, include=include, timeout=30.0,
                 exclude=exclude, ignore_vcs=ignore_vcs, context=context, smart_case=smart_case,
                 spill_file_path=spill_file_path
             )
             if results is not None:
                 # Subprocess grep succeeded — format and return
                 if count == 0 and not _sub_truncated:
-                    # Don't return early — fall through to Python fallback which may find matches
-                    # in hidden directories or handle globs differently
-                    logger.debug(f"grep: subprocess found no matches for '{pattern}', trying Python fallback")
+                    # Subprocess found zero matches legitimately — return early instead of falling through
+                    # to Python fallback which would re-scan all files unnecessarily
+                    logger.debug(f"grep: subprocess found no matches for '{pattern}'")
+                    return f"Found {count} matches for '{pattern}'"
                 else:
                     output_text = '\n'.join(results)
-                    # When _sub_truncated=True and count==0, matches were found but all truncated — 
-                    # report the truncation in the summary so "Found 0 matches" isn't misleading
-                    if _sub_truncated and count == 0:
-                        summary = f"Matches found for '{pattern}' [TRUNCATED]"
-                    else:
-                        summary = f"Found {count} matches for '{pattern}'"
+                    summary = f"Found {count} matches for '{pattern}'"
                     if context > 0:
                         summary += f" (with {context} line(s) of context)"
                     if was_timed_out:
@@ -804,10 +795,6 @@ class OperationManager:
                         if spill_file_path is not None:
                             output_text += f" Full output ({len(full_output)} chars) saved to: {spill_file_path}"
                         output_text += "\nYou can read it with read_file if needed.]"
-                    elif _sub_truncated and spill_file_path is not None:
-                        # Subprocess already truncated and wrote spill file — just add the truncation notice
-                        summary += " [TRUNCATED]"
-                        output_text += f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. Full output ({_orig_output_size} chars) saved to: {spill_file_path}\nYou can read it with read_file if needed.]"
 
                     return f"{summary}:\n\n" + output_text
 

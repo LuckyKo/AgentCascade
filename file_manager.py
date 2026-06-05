@@ -131,7 +131,7 @@ class FileManager:
             if dirs:
                 result += "Directories:\n"
                 for d in sorted(dirs):
-                    result += f"  [dir] {d}/\n"
+                    result += f"  [dir] {d}\n"
             
             if files:
                 result += "\nFiles:\n"
