@@ -40,15 +40,15 @@ COMPRESSION_PROMPT = (
 )
 
 COMPRESSION_BASELINE_TEMPLATE = (
-    COMPRESSION_MARKER + " ---\n"
-    "[SYSTEM]: Compressed messages [{start_idx}-{end_idx}]\n"
+    COMPRESSION_MARKER + " ({header}) ---\n"
+    "**[SYSTEM NOTICE]**: Context compression was applied. {compression_notice}\n"
+    "The following is a summary of the conversation context that was removed to save space.\n"
+    "Summary of previous context:\n"
     "<context_summary>\n"
     "{summary}\n"
     "</context_summary>"
 )
 
-# DEPRECATED: legacy notice template retained for backward compatibility.
-# New code uses COMPRESSION_BASELINE_TEMPLATE directly with structured metadata.
 COMPRESSION_NOTICE_TEMPLATE = "A portion of earlier conversation history ({fraction}%) has been summarized to preserve context space. The key information from those messages is captured below."
 
 # --- Security Advisor ---
@@ -233,8 +233,8 @@ TOOL_METADATA = {
         'parameters': {
             'command': 'The exact shell command to execute.',
             'justification': 'Why you need to execute this command.',
-                            'cwd': 'Optional working directory, absolute or relative to workspace root.',
-                            'timeout': 'Optional timeout in seconds (default: 30). Use a higher value for long-running commands.'
+            'cwd': 'Optional working directory, absolute or relative to workspace root.',
+            'timeout': 'Optional timeout in seconds (default: 30). Use a higher value for long-running commands.'
         }
     },
     'system_info': {
@@ -243,7 +243,7 @@ TOOL_METADATA = {
             'This includes the operating system, current time and date, '
             'current work directories with their Docker container mount paths (e.g., host N:\\work\\WD\\AgentWorkspace maps to /workspace inside containers), '
             'Python version, and basic session stats. '
-            'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted.'
+            'Use this when a path works on the host but fails inside a Docker container — the output shows exactly where each folder is mounted. '
         ),
         'parameters': {}
     },

@@ -1,11 +1,11 @@
 """Helper functions for the compression system."""
 import copy
-from typing import Any, Dict, List
+from typing import Any
 from agent_cascade.prompts.dna import (
     COMPRESSION_BASELINE_TEMPLATE,
+    COMPRESSION_NOTICE_TEMPLATE,
 )
-from agent_cascade.llm.schema import USER, ASSISTANT, FUNCTION, ROLE, Message
-from agent_cascade.utils.utils import extract_text_from_message
+from agent_cascade.llm.schema import USER, Message
 
 
 def compute_discard_count(active_set, fraction, force):
@@ -16,9 +16,6 @@ def compute_discard_count(active_set, fraction, force):
     1. Start with fraction-based count: int(len(active_set) * fraction)
     2. If not force: keep at least 2 tail messages (clamp discard to len-2)
     3. If force: ensure at least 1 message is discarded
-    4. Tool-chain boundary protection: if the cut lands on a FUNCTION result,
-       walk back to include the paired ASSISTANT tool call so both are discarded
-       together (never orphan a tool result without its call).
 
     Args:
         active_set: List of active (uncompressed) messages eligible for compression.
@@ -35,68 +32,28 @@ def compute_discard_count(active_set, fraction, force):
     else:
         # Force mode: compress at least 1 message even from small sets
         discard = max(1, discard)
-
-    # Tool-chain boundary protection: if the message at the cut position is a
-    # FUNCTION result, walk back to include its paired ASSISTANT tool call.
-    # This ensures we never orphan a tool result without its corresponding call.
-    if discard < len(active_set):
-        msg = active_set[discard]
-        role = msg.get(ROLE) if isinstance(msg, dict) else getattr(msg, ROLE, '')
-        if role == FUNCTION:
-            # Walk back to find the ASSISTANT message with a function_call
-            i = discard - 1
-            while i >= 0:
-                prev_msg = active_set[i]
-                prev_role = prev_msg.get(ROLE) if isinstance(prev_msg, dict) else getattr(prev_msg, ROLE, '')
-                if prev_role == ASSISTANT and (
-                    prev_msg.get('function_call') if isinstance(prev_msg, dict)
-                    else getattr(prev_msg, 'function_call', None)
-                ):
-                    # Found the tool call at index i. We have two options:
-                    # 1. Extend discard to include both (discard + 1), or
-                    # 2. Reduce discard to exclude the FUNCTION result (i).
-                    # Prefer extending, but only if it doesn't violate the tail guard.
-                    extended = discard + 1
-                    tail_limit = len(active_set) - 2 if not force else len(active_set)
-                    if extended <= tail_limit:
-                        discard = extended
-                    else:
-                        # Can't extend — reduce discard to exclude the FUNCTION result
-                        discard = i
-                    break
-                elif prev_role != FUNCTION:
-                    # Not a tool chain (e.g., plain assistant text) — stop walking
-                    break
-                i -= 1
-
     return discard
 
 
-def build_marker_message(summary_text, start_idx, end_idx):
+def build_marker_message(summary_text, fraction):
     """
     Wrap a raw summary in the COMPRESSION_BASELINE_TEMPLATE to create a marker message.
 
     Args:
         summary_text: The raw summary text (before template wrapping).
-        start_idx: Index of the first message that was compressed (0-based).
-        end_idx: Index of the last message that was compressed (inclusive, 0-based).
+        fraction: Fraction of history that was discarded (e.g., 0.5 for 50%).
 
     Returns:
         A Message object (USER role) with the formatted compression marker.
-
-    Raises:
-        ValueError: If start_idx > end_idx (invalid range).
     """
-    if start_idx > end_idx:
-        raise ValueError(
-            f"Invalid compression range: start_idx ({start_idx}) > end_idx ({end_idx}) "
-            f"— discard count must be >= 1"
-        )
+    pct = int(fraction * 100)
+    header = f"{pct}% of history summarized"
+    compression_notice = COMPRESSION_NOTICE_TEMPLATE.format(fraction=pct)
 
     content = COMPRESSION_BASELINE_TEMPLATE.format(
-        start_idx=start_idx,
-        end_idx=end_idx,
+        header=header,
         summary=summary_text,
+        compression_notice=compression_notice,
     )
     return Message(role=USER, content=str(content))
 
@@ -127,50 +84,3 @@ def rebuild_working_set(
     messages_list.clear()
     messages_list.extend(copy.deepcopy(compressed))
     # deepcopy ensures callers don't accidentally mutate pool state through their references
-
-
-def extract_instance_output(messages: List[Dict], instance_name: str) -> str:
-    """
-    Extracts text output from agent instance messages.
-    Only includes text generated AFTER the last tool call ended.
-    
-    Args:
-        messages: List of message dicts or Message objects from the agent's conversation.
-        instance_name: Name of the agent instance (used in error/warning messages).
-    
-    Returns:
-        The extracted text output, or a warning/fallback message if no text was found.
-    """
-    last_tool_idx = -1
-    for i, msg in enumerate(messages):
-        # Handle both dict and Message object types
-        if isinstance(msg, dict):
-            role_check = msg.get(ROLE) == FUNCTION or msg.get('function_call')
-        else:
-            role_check = getattr(msg, 'role', None) == FUNCTION or getattr(msg, 'function_call', None)
-
-        if role_check:
-            last_tool_idx = i
-
-    relevant_msgs = messages[last_tool_idx + 1:] if last_tool_idx != -1 else messages
-
-    collected_text = []
-    for msg in relevant_msgs:
-        if isinstance(msg, dict):
-            msg_role = msg.get('role', '')
-        else:
-            msg_role = getattr(msg, 'role', '')
-
-        if msg_role == ASSISTANT:
-            text = extract_text_from_message(msg, add_upload_info=False)
-            if text:
-                collected_text.append(text)
-
-    result_str = "\n\n".join(collected_text).strip()
-
-    if not result_str:
-        if last_tool_idx != -1:
-            return f"WARNING: Sub-agent {instance_name} performed tool calls but provided no final summary."
-        return f"Sub-agent {instance_name} finished but provided no text output."
-
-    return result_str

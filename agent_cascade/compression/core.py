@@ -20,6 +20,7 @@ def compress_context(
     summary_text: str | None = None,  # Required when mode == "manual"
     force: bool = False,           # Bypass validation guards (forced compression at >95%)
     justification: str = "",       # Human-readable reason for this compression
+    orchestrator=None,             # Optional: orchestrator instance for call_agent pattern
     dry_run: bool = False,         # If True, generate summary but don't mutate pool
     precomputed_summary: str | None = None,  # Pre-generated summary to skip LLM call
 ) -> CompressResult:
@@ -31,7 +32,7 @@ def compress_context(
     - Manual (user provides summary text): mode="manual" with summary_text
 
     Synchronous — uses generator iteration to invoke the Compression Agent
-    (matching the existing sub-agent execution pattern).
+    (matching the existing _stream_sub_agent_call pattern).
 
     Fail-safe: if compression fails at any point, pool is untouched.
 
@@ -43,6 +44,7 @@ def compress_context(
         summary_text: Required when mode == "manual". Raw summary text.
         force: If True, bypass the "not enough messages" guard.
         justification: Human-readable reason (logged for debugging).
+        orchestrator: Optional orchestrator instance for call_agent pattern invocation.
         dry_run: If True, generate summary but don't mutate pool (for /compress command).
         precomputed_summary: Pre-generated summary to skip LLM call in auto mode.
 
@@ -107,36 +109,45 @@ def compress_context(
         # Token counting is advisory — if it fails, skip the token guard
         total_tokens = 0
 
-    if not force and len(active_set) < 3 and total_tokens < 200:
-        # Only defer when NOT in force mode — force mode must attempt compression regardless
-        logger.debug(
-            f"Deferring compression for '{target_agent_name}': "
-            f"{len(active_set)} messages, ~{total_tokens} tokens"
-        )
-        return CompressResult(
-            success=False,
-            summary_text=None,
-            marker_message=None,
-            messages_discarded=0,
-            tail_count=0,
-            error="Already optimally compressed; deferring until more messages accumulate",
-            mode=mode,
-        )
-
     # ── 3. Calculate discard count ──
     target_discard_count = compute_discard_count(active_set, fraction, force)
 
-    # ── 4. Guard: Not enough messages to discard (unless force=True) ──
-    if target_discard_count <= 0 and not force:
-        return CompressResult(
-            success=False,
-            summary_text=None,
-            marker_message=None,
-            messages_discarded=0,
-            tail_count=0,
-            error="Not enough messages to compress; deferring until more accumulate",
-            mode=mode,
-        )
+    # ── 3b. Cap discard count so compression agent can actually process the messages ──
+    # If the compression agent has a known context window, don't feed it more than it can handle.
+    # Estimate ~500 tokens per message; reserve 60% of the agent's context for input (40% for system prompt,
+    # existing summary, and output generation).
+    try:
+        comp_agent = agent_pool.get_agent('Compressor')
+        if comp_agent:
+            max_tokens = None
+            if hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'generate_cfg'):
+                max_tokens = comp_agent.llm.generate_cfg.get('max_input_tokens')
+            elif hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'cfg'):
+                max_tokens = comp_agent.llm.cfg.get('max_input_tokens')
+
+            if max_tokens:
+                # Reserve ~90% of compression agent's context for input messages (10% for summary output)
+                available_for_messages = int(max_tokens * 0.9)
+                estimated_tokens_per_message = 500
+                max_discardable = available_for_messages // estimated_tokens_per_message
+                target_discard_count = min(target_discard_count, max_discardable)
+    except Exception:
+        pass  # If we can't determine the limit, proceed with original count
+
+    # ── 4. Guard: Not enough to compress (unless force=True) ──
+    # Combines the "already optimally compressed" check with the "not enough to discard" check.
+    # If fewer than 3 messages AND under 200 tokens, OR if nothing to discard — defer.
+    if not force:
+        if (len(active_set) < 3 and total_tokens < 200) or target_discard_count <= 0:
+            return CompressResult(
+                success=False,
+                summary_text=None,
+                marker_message=None,
+                messages_discarded=0,
+                tail_count=len(active_set),
+                error="Not enough messages to compress; deferring until more accumulate",
+                mode=mode,
+            )
 
     # ── 5. Force mode guard: if discard count is 0 in force mode, fail gracefully ──
     if force and target_discard_count < 1:
@@ -196,6 +207,7 @@ def compress_context(
                 agent_pool=agent_pool,
                 target_messages=target_messages,
                 existing_summary=existing_summary,
+                orchestrator=orchestrator,
             )
         except Exception as e:
             # Fail-safe: Compression Agent failed — pool is untouched
@@ -223,9 +235,7 @@ def compress_context(
         )
 
     # ── 9. Build the marker message ──
-    compressed_start = active_start_idx
-    compressed_end = active_start_idx + target_discard_count - 1
-    marker_message = build_marker_message(generated_summary, compressed_start, compressed_end)
+    marker_message = build_marker_message(generated_summary, fraction)
 
     # ── Dry run: return early with summary but don't mutate pool ──
     if dry_run:
@@ -247,17 +257,9 @@ def compress_context(
     # NOTE: This is single-threaded by design — forced compression halts all other agents
     # before running, so no concurrent pool mutations can occur during this block.
     
-    # Snapshot pre-mutation state for rollback if anything goes wrong after the pool write.
-    # Without this, a failure between mutation and return would leave the pool in partial state.
-    import copy as _copy
-    # Phase 3: Use get_conversation() instead of instance_conversations.get()
-    pre_mutation_history = _copy.deepcopy(
-        agent_pool.get_conversation(target_agent_name) or []
-    )
-    
     try:
-        # NOTE: get_conversation returns a copy of inst.conversation under lock.
-        # We build new_history as a new list and assign via the proper pool API on the next line.
+        # NOTE: get_conversation returns the same list object as instance_conversations[].
+        # We build new_history as a new list and replace the reference on the next line.
         history = agent_pool.get_conversation(target_agent_name)
         insert_pos = active_start_idx + target_discard_count
 
@@ -271,13 +273,7 @@ def compress_context(
         # Atomic mutation via copy-and-replace: build new list and assign.
         # This ensures that if an exception occurs, the pool is untouched.
         new_history = history[:active_start_idx] + [marker_message] + history[insert_pos:]
-        # Phase 3: Write to instance.conversation directly (not via bridge)
-        inst = agent_pool.get_instance(target_agent_name)
-        if inst:
-            with inst._compression_lock:
-                inst.conversation = new_history
-            # Invalidate token count cache — conversation was replaced (Fix #2)
-            inst._last_token_count_conversation_length = -1
+        agent_pool.instance_conversations[target_agent_name] = new_history
 
     except Exception as e:
         # Fail-safe: pool mutation failed — this shouldn't happen but protect against it
@@ -310,20 +306,11 @@ def compress_context(
                     "'insert_compression_marker' method — marker not logged to file"
                 )
     except Exception as e:
-        # Logger notification FAILURE is now fatal — pool and logger must stay in sync.
-        # Roll back the pool to pre-mutation state to avoid partial state inconsistency.
-        # The logger and pool should be in sync; if the logger couldn't record the
-        # compression, the pool shouldn't reflect it either.
+        # Logger notification failure: pool remains modified — logger can be resynced on next iteration.
         logger.error(
             f"Logger notification failed after compression for agent "
-            f"'{target_agent_name}': {e}. Rolling back pool to pre-mutation state."
+            f"'{target_agent_name}': {e}. Pool remains modified — logger can be resynced on next iteration."
         )
-        # Phase 3: Rollback via instance.conversation (not via bridge)
-        inst = agent_pool.get_instance(target_agent_name)
-        if inst:
-            with inst._compression_lock:
-                inst.conversation = pre_mutation_history
-            inst._last_token_count_conversation_length = -1
         return CompressResult(
             success=False,
             summary_text=generated_summary,

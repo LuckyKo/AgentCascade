@@ -87,34 +87,17 @@ class CallAgent(BaseTool):
         caller_class = caller.__class__.__name__ if caller else 'Tool'
 
         # Prepare sub-agent system message with identity and memory info
-        # Read workspace config from operation_manager (live source of truth), falling back to logger metadata
-        _working_dir = "Unknown"
-        _extra_ro: list[str] = []
-        _extra_rw: list[str] = []
-        _om = getattr(self.agent_pool, 'operation_manager', None) if self.agent_pool else None
-        if _om is not None:
-            _working_dir = str(getattr(_om, 'base_dir', 'Unknown'))
-            _extra_ro = [str(p) for p in getattr(_om, 'extra_work_folders_ro', [])]
-            _extra_rw = [str(p) for p in getattr(_om, 'extra_work_folders_rw', [])]
-        else:
-            try:
-                _working_dir = logger_inst.data['metadata'].get('working_dir', 'Unknown')
-                _extra_ro = logger_inst.data['metadata'].get('extra_paths_ro', [])
-                _extra_rw = logger_inst.data['metadata'].get('extra_paths_rw', [])
-            except (AttributeError, KeyError):
-                pass  # Keep defaults set on lines 91-93
-
         metadata_prompt = f"""
 [IDENTITY]
 You are a specialized agent instance.
 - Instance Name: {instance_name}
 - Agent Class: {agent_class}
 - Supervisor: {caller_name} ({caller_class})
-- Working Dir: {_working_dir}
+- Working Dir: {logger_inst.data['metadata'].get('working_dir', 'Unknown')}
 """
         # Add extra paths if they exist
-        extra_ro = _extra_ro
-        extra_rw = _extra_rw
+        extra_ro = logger_inst.data['metadata'].get('extra_paths_ro', [])
+        extra_rw = logger_inst.data['metadata'].get('extra_paths_rw', [])
         if extra_ro:
             metadata_prompt += f"- Extra Paths (Read-Only): {', '.join(extra_ro)}\n"
         if extra_rw:
@@ -124,17 +107,11 @@ You are a specialized agent instance.
         if metadata_prompt not in orig_sys:
             agent.system_message = metadata_prompt + "\n" + orig_sys
 
-        # Phase 3: Use get_conversation() for reads (returns [] if no instance)
-        messages = self.agent_pool.get_conversation(instance_name)
-        if not messages:
+        messages = self.agent_pool.instance_conversations.get(instance_name)
+        if messages is None:
             # Initialize with agent's soul (SYSTEM message)
             messages = [Message(role=SYSTEM, content=agent.system_message)]
-            # Phase 3: Write to instance.conversation if real instance exists
-            inst = self.agent_pool.get_instance(instance_name)
-            if inst:
-                with inst._compression_lock:
-                    inst.conversation = messages
-                inst._last_token_count_conversation_length = -1
+            self.agent_pool.instance_conversations[instance_name] = messages
             # Sync to persistent log immediately
             logger_inst.update_history(messages)
         elif not logger_inst.data["history"]:
@@ -163,11 +140,11 @@ You are a specialized agent instance.
                     if resp and (resp[-1].get(ROLE) == FUNCTION or resp[-1].get('function_call')):
                         logger_inst.update_history(messages + resp)
                         # Check for loop
-                        from agent_cascade.loop_detection import detect_loop
+                        from agent_orchestrator import detect_loop
                         loop_info = detect_loop(messages + response)
                         if loop_info:
                             loop_reason, pop_count = loop_info
-                            from agent_cascade.loop_detection import LoopDetectedError
+                            from agent_orchestrator import LoopDetectedError
                             logger.warning(f"Loop detected for sub-agent {instance_name}: {loop_reason}")
                             raise LoopDetectedError(loop_reason, agent_name=instance_name, pop_count=pop_count, turn_pop_count=len(response), resp_snapshot=list(response))
 
@@ -178,14 +155,14 @@ You are a specialized agent instance.
                     logger_inst.update_history(messages)
 
                     # Accumulate refined text output
-                    from agent_cascade.compression.helpers import extract_instance_output
-                    result_str = extract_instance_output(response, instance_name)
+                    from agent_orchestrator import extract_sub_agent_feedback
+                    result_str = extract_sub_agent_feedback(response, instance_name)
                     
                     return f"[{instance_name}'s output]:\n{result_str}"
                 
                 return f"[{instance_name}]: No response generated"
             except Exception as e:
-                from agent_cascade.loop_detection import LoopDetectedError
+                from agent_orchestrator import LoopDetectedError
                 if isinstance(e, LoopDetectedError):
                     internal_retries += 1
                     if internal_retries > max_internal_retries:
@@ -268,10 +245,9 @@ class DismissAgent(BaseTool):
         all_idle = params.get('all_idle', False)
 
         if all_idle:
-            active_set = set(n for n, _depth in self.agent_pool.active_stack)
-            # Phase 3: Use pool.instances.keys() instead of instance_conversations.keys()
+            active_set = set(self.agent_pool.active_stack)
             all_instances = list(set(self.agent_pool.instance_classes.keys()) | 
-                                 set(self.agent_pool.instances.keys()))
+                                 set(self.agent_pool.instance_conversations.keys()))
             
             dismissed = []
             # Capture log paths BEFORE clearing (clear_conversation removes the logger)
@@ -282,7 +258,7 @@ class DismissAgent(BaseTool):
                     logger_inst = self.agent_pool.instance_loggers.get(inst)
                     if logger_inst:
                         log_path = getattr(logger_inst, 'log_path', None)
-                    elif inst in self.agent_pool.instances:
+                    elif inst in self.agent_pool.instance_conversations:
                         from agent_cascade.log import logger
                         logger.warning(f"Log path not found for instance '{inst}' — may affect resurrection")
                     
@@ -308,7 +284,7 @@ class DismissAgent(BaseTool):
         if not instance_name:
             return json.dumps({"status": "error", "message": "Please provide 'instance_name' or set 'all_idle' to true."})
 
-        if instance_name not in self.agent_pool.instances:
+        if instance_name not in self.agent_pool.instance_conversations:
             return json.dumps({
                 "status": "not_found",
                 "agent": instance_name,
@@ -385,11 +361,11 @@ class ListAgents(BaseTool):
 
         # 2. Active & Persistent Instances
         lines.append("## 2. Active Instances (Sessions)")
-        active_set = set(n for n, _depth in self.agent_pool.active_stack)
+        active_set = set(self.agent_pool.active_stack)
         
-        # Get all known instances from classes or instances dict (Phase 3)
+        # Get all known instances from classes or conversations
         all_instances = sorted(list(set(self.agent_pool.instance_classes.keys()) | 
-                                    set(self.agent_pool.instances.keys())))
+                                    set(self.agent_pool.instance_conversations.keys())))
         
         if not all_instances:
             lines.append("- No active or persistent instances.")

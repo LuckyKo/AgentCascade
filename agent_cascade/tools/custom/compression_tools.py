@@ -4,7 +4,7 @@ Previous implementation (338 lines) with _generate_summary(), token counting, di
 calculation, and pool sync logic has been replaced by direct delegation to
 agent_cascade.compression.compress_context(). See core.py for full compression logic.
 """
-import json
+import copy
 import logging
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
@@ -79,6 +79,54 @@ class CompressContext(BaseTool):
             self.agent_name or
             'orchestrator'
         )
+
+        # Before compressing, ensure the pool has the current state of the conversation.
+        # When a sub-agent calls compress_context mid-turn, its local 'messages' list contains
+        # messages from this turn that haven't been written back to the pool yet (pool is only
+        # updated after the turn ends via conv.extend(final_resp)). Without this sync,
+        # compress_context reads stale data from the pool and fails with "Not enough messages".
+        if 'messages' in kwargs and agent_name != 'orchestrator' and not dry_run:
+            try:
+                # Resolve the correct key in instance_conversations (case-insensitive fallback)
+                pool_key = agent_name
+                if pool_key not in self.agent_pool.instance_conversations:
+                    for key in self.agent_pool.instance_conversations:
+                        if key.lower() == pool_key.lower():
+                            pool_key = key
+                            break
+                
+                # Append only NEW messages that aren't already in the pool.
+                # The sub-agent's local 'messages' starts with a sliced working set (already in pool)
+                # plus any new tool calls/results from this turn. We must NOT replace the pool.
+                pool_list = self.agent_pool.instance_conversations.get(pool_key, [])
+                local_messages = kwargs['messages']
+                
+                if pool_list and local_messages:
+                    # The sub-agent's local 'messages' = sliced working set (already in pool) + new tool calls/results.
+                    # Build a set of (role, content) signatures from the pool, then append only messages not in it.
+                    def _sig(msg):
+                        r = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                        c = str(msg.get('content', '')) if isinstance(msg, dict) else str(getattr(msg, 'content', ''))
+                        return (r, c)
+                    
+                    pool_sigs = {sig for sig in map(_sig, pool_list)}
+                    new_start_idx = len(local_messages)  # default: nothing is new
+                    
+                    for i in range(len(local_messages) - 1, -1, -1):
+                        if _sig(local_messages[i]) not in pool_sigs:
+                            new_start_idx = i
+                        else:
+                            break
+                    
+                    # Append only new messages beyond the overlap
+                    if new_start_idx < len(local_messages):
+                        for msg in local_messages[new_start_idx:]:
+                            pool_list.append(copy.deepcopy(msg))
+                elif not pool_list and local_messages:
+                    # Pool doesn't exist yet — populate it with the local messages
+                    self.agent_pool.instance_conversations[pool_key] = copy.deepcopy(local_messages)
+            except Exception as e:
+                logger.warning(f"Failed to sync messages to pool before compression for '{agent_name}': {e}")
 
         # Delegate to the unified compress_context function
         # Note: orchestrator param not passed — agent-triggered compression uses

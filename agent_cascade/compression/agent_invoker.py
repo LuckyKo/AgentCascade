@@ -1,11 +1,9 @@
 """Compression Agent invocation wrapper.
 
-Routes LLM calls through the API router (api_router.call_with_fallback) for
-multi-endpoint failover, concurrency enforcement, and token limit adherence.
-Also acquires endpoint scheduling slots via _acquire_slot() and protects shared
-state writes with the execution state lock.
-
-Called both from the orchestrator context and from the API server forced compression path.
+Uses the call_agent pattern (via _stream_sub_agent_call) when an orchestrator
+reference is available, providing session tracking, WebUI visibility, and
+consistent error handling. Falls back to direct comp_agent.run() when called
+outside the orchestrator context (e.g., from API server forced compression).
 """
 import logging
 import time as _time
@@ -40,15 +38,9 @@ def _format_messages_for_summary(target_messages):
         if isinstance(msg, dict):
             role = msg.get('role', 'unknown').upper()
             content = msg.get('content', '')
-            # Extract function_call data (Fix #44)
-            func_call = msg.get('function_call')
-            name = msg.get('name')
         else:
             role = getattr(msg, 'role', 'unknown').upper()
             content = getattr(msg, 'content', '')
-            # Extract function_call data (Fix #44)
-            func_call = getattr(msg, 'function_call', None)
-            name = getattr(msg, 'name', None)
 
         # Handle multi-modal content (list of items)
         # Only include text parts; skip images and other non-text items to avoid "None" strings
@@ -64,32 +56,6 @@ def _format_messages_for_summary(target_messages):
                     if text:
                         text_parts.append(str(text))
             content = " ".join(text_parts)
-
-        # Include function call info for the compression agent (Fix #44)
-        if func_call:
-            fc_name = func_call.get('name', '') if isinstance(func_call, dict) else getattr(func_call, 'name', '')
-            fc_args = func_call.get('arguments', '') if isinstance(func_call, dict) else getattr(func_call, 'arguments', '')
-            # Only format if we have an actual function name (defensive against empty dicts)
-            if fc_name:
-                fc_info = f" [CALLED: {fc_name}]"
-                if fc_args:
-                    # Truncate long arguments to save tokens for the compressor
-                    args_str = str(fc_args)
-                    truncated = args_str[:500]
-                    if len(args_str) > 500:
-                        args_str = truncated + "... (truncated)"
-                    else:
-                        args_str = truncated
-                    fc_info += f" with args: {args_str}"
-                if not content:
-                    content = fc_info
-                else:
-                    content = f"{content}{fc_info}"
-
-        # Include name for function/tool result messages (Fix #44)
-        if name and role in ('FUNCTION', 'TOOL'):
-            content = f"[{name} RESULT]: {content}"
-
         history_text += f"{role}: {content}\n\n"
     return history_text
 
@@ -98,21 +64,21 @@ def invoke_compression_agent(
     agent_pool,
     target_messages,
     existing_summary=None,
+    orchestrator=None,   # Optional: the orchestrator instance (for call_agent pattern)
 ):
     """
     Invoke the Compression Agent to generate a summary of target messages.
 
-    Routes LLM calls through api_router.call_with_fallback() for multi-endpoint
-    failover, concurrency enforcement, and token limit adherence (Fix #1).
-    Acquires endpoint scheduling slot via _acquire_slot() before execution (Fix #3).
-    Protects shared state writes with _state_lock (Fix #4).
-
-    Called both from the orchestrator context and from the API server forced compression path.
+    When an orchestrator is provided and has _stream_sub_agent_call, uses the
+    call_agent pattern for session tracking, WebUI visibility, and consistent
+    error handling. When no orchestrator is available (e.g., forced compression
+    from API server), falls back to direct agent.run().
 
     Args:
         agent_pool: The AgentPool instance (provides agent loading and state management).
         target_messages: List of messages to summarize.
         existing_summary: Optional previous summary text to compound onto.
+        orchestrator: Optional orchestrator instance for call_agent pattern.
 
     Returns:
         The raw summary string (with thinking blocks stripped).
@@ -124,17 +90,18 @@ def invoke_compression_agent(
         raise RuntimeError("agent_pool not connected")
 
     # 1. Ensure the compression agent is loaded
-    if not agent_pool.get_agent('compression_agent'):
+    # Agent type identifier: 'Compressor' (renamed from 'compression_agent')
+    if not agent_pool.get_agent('Compressor'):
         try:
-            agent_pool.load_agent('compression_agent')
+            agent_pool.load_agent('Compressor')
         except Exception as e:
-            raise RuntimeError(f"Could not load compression_agent: {e}") from e
+            raise RuntimeError(f"Could not load Compressor: {e}") from e
 
-    comp_agent = agent_pool.get_agent('compression_agent')
+    comp_agent = agent_pool.get_agent('Compressor')
     if not comp_agent:
-        raise RuntimeError("compression_agent is None after loading")
+        raise RuntimeError("Compressor is None after loading")
 
-    comp_state_key = 'compression_agent'
+    comp_state_key = 'Compressor'
 
     # Build the history text for the summary prompt
     history_text = _format_messages_for_summary(target_messages)
@@ -157,111 +124,101 @@ def invoke_compression_agent(
     ]
 
     summary = ""
-    endpoint_release = None  # Fix #3: endpoint slot release callback
-
     try:
-        # ── Fix #3: Acquire endpoint scheduling slot before execution ──
-        if hasattr(agent_pool, '_execution') and hasattr(agent_pool._execution, '_acquire_slot'):
-            try:
-                endpoint_release = agent_pool._execution._acquire_slot('compression_agent', comp_state_key)
-            except Exception as e:
-                logger.warning(f"Failed to acquire endpoint slot for compression_agent: {e}")
-
-        # ── Fix #4: Thread-safe state initialization via _state_lock ──
-        with agent_pool._execution._state_lock:
-            agent_pool.instance_state[comp_state_key] = {
-                'active': True,
-                'agent_name': f"Compression Agent (compression_agent)",
-                'messages': list(comp_history),
+        if orchestrator is not None and hasattr(orchestrator, '_stream_sub_agent_call'):
+            # ── call_agent pattern via _stream_sub_agent_call ──
+            # Build tool_args matching what call_agent expects
+            tool_args = {
+                'instance_name': comp_state_key,
+                'agent_class': 'Compressor',
+                'task': summary_prompt,
+                'context': None,
             }
-            if not any(n == comp_state_key for n, _depth in agent_pool._execution.active_stack):
-                agent_pool._execution.active_stack.append((comp_state_key, 1))
-            # Phase 3: Write to instance.conversation if real instance exists, otherwise skip
-            inst = agent_pool.get_instance(comp_state_key)
-            if inst:
-                with inst._compression_lock:
-                    inst.conversation = list(comp_history)
-                    # Invalidate token count cache — conversation was replaced (Fix #2)
-                    inst._last_token_count_conversation_length = -1
+            # Use the orchestrator's _stream_sub_agent_call for full lifecycle management.
+            # Pass an empty current_response and manager_history since compression is a
+            # self-contained LLM call without tool use or async message injection needs.
+            current_response = []
+            manager_history = comp_history
 
-        # ── Fix #1: Route LLM call through API router instead of direct comp_agent.run() ──
-        logger.info("Compression agent invoked via API router (call_with_fallback)")
+            final_msgs = []
+            subagent_return_value = None  # Capture StopIteration.value as fallback
+            start_time = _time.monotonic()   # Monotonic clock — immune to NTP adjustments
+            max_poll_time = 300            # 5-minute timeout for large compression tasks
+            poll_count = 0
 
-        api_router = getattr(agent_pool, 'api_router', None)
-
-        if api_router and hasattr(api_router, 'call_with_fallback'):
-            # Build the LLM call function that mirrors what comp_agent._call_llm() does
-            def _compression_llm_call(llm_cfg: dict):
-                """Execute the compression agent's LLM call with the given config."""
-                # Merge configs in same order as Agent._call_llm(): extra_generate_cfg → generate_cfg → router config
-                merged_cfg = {}
-                if hasattr(comp_agent, 'extra_generate_cfg') and comp_agent.extra_generate_cfg:
-                    merged_cfg.update(comp_agent.extra_generate_cfg)
-                if hasattr(comp_agent.llm, 'generate_cfg'):
-                    merged_cfg.update(comp_agent.llm.generate_cfg)
-                # Endpoint config (from router) overwrites — including max_input_tokens.
-                # This allows user's configured limit to take effect naturally via merge order.
-                merged_cfg.update(llm_cfg)
-                merged_cfg['agent_name'] = comp_agent.name
-
-                return comp_agent.llm.chat(
-                    messages=comp_history,
-                    stream=True,
-                    delta_stream=False,
-                    extra_generate_cfg=merged_cfg,
+            try:
+                gen = orchestrator._stream_sub_agent_call(
+                    'call_agent', tool_args, current_response, manager_history
                 )
+                # Iterate the generator synchronously (same pattern as yield from).
+                # Each LLM streaming chunk produces one yield through the chain:
+                #   _original_call_llm → hooked_call_llm → _run → run() → _stream_sub_agent_call
+                # For large compression tasks (60K+ tokens of input), 1000+ chunks are common.
+                # We use a time-based timeout instead of iteration count to handle any task size.
+                while True:
+                    yielded = next(gen)
+                    poll_count += 1
 
-            # call_with_fallback handles retries, per-endpoint concurrency semaphores, and failover
-            output_stream = api_router.call_with_fallback('compression_agent', _compression_llm_call)
+                    # Time-based check — adapts to any streaming chunk rate
+                    elapsed = _time.monotonic() - start_time
+                    if elapsed > max_poll_time:
+                        raise RuntimeError(
+                            f"Compression agent timed out after {elapsed:.0f}s "
+                            f"({poll_count} iterations) — further processing may have been incomplete"
+                        )
+
+                    # The generator yields intermediate state for WebUI — capture final messages
+                    if comp_state_key in agent_pool.sub_agent_state:
+                        msgs = agent_pool.sub_agent_state[comp_state_key].get('messages', [])
+                        if msgs:
+                            final_msgs = list(msgs)
+            except StopIteration as e:
+                # Normal termination of the generator — capture return value as fallback
+                if hasattr(e, 'value') and e.value is not None:
+                    subagent_return_value = e.value
+
         else:
-            # Fallback: direct LLM call if no router available (preserves old behavior)
-            logger.warning("API router unavailable — using direct LLM call for compression agent")
-            fallback_cfg = {}
-            if hasattr(comp_agent, 'extra_generate_cfg') and comp_agent.extra_generate_cfg:
-                fallback_cfg.update(comp_agent.extra_generate_cfg)
-            if hasattr(comp_agent.llm, 'generate_cfg'):
-                fallback_cfg.update(comp_agent.llm.generate_cfg)
-            fallback_cfg['agent_name'] = comp_agent.name
-            output_stream = comp_agent.llm.chat(
-                messages=comp_history,
-                stream=True,
-                delta_stream=False,
-                extra_generate_cfg=fallback_cfg,
+            # ── Fallback: direct comp_agent.run() when no orchestrator or method available ──
+            logger.info(
+                "Compression agent invoked via direct run() — "
+                "no orchestrator reference for call_agent pattern"
             )
 
-        final_msgs = []
-        start_time = _time.monotonic()   # Monotonic clock for timeout
-        max_poll_time = 300            # 5-minute timeout for large compression tasks
-        poll_count = 0
+            # Initialize sub-agent state for WebUI visibility (direct path)
+            agent_pool.sub_agent_state[comp_state_key] = {
+                'active': True,
+                'agent_name': f"Compressor",
+                'messages': list(comp_history),
+            }
+            if comp_state_key not in agent_pool.active_stack:
+                agent_pool.active_stack.append(comp_state_key)
+            agent_pool.instance_conversations[comp_state_key] = list(comp_history)
 
-        for partial in output_stream:
-            final_msgs = partial
-            poll_count += 1
+            final_msgs = []
+            start_time = _time.monotonic()   # Monotonic clock for timeout (same as call_agent path)
+            max_poll_time = 300            # 5-minute timeout for large compression tasks
+            poll_count = 0
 
-            # Time-based check — adapts to any streaming chunk rate
-            elapsed = _time.monotonic() - start_time
-            if elapsed > max_poll_time:
-                raise RuntimeError(
-                    f"Compression agent timed out after {elapsed:.0f}s "
-                    f"({poll_count} iterations)"
+            for partial in comp_agent.run(comp_history, agent_instance_name=comp_state_key):
+                final_msgs = partial
+                # Note: poll_count here counts run() yields (~1 per LLM turn), not token chunks
+                poll_count += 1
+
+                # Time-based check — adapts to any streaming chunk rate (same as call_agent path)
+                elapsed = _time.monotonic() - start_time
+                if elapsed > max_poll_time:
+                    raise RuntimeError(
+                        f"Compression agent timed out after {elapsed:.0f}s "
+                        f"({poll_count} iterations in direct run path)"
+                    )
+
+                # Update sub_agent_state during streaming so WebUI reflects progress
+                agent_pool.sub_agent_state[comp_state_key]['messages'] = (
+                    list(comp_history) + (list(final_msgs) if isinstance(final_msgs, list) else [final_msgs])
                 )
-
-            # Fix #4: Update instance_state during streaming with lock protection
-            with agent_pool._execution._state_lock:
-                agent_pool.instance_state[comp_state_key]['messages'] = (
-                    list(comp_history) + list(final_msgs) if isinstance(final_msgs, list) else list(comp_history) + [final_msgs]
+                agent_pool.instance_conversations[comp_state_key] = list(
+                    agent_pool.sub_agent_state[comp_state_key]['messages']
                 )
-                # Phase 3: Write to instance.conversation if real instance exists, otherwise skip
-                inst = agent_pool.get_instance(comp_state_key)
-                if inst:
-                    with inst._compression_lock:
-                        inst.conversation = list(final_msgs) if isinstance(final_msgs, list) else [final_msgs]
-                        # Invalidate token count cache — conversation was replaced (Fix #2)
-                        inst._last_token_count_conversation_length = -1
-
-        # Normalize final_msgs to a list for downstream consumers (after the loop ends)
-        if not isinstance(final_msgs, list):
-            final_msgs = [final_msgs] if final_msgs else []
 
         # 2. Extract the summary from the last assistant message
         if final_msgs:
@@ -281,6 +238,18 @@ def invoke_compression_agent(
                     summary = summary.lstrip(':\n \t')
                     lower_summary = summary.lower()
 
+        # Fallback: if final_msgs was empty but we got a return value from the generator,
+        # try to extract the summary from that string. This handles edge cases where the
+        # sub_agent_state wasn't populated during streaming.
+        if not summary.strip() and subagent_return_value:
+            if isinstance(subagent_return_value, str):
+                logger.info("Using subagent return value as fallback for summary extraction")
+                rv = subagent_return_value
+                # Strip the "[instance_name's output]:\n" wrapper added by _stream_sub_agent_call
+                if ']:' in rv and '\n' in rv:
+                    rv = rv.split(']:\n', 1)[1]
+                summary = strip_thinking_blocks(rv)
+
         # Validate we got a usable summary
         if not summary.strip():
             raise RuntimeError("Compression Agent returned an empty summary")
@@ -293,19 +262,8 @@ def invoke_compression_agent(
     except Exception as e:
         raise RuntimeError(f"Exception occurred while generating summary: {e}") from e
     finally:
-        # Always clean up compression agent state when done (Fix #4: thread-safe)
-        with agent_pool._execution._state_lock:
-            if comp_state_key in agent_pool.instance_state:
-                agent_pool.instance_state[comp_state_key]['active'] = False
-            if any(n == comp_state_key for n, _depth in agent_pool._execution.active_stack):
-                for i, (n, _depth) in enumerate(agent_pool._execution.active_stack):
-                    if n == comp_state_key:
-                        agent_pool._execution.active_stack.pop(i)
-                        break
-
-        # Fix #3: Release endpoint slot when done
-        if endpoint_release is not None:
-            try:
-                endpoint_release()
-            except Exception as e:
-                logger.warning(f"Failed to release endpoint slot for compression_agent: {e}")
+        # Always clean up compression agent state when done
+        if comp_state_key in agent_pool.sub_agent_state:
+            agent_pool.sub_agent_state[comp_state_key]['active'] = False
+            if comp_state_key in agent_pool.active_stack:
+                agent_pool.active_stack.remove(comp_state_key)
