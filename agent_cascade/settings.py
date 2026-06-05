@@ -24,19 +24,23 @@ DEFAULT_MAX_INPUT_TOKENS: int = int(os.getenv(
 MAX_LLM_CALL_PER_RUN: int = int(os.getenv('QWEN_AGENT_MAX_LLM_CALL_PER_RUN', 20))
 
 # Settings for tools
-DEFAULT_WORKSPACE: str = os.path.abspath(os.getenv('QWEN_AGENT_DEFAULT_WORKSPACE', 'workspace/'))
+# FIX: Changed default from 'workspace/' to '.' to correctly resolve to CWD when env var not set
+# When CWD is /workspace, os.path.realpath('.') = /workspace (correct)
+# Previously, os.path.abspath('workspace/') = /workspace/workspace (incorrect)
+# Using realpath() instead of abspath() for consistency with python_compiler.py's path resolution
+DEFAULT_WORKSPACE: str = os.path.realpath(os.getenv('QWEN_AGENT_DEFAULT_WORKSPACE', '.'))
 DEFAULT_TOOL_RESULT_MAX_CHARS: int = int(os.getenv('QWEN_AGENT_TOOL_RESULT_MAX_CHARS', 10000))
 DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('QWEN_AGENT_READ_FILE_MAX_LINES', 10000))
 DEFAULT_HEURISTIC_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_HEURISTIC_MATCH_THRESHOLD', 0.90))
 
 # Settings for RAG
-DEFAULT_MAX_REF_TOKEN: int = int(os.getenv('QWEN_AGENT_DEFAULT_MAX_REF_TOKEN',
+DEFAULT_MAX_REF_TOKEN: int = int(os.getenv('QWEN_AGENT_DEFAULT_REF_TOKEN',
                                            20000))  # The window size reserved for RAG materials
 DEFAULT_PARSER_PAGE_SIZE: int = int(os.getenv('QWEN_AGENT_DEFAULT_PARSER_PAGE_SIZE',
-                                              500))  # Max tokens per chunk when doing RAG
+                                               500))  # Max tokens per chunk when doing RAG
 DEFAULT_RAG_KEYGEN_STRATEGY: Literal['None', 'GenKeyword', 'SplitQueryThenGenKeyword', 'GenKeywordWithKnowledge',
-                                     'SplitQueryThenGenKeywordWithKnowledge'] = os.getenv(
-                                         'QWEN_AGENT_DEFAULT_RAG_KEYGEN_STRATEGY', 'GenKeyword')
+                                      'SplitQueryThenGenKeywordWithKnowledge'] = os.getenv(
+                                          'QWEN_AGENT_DEFAULT_RAG_KEYGEN_STRATEGY', 'GenKeyword')
 DEFAULT_RAG_SEARCHERS: List[str] = ast.literal_eval(
     os.getenv('QWEN_AGENT_DEFAULT_RAG_SEARCHERS',
               "['keyword_search', 'front_page_search']"))  # Sub-searchers for hybrid retrieval

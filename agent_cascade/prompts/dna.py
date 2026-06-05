@@ -219,10 +219,11 @@ TOOL_METADATA = {
     'python_compiler': {
         'description': (
             'Checks Python code for syntax errors without executing it. '
-            'Returns "Valid" or a detailed error message.'
+            'If the code parameter is a path to a .py file within the workspace, reads and validates that file instead. '
+            'Returns "Valid", "File valid: <relative_path>", or a detailed error message.'
         ),
         'parameters': {
-            'code': 'The Python code to check for syntax errors.'
+            'code': 'The Python code to check for syntax errors, or a relative path to a .py file within the workspace to validate.'
         }
     },
     'shell_cmd': {
