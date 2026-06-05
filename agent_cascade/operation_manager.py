@@ -98,10 +98,28 @@ def _path_is_contained_cached(path_str: str, container_str: str) -> bool:
         return False
 
 
-# Cache tool availability at module level — doesn't change at runtime
-_RIPGREP_AVAILABLE = shutil.which('rg') is not None
-# On Windows, standard grep may be a Git Bash wrapper that hangs
-_GREP_AVAILABLE = (shutil.which('grep') is not None) and (os.name != 'nt')
+@lru_cache(maxsize=1)
+def _check_tool_availability():
+    """Check if ripgrep or system grep are available at runtime.
+    
+    Returns a tuple of (rg_available, grep_available).
+    
+    This is called at runtime rather than module load time to handle cases where:
+    - The module is loaded on Windows but executed inside Docker container
+    
+    Uses lru_cache for performance — tool availability doesn't change during execution.
+    """
+    rg_path = shutil.which('rg')
+    grep_path = shutil.which('grep')
+    
+    # ripgrep available if 'rg' command exists in PATH
+    rg_available = rg_path is not None
+    
+    # Standard grep available if 'grep' exists AND we're on Unix-like system
+    # (Windows Git Bash grep wrapper may hang)
+    grep_available = (grep_path is not None) and (os.name != 'nt')
+    
+    return rg_available, grep_available
 
 
 class OperationManager:
@@ -445,18 +463,27 @@ class OperationManager:
         or (None, 0, False, False, 0) on failure.
         Output format matches Python fallback: "relative_path:line_number: content"
         """
-        # Only try subprocess path if at least one tool is available (cached at module level)
-        if not _RIPGREP_AVAILABLE and not _GREP_AVAILABLE:
+        # Check tool availability at call time - _check_tool_availability() is @lru_cache'd
+        # so it only checks once per process (on first grep call), then caches the result.
+        # This ensures ripgrep installed after OperationManager init is detected.
+        _rg_available, _grep_available = _check_tool_availability()
+        
+        # Only try subprocess path if at least one tool is available
+        if not _rg_available and not _grep_available:
+            logger.debug("grep: subprocess fast path unavailable (rg=%s, grep=%s), falling back to Python", _rg_available, _grep_available)
             return None, 0, False, False, 0
         
         try:
-            if _RIPGREP_AVAILABLE:
+            if _rg_available:
                 # ripgrep command — supports Perl regex, fast recursive search
+                # Using --json output to avoid Windows bug where matched text gets 
+                # replaced with flag values (e.g., "-n()" instead of actual function name)
                 cmd = [
                     'rg',
                     '-r',           # recursive
                     '--no-heading', # don't print filename before each match group
                     '-n',           # line numbers
+                    '--json',       # JSON output format (avoids Windows text corruption bug)
                     '--color', 'never',  # no ANSI color codes
                     '--no-mmap',    # disable mmap — handle binary files gracefully like Python fallback
                 ]
@@ -523,56 +550,119 @@ class OperationManager:
             
             if result.returncode == 0:
                 lines = result.stdout.split('\n') if result.stdout.strip() else []
-                # Convert grep/rg output (file:line:content) to our format (file:line: content)
+                
+                # Parse output based on tool used (ripgrep with --json or standard grep)
                 formatted = []
-                # H3: When context is active, we need to distinguish match lines from context lines.
-                # ripgrep uses space prefix for context; standard grep uses "-" in filename part.
-                _match_re = re.compile(r'^(.+?):(\d+):(.*)$')  # file:linenum:content
-                _ctx_re = re.compile(r'^(.+?)-(\d+)-(.*)$')   # file-linenum-content (std grep context)
                 
-                for line in lines:
-                    if not line:
-                        continue
-                    # H3: When context is active, ripgrep outputs "---" separators and includes
-                    # line numbers for context lines. Standard grep uses "--" as separator.
-                    if line == "---" or line == "--":
-                        formatted.append("---")  # Normalize both to "---"
-                        continue
+                if _rg_available:
+                    # ripgrep with --json output - parse JSON to avoid Windows text corruption bug
+                    match_count = 0
                     
-                    # First try to parse as a match line (file:linenum:content)
-                    m = _match_re.match(line)
-                    if m:
-                        raw_path, linenum, content = m.groups()
-                        normalized_path = raw_path.replace('\\', '/')
-                        # M3: Don't strip content — preserve whitespace (important for Python/YAML)
-                        if _RIPGREP_AVAILABLE and context > 0 and normalized_path.startswith(' '):
-                            # Context line from ripgrep (path starts with space)
-                            normalized_path = normalized_path[1:]
-                            formatted.append(f"{normalized_path}:{linenum}:     {content}")
-                        elif context > 0:
-                            # Match line in context mode (ripgrep or standard grep)
-                            formatted.append(f"{normalized_path}:{linenum}: >>>{content}")
-                        else:
-                            # No context mode — just normalize
-                            formatted.append(f"{normalized_path}:{linenum}: {content}")
-                    elif not _RIPGREP_AVAILABLE and context > 0:
-                        # Standard grep with context: try to parse as context line (file-linenum-content)
-                        c = _ctx_re.match(line)
-                        if c:
-                            ctx_path, ctx_linenum, ctx_content = c.groups()
-                            normalized_ctx_path = ctx_path.replace('\\', '/')
-                            formatted.append(f"{normalized_ctx_path}:{ctx_linenum}:     {ctx_content}")
-                        else:
-                            # Can't parse — keep raw line
-                            formatted.append(line)
-                    else:
-                        formatted.append(line)
-                
-                # Count only actual match lines, not context lines or separators
-                if context > 0:
-                    count = sum(1 for l in formatted if ">>>" in l)
+                    for line in lines:
+                        if not line.strip():
+                            continue
+                        
+                        try:
+                            json_obj = json.loads(line)
+                            entry_type = json_obj.get('type', '')
+                            
+                            if entry_type == 'match':
+                                data = json_obj.get('data', {})
+                                file_path = data.get('path', {}).get('text', '')
+                                
+                                # line_number can be an int or a dict with 'start' key depending on ripgrep version/options
+                                line_num_data = data.get('line_number', 0)
+                                if isinstance(line_num_data, dict):
+                                    line_num = line_num_data.get('start', 0)
+                                else:
+                                    line_num = line_num_data
+                                
+                                # Extract matched text from submatches (this is the key fix!)
+                                submatches = data.get('submatches', [])
+                                if submatches:
+                                    match_text = submatches[0].get('match', {}).get('text', '')
+                                else:
+                                    match_text = data.get('lines', {}).get('text', '')
+                                
+                                normalized_path = file_path.replace('\\', '/')
+                                
+                                # Handle context mode - ripgrep --json with -C outputs 'context' entries too
+                                if context > 0:
+                                    formatted.append(f"{normalized_path}:{line_num}: >>>{match_text}")
+                                else:
+                                    formatted.append(f"{normalized_path}:{line_num}: {match_text}")
+                                
+                                match_count += 1
+                                
+                            elif entry_type == 'context' and context > 0:
+                                # Context line from ripgrep --json output
+                                data = json_obj.get('data', {})
+                                file_path = data.get('path', {}).get('text', '')
+                                line_num_data = data.get('line_number', 0)
+                                if isinstance(line_num_data, dict):
+                                    line_num = line_num_data.get('start', 0)
+                                else:
+                                    line_num = line_num_data
+                                
+                                # Get context text from lines
+                                match_text = data.get('lines', {}).get('text', '')
+                                normalized_path = file_path.replace('\\', '/')
+                                formatted.append(f"{normalized_path}:{line_num}:     {match_text}")
+                                
+                        except json.JSONDecodeError as e:
+                            logger.debug("ripgrep JSON parse error: %s", e)
+                    
+                    # Use match_count from JSON parsing for ripgrep
+                    count = match_count
+                    
                 else:
-                    count = sum(1 for l in formatted if l != "---")
+                    # Standard grep - use plain text parsing
+                    _match_re = re.compile(r'^(.+?):(\d+):(.*)$')  # file:linenum:content
+                    _ctx_re = re.compile(r'^(.+?)-(\d+)-(.*)$')   # file-linenum-content (std grep context)
+                    
+                    for line in lines:
+                        if not line:
+                            continue
+                        # H3: When context is active, ripgrep outputs "---" separators and includes
+                        # line numbers for context lines. Standard grep uses "--" as separator.
+                        if line == "---" or line == "--":
+                            formatted.append("---")  # Normalize both to "---"
+                            continue
+                        
+                        # First try to parse as a match line (file:linenum:content)
+                        m = _match_re.match(line)
+                        if m:
+                            raw_path, linenum, content = m.groups()
+                            normalized_path = raw_path.replace('\\', '/')
+                            # M3: Don't strip content — preserve whitespace (important for Python/YAML)
+                            if context > 0 and normalized_path.startswith(' '):
+                                # Context line from ripgrep (path starts with space)
+                                normalized_path = normalized_path[1:]
+                                formatted.append(f"{normalized_path}:{linenum}:     {content}")
+                            elif context > 0:
+                                # Match line in context mode (ripgrep or standard grep)
+                                formatted.append(f"{normalized_path}:{linenum}: >>>{content}")
+                            else:
+                                # No context mode — just normalize
+                                formatted.append(f"{normalized_path}:{linenum}: {content}")
+                        elif context > 0:
+                            # Standard grep with context: try to parse as context line (file-linenum-content)
+                            c = _ctx_re.match(line)
+                            if c:
+                                ctx_path, ctx_linenum, ctx_content = c.groups()
+                                normalized_ctx_path = ctx_path.replace('\\', '/')
+                                formatted.append(f"{normalized_ctx_path}:{ctx_linenum}:     {ctx_content}")
+                            else:
+                                # Can't parse — keep raw line
+                                formatted.append(line)
+                        else:
+                            formatted.append(line)
+                    
+                    # Count only actual match lines for standard grep (not context lines or separators)
+                    if context > 0:
+                        count = sum(1 for l in formatted if ">>>" in l)
+                    else:
+                        count = sum(1 for l in formatted if l != "---")
                 
                 # If char_limit is set and output exceeds it, truncate within subprocess path too
                 _was_truncated = False
@@ -812,7 +902,8 @@ class OperationManager:
                     return f"{summary}:\n\n" + output_text
 
             # ── Slow path: pure Python fallback ──
-            logger.debug(f"grep: subprocess fast path unavailable (rg={_RIPGREP_AVAILABLE}, grep={_GREP_AVAILABLE}), falling back to Python")
+            _rg_avail, _grep_avail = _check_tool_availability()
+            logger.debug(f"grep: subprocess fast path unavailable (rg={_rg_avail}, grep={_grep_avail}), falling back to Python")
             results = []
             
             # M1: Smart case — compile with or without IGNORECASE based on pattern content
