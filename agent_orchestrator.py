@@ -1243,12 +1243,12 @@ class OrchestratorAgent(Assistant):
                 
                 continue
 
-            # BUG-7 fix: If compress_context ran via LLM tool call, llm_messages was compressed in-place
-            # but `messages` (the canonical history) still holds the old un-compressed state.
-            # Re-sync `messages` from the Pool to prevent divergence.
+            # BUG-7 fix: After compress_context ran, messages was synced to sliced state at line 1675,
+            # but subsequent operations (loop detection, forced compression checks) need consistent state.
+            # Re-sync messages from the pool's sliced working set so it matches llm_messages.
             # NOTE: cumulative compression INSERTS a summary marker (pool grows), so we check
-            # the flag rather than comparing lengths. `messages` stays as full cumulative history;
-            # `llm_messages` is synced to the sliced working set by the compression tool itself.
+            # the flag rather than comparing lengths. Both messages and llm_messages stay as sliced
+            # working sets for consistency during the turn after compression.
             if self._compress_tracker.get(self.session_name, False):
                 compressed = self.agent_pool.get_conversation(self.session_name)
                 if compressed:
@@ -1256,8 +1256,11 @@ class OrchestratorAgent(Assistant):
                     if not validate_message_pool(compressed, self.session_name):
                         logger.error(f"[COMPRESSION BUG] Message pool validation FAILED for '{self.session_name}' after agent-triggered compression.")
                     
+                    # Use slice_history_for_llm to get the working set — NOT the full cumulative history.
+                    # This ensures messages and llm_messages stay in sync after compression.
+                    sliced = self.agent_pool.slice_history_for_llm(compressed) if hasattr(self.agent_pool, 'slice_history_for_llm') else compressed
                     messages.clear()
-                    messages.extend(copy.deepcopy(compressed))
+                    messages.extend(copy.deepcopy(sliced))
                     # NOTE: No logger sync needed here — compress_context() in core.py already
                     # called insert_compression_marker() on the logger, which updates
                     # logger.data["history"] to match the pool. Only forced compression recovery
@@ -1397,6 +1400,13 @@ class OrchestratorAgent(Assistant):
             is_truncated = False
             for msg in output:
                 logger_inst.log_message(msg)
+                # Sync assistant message to pool immediately so BUG-7 re-sync doesn't wipe it out
+                # This is critical after compress_context which modifies the pool mid-turn
+                try:
+                    pool_conv = self.agent_pool.get_conversation(self.session_name)
+                    pool_conv.append(msg)
+                except Exception:
+                    pass  # Pool sync failure shouldn't break message flow
                 # Detection: finish_reason is often in extra (handle both dict and Message objects)
                 if isinstance(msg, dict):
                     extra = msg.get('extra')
@@ -1416,6 +1426,12 @@ class OrchestratorAgent(Assistant):
                 response.append(cont_msg)
                 llm_messages.append(cont_msg)
                 logger_inst.log_message(cont_msg)
+                # Sync cont_msg to pool immediately so BUG-7 re-sync doesn't wipe it out
+                try:
+                    pool_conv = self.agent_pool.get_conversation(self.session_name)
+                    pool_conv.append(cont_msg)
+                except Exception:
+                    pass  # Pool sync failure shouldn't break auto-continue flow
                 # Yield with a hint
                 yield response + [Message(role=ASSISTANT, content="... (Continuing output due to length limit)")]
     
@@ -1655,7 +1671,7 @@ class OrchestratorAgent(Assistant):
                 # Track that compress_context ran this turn to prevent _inject_compression_warning from triggering a second one
                 if tool_name == 'compress_context':
                     self._compress_tracker[self.session_name] = True
-                    # Sync llm_messages from the pool immediately so subsequent operations 
+                    # Sync llm_messages and messages from the pool immediately so subsequent operations 
                     # in this turn see the compressed state (prevents desync).
                     # Use slice_history_for_llm to get the working set — NOT the full cumulative history.
                     # compression_tools.py already synced llm_messages via kwargs['messages'], but if
@@ -1669,6 +1685,11 @@ class OrchestratorAgent(Assistant):
                         sliced = self.agent_pool.slice_history_for_llm(compressed_conv) if hasattr(self.agent_pool, 'slice_history_for_llm') else compressed_conv
                         llm_messages.clear()
                         llm_messages.extend(copy.deepcopy(sliced))
+                        # FIX: Also sync messages to prevent divergence with llm_messages.
+                        # Without this, messages retains stale pre-compression content, and since
+                        # turn_final_messages = messages (line 1790), the stale data propagates.
+                        messages.clear()
+                        messages.extend(copy.deepcopy(sliced))
                 
                 # --- Post-execution success detection ---
                 # Many tools return an error message as a string instead of raising an exception.
@@ -1721,6 +1742,14 @@ class OrchestratorAgent(Assistant):
                 # Log just the function result (LLM output already logged above)
                 logger_inst.log_message(fn_msg)
                 
+                # Sync fn_msg to pool immediately so BUG-7 re-sync doesn't wipe it out
+                # This is critical after compress_context which modifies the pool mid-turn
+                try:
+                    pool_conv = self.agent_pool.get_conversation(self.session_name)
+                    pool_conv.append(fn_msg)
+                except Exception:
+                    pass  # Pool sync failure shouldn't break tool execution
+                
                 # --- ASYNC MESSAGE INJECTION (URGENT, per-agent routed) ---
                 urgent_msgs = self.agent_pool.drain_queue(instance)
                 if urgent_msgs:
@@ -1732,6 +1761,14 @@ class OrchestratorAgent(Assistant):
                         llm_messages.append(async_msg)
                         response.append(async_msg)
                         logger_inst.log_message(async_msg)  # Log to JSONL file
+                        
+                        # Sync async_msg to pool for consistency with other message types
+                        try:
+                            pool_conv = self.agent_pool.get_conversation(self.session_name)
+                            pool_conv.append(async_msg)
+                        except Exception:
+                            pass  # Pool sync failure shouldn't break async injection
+                        
                         logger.info(f"Injected urgent async user message mid-tool-loop into {instance}: {async_msg_text}")
                     yield response
                     break  # CRITICAL: Stop executing the rest of the batched tools!
