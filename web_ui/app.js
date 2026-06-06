@@ -750,6 +750,7 @@ function handleServerMessage(data) {
       }
       if (data.session_name) state.sessionName = data.session_name;
       if (data.agent_index !== undefined) state.agentIndex = data.agent_index;
+      if (data.root_agent_class !== undefined) state.rootAgentClass = data.root_agent_class;
       if (data.approvals) {
         state.approvals = data.approvals;
         renderApprovals();
@@ -817,6 +818,38 @@ function handleServerMessage(data) {
       renderMessages();
       renderSubAgents();
       updateControls();
+
+      // UI behavior: ensure root mode and session switches keep the chat/sub-agent tabs in sync.
+      const rootMode = Boolean(state.subAgents && state.subAgents.Root);
+      if (rootMode) {
+        if (mainTabChat) mainTabChat.style.display = 'none';
+        if (state.activeSubTab !== 'sub-Root') {
+          switchMainTab('sub-Root');
+        }
+      } else {
+        if (mainTabChat) mainTabChat.style.display = '';
+      }
+
+      const activeSubName = state.activeSubTab && state.activeSubTab.startsWith('sub-') ? state.activeSubTab.substring(4) : null;
+      const activeSubValid = activeSubName && state.subAgents && state.subAgents[activeSubName];
+      if (!activeSubValid) {
+        if (rootMode) {
+          switchMainTab('sub-Root');
+        } else {
+          switchMainTab('chat');
+        }
+      } else if (!state.activeSubTab) {
+        if (rootMode) {
+          switchMainTab('sub-Root');
+        } else if (Object.keys(state.subAgents || {}).length > 0) {
+          const first = Object.keys(state.subAgents)[0];
+          const firstState = state.subAgents[first] || {};
+          const msgs = firstState.messages || [];
+          if (msgs.length > 0) {
+            switchMainTab('sub-' + first);
+          }
+        }
+      }
 
       // Update stats if generating
       if (state.generating) {
@@ -2123,6 +2156,7 @@ window.rejectRequest = function (requestId) {
 function renderSubAgents() {
   const sa = state.subAgents;
   const names = Object.keys(sa);
+  const rootMode = Boolean(sa && sa.Root);
 
   // Remove stale sub-agent tabs and panels for agents that no longer exist
   mainTabBar.querySelectorAll('.main-tab[data-tab^="sub-"]').forEach(tab => {
@@ -2180,7 +2214,7 @@ function renderSubAgents() {
     }
     const labelSpan = tabBtn.querySelector('.tab-label');
     if (labelSpan) {
-      labelSpan.textContent = ` ${name}`;
+      labelSpan.textContent = ` ${name === 'Root' && rootMode ? 'Maine' : name}`;
     }
 
     // Highlight the active sub-agent's tab
@@ -3169,11 +3203,20 @@ resetBtn.addEventListener('click', () => {
   }
 });
 
+let agentSelectDebounce = null;
 agentSelect.addEventListener('change', () => {
   state.agentIndex = parseInt(agentSelect.value);
   state.viewingAgentIndex = state.agentIndex;
   renderAgentSelect(); // This will also call renderToolsForSelectedAgent
   send({ type: 'select_agent', index: state.agentIndex });
+
+  const selectedAgent = state.agents.find(a => a.index === state.agentIndex);
+  if (selectedAgent && state.subAgents && state.subAgents.Root) {
+    clearTimeout(agentSelectDebounce);
+    agentSelectDebounce = setTimeout(() => {
+      send({ type: 'set_root_agent_class', agent_class: selectedAgent.agent_type || selectedAgent.name });
+    }, 250);
+  }
 });
 
 sessionNameInput.addEventListener('change', () => {
@@ -3248,24 +3291,26 @@ function sendMessage(inputEl) {
   targetInput.value = '';
   autoResize(targetInput);
 
+  const activeSubTabName = (state.activeSubTab && state.activeSubTab !== 'chat') ? state.activeSubTab.substring(4) : null;
   if (state.generating) {
     // Async injection: route to the agent whose tab is active
-    let targetAgent = state.sessionName || 'Maine';
-    if (state.activeSubTab && state.activeSubTab !== 'chat') {
-      targetAgent = state.activeSubTab.substring(4); // strip 'sub-'
-    }
+    const targetAgent = activeSubTabName || state.sessionName || 'Maine';
     send({ type: 'message', text, target_agent: targetAgent });
     return;
   }
 
   resetGenStats();
-  send({
-    type: 'message',
-    text,
-    agent_index: state.agentIndex,
-    session_name: state.sessionName,
-    generate_cfg: getGenerateCfg()
-  });
+  if (activeSubTabName) {
+    send({ type: 'message', text, target_agent: activeSubTabName, generate_cfg: getGenerateCfg() });
+  } else {
+    send({
+      type: 'message',
+      text,
+      agent_index: state.agentIndex,
+      session_name: state.sessionName,
+      generate_cfg: getGenerateCfg()
+    });
+  }
 }
 
 function continueMessage() {

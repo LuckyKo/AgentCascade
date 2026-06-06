@@ -4,7 +4,8 @@
       "Read(n:\\work\\WD\\AgentWorkspace/**)",
       "Bash(python *)",
       "Read(n:\\work\\WD\\AgentWorkspace\\logs/**)",
-      "Bash(wsl *)"
+      "Bash(wsl *)",
+      "Bash(findstr *)"
     ]
   },
   "$version": 4

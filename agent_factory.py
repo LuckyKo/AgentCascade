@@ -239,6 +239,96 @@ def load_sub_agent_with_tools(agent_pool, agent_name: str, llm_cfg: dict) -> Ass
     return load_agent(agent_pool, agent_name, llm_cfg)
 
 
+def prepare_root_agent(agent_pool, llm_cfg: dict, instance_name: str = 'Root', root_agent_class: str = None) -> Assistant:
+    """Prepare the Root agent as a first-class session (replaces the main orchestrator).
+
+    Root is an OrchestratorAgent loaded from the resolved agent class's soul.md.
+    It uses the same downstream logic as all sub-agents but has Supervisor: User
+    and waits for the user's first message before doing anything.
+
+    The Root agent:
+    - Loads its system message from the resolved agent class's soul.md
+    - Has its conversation initialized with just the system message (visible on load)
+    - Is registered in the pool's sub_agent_state for UI tab rendering
+    - Can spawn sub-agents via call_agent (it's a full OrchestratorAgent)
+
+    Returns the root_agent OrchestratorAgent instance.
+    """
+    from agent_cascade.llm.schema import SYSTEM as _SYSTEM, ROLE as _ROLE, CONTENT as _CONTENT
+
+    resolved_class = _resolve_root_agent_class(agent_pool, instance_name, root_agent_class)
+
+    # Load Root as a full OrchestratorAgent from the resolved class's soul.md
+    root_agent = load_agent(agent_pool, resolved_class, llm_cfg)
+    root_agent.session_name = instance_name
+
+    # Rewrite the identity line so the agent identifies as "Maine" (the main orchestrator) while preserving behavior.
+    lines = root_agent.system_message.strip().split('\n')
+    if lines and lines[0].startswith("You are"):
+        role_part = lines[0][len("You are "):].strip()
+        if role_part.endswith('.'):
+            role_part = role_part[:-1]
+        lines[0] = f"You are Maine, acting as {role_part}."
+    root_agent.system_message = '\n'.join(lines)
+    if hasattr(root_agent, 'base_system_message'):
+        root_agent.base_system_message = root_agent.system_message
+
+    # Initialize Root's conversation with just the system message (waits for user).
+    # The system message is shown in the UI on session load, like any other sub-agent.
+    if instance_name not in agent_pool.instance_conversations:
+        sys_msg = {_ROLE: _SYSTEM, _CONTENT: root_agent.system_message}
+        agent_pool.instance_conversations[instance_name] = [sys_msg]
+
+    # Register in instance_classes so the pool knows which agent class Root is
+    agent_pool.instance_classes[instance_name] = resolved_class
+
+    # Register in sub_agent_state for UI tab rendering (same as any sub-agent)
+    if not hasattr(agent_pool, 'sub_agent_state'):
+        agent_pool.sub_agent_state = {}
+    agent_pool.sub_agent_state[instance_name] = {
+        'active': False,
+        'agent_name': f"{instance_name} ({resolved_class})",
+        'messages': agent_pool.instance_conversations[instance_name],
+    }
+
+    return root_agent
+
+
+def _resolve_root_agent_class(agent_pool, instance_name: str, requested_class: str = None) -> str:
+    """Resolve the effective root agent class to use for startup.
+
+    Deterministic resolution order:
+    1. Explicit `requested_class` argument
+    2. Existing registration in `agent_pool.instance_classes` (unless it's the placeholder)
+    3. Prefer well-known agent types in order of preference
+    4. First available non-orchestrator agent (sorted), then final fallback 'researcher'
+    """
+    if requested_class:
+        return requested_class
+
+    if agent_pool and hasattr(agent_pool, 'instance_classes'):
+        existing = agent_pool.instance_classes.get(instance_name)
+        if existing and not existing.startswith('_placeholder'):
+            return existing
+
+    # Prefer sensible default agent types if present
+    preferred = ['coder', 'researcher', 'writer', 'reviewer']
+    if agent_pool:
+        agent_names = agent_pool.list_agents()
+        # Prefer original-cased names matching our preferred list
+        for p in preferred:
+            for agent_name in agent_names:
+                if agent_name.lower() == p:
+                    return agent_name
+        # Deterministic fallback: sorted list (case-insensitive)
+        available = [a for a in agent_names if a.lower() != 'orchestrator']
+        available_sorted = sorted(available, key=lambda s: s.lower())
+        if available_sorted:
+            return available_sorted[0]
+
+    return 'researcher'
+
+
 def _default_agent_prompt(agent_pool, agent_name: str) -> str:
     """Fallback system prompt when no soul.md exists."""
     prompt = f"""You are {agent_name.replace('_', ' ').title()}, an AI assistant that can coordinate with specialized sub-agents.

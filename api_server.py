@@ -138,8 +138,15 @@ def detect_loop(messages: List[dict]) -> Optional[Tuple[str, int]]:
                 'reasoning_content': getattr(m, 'reasoning_content', getattr(m, 'thought', '')),
                 'function_call': getattr(m, 'function_call', None)
             }
+            
         role = m.get(ROLE)
-        content = str(m.get(CONTENT, ''))
+        content = m.get(CONTENT, '')
+        if isinstance(content, list):
+            # For multimodal content, just use the text parts
+            text_parts = [item.get('text', '') for item in content if isinstance(item, dict) and item.get('type') == 'text']
+            content = " ".join(text_parts)
+        content = str(content)
+        
         reasoning = str(m.get('reasoning_content', '') or m.get('thought', ''))
         
         # Combine reasoning and content for better loop detection
@@ -156,6 +163,7 @@ def detect_loop(messages: List[dict]) -> Optional[Tuple[str, int]]:
             name = fc.get('name') if isinstance(fc, dict) else getattr(fc, 'name', '')
             args = fc.get('arguments') if isinstance(fc, dict) else getattr(fc, 'arguments', '')
             return f"{role}:{name}:{args}"
+        
         # For plain messages, use first 3000 chars of content to distinguish long reasoning
         return f"{role}:{text_feature[:3000]}"
 
@@ -164,9 +172,15 @@ def detect_loop(messages: List[dict]) -> Optional[Tuple[str, int]]:
     features = []
     feature_to_window_idx = []
     for i, m in enumerate(window):
-        if m.get(ROLE) != SYSTEM:
-            features.append(get_feature(m))
-            feature_to_window_idx.append(i)
+        role = m.get(ROLE) if isinstance(m, dict) else getattr(m, 'role', '')
+        if role != SYSTEM:
+            feat = get_feature(m)
+            # Skip consecutive duplicates to avoid treating incremental streaming updates as loops.
+            # Only consecutive duplicates are filtered (not global), so real repeated patterns
+            # later in the conversation are still detected correctly.
+            if not features or features[-1] != feat:
+                features.append(feat)
+                feature_to_window_idx.append(i)
     
     if len(features) < 4:
         return None
@@ -343,7 +357,7 @@ def serialize_message(msg, index=None):
 
 # ─── App factory ──────────────────────────────────────────────────────────────
 
-def create_app(agents, agent_pool, config=None):
+def create_app(agents, agent_pool, config=None, root_agent=None):
     """
     Create the FastAPI application.
 
@@ -469,6 +483,7 @@ def create_app(agents, agent_pool, config=None):
         'stop_requested': False,
         'generation_id': 0,         # Increment on each run to prevent stale appends
         'summary': "",
+        'root_agent_class': None,
     }
     # Initial load
     session['history'], session['summary'] = _load_session_history(default_session_name)
@@ -499,10 +514,13 @@ def create_app(agents, agent_pool, config=None):
 
 
     def get_agent():
+        if session['session_name'] == 'Root' and root_agent is not None:
+            return root_agent
         idx = session['agent_index']
         if 0 <= idx < len(agents):
             return agents[idx]
         return agents[0]
+
 
     def get_sub_agent_state(streaming=False):
         result = {}
@@ -733,6 +751,7 @@ def create_app(agents, agent_pool, config=None):
             'generating': generating if generating is not None else session['generating'],
             'session_name': session['session_name'],
             'agent_index': session['agent_index'],
+            'root_agent_class': session.get('root_agent_class'),
             'total_tokens': total_tokens,
             'total_words': total_words,
             'max_tokens': max_tokens,
@@ -1293,18 +1312,6 @@ def create_app(agents, agent_pool, config=None):
                 else:
                     session['history'] = current_history
 
-                if responses:
-                    for r in responses:
-                        c = r.get(CONTENT) if isinstance(r, dict) else getattr(r, 'content', '')
-                        if c == PENDING_USER_INPUT:
-                            continue
-                        if isinstance(r, dict):
-                            session['history'].append(r)
-                        elif hasattr(r, 'model_dump'):
-                            session['history'].append(r.model_dump())
-                        else:
-                            session['history'].append({ROLE: str(getattr(r, 'role', '')), CONTENT: str(getattr(r, 'content', ''))})
-
                 if agent_pool:
                     # CRITICAL: Sync back to pool so tools like CompressionTool see the current history
                     agent_pool.instance_conversations[session['session_name']] = session['history']
@@ -1761,6 +1768,7 @@ def create_app(agents, agent_pool, config=None):
 
     @app.websocket("/ws/chat")
     async def ws_chat(websocket: WebSocket):
+        nonlocal root_agent
         await websocket.accept()
         ws_connections.add(websocket)
 
@@ -1788,11 +1796,18 @@ def create_app(agents, agent_pool, config=None):
                     if not text:
                         continue
 
+                    target_agent = data.get('target_agent')
                     if session['generating']:
                         # Async injection while agent is running — route to target agent
                         if agent_pool:
-                            target = data.get('target_agent') or session.get('session_name', 'Maine')
+                            target = target_agent or session.get('session_name', 'Maine')
                             agent_pool.enqueue_message(target, text)
+                        continue
+
+                    # Route normal messages to the selected sub-agent if one is active.
+                    if target_agent and target_agent != session.get('session_name', 'Maine') and agent_pool and hasattr(agent_pool, 'sub_agent_state') and target_agent in agent_pool.sub_agent_state:
+                        agent_pool.enqueue_message(target_agent, text)
+                        await broadcast({'type': 'state', **build_state()})
                         continue
 
                     # Update session config if provided
@@ -2625,6 +2640,52 @@ def create_app(agents, agent_pool, config=None):
                     session['agent_index'] = int(data.get('index', 0))
                     await broadcast({'type': 'state', **build_state()})
 
+                elif msg_type == 'set_root_agent_class':
+                    root_agent_class = data.get('agent_class')
+                    # Validate incoming agent class against available pool agents
+                    valid = False
+                    if root_agent_class and agent_pool:
+                        try:
+                            available = [a.lower() for a in agent_pool.list_agents()]
+                            valid = root_agent_class.lower() in available
+                        except Exception:
+                            valid = False
+
+                    if not valid:
+                        # Reject invalid classes and inform clients, include current valid state
+                        await broadcast({
+                            'type': 'error',
+                            'message': f'Unknown agent class: {root_agent_class}',
+                            'current_root_agent_class': session.get('root_agent_class')
+                        })
+                    else:
+                        session['root_agent_class'] = root_agent_class
+                        if agent_pool and hasattr(agent_pool, 'instance_classes'):
+                            agent_pool.instance_classes['Root'] = root_agent_class
+                        if agent_pool and hasattr(agent_pool, 'sub_agent_state') and 'Root' in agent_pool.sub_agent_state:
+                            agent_pool.sub_agent_state['Root']['agent_name'] = f"Root ({root_agent_class})"
+                        
+                        # Dynamically reload/update root_agent to use the new soul.md and configuration
+                        if root_agent is not None and agent_pool:
+                            try:
+                                from agent_factory import prepare_root_agent
+                                # Fetch the llm_cfg currently active
+                                llm_cfg = getattr(agent_pool, 'llm_cfg', {})
+                                old_func_map = root_agent.function_map  # Save shared tools before reload
+                                new_root_agent = prepare_root_agent(agent_pool, llm_cfg, root_agent_class=root_agent_class)
+                                # Merge shared tool references from old agent that aren't already registered.
+                                # This preserves heavy shared singletons (ddg_search, code_interpreter, etc.)
+                                # without overwriting the standard file tools that prepare_root_agent just set up.
+                                for key, val in old_func_map.items():
+                                    if key not in new_root_agent.function_map:
+                                        new_root_agent.function_map[key] = val
+                                root_agent = new_root_agent
+                                logger.info(f"Successfully reloaded root_agent for class: {root_agent_class}")
+                            except Exception as reload_err:
+                                logger.error(f"Failed to reload root_agent for class {root_agent_class}: {reload_err}")
+                                
+                        await broadcast({'type': 'state', **build_state()})
+
                 elif msg_type == 'set_session_name':
                     old_name = session['session_name']
                     new_name = data.get('name', 'Maine')
@@ -2656,6 +2717,26 @@ def create_app(agents, agent_pool, config=None):
                                 session['stop_requested'] = False
                                 if agent_pool:
                                     agent_pool.stopped = False
+
+                                # CRITICAL: If restoring a Root session, sync the root agent and class
+                                if instance_name == 'Root':
+                                    loaded_class = agent_pool.instance_classes.get('Root')
+                                    if loaded_class:
+                                        session['root_agent_class'] = loaded_class
+                                        try:
+                                            from agent_factory import prepare_root_agent
+                                            llm_cfg = getattr(agent_pool, 'llm_cfg', {})
+                                            old_func_map = root_agent.function_map if root_agent is not None else {}
+                                            new_root_agent = prepare_root_agent(agent_pool, llm_cfg, instance_name='Root', root_agent_class=loaded_class)
+                                            # Merge shared tool references from old agent that aren't already registered
+                                            for key, val in old_func_map.items():
+                                                if key not in new_root_agent.function_map:
+                                                    new_root_agent.function_map[key] = val
+                                            root_agent = new_root_agent
+                                            logger.info(f"Successfully loaded and re-prepared Root agent for class: {loaded_class}")
+                                        except Exception as err:
+                                            logger.error(f"Failed to prepare Root agent after loading session: {err}")
+
                                 await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'inject':
@@ -2790,7 +2871,14 @@ if __name__ == "__main__":
     # Pre-load agents
     orch_agent = agent_pool.get_instance('Maine', 'Orchestrator')
     
-    app = create_app(agents=[orch_agent], agent_pool=agent_pool)
+    use_root = os.getenv('QWEN_USE_ROOT_SUBAGENT', '1').lower() in ('1','true','yes','on')
+    root_agent_class_env = os.getenv('QWEN_ROOT_AGENT_CLASS')
+    root_agent = None
+    if use_root:
+        from agent_factory import prepare_root_agent
+        root_agent = prepare_root_agent(agent_pool, initial_llm_cfg, root_agent_class=root_agent_class_env)
+    
+    app = create_app(agents=[orch_agent], agent_pool=agent_pool, root_agent=root_agent)
     
     logger.info("Starting AgentCascade API Server on %s:%d", args.host, args.port)
     uvicorn.run(app, host=args.host, port=args.port)

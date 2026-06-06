@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import logging
 import os
 import traceback
+from functools import lru_cache
 from typing import Dict, Optional, Union
 
 from agent_cascade.settings import DEFAULT_READ_FILE_MAX_LINES
@@ -48,8 +51,12 @@ class PythonCompiler(BaseToolWithFileAccess):
         for prefix in allowed_prefixes:
             try:
                 common = os.path.commonpath([abs_path, prefix])
-                if os.path.normpath(common).lower() == os.path.normpath(prefix).lower():
-                    return True
+                if os.name == 'nt':
+                    if os.path.normpath(common).lower() == os.path.normpath(prefix).lower():
+                        return True
+                else:
+                    if os.path.normpath(common) == os.path.normpath(prefix):
+                        return True
             except ValueError:
                 # Different drive letters on Windows (e.g., C:\ vs D:\)
                 continue
@@ -73,6 +80,48 @@ class PythonCompiler(BaseToolWithFileAccess):
         normalized = os.path.realpath(local_ws)
         os.environ['QWEN_AGENT_DEFAULT_WORKSPACE'] = normalized
         return normalized
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _get_allowed_paths(workspace_dir: str) -> list:
+        """Dynamically discover all allowed paths for python_compiler file access.
+        
+        Collects workspace_dir and any additional mapped host directories from 
+        path_mapping_*.json files. This allows security to dynamically manage 
+        allowed paths rather than hardcoding them.
+        
+        Args:
+            workspace_dir: The resolved workspace directory path.
+            
+        Returns:
+            List of absolute directory paths that are allowed for file validation.
+        """
+        allowed = set()
+        
+        # Always allow the workspace directory (AgentWorkspace or local workspace)
+        if workspace_dir:
+            allowed.add(workspace_dir)
+        
+        # Add host paths from path_mapping_*.json files if available
+        try:
+            work_dir = os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))))
+            for f in os.listdir(work_dir):
+                if f.startswith('path_mapping_') and f.endswith('.json'):
+                    mapping_path = os.path.join(work_dir, f)
+                    with open(mapping_path, 'r', encoding='utf-8') as fp:
+                        mapping = json.load(fp)
+                        host_map = mapping.get('host_to_container', {})
+                        for entry in host_map.values():
+                            if isinstance(entry, dict):
+                                host_path = entry.get('host')
+                                if host_path and os.path.isdir(host_path):
+                                    allowed.add(os.path.realpath(host_path))
+        except (json.JSONDecodeError, OSError) as e:
+            # If path_mapping files are unavailable, continue with workspace_dir only
+            logging.warning(f"Failed to read path_mapping files: {e}")
+        
+        return list(allowed)
 
     def call(self, params: Union[str, dict], **kwargs) -> str:
         try:
@@ -103,9 +152,11 @@ class PythonCompiler(BaseToolWithFileAccess):
                 return f"Error: File not found: {stripped_code}"
             
             # Security: verify path is within allowed directories (uses commonpath, not startswith)
-            allowed_prefixes = [workspace_dir]
+            # Dynamically discover all valid project directories instead of hardcoding
+            allowed_prefixes = self._get_allowed_paths(workspace_dir)
             if not self._is_path_allowed(potential_path, allowed_prefixes):
-                return f"Error: File '{stripped_code}' is outside the workspace directory."
+                return f"Error: File '{stripped_code}' is outside the allowed directories. " \
+                       f"Allowed: {', '.join(allowed_prefixes)}"
             
             file_path = potential_path
 

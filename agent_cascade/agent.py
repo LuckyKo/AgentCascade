@@ -120,12 +120,15 @@ class Agent(ABC):
             else:
                 # Already got system message in new_messages
                 if isinstance(new_messages[0][CONTENT], str):
-                    new_messages[0][CONTENT] = self.system_message + '\n\n' + new_messages[0][CONTENT]
+                    if self.system_message not in new_messages[0][CONTENT]:
+                        new_messages[0][CONTENT] = self.system_message + '\n\n' + new_messages[0][CONTENT]
                 else:
                     assert isinstance(new_messages[0][CONTENT], list)
                     assert new_messages[0][CONTENT][0].text
-                    new_messages[0][CONTENT] = [ContentItem(text=self.system_message + '\n\n')
-                                               ] + new_messages[0][CONTENT]  # noqa
+                    first_text = new_messages[0][CONTENT][0].text
+                    if self.system_message not in first_text:
+                        new_messages[0][CONTENT] = [ContentItem(text=self.system_message + '\n\n')
+                                                   ] + new_messages[0][CONTENT]  # noqa
 
         for rsp in self._run(messages=new_messages, **kwargs):
             # Handle both Message objects and dicts (type depends on input message types)

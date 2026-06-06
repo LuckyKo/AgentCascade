@@ -131,8 +131,11 @@ def detect_loop(messages: List[Union[dict, Message]]) -> Optional[Tuple[str, int
     for i, m in enumerate(window):
         role = m.get(ROLE) if isinstance(m, dict) else getattr(m, 'role', '')
         if role != SYSTEM:
-            features.append(get_feature(m))
-            feature_to_window_idx.append(i)
+            feat = get_feature(m)
+            # Skip consecutive duplicates to avoid treating incremental streaming updates as loops
+            if not features or features[-1] != feat:
+                features.append(feat)
+                feature_to_window_idx.append(i)
     
     if len(features) < 4:
         return None
@@ -847,8 +850,8 @@ class OrchestratorAgent(Assistant):
                     self._compress_fail_count[instance_name] = 0
                     # Mark that forced compression ran during this turn so _stream_sub_agent_call
                     # knows NOT to extend conv with stale final_resp (which contains pre-compression
-                    # messages already synced to the pool at lines 810-817). See:
-                    # lessons_duplicate_consecutive_messages_analysis.md
+                    # messages already synced to the pool at lines 810-817).
+                    # Historical analysis files were removed from the tree; see the project issue tracker for related notes.
                     self._forced_compression_ran[instance_name] = True
                     # Don't reset tracker on success — keep it True so next iteration lets LLM call through
                     # (agent needs to make progress with the compressed context, not compress again)
@@ -2326,7 +2329,11 @@ class OrchestratorAgent(Assistant):
                             f"All {len(final_resp)} final_resp messages already in pool for {instance_name}"
                         )
                 else:
-                    conv.extend(final_resp)
+                    conv_ids = {id(m) for m in conv}
+                    for msg in final_resp:
+                        if id(msg) not in conv_ids:
+                            conv.append(msg)
+                            conv_ids.add(id(msg))
                 
                 # Messages were already logged incrementally via log_message in the turn loop.
                 # update_history(conv) is redundant here.

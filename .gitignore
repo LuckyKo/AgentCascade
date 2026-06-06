@@ -71,3 +71,11 @@ temp/
 
 # Logs
 logs/ 
+
+# Qwen Settings Backup
+.qwen/settings.json.orig
+
+# Kernel runtime files
+kernel_connection_file_*
+path_mapping_*.json
+launch_kernel_*.py

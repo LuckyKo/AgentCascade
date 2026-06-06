@@ -35,6 +35,7 @@ if not WORKSPACE_DIR:
 from bs4 import BeautifulSoup
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_orchestrator import AgentPool, load_orchestrator_agent
+from agent_factory import prepare_root_agent
 
 from agent_cascade.tools import (
     image_gen,
@@ -185,8 +186,21 @@ def initialize_agents():
             for tool_name, tool_inst in shared_tools.items():
                 agent.function_map[tool_name] = tool_inst
 
-    # Load orchestrator
+    # Feature flag: allow opting out of root-sub-agent startup and use legacy orchestrator
+    # Set QWEN_USE_ROOT_SUBAGENT=0 to disable.
+    use_root = os.getenv('QWEN_USE_ROOT_SUBAGENT', '1').lower() in ('1','true','yes','on')
+    root_agent_class_env = os.getenv('QWEN_ROOT_AGENT_CLASS')
+
+    # Always load orchestrator as a template (needed for agent pool and as fallback)
     orchestrator = load_orchestrator_agent(agent_pool, llm_cfg)
+
+    # Prepare Root as the primary session (replaces the main orchestrator)
+    root_agent = None
+    if use_root:
+        root_agent = prepare_root_agent(agent_pool, llm_cfg, root_agent_class=root_agent_class_env)
+        # Give Root the same shared tools as the orchestrator
+        for tool_name, tool_inst in shared_tools.items():
+            root_agent.function_map[tool_name] = tool_inst
 
     default_orch_tools = DEFAULT_TOOLS['orchestrator']
     orchestrator.default_tools = default_orch_tools
@@ -205,17 +219,17 @@ def initialize_agents():
     logger.info("=" * 50)
 
     chatbot_config = {
-        'session_name': 'Maine',
+        'session_name': 'Root' if use_root else 'Maine',
         'verbose': False,
     }
 
-    return all_agents, agent_pool, chatbot_config
+    return all_agents, agent_pool, chatbot_config, root_agent
 
 
 if __name__ == '__main__':
     import sys
 
-    all_agents, agent_pool, chatbot_config = initialize_agents()
+    all_agents, agent_pool, chatbot_config, root_agent = initialize_agents()
 
     # Set up async terminal input (same as start_multi_agent.py)
     import threading
@@ -224,7 +238,7 @@ if __name__ == '__main__':
             try:
                 msg = sys.stdin.readline().strip()
                 if msg:
-                    target = 'Maine'  # Default to orchestrator
+                    target = chatbot_config.get('session_name', 'Root')
                     agent_pool.enqueue_message(target, msg)
                     logger.info("\n[QUEUED] '%s' → %s (will be injected on next turn)", msg, target)
             except Exception:
@@ -235,7 +249,7 @@ if __name__ == '__main__':
     from api_server import create_app
     import uvicorn
 
-    app = create_app(all_agents, agent_pool, chatbot_config)
+    app = create_app(all_agents, agent_pool, chatbot_config, root_agent=root_agent)
 
     port = 8765
     logger.info("\n[OK] API Server ready!")

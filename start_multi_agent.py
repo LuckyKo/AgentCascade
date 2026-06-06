@@ -40,6 +40,7 @@ from bs4 import BeautifulSoup
 from agent_cascade.gui import WebUI
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_orchestrator import AgentPool, load_orchestrator_agent
+from agent_factory import prepare_root_agent
 
 # Import built-in tools from agent_cascade
 from agent_cascade.tools import (
@@ -208,8 +209,18 @@ if __name__ == '__main__':
                 except Exception:
                     pass
 
-    # Load orchestrator with its default tools
+    # Feature flag: allow opting out of root-sub-agent startup and use legacy orchestrator
+    # Set QWEN_USE_ROOT_SUBAGENT=0 to disable.
+    use_root = os.getenv('QWEN_USE_ROOT_SUBAGENT', '1').lower() in ('1','true','yes','on')
+    root_agent_class_env = os.getenv('QWEN_ROOT_AGENT_CLASS')
+
+    # Always load orchestrator as a template (needed for agent pool)
     orchestrator = load_orchestrator_agent(agent_pool, llm_cfg)
+
+    # Prepare Root as the primary session (replaces the main orchestrator)
+    root_agent = None
+    if use_root:
+        root_agent = prepare_root_agent(agent_pool, llm_cfg, root_agent_class=root_agent_class_env)
 
     # Add web tools and system info to orchestrator
     orchestrator.function_map['ddg_search'] = DDGSearch()
@@ -255,6 +266,12 @@ if __name__ == '__main__':
         except Exception:
             pass
 
+    # Give Root the same shared and custom tools as the orchestrator
+    if root_agent:
+        for tool_name, tool_inst in orchestrator.function_map.items():
+            if tool_name not in root_agent.function_map:
+                root_agent.function_map[tool_name] = tool_inst
+
     # Also load all sub-agents for the agent selector
     all_agents = [orchestrator]
     for agent_name in agent_pool.list_agents():
@@ -277,6 +294,7 @@ if __name__ == '__main__':
         'user.name': 'You',
         'available_tools': ALL_BUILTIN_TOOLS,
         'verbose': False,
+        'session_name': 'Root' if use_root else 'Maine',
     }
 
     # Launch WebUI with orchestrator as the main agent
@@ -292,8 +310,8 @@ if __name__ == '__main__':
             try:
                 msg = sys.stdin.readline().strip()
                 if msg:
-                    # Route to orchestrator session by default
-                    target = orchestrator.session_name if hasattr(orchestrator, 'session_name') else 'Maine'
+                    # Route to Root or Maine session by default
+                    target = chatbot_config.get('session_name', 'Root')
                     agent_pool.enqueue_message(target, msg)
                     logger.info(f"\n[QUEUED] '{msg}' → {target} (will be injected on its next turn)")
             except Exception:
@@ -323,4 +341,4 @@ if __name__ == '__main__':
 
     # Note: Gradio might try to override signal handlers, but we'll try to catch it first.
     # To be extremely aggressive against hanging, os._exit(0) is used above.
-    WebUI(all_agents, chatbot_config=chatbot_config).run()
+    WebUI(all_agents, chatbot_config=chatbot_config, root_agent=root_agent).run()
