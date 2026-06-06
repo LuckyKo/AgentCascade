@@ -67,6 +67,9 @@ try:
 except ImportError:
     PENDING_USER_INPUT = 'PENDING_USER_INPUT'
 
+# Import LoopDetectedError for loop detection in api_server.py (used with agent_orchestrator.py pattern)
+from agent_orchestrator import LoopDetectedError
+
 # Pre-compiled regexes moved to agent_cascade.utils.thinking_block
 
 
@@ -772,9 +775,9 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
             'api_router': agent_pool.api_router.to_dict() if agent_pool and hasattr(agent_pool, 'api_router') else {'endpoints': [], 'agent_priorities': {}},
         }
 
-    def build_stream_update(responses, cached_h_stats=None, sub_agents=None, telemetry=None):
+    def build_stream_update(responses, cached_h_stats=None, sub_agents=None, telemetry=None, update_counter=True):
         """Build a lightweight streaming delta (skips re-serializing stable history).
-
+    
         Args:
             responses: Current partial response messages from the agent runner.
             cached_h_stats: Pre-computed history stats to avoid O(n) recalculation each tick.
@@ -783,6 +786,9 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                        on intermediate ticks the client tolerates slight staleness.
             telemetry: Pre-serialized session telemetry summary. Only recompute every ~20 ticks
                        (approx 3 seconds) to avoid heavy re-aggregation during streaming.
+                update_counter: If True (default), update _last_sent_resp_count for delta tracking.
+                               Set to False for sidebar calls (e.g., security check thread) that 
+                               shouldn't affect the main streaming loop's counter.
         """
         history_count = len(session['history'])
 
@@ -794,7 +800,28 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
         show_active_only = ui_cfg.get('show_active_only', False)
         history_count = len(active_h) if show_active_only else history_count
 
-        response_msgs = [serialize_message(m, history_count + i) for i, m in enumerate(responses)] if responses else []
+        # FIX: Send only delta messages to prevent duplication (critical fix for UI duplication issue)
+        # Track how many response messages were last sent to compute the delta
+        last_sent_resp_count = session.get('_last_sent_resp_count', 0)
+        
+        if not responses:
+            response_msgs = []
+        elif len(responses) > last_sent_resp_count:
+            # New message(s) added — send only the NEW messages (delta)
+            new_msgs = responses[last_sent_resp_count:]
+            response_msgs = [serialize_message(m, history_count + last_sent_resp_count + i) 
+                            for i, m in enumerate(new_msgs)]
+        elif last_sent_resp_count > 0 and len(responses) == last_sent_resp_count:
+            # Same count — only re-serialize the LAST message (its content grew during streaming)
+            # This prevents sending all messages again when only the last one is growing
+            response_msgs = [serialize_message(responses[-1], history_count + last_sent_resp_count - 1)]
+        else:
+            # Fallback: should not happen in normal flow, but send all if count decreased (e.g., after rollback)
+            response_msgs = [serialize_message(m, history_count + i) for i, m in enumerate(responses)]
+        
+        # Update tracking for next call (only if update_counter is True)
+        if update_counter:
+            session['_last_sent_resp_count'] = len(responses) if responses else 0
         
         orch_agent = get_agent()
         max_tokens = get_agent_max_tokens(orch_agent)
@@ -1039,8 +1066,11 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                 should_retry = False
                 responses = []
                 session['_last_resp_len'] = 0
+                session['_last_resp_sig'] = ''  # Reset content signature tracker
+                session['_last_sent_resp_count'] = 0  # Reset delta counter for clean state on retry
                 last_send = 0
                 tick_num = 0
+                prev_responses_len = 0  # Track previous response length for loop detection
                 
                 # Capture snapshots of sub-agent states before starting the run
                 pool_snapshots = {}
@@ -1080,9 +1110,31 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                         if resp_len > 0:
                             last_m = responses[-1]
                             has_tool_event = _get_msg_func_call(last_m) or _get_msg_role(last_m) == FUNCTION
+                        
+                        # Track content signature to detect actual changes (prevents duplicate sends on time-only triggers)
+                        # Signature combines message count + last message content length
+                        # Performance rationale: full serialization/hash is too expensive for 0.15s tick intervals,
+                        # but count+length catches the common case of new messages or growing content
+                        if responses and resp_len > 0:
+                            last_msg = responses[-1]
+                            # Defensive: handle malformed entries where last_msg might be None
+                            if not last_msg:
+                                current_sig = f"{resp_len}:0"
+                            else:
+                                content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
+                                if isinstance(content, list):
+                                    content_len = sum(len(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')) for item in content)
+                                else:
+                                    content_len = len(str(content))
+                                current_sig = f"{resp_len}:{content_len}"
+                        else:
+                            current_sig = "0:0"
+                        last_sig = session.get('_last_resp_sig', '')
+                        content_changed = (current_sig != last_sig)
 
-                        if now - last_send > 0.15 or stack_changed or len_changed or has_tool_event:
+                        if now - last_send > 0.15 or stack_changed or len_changed or has_tool_event or content_changed:
                             session['_last_resp_len'] = resp_len
+                            session['_last_resp_sig'] = current_sig  # Track signature for next comparison
                             
                             # Sub-agent state update strategy:
                             # - On stack changes or tool events: force a refresh immediately.
@@ -1138,75 +1190,30 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                             
                             # Loop Detection — throttled to every 10th tick to reduce overhead
                             if tick_num % 10 == 0:
-                                loop_info = detect_loop(current_history + responses)
-                                if loop_info:
-                                    loop_reason, pop_count = loop_info
-                                    if auto_rollback_enabled and retry_count < max_auto_retries:
-                                        logger.warning(f"Loop detected: {loop_reason}. Surgical rollback enabled (Retry {retry_count+1}/{max_auto_retries}).")
-
-                                        # 1. Surgical Rollback
-                                        # pop_count is relative to full_history (current_history + responses)
-                                        full_h = current_history + responses
-                                        refined_pop = _refine_pop_count(full_h, pop_count)
-
-                                        if refined_pop > len(responses):
-                                            # Loop started in previous history turns
-                                            excess = refined_pop - len(responses)
-                                            if len(current_history) >= excess:
-                                                del current_history[-excess:]
-                                            responses = []
-                                        else:
-                                            # Loop is entirely within current response
-                                            del responses[-refined_pop:]
-
-                                        # 1b. Record the soft rollback in the persistent log for the main session
-                                        if agent_pool:
-                                            orch_logger = agent_pool.get_logger(session['session_name'], 'Orchestrator')
-                                            orch_logger.rollback(refined_pop, soft=True, reason=loop_reason)
-
-                                        # 2. Inject a hint to avoid the loop in the next attempt
-                                        loop_hint = f"[SYSTEM]: A repetitive loop was detected ({loop_reason}). Please try a different approach."
-                                        current_history.append({ROLE: USER, CONTENT: loop_hint})
-
-                                        # 3. Notify UI that we are retrying
-                                        asyncio.run_coroutine_threadsafe(
-                                            send_queue.put({
-                                                'type': 'error',
-                                                'message': f"🔄 Loop detected. Surgically rolling back and retrying ({retry_count+1}/{max_auto_retries})..."
-                                            }), loop
+                                # Check only NEW messages since last iteration to avoid false positives from
+                                # accumulated responses lists. agent_runner.run() yields accumulating lists, so
+                                # each iteration's 'responses' contains all previous messages plus new ones.
+                                new_responses = responses[prev_responses_len:] if len(responses) > prev_responses_len else []
+                                if new_responses:  # Only check when there are actually new messages
+                                    loop_info = detect_loop(current_history + new_responses)
+                                    if loop_info:
+                                        loop_reason, pop_count = loop_info
+                                        # Raise LoopDetectedError to be caught by outer try/except for cleaner state management.
+                                        # This matches the approach used in agent_orchestrator.py for consistency.
+                                        # FIX: The original code did `del new_responses[-refined_pop:]` which deleted from a slice copy,
+                                        # not the original responses list, causing rollback to fail silently.
+                                        raise LoopDetectedError(
+                                            reason=loop_reason,
+                                            agent_name='Orchestrator',
+                                            pop_count=pop_count,
+                                            turn_pop_count=len(responses),
+                                            resp_snapshot=list(responses)
                                         )
+                            
+                                prev_responses_len = len(responses)  # Track for next iteration
 
-                                        should_retry = True
-                                        session['stop_requested'] = False
-                                        break
-                                    else:
-                                        logger.warning(f"Loop detected: {loop_reason}. Stopping generation.")
-
-                                        # Rollback even on final stop to keep history clean for user intervention
-                                        if agent_pool:
-                                            agent_pool.rollback_to_snapshots(pool_snapshots, soft=True, reason=loop_reason)
-                                        if current_history:
-                                            current_history.pop()
-                                    
-                                    # Clear responses so the loop garbage isn't appended to history
-                                    responses = []
-                                    
-                                    session['stop_requested'] = True
-                                    if agent_pool:
-                                        agent_pool.stopped = True
-                                    
-                                    asyncio.run_coroutine_threadsafe(
-                                        send_queue.put({
-                                            'type': 'error', 
-                                            'message': f"🔄 {loop_reason}. The agent has been stopped to prevent an infinite loop. History has been rolled back to the last stable state."
-                                        }), loop
-                                    )
-                                    break
-
-                            last_send = now
                             tick_num += 1
                 except Exception as e:
-                    from agent_orchestrator import LoopDetectedError
                     if isinstance(e, LoopDetectedError):
                         loop_reason = e.reason
                         agent_name = e.agent_name
@@ -1238,6 +1245,10 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                                         # Record soft rollback in orchestrator log
                                         orch_logger = agent_pool.get_logger(session['session_name'], 'Orchestrator')
                                         orch_logger.rollback(refined_pop, soft=True, reason=loop_reason)
+                                        
+                                        # FIX: Reset delta counter after rollback to force full re-send on next tick
+                                        # This prevents stale counter from causing messages to be dropped or duplicated
+                                        session['_last_sent_resp_count'] = 0
                             elif agent_pool:
                                 # Fallback to snapshots if pop_count is missing
                                 agent_pool.rollback_to_snapshots(pool_snapshots, soft=True, reason=loop_reason)
@@ -1376,6 +1387,12 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
             for key in list(session.keys()):
                 if key.startswith('_sa_stats_'):
                     session.pop(key, None)
+            # FIX4: Clean up content signature tracker to prevent stale state
+            session.pop('_last_resp_sig', None)
+            # FIX5: Clean up response length and sent count trackers for cross-generation safety
+            session.pop('_last_resp_len', None)
+            session.pop('_last_sent_resp_count', None)
+            session.pop('_last_resp_content_len', None)
             if agent_pool:
                 agent_pool.stopped = False
             if has_llm and old_cfg:
@@ -2251,7 +2268,7 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                                             agent_pool.active_stack.append(sec_state_key)
                                         # Broadcast initial state so the tab appears immediately
                                         asyncio.run_coroutine_threadsafe(
-                                            send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
+                                            send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True), update_counter=False)}),
                                             loop
                                         )
                                         
@@ -2311,7 +2328,7 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                                                 # Only broadcast at start and end of security check (not every token)
                                                 if sec_first_broadcast:
                                                     asyncio.run_coroutine_threadsafe(
-                                                        send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True))}),
+                                                                                                         send_queue.put({'type': 'stream_update', **build_stream_update([], sub_agents=get_sub_agent_state(streaming=True), update_counter=False)}),
                                                         loop
                                                     )
                                                     sec_first_broadcast = False

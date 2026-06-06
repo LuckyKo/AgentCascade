@@ -2091,12 +2091,14 @@ class OrchestratorAgent(Assistant):
 
         # Run the sub-agent as a generator
         final_resp: list = []
+        prev_resp_len = 0  # Track previous response length to detect only new messages
         try:
             # Run the sub-agent as a generator with an internal retry loop for loop recovery
             max_internal_retries = 3
             internal_retries = 0
             while internal_retries <= max_internal_retries:
                 try:
+                    prev_resp_len = 0  # Reset for each retry iteration
                     # ── Monkey-patch sub-agent's _call_llm to enforce compression ──
                     if not hasattr(agent, '_original_call_llm'):
                         agent._original_call_llm = agent._call_llm
@@ -2205,14 +2207,21 @@ class OrchestratorAgent(Assistant):
                             break
                         
                         # --- SUB-AGENT LOOP DETECTION ---
-                        # Check the full history of the sub-agent to detect loops across turns
-                        loop_info = detect_loop(list(conv) + list(resp))
-                        if loop_info:
-                            loop_reason, pop_count = loop_info
-                            logger.warning(f"Loop detected for sub-agent {instance_name}: {loop_reason}")
-                            raise LoopDetectedError(loop_reason, agent_name=instance_name, pop_count=pop_count, turn_pop_count=len(resp), resp_snapshot=list(resp))
-                            
+                        # Check only NEW messages since last iteration to avoid false positives from
+                        # accumulated resp lists. FnCallAgent._run() yields accumulating lists, so
+                        # each iteration's 'resp' contains all previous messages plus new ones.
+                        # We only want to detect loops in the actual conversation flow, not in
+                        # the generator's internal accumulation pattern.
+                        new_messages = resp[prev_resp_len:] if len(resp) > prev_resp_len else []
+                        if new_messages:  # Only check when there are actually new messages
+                            loop_info = detect_loop(list(conv) + list(new_messages))
+                            if loop_info:
+                                loop_reason, pop_count = loop_info
+                                logger.warning(f"Loop detected for sub-agent {instance_name}: {loop_reason}")
+                                raise LoopDetectedError(loop_reason, agent_name=instance_name, pop_count=pop_count, turn_pop_count=len(resp), resp_snapshot=list(resp))
+
                         final_resp = resp
+                        prev_resp_len = len(resp)  # Track for next iteration to find only new messages
 
                         # Efficient logging: check if a tool call was just completed
                         if resp:
