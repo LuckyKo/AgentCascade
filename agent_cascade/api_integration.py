@@ -398,13 +398,16 @@ def build_state_from_pool(
         except Exception as e:
             logger.debug(f"API router waiting check failed for {instance_name} (using default): {e}")
 
+    # Get pending approvals (only include if non-empty to prevent UI flickering)
+    pending_approvals = _get_approvals(pool)
+    
     return {
         # Kept for backward compat — frontend fallback reads data.messages if root not in agent_instances
         'messages': [serialize_message(m, i) for i, m in enumerate(msgs)],
         'instances': all_instances,
         'agent_instances': all_instances,
         'active_stack': active_stack,
-        'approvals': _get_approvals(pool),
+        **( {'approvals': pending_approvals} if pending_approvals else {} ),
         'generating': generating,
         'session_name': session_name,
         'instance_name': instance_name,
@@ -556,11 +559,14 @@ def build_stream_update_from_pool(
         except Exception as e:
             logger.debug(f"Telemetry summary fetch failed for {instance_name} in stream (non-critical): {e}")
 
+    # Get pending approvals (only include if non-empty to prevent UI flickering)
+    pending_approvals = _get_approvals(pool)
+    
     return {
         'instances': all_instances,
         'agent_instances': all_instances,
         'active_stack': active_stack,
-        'approvals': _get_approvals(pool),
+        **( {'approvals': pending_approvals} if pending_approvals else {} ),
         'generating': True,
         'total_tokens': h_stats['tokens'] + r_stats['tokens'],
         'total_words': h_stats['words'] + r_stats['words'],
@@ -905,7 +911,7 @@ def _get_approvals(pool: AgentPool) -> list:
     """Get pending approvals from the operation manager (if available)."""
     if hasattr(pool, 'operation_manager') and pool.operation_manager:
         try:
-            return pool.operation_manager.get_pending_approvals()
+            return pool.operation_manager.list_pending_approvals()
         except Exception as e:
             logger.debug(f"Failed to get pending approvals (non-critical): {e}")
     return []
