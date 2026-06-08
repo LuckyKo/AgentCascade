@@ -55,6 +55,7 @@ _cached_instance_data: Dict[str, dict] = {}
 # During active generation, the conversation doesn't change — skip expensive slice_history_for_llm + get_history_stats.
 # Key: instance_name, Value: (h_stats, r_stats) tuple of dicts
 _stream_token_stats_cache: Dict[str, tuple] = {}
+_STREAM_TOKEN_STATS_CACHE_MAXSIZE = 100  # Bounded cache (FIFO eviction) to prevent unbounded growth
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -342,8 +343,11 @@ def build_state_from_pool(
     instance_snapshot = dict(pool.instances)
     all_instances = {}
     for name, inst in instance_snapshot.items():
-        # Full state includes messages; streaming=False so we send the whole history
-        all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=False)
+        # Read _streaming_responses under lock and pass to _serialize_instance
+        with inst._compression_lock:
+            inst_streaming = list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
+        # Full state includes messages; streaming=True to include streaming responses
+        all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=True, streaming_responses=inst_streaming)
 
     # Derive session name from root instance (M1/M4 fix)
     root_instances = [
@@ -454,11 +458,13 @@ def build_stream_update_from_pool(
     # Streaming UI Content Update Fix: Also read _streaming_responses under lock
     with instance._compression_lock:
         conv_snapshot = list(instance.conversation)
-        stream_resp_snapshot = list(instance._streaming_responses) if hasattr(instance, '_streaming_responses') else None
+        stream_resp_snapshot = list(instance._streaming_responses) if instance._streaming_responses else None
     
     # BUG31 Fix #4: Skip expensive slice_history_for_llm + get_history_stats during active
     # generation when the conversation hasn't changed since last stream update.
-    current_version = (len(conv_snapshot), id(conv_snapshot[-1]) if conv_snapshot else None)
+    # Streaming UI Step 3 Fix: Include streaming response length in cache key so growing 
+    # streaming content triggers cache invalidation and fresh stats computation
+    current_version = (len(conv_snapshot), id(conv_snapshot[-1]) if conv_snapshot else None, len(stream_resp_snapshot) if stream_resp_snapshot else 0)
     cached_stats = _stream_token_stats_cache.get(instance_name)
     
     if cached_stats is not None and current_version == _last_stream_versions.get(instance_name):
@@ -482,6 +488,10 @@ def build_stream_update_from_pool(
             r_stats = {'tokens': 0, 'words': 0}
         
         # Cache the computed stats for next tick
+        # Evict oldest entry if cache is full (FIFO-style eviction)
+        if len(_stream_token_stats_cache) >= _STREAM_TOKEN_STATS_CACHE_MAXSIZE:
+            oldest_key = next(iter(_stream_token_stats_cache))
+            del _stream_token_stats_cache[oldest_key]
         _stream_token_stats_cache[instance_name] = (h_stats, r_stats)
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
@@ -515,7 +525,7 @@ def build_stream_update_from_pool(
             current_msgs = list(inst.conversation)
             # Read streaming responses for this instance (field always exists due to dataclass default_factory)
             inst_streaming_responses = list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
-        current_version = (len(current_msgs), id(current_msgs[-1]) if current_msgs else None)
+        current_version = (len(current_msgs), id(current_msgs[-1]) if current_msgs else None, len(inst_streaming_responses) if inst_streaming_responses else 0)
 
         # Always serialize the primary instance (it's actively streaming)
         # and any instance whose version changed since last stream_update
@@ -780,8 +790,10 @@ def _serialize_instance(
     messages), only the last 3 are sent to avoid O(N²) serialisation on every
     ~150ms tick. Smaller conversations are sent in full.
     
-    Streaming UI Content Update Fix: When streaming_responses is provided, append
-    partial LLM content after persisted messages with fingerprint-based dedup.
+    Streaming UI Content Update Fix (Step 3): When streaming_responses is provided, 
+    append partial LLM content after persisted messages with fingerprint-based dedup.
+    Fingerprint includes (content, reasoning_content, function_call, name) to prevent
+    duplicates when messages committed in Phase 4 also appear in _streaming_responses.
     """
     result = {
         'instance_name': inst.instance_name,

@@ -674,6 +674,35 @@ class ExecutionEngine:
         llm_messages.clear()
         llm_messages.extend(list(sliced))  # Already a new list from slice_history_for_llm
 
+    def _update_streaming_responses(self, instance: AgentInstance, last_output: List[Message]):
+        """Update streaming responses only when content actually changes (performance optimization).
+        
+        Compares both message count AND content to detect meaningful changes.
+        This prevents unnecessary deep copies while ensuring UI gets fresh data.
+        
+        Args:
+            instance: The AgentInstance whose _streaming_responses to update
+            last_output: The accumulated LLM output (list of Messages)
+        """
+        if last_output is None or len(last_output) == 0:
+            return
+        
+        # Check if we need to update by comparing message count and content
+        needs_update = False
+        
+        if len(last_output) != len(instance._streaming_responses):
+            # Message count changed — definitely need update
+            needs_update = True
+        elif len(last_output) == len(instance._streaming_responses) and len(last_output) > 0:
+            # Count is same — check if any message content changed
+            for old_msg, new_msg in zip(instance._streaming_responses, last_output):
+                if getattr(old_msg, 'content', None) != getattr(new_msg, 'content', None):
+                    needs_update = True
+                    break
+        
+        if needs_update:
+            instance._streaming_responses = copy.deepcopy(last_output)
+
     def _call_llm_with_injection(
         self, instance: AgentInstance, llm_messages: List[Message]
     ) -> Iterator[Message]:
@@ -698,8 +727,7 @@ class ExecutionEngine:
         try:
             last_output = None
             # Streaming UI Content Update Fix: Track partial LLM content for UI updates every ~150ms
-            streaming_start_time = time.monotonic()
-            last_streaming_update_time = streaming_start_time
+            last_streaming_update_time = time.monotonic()
             
             for output in self._execute_llm_call(instance, template, llm_messages, active_functions):
                 last_output = output  # keep latest accumulated response FIRST
@@ -709,18 +737,20 @@ class ExecutionEngine:
                 if current_time - last_streaming_update_time >= 0.15:
                     # Only deep-copy when content actually changed (performance optimization)
                     with instance._compression_lock:
-                        if not last_output or len(last_output) != len(instance._streaming_responses):
-                            instance._streaming_responses = copy.deepcopy(last_output)
-                            last_streaming_update_time = current_time
+                        self._update_streaming_responses(instance, last_output)
+                        last_streaming_update_time = current_time
                 
                 # Check stop/halt mid-stream (after capturing the current result)
                 if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
+                    # Clear streaming state on early exit to prevent stale data leak
+                    with instance._compression_lock:
+                        instance._streaming_responses = []
                     break
 
             # Final update before yielding results (under lock for thread safety)
-            with instance._compression_lock:
-                if last_output and len(last_output) != len(instance._streaming_responses):
-                    instance._streaming_responses = copy.deepcopy(last_output)
+            if last_output is not None:
+                with instance._compression_lock:
+                    self._update_streaming_responses(instance, last_output)
             
             if not last_output or (isinstance(last_output, list) and len(last_output) == 0):
                 yield Message(role=ASSISTANT, content="[SYSTEM ERROR: Empty LLM response]")
@@ -728,6 +758,9 @@ class ExecutionEngine:
                 for msg in last_output:
                     yield msg
         except Exception as e:
+            # Clear streaming state on exception to prevent stale partial data from leaking
+            with instance._compression_lock:
+                instance._streaming_responses = []
             logger.error(f"LLM call failed for {inst_name}: {e}")
             yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {e}]")
 
