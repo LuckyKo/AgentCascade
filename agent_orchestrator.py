@@ -1764,14 +1764,10 @@ class OrchestratorAgent(Assistant):
                         llm_messages.append(async_msg)
                         response.append(async_msg)
                         logger_inst.log_message(async_msg)  # Log to JSONL file
-                        
-                        # Sync async_msg to pool for consistency with other message types
-                        try:
-                            pool_conv = self.agent_pool.get_conversation(self.session_name)
-                            pool_conv.append(async_msg)
-                        except Exception:
-                            pass  # Pool sync failure shouldn't break async injection
-                        
+
+                        # NOTE: Don't append to pool here - the turn's final history sync will handle it.
+                        # Appending mid-turn causes re-sync loops when _compress_tracker triggers.
+
                         logger.info(f"Injected urgent async user message mid-tool-loop into {instance}: {async_msg_text}")
                     yield response
                     break  # CRITICAL: Stop executing the rest of the batched tools!
