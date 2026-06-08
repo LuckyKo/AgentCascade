@@ -451,8 +451,10 @@ def build_stream_update_from_pool(
         return None
 
     # Get active working set for token stats (single snapshot)
+    # Streaming UI Content Update Fix: Also read _streaming_responses under lock
     with instance._compression_lock:
         conv_snapshot = list(instance.conversation)
+        stream_resp_snapshot = list(instance._streaming_responses) if hasattr(instance, '_streaming_responses') else None
     
     # BUG31 Fix #4: Skip expensive slice_history_for_llm + get_history_stats during active
     # generation when the conversation hasn't changed since last stream update.
@@ -464,7 +466,9 @@ def build_stream_update_from_pool(
         h_stats, r_stats = cached_stats
     else:
         # Conversation changed or first call — compute fresh stats
-        active_h = pool.slice_history_for_llm(conv_snapshot) if conv_snapshot else conv_snapshot
+        # Streaming UI Content Update Fix: Include streaming responses in combined snapshot
+        combined_snapshot = conv_snapshot + (stream_resp_snapshot if stream_resp_snapshot else [])
+        active_h = pool.slice_history_for_llm(combined_snapshot) if combined_snapshot else conv_snapshot
 
         # Calculate token stats
         try:
@@ -503,16 +507,20 @@ def build_stream_update_from_pool(
     # conversation changed since the last stream_update. Version is derived
     # from (msg_count, id_of_last_msg) which changes only when a new message
     # is appended. During LLM streaming, the conversation doesn't change.
+    
+    # Streaming UI Content Update Fix: Read _streaming_responses under compression lock for thread safety
     all_instances = {}
     for name, inst in instance_snapshot_data.items():
         with inst._compression_lock:
             current_msgs = list(inst.conversation)
+            # Read streaming responses for this instance (field always exists due to dataclass default_factory)
+            inst_streaming_responses = list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
         current_version = (len(current_msgs), id(current_msgs[-1]) if current_msgs else None)
 
         # Always serialize the primary instance (it's actively streaming)
         # and any instance whose version changed since last stream_update
         if name == instance_name or current_version != _last_stream_versions.get(name):
-            all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=True)
+            all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=True, streaming_responses=inst_streaming_responses)
             _last_stream_versions[name] = current_version
             _cached_instance_data[name] = all_instances[name]
         else:
@@ -520,7 +528,7 @@ def build_stream_update_from_pool(
             all_instances[name] = _cached_instance_data.get(name)
             # If for some reason the cached data is missing, serialize fresh
             if all_instances[name] is None:
-                all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=True)
+                all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=True, streaming_responses=inst_streaming_responses)
                 _cached_instance_data[name] = all_instances[name]
                 _last_stream_versions[name] = current_version
 
@@ -760,6 +768,7 @@ def _check_is_waiting(pool: AgentPool, instance_name: str) -> bool:
 def _serialize_instance(
     inst: AgentInstance, pool: AgentPool,
     include_messages: bool = False, streaming: bool = False,
+    streaming_responses: Optional[List[Message]] = None,
 ) -> dict:
     """Serialize an AgentInstance for UI state display.
 
@@ -770,6 +779,9 @@ def _serialize_instance(
     Streaming optimisation: during active generation for large conversations (>30
     messages), only the last 3 are sent to avoid O(N²) serialisation on every
     ~150ms tick. Smaller conversations are sent in full.
+    
+    Streaming UI Content Update Fix: When streaming_responses is provided, append
+    partial LLM content after persisted messages with fingerprint-based dedup.
     """
     result = {
         'instance_name': inst.instance_name,
@@ -788,6 +800,9 @@ def _serialize_instance(
     # ── Serialise messages ───────────────────────────────────────────────
     with inst._compression_lock:
         msgs = list(inst.conversation)
+        # Read streaming_responses under compression lock for thread safety
+        # Use passed parameter if provided, otherwise read from instance (fallback for callers not passing it)
+        stream_responses = list(inst._streaming_responses) if streaming and streaming_responses is None and len(inst._streaming_responses) > 0 else streaming_responses
 
     if streaming and inst.is_active and len(msgs) > 30:
         # During active generation only send the tail (last 3 messages) for large
@@ -801,19 +816,55 @@ def _serialize_instance(
         serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
         result['is_partial'] = False
 
+    # ── Streaming UI Content Update Fix: Append partial LLM content ────────
+    if stream_responses and len(stream_responses) > 0:
+        # Build fingerprint set from existing serialized messages for dedup
+        existing_fingerprints = set()
+        for msg in serialized_msgs:
+            content = msg.get(CONTENT, '') or ''
+            reasoning = msg.get(REASONING_CONTENT, '') or ''
+            func_call = msg.get('function_call')
+            name = msg.get(NAME)
+            fingerprint = (content, reasoning, func_call, name)
+            if fingerprint != ('', '', None, None):
+                existing_fingerprints.add(fingerprint)
+        
+        # Append streaming responses that aren't already in serialized_msgs
+        for stream_msg in stream_responses:
+            stream_content = stream_msg.get(CONTENT, '') if isinstance(stream_msg, dict) else getattr(stream_msg, CONTENT, '') or ''
+            stream_reasoning = stream_msg.get(REASONING_CONTENT, '') if isinstance(stream_msg, dict) else getattr(stream_msg, REASONING_CONTENT, '') or ''
+            stream_func_call = stream_msg.get('function_call') if isinstance(stream_msg, dict) else getattr(stream_msg, 'function_call', None)
+            stream_name = stream_msg.get(NAME) if isinstance(stream_msg, dict) else getattr(stream_msg, NAME, None)
+            fingerprint = (stream_content, stream_reasoning, stream_func_call, stream_name)
+            
+            # Only append if not duplicate and has meaningful content
+            if fingerprint not in existing_fingerprints and fingerprint != ('', '', None, None):
+                serialized_msgs.append(serialize_message(stream_msg, len(serialized_msgs)))
+                existing_fingerprints.add(fingerprint)
+
     # ── Token stats (Fix #1: cached by conversation identity) ─────────────
     # Cache key: (message_count, id_of_last_message). During LLM streaming,
     # the conversation doesn't change — only partial streamed content changes.
     # So stats are only recalculated when a new message is appended.
-    cache_key = (len(msgs), id(msgs[-1]) if msgs else None)
+    
+    # Streaming UI Content Update Fix: Include streaming_responses length in cache key
+    # so that growing streaming content causes cache miss and fresh stats computation
+    stream_resp_len = len(stream_responses) if stream_responses else 0
+    cache_key = (len(msgs), id(msgs[-1]) if msgs else None, stream_resp_len)
+    
+    # Streaming UI Content Update Fix: Compute token stats from combined messages (conversation + streaming_responses)
+    all_msgs_for_stats = list(msgs)
+    if stream_responses:
+        all_msgs_for_stats.extend(stream_responses)
+    
     if cache_key not in _token_stats_cache:
-        active_msgs = pool.slice_history_for_llm(msgs) if msgs else msgs
+        active_msgs = pool.slice_history_for_llm(all_msgs_for_stats) if all_msgs_for_stats else all_msgs_for_stats
         try:
             from agent_cascade.utils.utils import get_history_stats
             stats = get_history_stats(active_msgs)
         except Exception as e:
             logger.debug(f"Token stats calculation failed for {inst.instance_name} (using estimate): {e}")
-            stats = {'tokens': len(msgs) * 4, 'words': 0}
+            stats = {'tokens': len(all_msgs_for_stats) * 4, 'words': 0}
         # BUG31 Fix #1: Evict oldest entry if cache is full (increased from 100 to 5000)
         if len(_token_stats_cache) >= _TOKEN_STATS_CACHE_MAXSIZE:
             oldest_key = next(iter(_token_stats_cache))

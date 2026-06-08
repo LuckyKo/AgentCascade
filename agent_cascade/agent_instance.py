@@ -66,6 +66,9 @@ class AgentInstance:
     # ── Per-instance LLM config override (Fix: avoid template mutation) ────
     _generate_cfg_override: Optional[dict] = field(default=None)  # Merged into generate_cfg at call time without mutating template
 
+    # ── Streaming State (Streaming UI Content Update Fix) ──────────────────
+    _streaming_responses: List[Message] = field(default_factory=list)  # Partial LLM content during streaming, updated every ~150ms
+
 
 @dataclass
 class CompressResult:

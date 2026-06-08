@@ -697,12 +697,31 @@ class ExecutionEngine:
         # keeping the latest accumulated result, then yield individual messages from it.
         try:
             last_output = None
+            # Streaming UI Content Update Fix: Track partial LLM content for UI updates every ~150ms
+            streaming_start_time = time.monotonic()
+            last_streaming_update_time = streaming_start_time
+            
             for output in self._execute_llm_call(instance, template, llm_messages, active_functions):
                 last_output = output  # keep latest accumulated response FIRST
+                
+                # Update _streaming_responses every ~150ms with deep copy of partial content
+                current_time = time.monotonic()
+                if current_time - last_streaming_update_time >= 0.15:
+                    # Only deep-copy when content actually changed (performance optimization)
+                    with instance._compression_lock:
+                        if not last_output or len(last_output) != len(instance._streaming_responses):
+                            instance._streaming_responses = copy.deepcopy(last_output)
+                            last_streaming_update_time = current_time
+                
                 # Check stop/halt mid-stream (after capturing the current result)
                 if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
                     break
 
+            # Final update before yielding results (under lock for thread safety)
+            with instance._compression_lock:
+                if last_output and len(last_output) != len(instance._streaming_responses):
+                    instance._streaming_responses = copy.deepcopy(last_output)
+            
             if not last_output or (isinstance(last_output, list) and len(last_output) == 0):
                 yield Message(role=ASSISTANT, content="[SYSTEM ERROR: Empty LLM response]")
             else:
@@ -817,6 +836,8 @@ class ExecutionEngine:
         llm_messages.extend(turn_output)
         with instance._compression_lock:
             instance.conversation.extend(turn_output)
+            # Streaming UI Content Update Fix: Clear _streaming_responses after Phase 4 commits messages
+            instance._streaming_responses = []
 
         # Fix #2: Invalidate token count cache — conversation length changed
         instance._last_token_count_conversation_length = -1  # Force cache miss on next call
