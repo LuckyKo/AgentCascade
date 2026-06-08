@@ -1695,33 +1695,51 @@ class ExecutionEngine:
         )
         self._create_completed = False  # Reset for this execution cycle
 
-        # Create the instance
+        # FIX #1: Check for existing inactive instance before creating new one
+        # This allows conversation history to be preserved when reusing agent instances
         now = time.monotonic()
-        inst = AgentInstance(
-            instance_name=instance_name,
-            agent_class=agent_class,
-            conversation=[],
-            is_active=False,
-            max_turns=None,  # Will be set below via settings propagation (P6)
-            parent_instance=caller,
-            created_at=now,
-            last_activity=now,
-            compression_summary=None,
-            latest_marker_index=-1,
-            _nest_depth=nest_depth,
-        )
-
-        # Fix #6: Warn if reusing an instance name that already exists with the same class
         existing = self.pool.instances.get(instance_name)
-        if existing is not None:
-            old_active = getattr(existing, 'is_active', False)
-            logger.warning(
-                f"[INSTANCE REUSE] '{instance_name}' ({agent_class}) is being reused. "
-                f"Previous instance was {'active' if old_active else 'inactive'} — conversation will be replaced."
+        is_reuse = False
+        
+        if existing is not None and not getattr(existing, 'is_active', False):
+            # Reuse existing inactive instance instead of creating new one
+            inst = existing
+            is_reuse = True
+            
+            # Update _nest_depth to reflect current call chain depth (Fix #1 improvement)
+            inst._nest_depth = nest_depth
+            
+            logger.debug(
+                f"[INSTANCE REUSE] '{instance_name}' ({agent_class}) reusing existing inactive instance. "
+                f"Conversation history will be preserved and extended."
             )
+        else:
+            # Create new instance (existing is None or still active)
+            inst = AgentInstance(
+                instance_name=instance_name,
+                agent_class=agent_class,
+                conversation=[],
+                is_active=False,
+                max_turns=None,  # Will be set below via settings propagation (P6)
+                parent_instance=caller,
+                created_at=now,
+                last_activity=now,
+                compression_summary=None,
+                latest_marker_index=-1,
+                _nest_depth=nest_depth,
+            )
+            
+            if existing is not None:
+                # Warn about overwriting an active instance
+                logger.warning(
+                    f"[INSTANCE REUSE] '{instance_name}' ({agent_class}) is being reused while still active. "
+                    f"Previous instance conversation will be replaced."
+                )
 
-        self.pool.instances[instance_name] = inst
-        logger.debug(f"[CALL_AGENT_DEBUG] _create_and_run_agent — instance registered in pool for {instance_name}")
+        # FIX #7: Only assign new instances to pool (reused instances already exist)
+        if not is_reuse:
+            self.pool.instances[instance_name] = inst
+            logger.debug(f"[CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for {instance_name}")
 
         # Build system message for new agent
         template = self.pool.templates.get(agent_class)
@@ -1746,6 +1764,33 @@ class ExecutionEngine:
 
         sys_msg = Message(role=SYSTEM, content="\n".join(lines))
 
+        # FIX #2, #3, #4, #5: For reused instances, preserve conversation and reset stale state
+        if is_reuse:
+            # Thread-safe update of instance state for reuse
+            with inst._compression_lock:
+                # FIX #3: Reset stale state fields to prepare for new task
+                inst.compression_summary = None
+                inst.latest_marker_index = -1
+                inst._generate_cfg_override = None
+                inst.max_turns = None
+                
+                # FIX #4: Clear is_terminated flag and invalidate token cache
+                inst.is_terminated = False
+                inst._cached_token_count = 0
+                inst._last_token_count_conversation_length = -1
+                
+                # FIX #2: Preserve & extend conversation
+                # Update system message in-place (first message is always system)
+                if inst.conversation and len(inst.conversation) > 0:
+                    # Update the existing system message with new template content
+                    inst.conversation[0] = sys_msg
+                else:
+                    # Fallback: prepend system message if conversation is empty
+                    inst.conversation.insert(0, sys_msg)
+                
+                # Get the preserved conversation (will be extended with task below)
+                conv = inst.conversation
+        
         # Build task message
         task_text = args.get('task', '')
         context_text = args.get('context', '')
@@ -1807,25 +1852,40 @@ class ExecutionEngine:
         else:
             task_msg = Message(role=USER, content=task_text)
 
-        # Build conversation: [system, task]
-        conv = [sys_msg, task_msg]
-        with inst._compression_lock:
-            inst.conversation = conv
-            # Invalidate token count cache — conversation replaced
-            inst._last_token_count_conversation_length = -1
+        # Build conversation: [system, task] for new instances, or append task for reused
+        if is_reuse:
+            # FIX #2: For reused instances, append task message to preserved conversation
+            # (conv already set above with system message updated in-place)
+            conv.append(task_msg)
+            
+            # FIX #6: Use update_history() for logger synchronization on reused instances
+            # This prevents duplicate log_message(task_msg) calls and properly syncs the logger
+            with inst._compression_lock:
+                try:
+                    log_inst = self.pool.get_logger(instance_name, agent_class)
+                    log_inst.update_history(conv)
+                except Exception as e:
+                    logger.debug(f"Logger sync via update_history for {instance_name} failed (non-critical): {e}")
+        else:
+            # Build conversation: [system, task] for new instances
+            conv = [sys_msg, task_msg]
+            with inst._compression_lock:
+                inst.conversation = conv
+                # Invalidate token count cache — conversation replaced
+                inst._last_token_count_conversation_length = -1
 
-            # Log initial messages to agent's JSONL file (P1 continuation)
-            try:
-                log_inst = self.pool.get_logger(instance_name, agent_class)
-                log_inst.log_message(sys_msg)
-                log_inst.log_message(task_msg)
-                # Sync internal tracking to prevent drift if logger instance differs later
-                log_inst.data["history"] = [
-                    log_inst._format_message(sys_msg),
-                    log_inst._format_message(task_msg),
-                ]
-            except Exception as e:
-                logger.debug(f"Logging initial messages for {instance_name} failed (non-critical): {e}")
+                # Log initial messages to agent's JSONL file (P1 continuation)
+                try:
+                    log_inst = self.pool.get_logger(instance_name, agent_class)
+                    log_inst.log_message(sys_msg)
+                    log_inst.log_message(task_msg)
+                    # Sync internal tracking to prevent drift if logger instance differs later
+                    log_inst.data["history"] = [
+                        log_inst._format_message(sys_msg),
+                        log_inst._format_message(task_msg),
+                    ]
+                except Exception as e:
+                    logger.debug(f"Logging initial messages for {instance_name} failed (non-critical): {e}")
 
         # P6+P3: Settings propagation from caller agent — merged under single lock scope
         # to prevent a race window where another thread reads partial state.
