@@ -70,8 +70,20 @@ class SystemInfo(BaseTool):
         # Max context detection
         max_context = "Unknown"
         if agent_obj:
-            if hasattr(agent_obj, '_get_max_tokens'):
-                max_context = agent_obj._get_max_tokens()
+            # Try to get instance from pool for _get_max_tokens method
+            instance = None
+            if hasattr(self, 'agent_pool') and self.agent_pool:
+                try:
+                    instance = self.agent_pool.get_instance(agent_name)
+                except Exception as e:
+                    logger.warning(f"Failed to retrieve instance '{agent_name}' from pool: {e}")
+            
+            # _get_max_tokens requires an instance argument - use defensive guards
+            if hasattr(agent_obj, '_get_max_tokens') and instance is not None:
+                try:
+                    max_context = agent_obj._get_max_tokens(instance)
+                except Exception as e:
+                    logger.warning(f"Failed to call _get_max_tokens for {agent_name}: {e}")
             elif hasattr(agent_obj, 'llm') and hasattr(agent_obj.llm, 'cfg'):
                 from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
                 cfg = agent_obj.llm.cfg

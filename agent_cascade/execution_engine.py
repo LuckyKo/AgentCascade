@@ -900,16 +900,17 @@ class ExecutionEngine:
 
         # ── Tool detection and execution ────────────────────────────────────
         used_any_tool = False
+        executed_tools = []  # Track which tools were actually executed (for orphan handling)
         for out in turn_output:
             use_tool, tool_name, tool_args, _ = self._detect_tool(out)
             if not use_tool:
                 continue
 
-            used_any_tool = True
-
-            # Stop/halt check BEFORE tool execution
+            # Stop/halt check BEFORE tool execution (check before setting used_any_tool)
             if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
                 break
+            
+            used_any_tool = True
 
             # Track tool success/failure — needed for function_id matching and frontend isToolFailure()
             _tool_success = True
@@ -1008,6 +1009,9 @@ class ExecutionEngine:
                 instance.conversation.append(fn_msg)
             # Fix #2: Invalidate token count cache — conversation mutated
             instance._last_token_count_conversation_length = -1
+            
+            # Track executed tool for orphan handling
+            executed_tools.append(tool_name)
 
             # Log the function result to JSONL (was missing)
             try:
@@ -1016,20 +1020,61 @@ class ExecutionEngine:
             except Exception:
                 pass  # Logging must never block tool execution
 
-            # ── Mid-tool urgent injection ───────────────────────────────────
-            urgent = self.pool.drain_queue(inst_name)
-            if urgent:
-                for text in urgent:
-                    if text.strip():
-                        async_msg = Message(role=USER, content=text)
-                        messages.append(async_msg)
-                        llm_messages.append(async_msg)
-                        response.append(async_msg)  # Stream urgent message to UI (was missing)
-                        with instance._compression_lock:
-                            instance.conversation.append(async_msg)
-                # Fix #2: Invalidate token count cache — conversation mutated by urgent injection
-                instance._last_token_count_conversation_length = -1
-                break  # Stop executing remaining tools
+        # ── Handle orphaned tool calls from early break ───────────────────────────────
+        # If halt/stop was detected mid-loop, remaining tools in turn_output don't have FUNCTION results.
+        # Add placeholder FUNCTION messages to prevent API Error 400 (orphaned tool_call_id's).
+        if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
+            executed_set = set(executed_tools)  # Convert to set for O(1) lookup
+            tools_processed = 0
+            for out in turn_output:
+                use_tool, tool_name, tool_args, _ = self._detect_tool(out)
+                if not use_tool:
+                    continue
+                
+                # Only add placeholder for tools that were NOT executed
+                if tool_name in executed_set:
+                    continue
+                
+                # Extract function_id from the assistant message that had the tool call
+                extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
+                
+                # Add placeholder FUNCTION result for unexecuted tool
+                fn_msg = Message(
+                    role=FUNCTION,
+                    name=tool_name,
+                    content=f"Tool execution skipped: instance {inst_name} was halted/stopped",
+                    extra={
+                        'function_id': extra_data.get('function_id', '1'),
+                        'tool_success': False,
+                    },
+                )
+                messages.append(fn_msg)
+                llm_messages.append(fn_msg)
+                response.append(fn_msg)  # Stream to UI
+                with instance._compression_lock:
+                    instance.conversation.append(fn_msg)
+                tools_processed += 1
+            
+            if tools_processed > 0:
+                logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
+            # Invalidate token count cache — conversation mutated
+            instance._last_token_count_conversation_length = -1
+
+        # ── Post-tool urgent injection ───────────────────────────────────
+        # Inject urgent messages AFTER all tools complete to avoid orphaned tool_call_id's
+        urgent = self.pool.drain_queue(inst_name)
+        if urgent:
+            for text in urgent:
+                if text.strip():
+                    async_msg = Message(role=USER, content=text)
+                    messages.append(async_msg)
+                    llm_messages.append(async_msg)
+                    response.append(async_msg)  # Stream urgent message to UI
+                    with instance._compression_lock:
+                        instance.conversation.append(async_msg)
+            # Invalidate token count cache — conversation mutated by urgent injection
+            instance._last_token_count_conversation_length = -1
+            return True  # Continue to next LLM call for urgent message processing
 
         return used_any_tool or is_truncated  # Continue loop if tool was used
 
