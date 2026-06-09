@@ -28,6 +28,10 @@ from enum import Enum
 from functools import lru_cache
 from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_HEURISTIC_MATCH_THRESHOLD
 from agent_cascade.log import logger
+from agent_cascade.tool_utils import (
+    MAX_SPILL_SIZE,  # Unified 50MB limit across all modules
+    generate_spillover_filename,  # Shared collision detection helper
+)
 
 
 class OperationType(Enum):
@@ -65,8 +69,7 @@ APPROVAL_TIMEOUT_SECONDS = 300  # 5 minutes
 SECURITY_ADVISOR_TIMEOUT_SECONDS = 180   # 3 minutes — gives slow models breathing room
 SECURITY_ADVISOR_WARNING_SECONDS = 120   # Warn at 2 minutes — agent gets a nudge via message queue
 
-# Maximum size for spill files (grep/shell output saved to disk). Prevents disk exhaustion.
-MAX_SPILL_SIZE = 50 * 1024 * 1024  # 50MB
+# Note: MAX_SPILL_SIZE is imported from tool_utils for consistency (50 * 1024 * 1024 bytes)
 
 
 # ─── Module-level cached helpers (P1-1, P3-1) ─────────────────────────────
@@ -1891,16 +1894,19 @@ class OperationManager:
                     # Save full result to spill file
                     log_dir = self.base_dir / 'logs' / 'spillover'
                     log_dir.mkdir(parents=True, exist_ok=True)
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
-                    spill_filename = f"{safe_agent}_shell_{timestamp}.txt"
+                    
+                    # Cap output to prevent disk exhaustion from massive shell output
+                    if len(output) > MAX_SPILL_SIZE:
+                        output_copy = output[:MAX_SPILL_SIZE] + "\n\n[SPILL FILE TRUNCATED — exceeded maximum size]"
+                    else:
+                        output_copy = output
+                    
+                    # Use shared generate_spillover_filename helper for collision detection with counter cap < 1000
+                    spill_filename = generate_spillover_filename(agent_name, 'shell', log_dir)
                     spill_path = log_dir / spill_filename
-
+                    
                     try:
-                        # Cap spill file to prevent disk exhaustion from massive shell output
-                        if len(output) > MAX_SPILL_SIZE:
-                            output = output[:MAX_SPILL_SIZE] + "\n\n[SPILL FILE TRUNCATED — exceeded maximum size]"
-                        spill_path.write_text(output, encoding='utf-8')
+                        spill_path.write_text(output_copy, encoding='utf-8')
                         try:
                             rel_spill = str(spill_path.relative_to(self.base_dir))
                         except ValueError:

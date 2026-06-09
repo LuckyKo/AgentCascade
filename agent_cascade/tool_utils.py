@@ -4,8 +4,98 @@ Import via: from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 """
 
 import copy
+import os
+import re
 import threading
+from pathlib import Path
 from typing import Any, Optional, Tuple
+
+# Maximum size for spillover files (50MB) - consistent across all modules
+MAX_SPILL_SIZE = 50 * 1024 * 1024  # 50MB
+
+# Thread-local storage for truncation state tracking
+_thread_locals = threading.local()
+
+
+def mark_tool_call_truncated(instance_name: str, tool_name: str):
+    """Mark that a tool call was truncated for the current thread.
+    
+    Replaces fragile string-match guards like '[TOOL RESPONSE TRUNCATED' in tool_result
+    with explicit thread-local state tracking for reliable truncation detection.
+    
+    Args:
+        instance_name: The agent instance name
+        tool_name: The tool that produced truncated output
+    """
+    if not hasattr(_thread_locals, 'truncated_calls'):
+        _thread_locals.truncated_calls = {}
+    key = f"{instance_name}:{tool_name}"
+    _thread_locals.truncated_calls[key] = True
+
+
+def was_tool_call_truncated(instance_name: str, tool_name: str) -> bool:
+    """Check if a tool call was truncated in the current thread.
+    
+    Args:
+        instance_name: The agent instance name
+        tool_name: The tool to check for truncation
+        
+    Returns:
+        True if the tool call was marked as truncated, False otherwise
+    """
+    if not hasattr(_thread_locals, 'truncated_calls'):
+        return False
+    key = f"{instance_name}:{tool_name}"
+    return _thread_locals.truncated_calls.get(key, False)
+
+
+def clear_truncation_state():
+    """Clear truncation state for the current thread.
+    
+    Call this at the start of each turn or when context is reset to prevent
+    stale truncation markers from affecting subsequent operations.
+    """
+    if hasattr(_thread_locals, 'truncated_calls'):
+        _thread_locals.truncated_calls = {}
+
+
+def generate_spillover_filename(instance_name: str, tool_name: str, base_dir: Path) -> str:
+    """Generate a unique spillover filename with collision detection.
+    
+    Creates filenames in the format: {safe_instance}_{safe_tool}_{timestamp}.txt
+    Handles collisions by appending a counter (_1, _2, etc.) up to 1000 attempts.
+    
+    Args:
+        instance_name: The agent instance name
+        tool_name: The tool name
+        base_dir: Directory to write spillover files
+        
+    Returns:
+        Unique filename string (not full path)
+        
+    Raises:
+        ValueError: If counter exceeds 1000 collisions
+    """
+    from datetime import datetime
+    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    safe_tool = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name)
+    safe_instance = re.sub(r'[^a-zA-Z0-9_-]', '_', instance_name)
+    
+    counter = 1
+    while counter < 1000:
+        if counter == 1:
+            spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}.txt"
+        else:
+            spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}_{counter}.txt"
+        
+        spill_path = base_dir / spill_filename
+        if not spill_path.exists():
+            return spill_filename
+        
+        counter += 1
+    
+    raise ValueError(f"Spillover filename collision exceeded 1000 attempts for {instance_name}/{tool_name}")
 
 
 def resolve_prev_arg_placeholders(

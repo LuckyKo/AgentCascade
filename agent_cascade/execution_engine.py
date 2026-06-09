@@ -25,6 +25,12 @@ from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
 )
 from agent_cascade.log import logger
+from agent_cascade.tool_utils import (
+    MAX_SPILL_SIZE,  # Use shared constant for consistency
+    mark_tool_call_truncated,
+    clear_truncation_state,
+    generate_spillover_filename,
+)
 # Import at module level for build_stream_update_from_pool (Minor #5 from review):
 # Python caches module imports in sys.modules, so this is not a performance concern.
 # Kept local to _create_and_run_agent only because execution_engine shouldn't have
@@ -32,9 +38,6 @@ from agent_cascade.log import logger
 from agent_cascade.utils.utils import extract_text_from_message
 
 from .agent_instance import AgentInstance, LoopDetectedError, AgentState
-
-# Maximum size for spillover files (tool output saved to disk). Prevents disk exhaustion.
-MAX_SPILL_SIZE = 50 * 1024 * 1024  # 50MB
 
 
 def _get_active_functions_from_template(template, instance=None) -> list:
@@ -301,6 +304,10 @@ class ExecutionEngine:
         )
         instance.is_active = True  # Mark active before execution starts
         self._current_instance = instance  # Fix #2: set for token count cache lookups
+        
+        # Clear truncation state at the start of each agent turn to prevent stale markers
+        clear_truncation_state()
+        
         try:
             # ── Phase 1: Setup ─────────────────────────────────────────────
             messages, llm_messages, response = self._setup_turn(instance)
@@ -2834,6 +2841,9 @@ class ExecutionEngine:
 
             truncated = tool_result[:target_tokens * 3]
 
+            # Mark this tool call as truncated for thread-local state tracking
+            mark_tool_call_truncated(instance_name, tool_name)
+
             # Build truncation notice with spillover path — matches format used by
             # operation_manager.py and code_interpreter.py across the unified branch
             if spill_rel:
@@ -2855,6 +2865,8 @@ class ExecutionEngine:
             # Fallback: just truncate to a reasonable size
             if len(tool_result) > 8000:
                 spill_rel = self._write_spillover_file(tool_result, tool_name, instance_name)
+                # Mark as truncated in fallback path too
+                mark_tool_call_truncated(instance_name, tool_name)
                 if spill_rel:
                     return (
                         f"{tool_result[:8000]}\n\n[TOOL RESPONSE TRUNCATED — fallback path. "
@@ -2891,19 +2903,9 @@ class ExecutionEngine:
             if len(tool_result) > MAX_SPILL_SIZE:
                 tool_result = tool_result[:MAX_SPILL_SIZE] + "\n\n[SPILL FILE TRUNCATED — exceeded maximum size]"
 
-            # Use microsecond-precision timestamp to reduce collision risk
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-            safe_tool = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name)
-            safe_instance = re.sub(r'[^a-zA-Z0-9_-]', '_', instance_name)
-            spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}.txt"
+            # Use generate_spillover_filename helper for collision detection with counter cap < 1000
+            spill_filename = generate_spillover_filename(instance_name, tool_name, log_dir)
             spill_path = log_dir / spill_filename
-
-            # Duplicate filename detection — append counter if file already exists
-            counter = 1
-            while spill_path.exists():
-                spill_filename = f"{safe_instance}_{safe_tool}_{timestamp}_{counter}.txt"
-                spill_path = log_dir / spill_filename
-                counter += 1
 
             spill_path.write_text(tool_result, encoding='utf-8')
 
