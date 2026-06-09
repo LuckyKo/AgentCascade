@@ -853,22 +853,22 @@ def _serialize_instance(
         for msg in serialized_msgs:
             content = msg.get(CONTENT, '') or ''
             reasoning = msg.get(REASONING_CONTENT, '') or ''
-            func_call = msg.get('function_call')
+            func_call = str(msg.get('function_call'))
             name = msg.get(NAME)
             fingerprint = (content, reasoning, func_call, name)
-            if fingerprint != ('', '', None, None):
+            if fingerprint != ('', '', 'None', None):
                 existing_fingerprints.add(fingerprint)
         
         # Append streaming responses that aren't already in serialized_msgs
         for stream_msg in stream_responses:
             stream_content = stream_msg.get(CONTENT, '') if isinstance(stream_msg, dict) else getattr(stream_msg, CONTENT, '') or ''
             stream_reasoning = stream_msg.get(REASONING_CONTENT, '') if isinstance(stream_msg, dict) else getattr(stream_msg, REASONING_CONTENT, '') or ''
-            stream_func_call = stream_msg.get('function_call') if isinstance(stream_msg, dict) else getattr(stream_msg, 'function_call', None)
+            stream_func_call = str(stream_msg.get('function_call') if isinstance(stream_msg, dict) else getattr(stream_msg, 'function_call', None))
             stream_name = stream_msg.get(NAME) if isinstance(stream_msg, dict) else getattr(stream_msg, NAME, None)
             fingerprint = (stream_content, stream_reasoning, stream_func_call, stream_name)
             
             # Only append if not duplicate and has meaningful content
-            if fingerprint not in existing_fingerprints and fingerprint != ('', '', None, None):
+            if fingerprint not in existing_fingerprints and fingerprint != ('', '', 'None', None):
                 serialized_msgs.append(serialize_message(stream_msg, len(serialized_msgs)))
                 existing_fingerprints.add(fingerprint)
 
