@@ -786,7 +786,24 @@ class ExecutionEngine:
                         if isinstance(c, str) and '<context_summary>' in c:
                             instance.latest_marker_index = idx
 
-                    # Item 10: Validate message pool after forced compression
+                    # Inject system notification as a USER message into the pool so the agent sees it.
+                    # This ensures the notification persists across turn loop iterations and is visible
+                    # to the LLM on the next call (not just appended to local llm_messages which gets lost).
+                    notification_text = (
+                        f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%. "
+                        f"Forced compression applied. Continue your work — context has been preserved.]"
+                    )
+                    notification_msg = Message(role=USER, content=notification_text)
+                    with instance._compression_lock:
+                        instance.conversation.append(notification_msg)
+                    messages.append(notification_msg)
+                    llm_messages.append(notification_msg)
+                    logger.info(f"Compression notification injected into conversation pool for '{inst_name}'")
+
+                    # Re-fetch conv after notification append so validation includes the notification message
+                    conv = self.pool.get_conversation(inst_name)
+
+                    # Item 10: Validate message pool after forced compression (now includes notification)
                     if not validate_message_pool(conv, inst_name):
                         logger.error(f"[MSG POOL VALIDATION] Pool invalid after forced compression for '{inst_name}'. Attempting recovery from log...")
                         # Recovery: reload from the logger's history (which is unaffected)
@@ -821,13 +838,10 @@ class ExecutionEngine:
                         log_inst.update_history(conv)
                     except Exception as e:
                         logger.error(f"Logger sync after forced compression FAILED for '{inst_name}': {e}. "
-                                     f"Pool may desync — manual intervention required.")
-
-                notification = (
-                    f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%. "
-                    f"Forced compression applied.]"
-                )
-                self._append_system_notification(llm_messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
+                                                          f"Pool may desync — manual intervention required. "
+                                                          f"Note: Compression notification was injected into instance.conversation "
+                                                          f"but not synced to logger history.")
+                    
             else:  # Compression failed or returned error
                 logger.error(f"Forced compression failed for {inst_name}: {result.error}")
                 notification = (
