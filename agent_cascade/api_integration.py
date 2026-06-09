@@ -470,6 +470,9 @@ def build_stream_update_from_pool(
     current_version = (len(conv_snapshot), id(conv_snapshot[-1]) if conv_snapshot else None, len(stream_resp_snapshot) if stream_resp_snapshot else 0)
     cached_stats = _stream_token_stats_cache.get(instance_name)
     
+    # Feature Plan #023 Fix: Import get_history_stats before conditional to ensure availability in all branches
+    from agent_cascade.utils.utils import get_history_stats
+    
     if cached_stats is not None and current_version == _last_stream_versions.get(instance_name):
         # Conversation unchanged — reuse previously computed token stats
         h_stats, r_stats = cached_stats
@@ -481,7 +484,6 @@ def build_stream_update_from_pool(
 
         # Calculate token stats
         try:
-            from agent_cascade.utils.utils import get_history_stats
             h_stats = get_history_stats(active_h)
             r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
         except Exception as e:
