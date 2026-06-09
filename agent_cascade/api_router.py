@@ -250,6 +250,11 @@ class APIRouter:
         # agent lifecycle — prevents interleaving of LLM calls between agents.
         self.scheduler = EndpointScheduler()
 
+        # Track the last successfully used endpoint config for automatic recovery.
+        # When an agent's configured endpoints become unavailable, this provides
+        # a validated fallback that previously succeeded (Tier 2 in fallback chain).
+        self._last_successful_endpoint_cfg: Optional[Dict[str, Any]] = None
+
         # Persistence path
         if config_dir:
             self._config_dir = Path(config_dir)
@@ -410,8 +415,9 @@ class APIRouter:
     def get_endpoint_chain(self, agent_type: str) -> List[dict]:
         """
         Returns an ordered list of LLM configs to try for the given agent type:
-          1. Agent-specific endpoints (priority order, enabled only)
-          2. General Settings default (always last)
+          1. Agent-specific endpoints (priority order, enabled only) — Tier 1
+          2. Last successful endpoint (if available and validated) — Tier 2
+          3. General Settings default (always last) — Tier 3
         """
         # Read general_limit inside lock scope for thread safety (same pattern as get_effective_max_tokens)
         general_limit = 0
@@ -436,22 +442,25 @@ class APIRouter:
                     
                     configs.append(cfg)
 
-        # 2. If no agent-specific endpoints found, try orchestrator's endpoints as fallback (Bug 40)
-        #    This ensures agents like Security inherit the caller's API configuration
-        if not configs and 'orchestrator' in self.agent_priorities:
-            with self._lock:
-                for eid in self.agent_priorities.get('orchestrator', []):
-                    ep = self.endpoints.get(eid)
-                    if ep and ep.enabled:
-                        cfg = ep.to_llm_cfg()
-                        # Apply MIN logic: min(endpoint_limit, general_limit)
+            # 2. If no agent-specific endpoints found, try the last successful endpoint (Tier 2)
+            #    This provides automatic recovery when an agent's configured endpoints become unavailable.
+            #    Kept inside lock to prevent TOCTOU race between condition check and data access.
+            if not configs and self._last_successful_endpoint_cfg is not None:
+                last_success_cfg = self._last_successful_endpoint_cfg
+                # Validate that the last successful endpoint still exists and is enabled
+                api_base = last_success_cfg.get('api_base') or last_success_cfg.get('model_server', '')
+                for ep in self.endpoints.values():
+                    if ep.api_base == api_base and ep.enabled:
+                        # Use the stored config but ensure it has proper token limits
+                        cfg = copy.deepcopy(last_success_cfg)
                         ep_limit = ep.max_input_tokens
                         if general_limit > 0:
                             if ep_limit <= 0 or ep_limit > general_limit:
                                 cfg['max_input_tokens'] = general_limit
                         configs.append(cfg)
+                        break
 
-        # 3. Always append the default as last resort
+        # 3. Always append the default as last resort (Tier 3)
         configs.append(copy.deepcopy(self.default_llm_cfg))
         return configs
 
@@ -571,6 +580,12 @@ class APIRouter:
                     )
                     
                     result = execute_with_sem(current_agent_name)
+                    
+                    # Track the last successful endpoint config for automatic recovery.
+                    # Stored only after complete success (including all retries), not during retries.
+                    # This enables Tier 2 fallback when agent-specific endpoints become unavailable.
+                    with self._lock:
+                        self._last_successful_endpoint_cfg = copy.deepcopy(llm_cfg)
                     
                     # Generator errors are already detected inside execute_with_sem (first-chunk pull).
                     # Pass the generator through directly — no double-wrapping needed.
