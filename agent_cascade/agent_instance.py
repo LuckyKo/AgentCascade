@@ -95,6 +95,10 @@ class AgentInstance:
     _last_actual_token_count: int = field(default=0)             # Actual token count from LLM API response (ground truth)
     _allocated_max_input_tokens: int = field(default=0)          # Max input tokens allocated for the last LLM call
 
+    # ── Loop Cooldown for Forced Compression (Feature 018) ─────────────────
+    _last_force_compress_time: float = field(default=0.0)        # Monotonic timestamp of last forced compression attempt
+    _force_compress_count: int = field(default=0)                # Number of forced compressions in current session
+
     # ── Nesting Depth (Fix: prevent infinite nesting) ──────────────────────
     _nest_depth: int = field(default=0)                           # Depth in the agent call chain (0 = root)
 
@@ -163,6 +167,8 @@ class PoolSettings:
     compression_force_threshold: float = 95.0 # Force compress at X% usage
     compression_warning_threshold: float = 85.0  # Warn at X% usage
     compression_timeout: float = 120.0        # Max seconds for compression to complete
+    compression_force_cooldown: float = 2.0   # Minimum seconds between forced compressions (prevent thrashing)
+    compression_max_attempts: int = 3         # Max forced compressions before considering overfeeding
     security_check_timeout: float = 120.0     # Max seconds for security advisor
     max_auto_rollbacks: int = 3               # Max loop recovery retries
     max_nesting_depth: int = 10               # Max depth of nested agent calls (prevent infinite chains)

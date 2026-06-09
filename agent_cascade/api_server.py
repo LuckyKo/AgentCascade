@@ -994,6 +994,9 @@ def create_app(agents, agent_pool, config=None):
                     inst.conversation.clear()
                     # Invalidate token count cache — conversation cleared
                     inst._last_token_count_conversation_length = -1
+                    # Reset compression tracking fields (Feature 018)
+                    inst._last_force_compress_time = 0.0
+                    inst._force_compress_count = 0
                 # Create a new logger session so messages go to a new JSONL file (Fix: New Session was appending to old logs)
                 try:
                     agent_pool._logger.create_new_session(
@@ -1664,6 +1667,9 @@ def create_app(agents, agent_pool, config=None):
                                 inst.conversation.clear()
                                 # Invalidate token count cache — conversation cleared
                                 inst._last_token_count_conversation_length = -1
+                                # Reset compression tracking fields (Feature 018)
+                                inst._last_force_compress_time = 0.0
+                                inst._force_compress_count = 0
                             # Create a new logger session so messages go to a new JSONL file (Fix: New Session was appending to old logs)
                             try:
                                 agent_pool._logger.create_new_session(

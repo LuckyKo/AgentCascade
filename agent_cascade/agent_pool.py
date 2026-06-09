@@ -542,8 +542,11 @@ class AgentPool:
             for inst in self.instances.values():
                 with inst._compression_lock:
                     inst.conversation.clear()
-                # Fix #2: Invalidate token count cache — conversation was cleared
-                inst._last_token_count_conversation_length = -1
+                    # Fix #2: Invalidate token count cache — conversation was cleared
+                    inst._last_token_count_conversation_length = -1
+                    # Reset compression tracking fields (Feature 018)
+                    inst._last_force_compress_time = 0.0
+                    inst._force_compress_count = 0
         # Clean up WebSocket references to prevent stale queue/loop usage in new sessions
         self._ws_send_queue = None
         self._ws_loop = None
@@ -610,6 +613,9 @@ class AgentPool:
                 inst.conversation.clear()
                 # Invalidate token count cache — conversation cleared
                 inst._last_token_count_conversation_length = -1
+                # Reset compression tracking fields (Feature 018)
+                inst._last_force_compress_time = 0.0
+                inst._force_compress_count = 0
 
     def capture_snapshots(self) -> Dict[str, int]:
         """Capture current conversation lengths for all instances."""

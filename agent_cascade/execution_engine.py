@@ -755,6 +755,44 @@ class ExecutionEngine:
         """Force compress when token usage exceeds critical threshold. Returns True (continue loop)."""
         inst_name = instance.instance_name
 
+        # ── Loop Cooldown Check (Feature 018) ─────────────────────────────────
+        # Thread-safe: acquire lock before reading/writing compression tracking fields
+        with instance._compression_lock:
+            now = time.monotonic()
+            cooldown = getattr(self.pool.settings, 'compression_force_cooldown', 2.0)  # Default 2.0 seconds
+            elapsed = now - instance._last_force_compress_time
+            
+            if elapsed < cooldown:
+                logger.warning(
+                    f"Forced compression cooldown active for {inst_name}: "
+                    f"{elapsed:.1f}s / {cooldown:.1f}s — skipping this cycle"
+                )
+                # Inject a warning so the agent knows context is still tight
+                current_tokens = self._count_history_tokens(messages, instance)
+                max_tokens = self._get_max_tokens(instance)
+                self._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens)
+                return True  # Continue loop without compressing
+            
+            # Mark this compression attempt (under lock for thread safety)
+            instance._last_force_compress_time = now
+            instance._force_compress_count += 1
+
+        # ── Overfeeding Detection (Feature 018) ───────────────────────────────
+        max_attempts = getattr(self.pool.settings, 'compression_max_attempts', 3)
+        if instance._force_compress_count >= max_attempts:
+            logger.error(
+                f"Overfeeding detected for {inst_name}: "
+                f"{instance._force_compress_count} forced compressions exceeded limit of {max_attempts}. "
+                f"Context keeps filling faster than compression can reduce it. Terminating agent."
+            )
+            notification = (
+                f"[SYSTEM NOTIFICATION: Overfeeding — {instance._force_compress_count} compressions without relief. Terminating.]"
+            )
+            self._append_system_notification(llm_messages, "[SYSTEM NOTIFICATION: Overfeeding", notification)
+            # Halt this instance to prevent further execution with growing context
+            self.pool.halt_instance(inst_name)
+            return True  # Continue loop so halt takes effect
+
         # Halt other agents (exempt target, Compressor, and root agent)
         exempt = [inst_name, 'Compressor']
         if instance.parent_instance:
@@ -764,7 +802,7 @@ class ExecutionEngine:
         try:
             logger.info(
                 f"Context usage at {usage_pct:.1f}% for {inst_name} — "
-                f"forcing compression."
+                f"forcing compression (attempt #{instance._force_compress_count})."
             )
 
             from agent_cascade.compression.core import compress_context as _compress
