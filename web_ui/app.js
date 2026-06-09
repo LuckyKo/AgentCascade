@@ -2811,6 +2811,30 @@ function estimateTokens(text) {
   return Math.ceil(cleanedText.length / 4.86) + imageTokens;
 }
 
+/**
+ * Format token count with K/M suffixes for compact display.
+ * @param {number} count - Token count to format
+ * @returns {string} Formatted string (e.g., "1K", "1.5K", "2.3M")
+ */
+function formatTokenCount(count) {
+  // Defensive: handle negative or NaN values
+  if (count < 0 || isNaN(count)) count = 0;
+  
+  if (count >= 1000000) {
+    return (count / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+  } else if (count >= 1000) {
+    return (count / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+  }
+  return String(count);
+}
+
+/**
+ * Update the context bar fill and numeric counter display for an agent tab.
+ * @param {HTMLElement} barEl - The .context-bar-fill element to update
+ * @param {Array} msgs - Message array (unused but kept for API compatibility)
+ * @param {number} overrideTokens - Token count to use, or falls back to cached value
+ * @param {number} overrideMax - Max token context limit from backend
+ */
 function updateContextBar(barEl, msgs, overrideTokens, overrideMax) {
   if (!barEl) return;
 
@@ -2822,6 +2846,8 @@ function updateContextBar(barEl, msgs, overrideTokens, overrideMax) {
 
   const pct = Math.min(100, Math.max(0, (tokens / maxContext) * 100));
   barEl.style.width = pct + '%';
+  
+  // Update tooltip with full numeric values
   barEl.title = `${tokens} / ${maxContext} tokens`;
 
   if (pct > 90) {
@@ -2830,6 +2856,21 @@ function updateContextBar(barEl, msgs, overrideTokens, overrideMax) {
     barEl.className = 'context-bar-fill warning';
   } else {
     barEl.className = 'context-bar-fill';
+  }
+
+  // Update or create the numeric counter display on the right side of the context bar
+  const contextBarContainer = barEl.parentElement;
+  if (contextBarContainer) {
+    let counterEl = contextBarContainer.querySelector('.context-bar-counter');
+    if (!counterEl) {
+      counterEl = document.createElement('span');
+      counterEl.className = 'context-bar-counter';
+      contextBarContainer.appendChild(counterEl);
+    }
+    // Display percentage: show at least 1% for any non-zero token usage
+    const pctDisplay = Math.round(pct) || (tokens > 0 ? 1 : 0);
+    // Display: "used / max (percentage%)" with formatted token counts
+    counterEl.textContent = `${formatTokenCount(tokens)} / ${formatTokenCount(maxContext)} (${pctDisplay}%)`;
   }
 }
 
