@@ -71,3 +71,9 @@ temp/
 
 # Logs
 logs/ 
+
+# API config (contains secrets)
+config/api_endpoints.json
+
+# Agent lessons
+.agent_lessons/ 
