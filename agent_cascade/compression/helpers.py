@@ -5,7 +5,8 @@ from agent_cascade.prompts.dna import (
     COMPRESSION_BASELINE_TEMPLATE,
     COMPRESSION_NOTICE_TEMPLATE,
 )
-from agent_cascade.llm.schema import USER, Message
+from agent_cascade.llm.schema import USER, ASSISTANT, FUNCTION, Message
+from agent_cascade.utils.utils import extract_text_from_message
 
 
 def compute_discard_count(active_set, fraction, force):
@@ -84,3 +85,54 @@ def rebuild_working_set(
     messages_list.clear()
     messages_list.extend(copy.deepcopy(compressed))
     # deepcopy ensures callers don't accidentally mutate pool state through their references
+
+
+def extract_instance_output(messages: list[Any], instance_name: str) -> str:
+    """
+    Extract text output from a sub-agent's conversation messages.
+
+    Only includes text generated AFTER the last tool call ended — i.e., the
+    agent's final summary/response that should be returned to the caller.
+
+    Args:
+        messages: List of Message objects or dicts (mixed types).
+        instance_name: The agent instance name (used in fallback warnings).
+
+    Returns:
+        The extracted text, or a warning message if no output was found.
+    """
+
+    # Find the last tool-call (function) message index
+    last_tool_idx = -1
+    for i, msg in enumerate(messages):
+        if isinstance(msg, dict):
+            role_check = msg.get('role') == FUNCTION or msg.get('function_call')
+        else:
+            role_check = getattr(msg, 'role', None) == FUNCTION or getattr(msg, 'function_call', None)
+
+        if role_check:
+            last_tool_idx = i
+
+    # Only look at messages after the last tool call
+    relevant_msgs = messages[last_tool_idx + 1:] if last_tool_idx != -1 else messages
+
+    collected_text = []
+    for msg in relevant_msgs:
+        if isinstance(msg, dict):
+            msg_role = msg.get('role', '')
+        else:
+            msg_role = getattr(msg, 'role', '')
+
+        if msg_role == ASSISTANT:
+            text = extract_text_from_message(msg, add_upload_info=False)
+            if text:
+                collected_text.append(text)
+
+    result_str = "\n\n".join(collected_text).strip()
+
+    if not result_str:
+        if last_tool_idx != -1:
+            return f"WARNING: Sub-agent {instance_name} performed tool calls but provided no final summary."
+        return f"Sub-agent {instance_name} finished but provided no text output."
+
+    return result_str

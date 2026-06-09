@@ -97,13 +97,18 @@ class QwenVLChatAtOAI(TextChatAtOAI):
                 content = msg.get('content')
                 if content is None:
                     continue
-                for item in content:
-                    if item.get('image_url', {}).get('url', '').startswith('data:'):
-                        item['image_url']['url'] = item['image_url']['url'][:64] + '...'
-                    if item.get('video_url', {}).get('url', '').startswith('data:'):
-                        item['video_url']['url'] = item['video_url']['url'][:64] + '...'
-                    if item.get('input_audio', {}).get('data', '').startswith('data:'):
-                        item['input_audio']['data'] = item['input_audio']['data'][:64] + '...'
+                # Only process content if it's a list (not a string)
+                if isinstance(content, list):
+                    for item in content:
+                        # Skip items that aren't dicts (e.g., if content was a string)
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get('image_url', {}).get('url', '').startswith('data:'):
+                            item['image_url']['url'] = item['image_url']['url'][:64] + '...'
+                        if item.get('video_url', {}).get('url', '').startswith('data:'):
+                            item['video_url']['url'] = item['video_url']['url'][:64] + '...'
+                        if item.get('input_audio', {}).get('data', '').startswith('data:'):
+                            item['input_audio']['data'] = item['input_audio']['data'][:64] + '...'
 
             logger.debug(f'LLM Input: \n{pformat(lite_messages, indent=2)}')
 

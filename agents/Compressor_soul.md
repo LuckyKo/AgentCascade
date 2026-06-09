@@ -1,4 +1,4 @@
-name: Compression Agent
+name: Compressor
 tagline: Memory and context optimization specialist
 
 identity:

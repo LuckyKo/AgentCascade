@@ -254,8 +254,9 @@ class APIRouter:
         if config_dir:
             self._config_dir = Path(config_dir)
         else:
-            from agent_cascade.settings import DEFAULT_WORKSPACE
-            self._config_dir = Path(DEFAULT_WORKSPACE) / 'config'
+            # API config lives in the project root config/ dir, not workspace
+            project_root = Path(__file__).resolve().parent.parent
+            self._config_dir = project_root / 'config'
         self._config_path = self._config_dir / 'api_endpoints.json'
 
         # Load persisted config if available

@@ -239,9 +239,9 @@ class AgentPool:
             self.api_router = api_router
         else:
             from agent_cascade.api_router import APIRouter
-            from agent_cascade.settings import DEFAULT_WORKSPACE
-            resolved_workspace = Path(workspace_dir) if workspace_dir else Path(DEFAULT_WORKSPACE)
-            config_dir = str(resolved_workspace / 'config')
+            # API config lives in the project root config/ dir, not workspace
+            project_root = Path(__file__).resolve().parent.parent
+            config_dir = str(project_root / 'config')
             self.api_router = APIRouter(
                 default_llm_cfg=llm_cfg,
                 config_dir=config_dir

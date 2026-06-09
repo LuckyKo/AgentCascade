@@ -130,14 +130,9 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
     from agent_cascade.tools.web_extractor import WebExtractor
     agent.function_map['web_extractor'] = WebExtractor(cfg={'work_dir': DEFAULT_WORKSPACE})
 
-    from agent_cascade.tools.storage import Storage
-    agent.function_map['storage'] = Storage()
-
-    from agent_cascade.tools.retrieval import Retrieval
-    agent.function_map['retrieval'] = Retrieval(cfg={'work_dir': DEFAULT_WORKSPACE})
-
-    from agent_cascade.tools.extract_doc_vocabulary import ExtractDocVocabulary
-    agent.function_map['extract_doc_vocabulary'] = ExtractDocVocabulary(cfg={'work_dir': DEFAULT_WORKSPACE})
+    # NOTE: storage, retrieval, extract_doc_vocabulary are intentionally NOT registered.
+    # They remain available in TOOL_REGISTRY (needed by Memory/RAG internally) but
+    # are hidden from agents so they never appear as callable tools.
     
     # ── Calculation Tool ──
     agent.function_map['calculate'] = Calculate()

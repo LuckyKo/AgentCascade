@@ -40,10 +40,6 @@ from agent_cascade.agent_factory import load_orchestrator_agent
 from agent_cascade.tools import (
     image_gen,
     web_extractor,
-    storage,
-    simple_doc_parser,
-    doc_parser,
-    extract_doc_vocabulary,
     code_interpreter,
     python_compiler,
 )
@@ -105,24 +101,22 @@ DEFAULT_TOOLS = {
     'orchestrator': [
         'call_agent', 'dismiss_agent', 'list_agents',
         'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'move_file', 'read_file', 'view_image', 'list_dir', 'grep',
-        'ddg_search', 'web_extractor', 'storage', 'retrieval', 'system_info'
+        'ddg_search', 'web_extractor', 'system_info'
     ],
     'coder': [
         'call_agent', 'list_agents',
         'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'move_file', 'list_dir', 'grep', 'code_interpreter', 'shell_cmd',
-        'ddg_search', 'web_extractor', 'storage'
+        'ddg_search', 'web_extractor'
     ],
     'researcher': [
         'call_agent', 'list_agents',
         'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'move_file', 'list_dir', 'grep', 'code_interpreter',
-        'ddg_search', 'web_extractor', 'storage', 'retrieval',
-        'doc_parser', 'simple_doc_parser', 'extract_doc_vocabulary'
+        'ddg_search', 'web_extractor'
     ],
     'writer': [
         'call_agent', 'list_agents',
         'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'list_dir',
-        'ddg_search', 'web_extractor', 'storage',
-        'doc_parser', 'simple_doc_parser'
+        'ddg_search', 'web_extractor'
     ],
     'reviewer': [
         'call_agent', 'list_agents',
@@ -172,13 +166,9 @@ def initialize_agents():
     except Exception:
         pass
     shared_tools['web_extractor'] = web_extractor.WebExtractor(cfg={'work_dir': DEFAULT_WORKSPACE})
-    shared_tools['storage'] = storage.Storage()
     
-    from agent_cascade.tools import retrieval
-    shared_tools['retrieval'] = retrieval.Retrieval(cfg={'work_dir': DEFAULT_WORKSPACE})
-    shared_tools['simple_doc_parser'] = simple_doc_parser.SimpleDocParser(cfg={'work_dir': DEFAULT_WORKSPACE})
-    shared_tools['doc_parser'] = doc_parser.DocParser(cfg={'work_dir': DEFAULT_WORKSPACE})
-    shared_tools['extract_doc_vocabulary'] = extract_doc_vocabulary.ExtractDocVocabulary(cfg={'work_dir': DEFAULT_WORKSPACE})
+    # NOTE: storage, retrieval, simple_doc_parser, doc_parser, extract_doc_vocabulary are intentionally NOT added.
+    # They remain in TOOL_REGISTRY (needed by Memory/RAG internally) but are hidden from agents.
     
     try:
         shared_tools['code_interpreter'] = code_interpreter.CodeInterpreter(cfg={'work_dir': DEFAULT_WORKSPACE})

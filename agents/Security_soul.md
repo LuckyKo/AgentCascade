@@ -1,4 +1,4 @@
-name: Security Advisor
+name: Security
 tagline: Strict Security Expert
 
 identity:

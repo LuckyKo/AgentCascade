@@ -49,38 +49,42 @@ class AgentInstance:
     """
     The canonical representation of any agent — main or sub.
 
-    Every field is mandatory (except where the design explicitly allows None).
-    There are no optional fields that distinguish "main" from "sub".
+    Required fields (no default): instance_name, agent_class, conversation, 
+        created_at, last_activity, latest_marker_index.
+
+    Optional fields (has defaults): is_active (default False), state (default RUNNING),
+        and all remaining fields for compression, token tracking, nesting, etc.
+
     The instance_name uniquely identifies an agent in the pool.
 
     Design principle: AgentInstance is primarily DATA. All orchestration logic
     lives in ExecutionEngine, not here. This dataclass just holds state.
     """
 
-    # ── Identity ──────────────────────────────────────────────────────
-    instance_name: str                    # Unique identifier (e.g., "Maine", "Coder1", "Researcher3")
+    # ── Identity (no defaults) ─────────────────────────────────────────
+    instance_name: str                    # Unique identifier (e.g., "Main", "Coder1", "Researcher3")
     agent_class: str                     # Template class name (e.g., "Orchestrator", "coder", "researcher")
 
-    # ── Conversation State ────────────────────────────────────────────
+    # ── Conversation State (no defaults) ────────────────────────────────
     conversation: List[Message]          # Full cumulative history for this instance
 
-    # ── Execution State ───────────────────────────────────────────────
-    is_active: bool                      # Currently executing a run() turn
-    state: AgentState = field(default=AgentState.RUNNING)  # Current lifecycle state (state machine)
-    _state_lock: threading.RLock = field(default_factory=threading.RLock)  # Lock for state transitions
-    
-    # SLEEPING state tracking fields (for async tools)
-    sleeping_since: Optional[float] = None  # time.monotonic() when entered SLEEPING state
-    _last_wakeup_log: float = field(default=0.0)  # Last time wakeup message was logged
-
-    # ── Metadata ──────────────────────────────────────────────────────
+    # ── Metadata (no defaults) ──────────────────────────────────────────
     created_at: float                    # time.monotonic() timestamp
     last_activity: float                 # time.monotonic() timestamp of last message
 
-    # ── Compression State ─────────────────────────────────────────────
+    # ── Compression State (no defaults) ─────────────────────────────────
     latest_marker_index: int             # Index in conversation where latest summary marker was inserted
 
-    # ── Fields with defaults (must come after non-default fields) ──────
+    # ── Execution State (with defaults) ─────────────────────────────────
+    is_active: bool = False              # Currently executing a run() turn (default: inactive)
+    state: AgentState = field(default=AgentState.RUNNING)  # Current lifecycle state (state machine)
+    _state_lock: threading.RLock = field(default_factory=threading.RLock)  # Lock for state transitions
+    
+    # SLEEPING state tracking fields (for async tools) - part of Execution State
+    sleeping_since: Optional[float] = None  # time.monotonic() when entered SLEEPING state
+    _last_wakeup_log: float = field(default=0.0)  # Last time wakeup message was logged
+
+    # ── Remaining Fields with defaults ──────────────────────────────────
     is_terminated: bool = False          # Set when terminate_instance() is called on this instance (Fix Bug41)
     max_turns: Optional[int] = None      # Per-instance turn limit (None = use default 50)
     parent_instance: Optional[str] = None  # Who called this agent (None for root/main)
