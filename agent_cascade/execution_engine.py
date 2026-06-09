@@ -774,7 +774,6 @@ class ExecutionEngine:
                 fraction=0.5,
                 mode='auto',
                 force=True,
-                justification=f'CRITICAL THRESHOLD ({usage_pct:.1f}%)',
             )
 
             if result.success:
@@ -1791,7 +1790,6 @@ class ExecutionEngine:
             mode=mode,
             summary_text=summary_text,
             force=force,
-            justification=args.get('justification', 'Agent-triggered compression'),
         )
 
         if result.success:
@@ -1872,7 +1870,6 @@ class ExecutionEngine:
         try:
             preview_params = json.dumps({
                 'fraction': fraction,
-                'justification': 'MANUAL USER COMMAND (Preview)',
                 'mode': 'auto',
             })
             summary = compress_tool.call(
@@ -1928,7 +1925,6 @@ class ExecutionEngine:
         try:
             apply_params = json.dumps({
                 'fraction': fraction,
-                'justification': 'MANUAL USER COMMAND (Approved)',
                 'mode': 'auto',
             })
             result = compress_tool.call(

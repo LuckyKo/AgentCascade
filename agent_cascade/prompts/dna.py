@@ -349,7 +349,6 @@ TOOL_METADATA = {
         'parameters': {
             'fraction': 'The fraction of history to summarize (e.g. 0.5 for 50%). Max 1.0.',
             'mode': "Compression mode: 'auto' (default) or 'manual'.",
-            'justification': 'Why compression is needed now.',
             'summary_text': 'Your own summary of the conversation history portion that will be trimmed out. Required when mode=manual.',
             'force': 'Bypass validation guards (e.g., minimum message count). Used for critical threshold compression.'
         }

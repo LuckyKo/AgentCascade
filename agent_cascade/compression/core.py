@@ -19,7 +19,6 @@ def compress_context(
     mode: str = "auto",            # "auto" (LLM generates) or "manual" (summary provided)
     summary_text: str | None = None,  # Required when mode == "manual"
     force: bool = False,           # Bypass validation guards (forced compression at >95%)
-    justification: str = "",       # Human-readable reason for this compression
     orchestrator=None,             # Optional: orchestrator instance for call_agent pattern
     dry_run: bool = False,         # If True, generate summary but don't mutate pool
     precomputed_summary: str | None = None,  # Pre-generated summary to skip LLM call
@@ -43,7 +42,6 @@ def compress_context(
         mode: "auto" for LLM-generated summary, "manual" for provided summary.
         summary_text: Required when mode == "manual". Raw summary text.
         force: If True, bypass the "not enough messages" guard.
-        justification: Human-readable reason (logged for debugging).
         orchestrator: Optional orchestrator instance for call_agent pattern invocation.
         dry_run: If True, generate summary but don't mutate pool (for /compress command).
         precomputed_summary: Pre-generated summary to skip LLM call in auto mode.
@@ -324,8 +322,7 @@ def compress_context(
     # ── 12. Log the successful compression event ──
     logger.info(
         f"Clean-trim compression: Discarded {target_discard_count} messages "
-        f"for agent '{target_agent_name}'. Tail count: {tail_count}. "
-        f"Justification: {justification}"
+        f"for agent '{target_agent_name}'. Tail count: {tail_count}."
     )
 
     return CompressResult(

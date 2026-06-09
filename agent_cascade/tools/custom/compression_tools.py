@@ -33,10 +33,6 @@ class CompressContext(BaseTool):
                 'enum': ['auto', 'manual'],
                 'description': TOOL_METADATA['compress_context']['parameters']['mode']
             },
-            'justification': {
-                'type': 'string',
-                'description': TOOL_METADATA['compress_context']['parameters']['justification']
-            },
             'summary_text': {
                 'type': 'string',
                 'description': TOOL_METADATA['compress_context']['parameters']['summary_text']
@@ -62,7 +58,6 @@ class CompressContext(BaseTool):
         mode = params.get('mode', 'auto')
         summary_text = params.get('summary_text')
         force = params.get('force', False)
-        justification = params.get('justification', 'Context management')
 
         # Legacy kwargs from /compress command path in orchestrator._run()
         dry_run = kwargs.get('dry_run', False)
@@ -139,7 +134,6 @@ class CompressContext(BaseTool):
             mode=mode,
             summary_text=summary_text,
             force=force,
-            justification=justification,
             dry_run=dry_run,
             precomputed_summary=precomputed_summary,
         )
