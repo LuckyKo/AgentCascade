@@ -755,8 +755,8 @@ class ExecutionEngine:
         """Force compress when token usage exceeds critical threshold. Returns True (continue loop)."""
         inst_name = instance.instance_name
 
-        # Halt other agents (exempt target, compression_agent, and root agent)
-        exempt = [inst_name, 'compression_agent']
+        # Halt other agents (exempt target, Compressor, and root agent)
+        exempt = [inst_name, 'Compressor']
         if instance.parent_instance:
             exempt.append(instance.parent_instance)
         self.pool.halt_all_instances(except_instances=exempt)

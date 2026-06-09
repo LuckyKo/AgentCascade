@@ -1188,7 +1188,7 @@ history = [
 requesting_agent = ap.get('requesting_instance')
 
 # Register in pool using unified model — Security Advisor is a regular agent instance
-sec_state_key = 'security_advisor'
+sec_state_key = 'Security'
 sec_inst = AgentInstance(
     instance_name=sec_state_key,
     agent_class='SecurityAdvisor',

@@ -804,14 +804,14 @@ class TestNestedCompressionGuard:
     """Integration tests for nested compression guard using real orchestrator code.
 
     The guard lives in agent_orchestrator.py:1846:
-        if instance_name != 'compression_agent':
+        if instance_name != 'Compressor':
             hook_forced = self._inject_compression_warning_for_agent(...)
 
     These tests verify the guard's behavior using simple mock objects.
     """
 
     def test_orchestrator_skips_inject_for_compression_agent(self):
-        """When instance_name == 'compression_agent', _inject_compression_warning_for_agent
+        """When instance_name == 'Compressor', _inject_compression_warning_for_agent
         is NOT called — prevents nested/circular compression."""
 
         inject_called = {"value": False}
@@ -825,11 +825,11 @@ class TestNestedCompressionGuard:
 
         mock_orch._inject_compression_warning_for_agent = track_inject
 
-        # Simulate what hooked_call_llm does for compression_agent (agent_orchestrator.py:1846)
-        instance_name = "compression_agent"
+        # Simulate what hooked_call_llm does for Compressor (agent_orchestrator.py:1846)
+        instance_name = "Compressor"
         hook_forced = False
 
-        if instance_name != 'compression_agent':
+        if instance_name != 'Compressor':
             hook_forced = mock_orch._inject_compression_warning_for_agent(
                 mock_orch, instance_name, []
             )
@@ -837,7 +837,7 @@ class TestNestedCompressionGuard:
         assert hook_forced is False
         assert inject_called["value"] is False, (
             "_inject_compression_warning_for_agent should NOT be called "
-            "for compression_agent — nested compression guard failed"
+            "for Compressor — nested compression guard failed"
         )
 
     def test_orchestrator_calls_inject_for_other_agents(self):
@@ -856,7 +856,7 @@ class TestNestedCompressionGuard:
         instance_name = "coder"
         hook_forced = False
 
-        if instance_name != 'compression_agent':
+        if instance_name != 'Compressor':
             hook_forced = mock_orch._inject_compression_warning_for_agent(
                 mock_orch, instance_name, []
             )
@@ -867,18 +867,18 @@ class TestNestedCompressionGuard:
 
     def test_compression_agent_exemption_in_force_path(self):
         """
-        Verify that the compression_agent is in the exempt list during forced compression.
+        Verify that the Compressor is in the exempt list during forced compression.
 
         From agent_orchestrator.py:682:
-            exempt = [instance_name, 'compression_agent', self.session_name]
+            exempt = [instance_name, 'Compressor', self.session_name]
             self.agent_pool.halt_all_instances(except_instances=exempt)
         """
         instance_name = "TestAgent"
         session_name = "Maine"
-        exempt = [instance_name, 'compression_agent', session_name]
+        exempt = [instance_name, 'Compressor', session_name]
 
-        assert 'compression_agent' in exempt, (
-            "compression_agent must be in the exempt list during forced compression"
+        assert 'Compressor' in exempt, (
+            "Compressor must be in the exempt list during forced compression"
         )
         assert instance_name in exempt
         assert session_name in exempt

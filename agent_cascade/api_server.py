@@ -1773,9 +1773,9 @@ def create_app(agents, agent_pool, config=None):
                                     import copy
 
                                     with app.security_check_lock:
-                                        if not agent_pool.get_agent('security_advisor'):
-                                            agent_pool.load_agent('security_advisor')
-                                        sec_agent = agent_pool.get_agent('security_advisor')
+                                        if not agent_pool.get_agent('Security'):
+                                            agent_pool.load_agent('Security')
+                                        sec_agent = agent_pool.get_agent('Security')
                                         workspace_info = f"Main workspace: {agent_pool.operation_manager.base_dir}\n"
                                         if agent_pool.operation_manager.extra_work_folders_ro:
                                             extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_ro]
@@ -1799,16 +1799,16 @@ def create_app(agents, agent_pool, config=None):
                                         # ── Fix #3: Acquire endpoint scheduling slot before execution ──
                                         if hasattr(agent_pool, '_execution') and hasattr(agent_pool._execution, '_acquire_slot'):
                                             try:
-                                                sec_endpoint_release = agent_pool._execution._acquire_slot('security_advisor', 'security_advisor')
+                                                sec_endpoint_release = agent_pool._execution._acquire_slot('Security', 'Security')
                                             except Exception as e:
-                                                logger.warning(f"Failed to acquire endpoint slot for security_advisor: {e}")
+                                                logger.warning(f"Failed to acquire endpoint slot for Security: {e}")
 
                                         # Register security advisor in instance_state so it shows a tab (Fix #4: thread-safe)
-                                        sec_state_key = 'security_advisor'
+                                        sec_state_key = 'Security'
                                         with agent_pool._execution._state_lock:
                                             agent_pool.instance_state[sec_state_key] = {
                                                 'active': True,
-                                                'agent_name': f"Security Advisor (security_advisor)",
+                                                'agent_name': f"Security Advisor (Security)",
                                                 'messages': list(history),
                                             }
                                             if not any(n == sec_state_key for n, _depth in agent_pool._execution.active_stack):
@@ -1873,7 +1873,7 @@ def create_app(agents, agent_pool, config=None):
                                                 )
 
                                             # call_with_fallback handles retries, per-endpoint concurrency semaphores, and failover
-                                            run_gen = api_router_sec.call_with_fallback('security_advisor', _security_llm_call)
+                                            run_gen = api_router_sec.call_with_fallback('Security', _security_llm_call)
                                         else:
                                             # Fallback: direct LLM call if no router available (preserves old behavior)
                                             logger.warning("API router unavailable — using direct LLM call for security advisor")
@@ -1901,7 +1901,7 @@ def create_app(agents, agent_pool, config=None):
                                         def _sec_warning_injector():
                                             try:
                                                 agent_pool.enqueue_message(
-                                                    'security_advisor',
+                                                    'Security',
                                                     "[SYSTEM WARNING] Your analysis is taking longer than expected. "
                                                     "Please provide a verdict as soon as possible — the approval request may timeout soon."
                                                 )
@@ -2072,7 +2072,7 @@ def create_app(agents, agent_pool, config=None):
                                         # Halt the security advisor instance to stop it cleanly.
                                         # Note: This is best-effort — only works between turns, not during active LLM calls.
                                         # The actual timeout enforcement happens inside the for loop via `break` + generator.close().
-                                        agent_pool.halt_instance('security_advisor')
+                                        agent_pool.halt_instance('Security')
                                         
                                         # Common timeout handling for BOTH modes: reject and notify UI
                                         reject_msg = (
@@ -2174,7 +2174,7 @@ def create_app(agents, agent_pool, config=None):
                                         try:
                                             sec_endpoint_release()
                                         except Exception as e:
-                                            logger.warning(f"Failed to release endpoint slot for security_advisor: {e}")
+                                            logger.warning(f"Failed to release endpoint slot for Security: {e}")
 
                                     if hasattr(app, 'active_security_checks') and rid:
                                         with app.active_security_checks_lock:

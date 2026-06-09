@@ -26,7 +26,7 @@ class _CompressionThresholdMock:
 
     def _inject_compression_warning_for_agent(self, agent, instance_name, messages):
         """Replicate the threshold logic from ExecutionEngine's compression injection."""
-        if instance_name == 'compression_agent':
+        if instance_name == 'Compressor':
             return False
 
         max_tokens = self._get_max_tokens()

@@ -436,7 +436,7 @@ class APIRouter:
                     configs.append(cfg)
 
         # 2. If no agent-specific endpoints found, try orchestrator's endpoints as fallback (Bug 40)
-        #    This ensures agents like security_advisor inherit the caller's API configuration
+        #    This ensures agents like Security inherit the caller's API configuration
         if not configs and 'orchestrator' in self.agent_priorities:
             with self._lock:
                 for eid in self.agent_priorities.get('orchestrator', []):
