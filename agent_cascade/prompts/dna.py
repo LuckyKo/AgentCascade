@@ -311,7 +311,7 @@ TOOL_METADATA = {
             'Delegate a task to a specialized sub-agent. '
             'If the instance_name already exists, the session continues. '
             'Otherwise, a new session is started using the specified agent_class.\n\n'
-            'Example: {"agent_class": "coder", "instance_name": "worker1", "task": "Write a script", "parallel_launch": true}\n\n'
+            'Example: {"agent_class": "coder", "instance_name": "worker1", "task": "Write a script"}\n\n'
             'To resume an old session from a JSONL log file, provide the log_file parameter.'
         ),
         'parameters': {
