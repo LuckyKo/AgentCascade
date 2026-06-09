@@ -380,6 +380,7 @@ def create_app(agents, agent_pool, config=None):
         _build_agents_list,
         _get_approvals,
         _resolve_max_tokens,
+        _find_user_message_insertion_point,
     )
 
     # ── Helpers ───────────────────────────────────────────────────────────
@@ -1633,7 +1634,9 @@ def create_app(agents, agent_pool, config=None):
                         inst = agent_pool.get_instance(instance_name)
                         if inst is not None:
                             with inst._compression_lock:
-                                inst.conversation.append(last_user_msg)
+                                # Use insertion point logic to avoid splitting tool call/response pairs
+                                insert_pos = _find_user_message_insertion_point(inst.conversation)
+                                inst.conversation.insert(insert_pos, last_user_msg)
                                 # Invalidate token count cache — conversation length changed
                                 inst._last_token_count_conversation_length = -1
                         else:

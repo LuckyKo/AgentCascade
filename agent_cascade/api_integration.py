@@ -747,6 +747,76 @@ def _get_max_tokens_for_instance(pool: AgentPool, instance: AgentInstance) -> in
     return _resolve_max_tokens(pool, instance)
 
 
+def _find_user_message_insertion_point(conversation: list) -> int:
+    """Find the correct insertion point for a user message in the conversation.
+
+    Scans backwards from the end of the conversation to find a safe insertion point
+    that doesn't split tool call/response pairs. Supports both legacy function_call
+    format (OpenAI <2023-07-06 API) and modern tool_calls array format.
+
+    Args:
+        conversation: List of message dicts or Message objects.
+
+    Returns:
+        Index where a new user message should be inserted (0 to len(conversation)).
+        Returns len(conversation) if appending at the end is safe.
+    """
+    if not conversation:
+        return 0
+
+    # Scan backwards from the end
+    i = len(conversation) - 1
+    while i >= 0:
+        msg = conversation[i]
+        # Extract role safely (handle both dict and object types)
+        if isinstance(msg, dict):
+            role = msg.get('role', '').lower()
+        else:
+            role = getattr(msg, 'role', '').lower()
+
+        if role == 'user':
+            # Found a user message — safe to insert before it
+            return i
+        elif role == 'assistant':
+            # Check if this assistant message has pending tool calls
+            # Support both legacy function_call and modern tool_calls formats
+            if isinstance(msg, dict):
+                func_call = msg.get('function_call')
+                tool_calls = msg.get('tool_calls', [])
+            else:
+                func_call = getattr(msg, 'function_call', None)
+                tool_calls = getattr(msg, 'tool_calls', [])
+
+            # Check for legacy function_call format
+            if func_call is not None:
+                # Assistant made a function call — need to find matching response
+                # Don't insert before this message
+                i -= 1
+                continue
+
+            # Check for modern tool_calls array format
+            if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
+                # Assistant made tool calls — need to find matching responses
+                # Don't insert before this message
+                i -= 1
+                continue
+
+            # No pending tool calls — safe to insert before this assistant message
+            return i
+        elif role == 'function' or role == 'tool':
+            # This is a function/tool response — continue scanning backwards
+            # to find where the original tool call was made
+            i -= 1
+            continue
+        else:
+            # Unknown role type — safe to insert before it
+            return i
+
+    # If we get here, all messages are part of tool call chains
+    # Insert at the beginning
+    return 0
+
+
 def serialize_message(msg: Any, index: Optional[int] = None) -> dict:
     """Serialize a Message object or dict to a JSON-serializable dict for UI rendering.
 

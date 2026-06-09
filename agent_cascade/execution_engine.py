@@ -2326,7 +2326,9 @@ class ExecutionEngine:
                         llm_cfg = getattr(caller_inst, '_generate_cfg_override', None) or getattr(caller_template.llm, 'generate_cfg', {})
 
                         # Propagate max_turns from caller's config
-                        caller_max_turns = llm_cfg.get('max_turns') or 50
+                        caller_max_turns = llm_cfg.get('max_turns')
+                        if caller_max_turns is None:
+                            caller_max_turns = 50  # DEFAULT_MAX_TURNS
                         inst.max_turns = caller_max_turns
 
                         target_template = self.pool.templates.get(agent_class)

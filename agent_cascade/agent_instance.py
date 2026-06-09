@@ -92,6 +92,9 @@ class AgentInstance:
     compression_summary: Optional[str] = None  # Current cumulative summary (if any)
     _compression_lock: threading.RLock = field(default_factory=threading.RLock)  # RLock: recovery paths may re-acquire via instance_conversations.__setitem__
 
+    # ── System Prompt Initialization Tracking (Bug #41 fix) ────────────────
+    _system_prompt_initialized: bool = field(default=False)  # Track if system prompt has been initialized once. Once set, session metadata and resources are frozen — they won't update even if the environment changes.
+
     # ── Token Count Cache (Fix #2) ────────────────────────────────────────
     _cached_token_count: int = field(default=0)                  # Cached cumulative token count for conversation
     _last_token_count_conversation_length: int = field(default=0)  # Length of conversation when tokens were last counted
