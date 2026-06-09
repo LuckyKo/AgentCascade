@@ -103,12 +103,33 @@ class SystemInfo(BaseTool):
         else:
             stats_str = "Agent Pool not connected.\n" + stats_str
 
-        # Tools information
+        # Tools information — Fix #6: Use template from pool for ExecutionEngine compatibility
         tools_str = ""
         if agent_obj:
-            all_tools = sorted(agent_obj.function_map.keys())
-            active_tools_schemas = agent_obj._get_active_functions()
-            active_tools = sorted([t['name'] for t in active_tools_schemas])
+            # Try to get template from pool instead of assuming agent_obj has function_map
+            # This works for both Agent instances (Path A) and ExecutionEngine (Path B)
+            template = None
+            if hasattr(self, 'agent_pool') and self.agent_pool and hasattr(self.agent_pool, 'templates'):
+                try:
+                    inst = self.agent_pool.get_instance(agent_name)
+                    if inst:
+                        agent_class = getattr(inst, 'agent_class', 'orchestrator')
+                        template = self.agent_pool.templates.get(agent_class)
+                except Exception as e:
+                    logger.debug(f"Failed to get template for {agent_name}: {e}")
+            
+            # Fallback to agent_obj attributes if template not available
+            if template and hasattr(template, 'function_map'):
+                all_tools = sorted(template.function_map.keys())
+                active_tools_schemas = template._get_active_functions() if hasattr(template, '_get_active_functions') else []
+            elif hasattr(agent_obj, 'function_map'):
+                all_tools = sorted(agent_obj.function_map.keys())
+                active_tools_schemas = agent_obj._get_active_functions() if hasattr(agent_obj, '_get_active_functions') else []
+            else:
+                all_tools = []
+                active_tools_schemas = []
+            
+            active_tools = sorted([t['name'] for t in active_tools_schemas]) if isinstance(active_tools_schemas, list) else []
             tools_str = f"Available Tools: {', '.join(all_tools)}\n"
             tools_str += f"Enabled Tools: {', '.join(active_tools)}\n"
         

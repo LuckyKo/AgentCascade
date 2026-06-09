@@ -1,0 +1,39 @@
+diff --git a/agent_cascade/compression/core.py b/agent_cascade/compression/core.py
+index fb9fd92..2efc6a8 100644
+--- a/agent_cascade/compression/core.py
++++ b/agent_cascade/compression/core.py
+@@ -255,6 +255,9 @@ def compress_context(
+     # NOTE: This is single-threaded by design — forced compression halts all other agents
+     # before running, so no concurrent pool mutations can occur during this block.
+     
++    # Fix #5: Snapshot current conversation length before any mutation for race condition detection
++    pre_mutation_len = len(history) if (history := agent_pool.get_conversation(target_agent_name)) else 0
++    
+     try:
+         # NOTE: get_conversation returns the same list object as instance_conversations[].
+         # We build new_history as a new list and replace the reference on the next line.
+@@ -286,6 +289,24 @@ def compress_context(
+             mode=mode,
+         )
+ 
++    # Fix #5: Re-validate conversation length after mutation to detect concurrent modification
++    post_mutation_conv = agent_pool.get_conversation(target_agent_name)
++    if len(post_mutation_conv) != len(new_history):
++        logger.warning(
++            f"Compression aborted for '{target_agent_name}': "
++            f"conversation was modified during compression (race condition detected). "
++            f"Expected length {len(new_history)}, got {len(post_mutation_conv)}."
++        )
++        return CompressResult(
++            success=False,
++            summary_text=generated_summary,
++            marker_message=None,
++            messages_discarded=0,
++            tail_count=0,
++            error="Concurrent modification detected",
++            mode=mode,
++        )
++
+     # ── 11. Calculate tail count and notify logger ──
+     tail_count = len(active_set) - target_discard_count
+ 

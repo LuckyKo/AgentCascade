@@ -1,0 +1,47 @@
+diff --git a/agent_cascade/api_server.py b/agent_cascade/api_server.py
+index 68d4fc2..6a78395 100644
+--- a/agent_cascade/api_server.py
++++ b/agent_cascade/api_server.py
+@@ -1291,6 +1291,42 @@ def create_app(agents, agent_pool, config=None):
+                         await broadcast({'type': 'state', **build_state()})
+                         continue
+ 
++                    # Fix #7: /compress manual command (external — no agent start)
++                    if text.startswith('/compress'):
++                        parts = text.split()
++                        fraction = 0.5
++                        if len(parts) > 1:
++                            try:
++                                fraction = float(parts[1])
++                                fraction = max(0.1, min(0.9, fraction))  # Clamp to valid range
++                            except ValueError as e:
++                                logger.warning(f"Invalid fraction in /compress command: {e}")
++                        
++                        # Apply compression using pool's compress_context function
++                        if agent_pool:
++                            target = session['session_name']
++                            inst = agent_pool.get_instance(target)
++                            if inst is not None:
++                                from agent_cascade.compression.core import compress_context
++                                result = compress_context(
++                                    agent_pool=agent_pool,
++                                    target_agent_name=target,
++                                    fraction=fraction,
++                                    mode='auto',
++                                    force=False,
++                                )
++                                
++                                if result.success:
++                                    logger.info(f"/compress applied via WebSocket for '{target}': {result.messages_discarded} messages discarded")
++                                    await broadcast({'type': 'state', **build_state()})
++                                else:
++                                    await broadcast({'type': 'error', 'message': f"Compression failed: {result.error}"})
++                            else:
++                                await broadcast({'type': 'error', 'message': f'No instance found for "{target}"'})
++                        else:
++                            await broadcast({'type': 'error', 'message': 'Agent pool not available'})
++                        continue
++
+                     # Add user message to the pool instance's conversation (unified path).
+                     # This replaces: session['history'].append(...) + sync to pool.
+                     parsed_content = _parse_multimodal_content(text)

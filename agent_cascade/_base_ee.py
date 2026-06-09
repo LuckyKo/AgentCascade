@@ -708,7 +708,7 @@ class ExecutionEngine:
             return True  # Yield and continue loop to process new messages
 
         # ── /compress manual command handling (Item 7) ──────────────────────
-        if self._handle_compress_command(instance, messages, llm_messages):
+        if self._handle_compress_command(instance, messages):
             return True  # Command handled — yield and continue
 
         # ── COMPRESSION CHECK (critical for long-running agents) ────────────
@@ -829,7 +829,7 @@ class ExecutionEngine:
                                 logger.error("Recovery from log also failed — message pool may be corrupted")
                                 self._append_system_notification(
                                     llm_messages, "[SYSTEM NOTIFICATION: Compression corrupted pool",
-                                    f"Forced compression and recovery both failed for {inst_name}. Agent halted to prevent corruption."
+                                    f"[SYSTEM NOTIFICATION: Forced compression and recovery both failed for {inst_name}. Agent halted to prevent corruption.]"
                                 )
                                 # Halt this instance to prevent further execution with corrupted state
                                 self.pool.halt_instance(inst_name)
@@ -851,8 +851,8 @@ class ExecutionEngine:
             else:  # Compression failed or returned error
                 logger.error(f"Forced compression failed for {inst_name}: {result.error}")
                 notification = (
-                    f"Context exceeded {usage_pct:.1f}%, "
-                    f"but automatic compression failed."
+                    f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%, "
+                    f"but automatic compression failed.]"
                 )
                 self._append_system_notification(llm_messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
 
@@ -1815,7 +1815,7 @@ class ExecutionEngine:
     #  Item 7: /compress manual command handling
     # ═══════════════════════════════════════════════════════════════════════
 
-    def _handle_compress_command(self, instance: AgentInstance, messages: List[Message], llm_messages: List[Message]) -> bool:
+    def _handle_compress_command(self, instance: AgentInstance, messages: List[Message]) -> bool:
         """Detect and handle /compress [fraction] user command.
 
         Checks the last USER message for a /compress command. If found:
@@ -1823,7 +1823,6 @@ class ExecutionEngine:
           2. Generate a preview summary via dry_run compression
           3. Request user approval via operation_manager
           4. Apply compression if approved
-          5. Rebuild llm_messages working set after compression (Fix #4)
 
         Returns True if the command was handled (whether approved or not).
         """
@@ -1847,13 +1846,6 @@ class ExecutionEngine:
         if not content.strip().startswith('/compress'):
             return False
 
-        # Fix #1 & #2: Clear the /compress command immediately to prevent infinite re-detection loop
-        # Replace with non-breaking space (U+00A0) for LLM API compatibility
-        if isinstance(last_user, dict):
-            last_user['content'] = "\u00a0"  # Non-breaking space — valid for all major LLM APIs
-        else:
-            last_user.content = "\u00a0"
-
         # Parse fraction from command (default 0.5)
         parts = content.strip().split()
         fraction = 0.5
@@ -1870,11 +1862,6 @@ class ExecutionEngine:
         template = self.pool.templates.get(instance.agent_class)
         if not template or 'compress_context' not in getattr(template, 'function_map', {}):
             logger.warning(f"/compress command but compress_context tool unavailable for {inst_name}")
-            # Fix #3: Add system notification when compress_context is unavailable
-            self._append_system_notification(
-                messages, "[SYSTEM NOTIFICATION: Compression tool unavailable",
-                f"/compress command issued but compress_context tool is unavailable for {inst_name}."
-            )
             return True
 
         compress_tool = template.function_map['compress_context']
@@ -1900,7 +1887,7 @@ class ExecutionEngine:
             logger.warning(f"/compress preview failed for {inst_name}: {summary}")
             self._append_system_notification(
                 messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                f"/compress preview failed for {inst_name}. Cannot compress."
+                f"[SYSTEM NOTIFICATION: /compress preview failed for {inst_name}. Cannot compress.]"
             )
             return True
 
@@ -1919,7 +1906,7 @@ class ExecutionEngine:
                 logger.error(f"User approval request failed for {inst_name}: {e}")
                 self._append_system_notification(
                     messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                    f"/compress approval request failed: {e}"
+                    f"[SYSTEM NOTIFICATION: /compress approval request failed: {e}]"
                 )
                 return True
         else:
@@ -1930,7 +1917,7 @@ class ExecutionEngine:
             logger.info(f"/compress rejected by user for {inst_name}: {rejection_reason}")
             self._append_system_notification(
                 messages, "[SYSTEM NOTIFICATION: Compression cancelled",
-                f"/compress cancelled by user. Reason: {rejection_reason}"
+                f"[SYSTEM NOTIFICATION: /compress cancelled by user. Reason: {rejection_reason}]"
             )
             return True
 
@@ -1951,7 +1938,6 @@ class ExecutionEngine:
 
             # Validate message pool after compression (Item 10)
             conv = self.pool.get_conversation(inst_name)
-            working_set_rebuilt = False  # Fix #4: Track whether rebuild already happened
             if conv and not validate_message_pool(conv, inst_name):
                 logger.error(f"[MSG POOL VALIDATION] Pool invalid after /compress for '{inst_name}'. Attempting recovery...")
                 # Recovery: reload from logger history (same as forced compression path)
@@ -1966,20 +1952,13 @@ class ExecutionEngine:
                         logger.info(f"Recovered message pool after /compress for '{inst_name}' ({len(recov)} messages)")
                         # Rebuild working sets from recovered data (matches forced compression path)
                         self._rebuild_working_set(messages, llm_messages, inst_name)
-                        working_set_rebuilt = True  # Fix #4: Mark as rebuilt
                     else:
                         self._append_system_notification(
                             messages, "[SYSTEM NOTIFICATION: Compression corrupted pool",
-                            f"/compress applied but message pool validation failed and recovery unsuccessful. Agent may behave unexpectedly."
+                            f"[SYSTEM NOTIFICATION: /compress applied but message pool validation failed and recovery unsuccessful. Agent may behave unexpectedly.]"
                         )
                 except Exception as e:
                     logger.error(f"Recovery after /compress failed for '{inst_name}': {e}")
-
-            # Fix #4: Rebuild working set after successful compression (if not already rebuilt in recovery path)
-            # This ensures llm_messages is synced to the compressed pool state
-            conv = self.pool.get_conversation(inst_name)
-            if conv and validate_message_pool(conv, inst_name) and not working_set_rebuilt:
-                self._rebuild_working_set(messages, llm_messages, inst_name)
 
             # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
             instance._last_token_count_conversation_length = -1
@@ -1996,14 +1975,14 @@ class ExecutionEngine:
 
             self._append_system_notification(
                 messages, "[SYSTEM NOTIFICATION: Compression applied",
-                f"/compress applied successfully for {inst_name}."
+                f"[SYSTEM NOTIFICATION: /compress applied successfully for {inst_name}.]"
             )
 
         except Exception as e:
             logger.error(f"/compress apply failed for {inst_name}: {e}")
             self._append_system_notification(
                 messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                f"/compress apply failed for {inst_name}: {e}"
+                f"[SYSTEM NOTIFICATION: /compress apply failed for {inst_name}: {e}]"
             )
 
         return True
