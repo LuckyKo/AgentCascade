@@ -142,6 +142,10 @@ class BaseChatModel(ABC):
 
         Returns:
             the generated message list response by llm.
+            
+        Note: Usage information from LLM API responses is stored in Message.extra['usage']
+        dict with keys: prompt_tokens, completion_tokens, total_tokens (when available).
+        See Feature 006 for ground-truth token tracking implementation details.
         """
 
         # Unify the input messages to type List[Message]:

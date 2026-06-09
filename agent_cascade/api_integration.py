@@ -647,18 +647,23 @@ def _resolve_max_tokens(pool, instance=None):
     api_integration, and api_server. Called from all 5 resolution sites.
 
     Resolution Order (short-circuit on first hit):
-      1. Per-instance override (absolute, set by execution engine propagation)
-      2. API router effective limit (per-endpoint MIN logic)
+      1. API router effective limit (per-endpoint MIN logic) — checked first
+      2. Per-instance override (_generate_cfg_override) — absolute priority, short-circuits below
+      2b. Instance's allocated max_input_tokens (Feature 006) — from last LLM call for consistency
       3. Runtime-detected LLM limit (OAI detection writes to llm.generate_cfg)
       4. Template static config (from settings, via llm.cfg)
       5. User-configured DEFAULT_MAX_INPUT_TOKENS from settings
 
-    Note: Per-instance override (step 1 in code = step 2 above) short-circuits before the router limit
-    check because supervisor-propagated overrides should be absolute.
+    Note: Per-instance override (step 2 in code) short-circuits before router limit check
+    because supervisor-propagated overrides should be absolute. The router limit is checked
+    first for efficiency but can be overridden by per-instance configuration.
 
     CRITICAL FIX: OAI detection writes to llm.generate_cfg['max_input_tokens']
     (an attribute dict), but old resolution only read from llm.cfg['generate_cfg']
     (a nested dict in cfg). These are DIFFERENT objects. We now check both paths.
+
+    Feature 006: Step 2b checks instance._allocated_max_input_tokens for consistent tool 
+    truncation thresholds when ground-truth values are available from previous LLM call.
 
     Args:
         pool: The AgentPool (or None for safe fallback).
@@ -688,6 +693,13 @@ def _resolve_max_tokens(pool, instance=None):
         if inst_override:
             return int(inst_override)
 
+    # ── Step 2b: Instance's allocated max_input_tokens (Feature 006) ──
+    # Check ground-truth value from last LLM call for consistent tool truncation thresholds
+    if instance and hasattr(instance, '_allocated_max_input_tokens'):
+        allocated = instance._allocated_max_input_tokens
+        if allocated > 0:
+            return allocated
+
     # ── Step 3: Runtime-detected LLM limit (OAI detection writes here directly) ──
     llm_limit = 0
     if instance and hasattr(pool, 'templates'):
@@ -715,13 +727,13 @@ def _resolve_max_tokens(pool, instance=None):
 
     # ── Step 5: Resolve priority ──
     if router_limit > 0:
-        return router_limit       # User-set or configured limit
+        return router_limit       # User-set or configured limit (Step 1)
     if llm_limit > 0:
-        return llm_limit         # Runtime-detected from OAI endpoint
+        return llm_limit         # Runtime-detected from OAI endpoint (Step 3)
     if static_llm_limit > 0:
-        return static_llm_limit  # Static config from settings
+        return static_llm_limit  # Static config from settings (Step 4)
     
-    return DEFAULT_MAX_INPUT_TOKENS   # User-configured default from settings
+    return DEFAULT_MAX_INPUT_TOKENS   # User-configured default from settings (Step 5 fallback)
 
 
 def _get_max_tokens_for_instance(pool: AgentPool, instance: AgentInstance) -> int:

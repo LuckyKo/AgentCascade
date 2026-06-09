@@ -255,9 +255,10 @@ class TextChatAtOAI(BaseFnCallModel):
                     json.dump(dump_data, f, indent=2, ensure_ascii=False)
             except Exception as e:
                 logger.error(f"Failed to dump API POST: {e}")
-            
+        
         try:
             response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
+            
             if delta_stream:
                 for chunk in response:
                     # Update local model info if returned by the server (e.g. LM Studio)
@@ -334,6 +335,17 @@ class TextChatAtOAI(BaseFnCallModel):
                         finish_reason = getattr(chunk.choices[0], 'finish_reason', None)
                         extra = {'finish_reason': finish_reason} if finish_reason else {}
                         
+                        # Feature 006: Capture usage info from OpenAI streaming response (last chunk)
+                        if hasattr(chunk, 'usage') and chunk.usage:
+                            usage_dict = {}
+                            if hasattr(chunk.usage, 'prompt_tokens'):
+                                usage_dict['prompt_tokens'] = chunk.usage.prompt_tokens
+                            if hasattr(chunk.usage, 'completion_tokens'):
+                                usage_dict['completion_tokens'] = chunk.usage.completion_tokens
+                            if hasattr(chunk.usage, 'total_tokens'):
+                                usage_dict['total_tokens'] = chunk.usage.total_tokens
+                            extra['usage'] = usage_dict
+                        
                         if full_reasoning_content or full_response:
                             res.append(Message(
                                 role=ASSISTANT,
@@ -350,6 +362,12 @@ class TextChatAtOAI(BaseFnCallModel):
                         yield res
         except OpenAIError as ex:
             raise ModelServiceError(exception=ex)
+        finally:
+            # Bug #37 Fix: Ensure the HTTP streaming connection is closed even if interrupted (e.g. user clicks stop)
+            try:
+                response.close()
+            except Exception as e:
+                logger.warning(f"Failed to close streaming response for TextChatAtOAI: {e}")
 
     def _chat_no_stream(
         self,
@@ -402,6 +420,17 @@ class TextChatAtOAI(BaseFnCallModel):
 
             finish_reason = getattr(response.choices[0], 'finish_reason', None)
             extra = {'finish_reason': finish_reason} if finish_reason else {}
+            
+            # Feature 006: Capture usage info from OpenAI non-streaming response
+            if hasattr(response, 'usage') and response.usage:
+                usage_dict = {}
+                if hasattr(response.usage, 'prompt_tokens'):
+                    usage_dict['prompt_tokens'] = response.usage.prompt_tokens
+                if hasattr(response.usage, 'completion_tokens'):
+                    usage_dict['completion_tokens'] = response.usage.completion_tokens
+                if hasattr(response.usage, 'total_tokens'):
+                    usage_dict['total_tokens'] = response.usage.total_tokens
+                extra['usage'] = usage_dict
 
             msg = response.choices[0].message
             result = []

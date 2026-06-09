@@ -706,8 +706,23 @@ class ExecutionEngine:
 
         # ── COMPRESSION CHECK (critical for long-running agents) ────────────
         max_tokens = self._get_max_tokens(instance)
-        current_tokens = self._count_history_tokens(llm_messages, instance)
-        usage_pct = (current_tokens / max_tokens * 100) if max_tokens > 0 else 0
+        
+        # Feature 006: Use ground-truth token counts from last LLM call when available
+        # This fixes the force compression loop bug where manual counting was ~5x higher than actual
+        # Atomic snapshot pattern: read both values into locals before check (thread-safe under GIL)
+        actual_tokens = instance._last_actual_token_count
+        allocated_max = instance._allocated_max_input_tokens
+        
+        if actual_tokens > 0 and allocated_max > 0:
+            # Use cached ground-truth values from last LLM API call
+            current_tokens = actual_tokens
+            max_tokens_for_check = allocated_max
+        else:
+            # Fallback to manual counting when ground-truth not available (e.g., first turn)
+            current_tokens = self._count_history_tokens(llm_messages, instance)
+            max_tokens_for_check = max_tokens
+        
+        usage_pct = (current_tokens / max_tokens_for_check * 100) if max_tokens_for_check > 0 else 0
 
         # Forced compression at >95% — halts other agents, compresses, rebuilds
         if usage_pct > self.pool.settings.compression_force_threshold:
@@ -715,7 +730,7 @@ class ExecutionEngine:
 
         # Warning injection at >85%
         if usage_pct > self.pool.settings.compression_warning_threshold:
-            self._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens)
+            self._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens_for_check)
 
         # ── Loop detection ────────────────────────────────────────────────
         loop_info = self._detect_loop(messages)
@@ -980,6 +995,13 @@ class ExecutionEngine:
                 # This allows user's General Settings / endpoint limit to take effect.
                 merged_cfg.update(llm_cfg)
                 merged_cfg['agent_name'] = template.name
+                
+                # Feature 006: Store allocated max_input_tokens in instance for compression check
+                # Validate to ensure it's a positive integer before storing
+                if 'max_input_tokens' in merged_cfg:
+                    val = merged_cfg['max_input_tokens']
+                    if isinstance(val, int) and val > 0:
+                        instance._allocated_max_input_tokens = val
 
                 return llm.chat(
                     messages=messages,
@@ -999,6 +1021,13 @@ class ExecutionEngine:
             elif hasattr(llm, 'generate_cfg'):
                 merged_cfg.update(llm.generate_cfg)
             merged_cfg['agent_name'] = template.name
+            
+            # Feature 006: Store allocated max_input_tokens in instance for compression check
+            # Validate to ensure it's a positive integer before storing
+            if 'max_input_tokens' in merged_cfg:
+                val = merged_cfg['max_input_tokens']
+                if isinstance(val, int) and val > 0:
+                    instance._allocated_max_input_tokens = val
 
             return llm.chat(
                 messages=messages,
@@ -1063,6 +1092,21 @@ class ExecutionEngine:
 
         # Fix #2: Invalidate token count cache — conversation length changed
         instance._last_token_count_conversation_length = -1  # Force cache miss on next call
+        
+        # Feature 006: Extract ground-truth usage info from LLM response and update instance fields
+        # This replaces manual token counting with actual API-reported values
+        for msg in turn_output:
+            extra = msg.get('extra') if isinstance(msg, dict) else getattr(msg, 'extra', None)
+            if extra and isinstance(extra, dict) and 'usage' in extra:
+                usage = extra['usage']
+                if isinstance(usage, dict):
+                    # Update ground-truth token counts from LLM API response
+                    if 'prompt_tokens' in usage:
+                        instance._last_actual_token_count = usage['prompt_tokens']
+                    if 'total_tokens' in usage and 'prompt_tokens' not in usage:
+                        # Some APIs only return total_tokens
+                        instance._last_actual_token_count = usage['total_tokens']
+                    break  # Only need to extract from first message with usage info
 
         # Persist messages to JSONL log file (P1: LoggerManager migration)
         try:
