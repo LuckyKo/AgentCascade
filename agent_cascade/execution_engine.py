@@ -31,7 +31,7 @@ from agent_cascade.log import logger
 # hard dependency on api_integration at module scope (cleaner separation of concerns).
 from agent_cascade.utils.utils import extract_text_from_message
 
-from .agent_instance import AgentInstance, LoopDetectedError
+from .agent_instance import AgentInstance, LoopDetectedError, AgentState
 
 # Maximum size for spillover files (tool output saved to disk). Prevents disk exhaustion.
 MAX_SPILL_SIZE = 50 * 1024 * 1024  # 50MB
@@ -313,8 +313,197 @@ class ExecutionEngine:
 
             max_turns = instance.max_turns or 50
             turns_available = max_turns
+            inst_name = instance.instance_name
 
             while turns_available > 0:
+                # ── SLEEPING STATE GUARD (Three-Path Design) ───────────────
+                # Handles async tool results, user messages, and state transitions
+                if instance.state == AgentState.SLEEPING:
+                    # Drain async tool results and user queue messages
+                    async_results = self.pool.drain_async_results(inst_name)
+                    user_msgs = self.pool.drain_queue(inst_name)
+
+                    if async_results or user_msgs:
+                        # New data available — transition back to RUNNING and inject messages
+                        with instance._state_lock:
+                            # CHECK TERMINATED BEFORE TRANSITION — prevents resuming terminated agent
+                            if instance.state == AgentState.TERMINATED:
+                                logger.debug(
+                                    f"[CALL_AGENT_DEBUG] engine.run() — TERMINATED while SLEEPING "
+                                    f"for instance={inst_name}, breaking immediately"
+                                )
+                                break
+                            instance._transition(AgentState.RUNNING)
+                            instance.sleeping_since = None  # Reset wakeup timer
+                            instance._last_wakeup_log = time.monotonic()  # Reset to current time
+                            logger.debug(
+                                f"[CALL_AGENT_DEBUG] engine.run() — RESUMED from SLEEPING for instance={inst_name}, "
+                                f"async_results={len(async_results)}, user_msgs={len(user_msgs)}"
+                            )
+
+                        # Inject async results as USER messages at wakeup
+                        for result in async_results:
+                            result_msg = Message(
+                                role=USER, 
+                                content=f"[BACKGROUND TOOL RESULT]: {result}"
+                            )
+                            messages.append(result_msg)
+                            llm_messages.append(result_msg)
+                            response.append(result_msg)
+                            with instance._compression_lock:
+                                instance.conversation.append(result_msg)
+                                instance._last_token_count_conversation_length = -1
+
+                        # Inject user messages as USER messages  
+                        for msg_text in user_msgs:
+                            if msg_text.strip():
+                                user_msg = Message(role=USER, content=msg_text)
+                                messages.append(user_msg)
+                                llm_messages.append(user_msg)
+                                response.append(user_msg)
+                                with instance._compression_lock:
+                                    instance.conversation.append(user_msg)
+                                    instance._last_token_count_conversation_length = -1
+
+                        # Continue to normal LLM processing below (in RUNNING state now)
+                        continue
+
+                    elif self.pool.has_pending(inst_name):
+                        # Still waiting for background tools — check for user messages first
+                        # Change A (Bug 1): Drain user messages even while waiting for tools
+                        if instance.state == AgentState.TERMINATED:
+                            break
+                        
+                        # Check for new user messages that arrived while waiting
+                        more_user_msgs = self.pool.drain_queue(inst_name)
+                        if more_user_msgs:
+                            with instance._state_lock:
+                                instance._transition(AgentState.RUNNING)
+                                instance.sleeping_since = None
+                                instance._last_wakeup_log = time.monotonic()
+                            
+                            for msg_text in more_user_msgs:
+                                if msg_text.strip():
+                                    user_msg = Message(role=USER, content=msg_text)
+                                    messages.append(user_msg)
+                                    llm_messages.append(user_msg)
+                                    response.append(user_msg)
+                                    with instance._compression_lock:
+                                        instance.conversation.append(user_msg)
+                                        instance._last_token_count_conversation_length = -1
+                            
+                            continue  # Go process via LLM; async results will arrive later
+
+                        # If no user messages, proceed with waiting logic
+                        current_time = time.monotonic()
+                        sleeping_duration = 0.0
+                        if instance.sleeping_since is not None:
+                            sleeping_duration = current_time - instance.sleeping_since
+                        
+                        # Get settings with defaults
+                        wakeup_interval = getattr(self.pool.settings, 'sleeping_wakeup_interval', 5.0)
+                        sleeping_timeout = getattr(self.pool.settings, 'sleeping_timeout', 300.0)
+                        
+                        # Check for timeout first
+                        if sleeping_duration >= sleeping_timeout:
+                            logger.warning(
+                                f"[CALL_AGENT_DEBUG] engine.run() — SLEEPING TIMEOUT for instance={inst_name}, "
+                                f"waited {sleeping_duration:.1f}s for background tools (timeout={sleeping_timeout}s)"
+                            )
+                            # Final drain before giving up — prevents data loss of late-arriving results
+                            final_results = self.pool.drain_async_results(inst_name)
+                            if final_results:
+                                logger.debug(f"Drained {len(final_results)} late-arriving results before timeout")
+                            with instance._state_lock:
+                                instance._transition(AgentState.COMPLETING)
+                                instance.sleeping_since = None  # Reset for consistency
+                            break
+                        
+                        # Log wakeup message periodically
+                        if (current_time - instance._last_wakeup_log) >= wakeup_interval:
+                            logger.info(
+                                f"[CALL_AGENT_DEBUG] engine.run() — SLEEPING wakeup for instance={inst_name}, "
+                                f"waiting {sleeping_duration:.1f}s for background tools to complete"
+                            )
+                            instance._last_wakeup_log = current_time
+                        
+                        logger.debug(
+                            f"[CALL_AGENT_DEBUG] engine.run() — WAITING for background tools "
+                            f"for instance={inst_name}, sleeping_duration={sleeping_duration:.1f}s"
+                        )
+                        yield []  # Empty yield signals waiting state without consuming turn
+                        continue
+
+                    else:
+                        # No pending tools and no immediate results/user messages
+                        # Change B (Bug 2): Stable-state drain before COMPLETING transition
+                        
+                        # Track whether we found any results
+                        results_found = False
+                        
+                        # Stable-state drain — keep draining until no more results arrive
+                        # Add iteration cap to prevent infinite spinning if results keep arriving
+                        max_drain_iterations = 100
+                        drain_count = 0
+                        while drain_count < max_drain_iterations:
+                            more_results = self.pool.drain_async_results(inst_name)
+                            if not more_results:
+                                break
+                            results_found = True
+                            for result in more_results:
+                                result_msg = Message(role=USER, content=f"[BACKGROUND TOOL RESULT]: {result}")
+                                messages.append(result_msg)
+                                llm_messages.append(result_msg)
+                                response.append(result_msg)
+                                with instance._compression_lock:
+                                    instance.conversation.append(result_msg)
+                                    instance._last_token_count_conversation_length = -1
+                            drain_count += 1
+                        
+                        if drain_count >= max_drain_iterations:
+                            logger.warning(
+                                f"[CALL_AGENT_DEBUG] Drain loop hit limit ({max_drain_iterations}) for {inst_name}, "
+                                f"may have missed some results"
+                            )
+                        
+                        # Final safety drain — catches results that arrived between last drain and here
+                        final_drain = self.pool.drain_async_results(inst_name)
+                        if final_drain:
+                            results_found = True
+                            for result in final_drain:
+                                result_msg = Message(role=USER, content=f"[BACKGROUND TOOL RESULT]: {result}")
+                                messages.append(result_msg)
+                                llm_messages.append(result_msg)
+                                response.append(result_msg)
+                                with instance._compression_lock:
+                                    instance.conversation.append(result_msg)
+                                    instance._last_token_count_conversation_length = -1
+                        
+                        # If any results were found, transition to RUNNING so LLM processes them
+                        if results_found:
+                            with instance._state_lock:
+                                if instance.state == AgentState.TERMINATED:
+                                    break
+                                instance._transition(AgentState.RUNNING)
+                                instance.sleeping_since = None
+                                instance._last_wakeup_log = time.monotonic()
+                            
+                            # Loop back; now in RUNNING state → LLM processes injected results
+                            yield []
+                            continue
+                        
+                        # No results found — safe to transition to COMPLETING
+                        with instance._state_lock:
+                            if instance.state == AgentState.TERMINATED:
+                                break
+                            instance._transition(AgentState.COMPLETING)
+                            instance.sleeping_since = None
+                        logger.debug(
+                            f"[CALL_AGENT_DEBUG] engine.run() — COMPLETING for instance={inst_name}, "
+                            f"all background tools done with no new results"
+                        )
+                        break
+
                 # ── Phase 2: Pre-LLM Checks ────────────────────────────────
                 # Stop/halt checks, async message injection, compression check/force, loop detection
                 if self._pre_llm_checks(instance, messages, llm_messages, turns_available):
@@ -1433,10 +1622,29 @@ class ExecutionEngine:
                 f"[CALL_AGENT_DEBUG] Taking PARALLEL path — caller={caller_name}, target={instance_name}, "
                 f"class={agent_class}, child_depth={child_depth}"
             )
+            
+            # Generate call_id once — it will be passed through the parallel execution chain
+            call_id = f"{instance_name}_{time.monotonic()}"
+            
             result = self.pool.submit_parallel(
-                agent_class, instance_name, args, messages, instance.instance_name, child_depth
+                agent_class, instance_name, args, messages, instance.instance_name, child_depth, call_id=call_id
             )
-            logger.debug(f"[CALL_AGENT_DEBUG] EXIT (parallel) — caller={caller_name}, target={instance_name}, result_preview={str(result)[:200]}")
+            
+            # Transition caller to SLEEPING state after dispatching parallel agent
+            # The caller will wait in SLEEPING until the parallel agent sends completion message
+            with instance._state_lock:
+                if instance.state != AgentState.TERMINATED:
+                    instance._transition(AgentState.SLEEPING)
+                    instance.sleeping_since = time.monotonic()
+                    instance._last_wakeup_log = time.monotonic()
+            
+            # Register this async call in the pool's registry using the generated call_id
+            self.pool.register_async_call(caller_name, call_id)
+            
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] EXIT (parallel) — caller={caller_name} transitioned to SLEEPING, "
+                f"target={instance_name}, call_id={call_id}, result_preview={str(result)[:200]}"
+            )
             return result
 
         # Synchronous execution — the unified path

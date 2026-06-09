@@ -10,9 +10,38 @@ See DESIGN_REWRITE.md §2.1 for design rationale.
 
 import threading
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import List, Optional
 
 from agent_cascade.llm.schema import Message
+
+
+class AgentState(Enum):
+    """Agent lifecycle states for the state machine.
+    
+    States and valid transitions:
+    - RUNNING: Agent is actively processing (initial state after creation)
+    - SLEEPING: Agent is waiting for async background tools to complete
+    - COMPLETING: Agent has finished its work, cleaning up
+    - TERMINATED: Agent has been terminated (final state)
+    - IDLE: Agent is idle (used for parallel execution tracking)
+    
+    Valid transitions are enforced by _transition() method.
+    """
+    RUNNING = auto()
+    SLEEPING = auto()
+    COMPLETING = auto()
+    TERMINATED = auto()
+    IDLE = auto()
+
+
+class InvalidStateTransition(Exception):
+    """Raised when an invalid state transition is attempted."""
+    
+    def __init__(self, current_state: AgentState, new_state: AgentState):
+        self.current_state = current_state
+        self.new_state = new_state
+        super().__init__(f"Invalid transition from {current_state.name} to {new_state.name}")
 
 
 @dataclass(slots=True)
@@ -37,10 +66,12 @@ class AgentInstance:
 
     # ── Execution State ───────────────────────────────────────────────
     is_active: bool                      # Currently executing a run() turn
-
-    # NOTE: halt state is NOT stored here — it lives in pool._halted_instances set.
-    #       ExecutionEngine checks via self.pool.is_instance_halted(instance.instance_name)
-    #       to ensure a single source of truth across threads.
+    state: AgentState = field(default=AgentState.RUNNING)  # Current lifecycle state (state machine)
+    _state_lock: threading.RLock = field(default_factory=threading.RLock)  # Lock for state transitions
+    
+    # SLEEPING state tracking fields (for async tools)
+    sleeping_since: Optional[float] = None  # time.monotonic() when entered SLEEPING state
+    _last_wakeup_log: float = field(default=0.0)  # Last time wakeup message was logged
 
     # ── Metadata ──────────────────────────────────────────────────────
     created_at: float                    # time.monotonic() timestamp
@@ -68,6 +99,29 @@ class AgentInstance:
 
     # ── Streaming State (Streaming UI Content Update Fix) ──────────────────
     _streaming_responses: List[Message] = field(default_factory=list)  # Partial LLM content during streaming, updated every ~150ms
+
+    def _transition(self, new_state: AgentState) -> None:
+        """Transition to a new state with validation.
+        
+        Args:
+            new_state: The target state to transition to.
+            
+        Raises:
+            InvalidStateTransition: If the transition is not valid.
+        """
+        # Valid transitions matrix
+        valid_transitions = {
+            AgentState.RUNNING: {AgentState.SLEEPING, AgentState.COMPLETING, AgentState.TERMINATED, AgentState.IDLE},
+            AgentState.SLEEPING: {AgentState.RUNNING, AgentState.COMPLETING, AgentState.TERMINATED},
+            AgentState.COMPLETING: {AgentState.TERMINATED},
+            AgentState.TERMINATED: set(),  # Terminal state - no transitions out
+            AgentState.IDLE: {AgentState.RUNNING, AgentState.TERMINATED},
+        }
+        
+        if new_state not in valid_transitions.get(self.state, set()):
+            raise InvalidStateTransition(self.state, new_state)
+        
+        self.state = new_state
 
 
 @dataclass
@@ -110,3 +164,7 @@ class PoolSettings:
     max_nesting_depth: int = 10               # Max depth of nested agent calls (prevent infinite chains)
     max_workers: int = 10                     # ThreadPoolExecutor workers for parallel agent execution
     auto_continue: bool = True                # Auto-continue on message truncation (respects user toggle)
+    
+    # SLEEPING state settings (for async tools)
+    sleeping_timeout: float = 300.0           # Max seconds to wait for background tools before timeout
+    sleeping_wakeup_interval: float = 5.0     # Interval between wakeup log messages while SLEEPING
