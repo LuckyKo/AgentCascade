@@ -1014,8 +1014,12 @@ def create_app(agents, agent_pool, config=None):
             api_integration._cached_instance_data.clear()
         except Exception:
             pass  # Non-critical — caches will self-correct
-        session['generating'] = False
-        session['generation_id'] += 1
+        
+        # Fix #3 (Feature 020): Wrap session state modifications with session_lock to prevent race condition
+        with session_lock:
+            session['generating'] = False
+            session['generation_id'] += 1
+        
         if agent_pool:
             agent_pool.reset()
         await broadcast({'type': 'done', **build_state()})
@@ -1365,11 +1369,11 @@ def create_app(agents, agent_pool, config=None):
                     # Start agent generation
                     with session_lock:
                         session['stop_requested'] = False
+                        session['generation_id'] += 1
+                        gen_id = session['generation_id']
                     if agent_pool:
                         agent_pool.stopped = False
                     
-                    session['generation_id'] += 1
-                    gen_id = session['generation_id']
                     agent_runner = get_agent()
                     loop = asyncio.get_event_loop()
 
@@ -1402,11 +1406,11 @@ def create_app(agents, agent_pool, config=None):
                     # Start agent generation with existing history (no new user message)
                     with session_lock:
                         session['stop_requested'] = False
+                        session['generation_id'] += 1
+                        gen_id = session['generation_id']
                     if agent_pool:
                         agent_pool.stopped = False
 
-                    session['generation_id'] += 1
-                    gen_id = session['generation_id']
                     agent_runner = get_agent()
                     loop = asyncio.get_event_loop()
 
@@ -1545,8 +1549,11 @@ def create_app(agents, agent_pool, config=None):
                                     logger.warning("validate_message_pool not available — skipping agent instance pool restoration")
                                 # ── End Fix 3 ──
                             
-                            session['generation_id'] += 1
-                            gen_id = session['generation_id']
+                            # Fix #3 (Feature 020): Wrap session state modifications with session_lock to prevent race condition
+                            with session_lock:
+                                session['generation_id'] += 1
+                                gen_id = session['generation_id']
+                            
                             agent_runner = get_agent()
                             loop = asyncio.get_event_loop()
 
@@ -2367,8 +2374,10 @@ def create_app(agents, agent_pool, config=None):
                             instance_name = session.get('session_name', 'Maine')
                             inst = agent_pool.get_instance(instance_name)
                             if inst is not None:
-                                session['generating'] = False
-                                session['stop_requested'] = False
+                                # Fix #3 (Feature 020): Wrap session state modifications with session_lock to prevent race condition
+                                with session_lock:
+                                    session['generating'] = False
+                                    session['stop_requested'] = False
                                 if agent_pool:
                                     agent_pool.stopped = False
                                 # Fix #1 & #3: Clear performance caches on session load

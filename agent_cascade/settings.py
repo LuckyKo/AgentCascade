@@ -40,3 +40,7 @@ DEFAULT_RAG_KEYGEN_STRATEGY: Literal['None', 'GenKeyword', 'SplitQueryThenGenKey
 DEFAULT_RAG_SEARCHERS: List[str] = ast.literal_eval(
     os.getenv('QWEN_AGENT_DEFAULT_RAG_SEARCHERS',
               "['keyword_search', 'front_page_search']"))  # Sub-searchers for hybrid retrieval
+
+# Settings for compression (Feature 020)
+DEFAULT_COMPRESSION_COOLDOWN_SECONDS: float = float(os.getenv(
+    'QWEN_AGENT_DEFAULT_COMPRESSION_COOLDOWN_SECONDS', 2.0))  # Minimum seconds between forced compressions to prevent thrashing
