@@ -1081,7 +1081,18 @@ class ExecutionEngine:
 
         if self.pool.api_router and hasattr(self.pool.api_router, 'call_with_fallback'):
             # Route through API router for multi-endpoint failover
-            agent_type = instance.agent_class.lower()
+            
+            # Feature 022: Calculate allocated_tokens from instance/template config to pass to router
+            # This enables endpoint selection based on the agent's actual token requirements
+            allocated_tokens = None
+            if instance._generate_cfg_override is not None and 'max_input_tokens' in instance._generate_cfg_override:
+                val = instance._generate_cfg_override['max_input_tokens']
+                if isinstance(val, int) and val > 0:
+                    allocated_tokens = val
+            elif hasattr(llm, 'generate_cfg') and 'max_input_tokens' in llm.generate_cfg:
+                val = llm.generate_cfg['max_input_tokens']
+                if isinstance(val, int) and val > 0:
+                    allocated_tokens = val
 
             def _do_call(llm_cfg: dict) -> Iterator[List[Message]]:
                 merged_cfg = {}
@@ -1111,7 +1122,7 @@ class ExecutionEngine:
                 )
 
             agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
-            return self.pool.api_router.call_with_fallback(agent_type, _do_call)
+            return self.pool.api_router.call_with_fallback(agent_type, _do_call, allocated_tokens=allocated_tokens)
         else:
             # Direct call without router — still respect instance override for max_input_tokens etc.
             merged_cfg = {}

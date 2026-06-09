@@ -412,12 +412,17 @@ class APIRouter:
             return general_limit
         return min(general_limit, ep_limit)
 
-    def get_endpoint_chain(self, agent_type: str) -> List[dict]:
+    def get_endpoint_chain(self, agent_type: str, allocated_tokens: Optional[int] = None) -> List[dict]:
         """
         Returns an ordered list of LLM configs to try for the given agent type:
           1. Agent-specific endpoints (priority order, enabled only) — Tier 1
           2. Last successful endpoint (if available and validated) — Tier 2
           3. General Settings default (always last) — Tier 3
+        
+        Args:
+            agent_type: The type of agent requesting endpoints
+            allocated_tokens: Optional - the agent's allocated context size in tokens.
+                            When provided, used to filter/weight endpoint selection for sufficient capacity.
         """
         # Read general_limit inside lock scope for thread safety (same pattern as get_effective_max_tokens)
         general_limit = 0
@@ -440,6 +445,17 @@ class APIRouter:
                         if ep_limit <= 0 or ep_limit > general_limit:
                             cfg['max_input_tokens'] = general_limit
                     
+                    # Feature 022: When allocated_tokens is provided, ensure endpoint config reflects the agent's
+                    # actual context requirements. This allows dynamically-sized agents (e.g., compression agent)
+                    # to be routed to endpoints that can handle their full token budget rather than being capped by
+                    # static endpoint limits. NOTE: If the LLM API has a hard cap below allocated_tokens, the call
+                    # may fail with an error — this is acceptable as it's better than silent truncation.
+                    if allocated_tokens is not None:
+                        effective_limit = cfg.get('max_input_tokens', 0)
+                        # Only adjust if effective_limit > 0 (explicitly configured). A limit of 0 means "unlimited".
+                        if effective_limit > 0 and effective_limit < allocated_tokens:
+                            cfg['max_input_tokens'] = allocated_tokens
+                    
                     configs.append(cfg)
 
             # 2. If no agent-specific endpoints found, try the last successful endpoint (Tier 2)
@@ -457,11 +473,28 @@ class APIRouter:
                         if general_limit > 0:
                             if ep_limit <= 0 or ep_limit > general_limit:
                                 cfg['max_input_tokens'] = general_limit
+                        
+                        # Feature 022: Adjust for allocated tokens requirement
+                        if allocated_tokens is not None:
+                            effective_limit = cfg.get('max_input_tokens', 0)
+                            # Only adjust if effective_limit > 0 (explicitly configured). A limit of 0 means "unlimited".
+                            if effective_limit > 0 and effective_limit < allocated_tokens:
+                                cfg['max_input_tokens'] = allocated_tokens
+                        
                         configs.append(cfg)
                         break
 
         # 3. Always append the default as last resort (Tier 3)
         configs.append(copy.deepcopy(self.default_llm_cfg))
+        
+        # Feature 022: If allocated_tokens is provided and default doesn't meet it, adjust
+        # Note: We only adjust if effective_limit > 0 (explicitly configured). A limit of 0 means "unlimited".
+        if allocated_tokens is not None and configs:
+            default_cfg = configs[-1]
+            effective_limit = default_cfg.get('max_input_tokens', 0)
+            if effective_limit > 0 and effective_limit < allocated_tokens:
+                default_cfg['max_input_tokens'] = allocated_tokens
+        
         return configs
 
     # ── Retry + Fallback Execution ───────────────────────────────────────
@@ -471,6 +504,7 @@ class APIRouter:
         agent_type: str,
         call_fn: Callable,
         *args,
+        allocated_tokens: Optional[int] = None,
         **kwargs
     ) -> Any:
         """
@@ -478,8 +512,15 @@ class APIRouter:
         Supports both regular functions and generators.
         
         Uses per-server semaphores if concurrency_limit is set for the selected endpoint.
+        
+        Args:
+            agent_type: The type of agent making the call (e.g., 'coder', 'researcher')
+            call_fn: The function to execute with the selected endpoint config
+            allocated_tokens: Optional - the agent's allocated context size in tokens.
+                           When provided, used for endpoint selection to ensure sufficient capacity.
+            *args, **kwargs: Additional arguments passed to call_fn
         """
-        chain = self.get_endpoint_chain(agent_type)
+        chain = self.get_endpoint_chain(agent_type, allocated_tokens=allocated_tokens)
         all_errors = []
 
         for cfg_idx, llm_cfg in enumerate(chain):
