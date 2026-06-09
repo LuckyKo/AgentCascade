@@ -77,6 +77,8 @@ class BaseChatModel(ABC):
         return False
 
     def __init__(self, cfg: Optional[Dict] = None):
+        import hashlib
+        
         cfg = cfg or {}
         self.cfg = cfg
         self.model = cfg.get('model', '').strip()
@@ -89,6 +91,12 @@ class BaseChatModel(ABC):
         self.max_retries = generate_cfg.pop('max_retries', 0)
         self.generate_cfg = generate_cfg
         self.model_type = cfg.get('model_type', '')
+        
+        # ── Preprocessing Cache (Feature 019: Prompt Reprocessing Optimization) ──
+        # Cache preprocessed messages to avoid redundant work when same messages are sent multiple times
+        # LRU-style cache with bounded size to prevent memory growth
+        self._preprocess_cache: Dict[str, List[Message]] = {}
+        self._max_preprocess_cache_size = 50  # Limit cache to 50 entries per model instance
         if 'dashscope' in self.model_type:
             self.generate_cfg['incremental_output'] = True
 
@@ -113,6 +121,51 @@ class BaseChatModel(ABC):
             self.cache = diskcache.Cache(directory=cache_dir)
         else:
             self.cache = None
+
+    def _get_message_hash(self, messages: List[Message], functions: Optional[List[Dict]] = None, 
+                          generate_cfg: Optional[Dict] = None, lang: str = 'en') -> str:
+        """Generate a hash for a list of messages to use as cache key.
+        
+        Includes message roles, content, function schemas, and relevant config in the hash
+        to ensure cache validity when any of these change.
+        
+        Args:
+            messages: List of Message objects to hash.
+            functions: Optional list of function schemas (for fncall mode).
+            generate_cfg: Optional generation config dict (keys that affect preprocessing).
+            lang: Language code ('en' or 'zh') affecting multimodal upload info.
+            
+        Returns:
+            MD5 hex digest string for use as cache key.
+        """
+        # Create a deterministic string representation of messages
+        try:
+            msg_repr = str([(m.role, str(m.content)) for m in messages])
+        except Exception:
+            # Defensive: handle complex multimodal objects with broken __str__
+            msg_repr = repr([(m.role, getattr(m, 'content', '<err>')) for m in messages])
+        
+        # Include functions in hash if present (affects preprocessing)
+        fn_repr = str(sorted([f.get('name', '') for f in functions])) if functions else ''
+        
+        # Include generate_cfg keys that affect preprocessing behavior
+        if generate_cfg:
+            relevant_keys = ['incremental_output', 'max_input_tokens']
+            cfg_items = [(k, v) for k, v in sorted(generate_cfg.items()) if k in relevant_keys]
+            gen_repr = str(cfg_items)
+        else:
+            gen_repr = ''
+        
+        combined = f"{msg_repr}|||{fn_repr}|||{gen_repr}|||{lang}"
+        return hashlib.md5(combined.encode()).hexdigest()
+    
+    def _clear_preprocess_cache(self):
+        """Clear the preprocessing cache.
+        
+        Called when model state changes (e.g., after compression rebuild) to ensure
+        fresh preprocessing on next call.
+        """
+        self._preprocess_cache.clear()
 
     def quick_chat(self, prompt: str) -> str:
         *_, responses = self.chat(messages=[Message(role=USER, content=prompt)])
@@ -371,20 +424,38 @@ class BaseChatModel(ABC):
         functions: Optional[List[Dict]] = None,
         use_raw_api: bool = False,
     ) -> List[Message]:
+        # ── Feature 019: Preprocessing Cache ────────────────────────────────────
+        # Check cache first to avoid redundant preprocessing work
+        cache_key = self._get_message_hash(messages, functions, generate_cfg, lang)
+        if cache_key in self._preprocess_cache:
+            return copy.deepcopy(self._preprocess_cache[cache_key])
+        
+        # Evict oldest entries if cache is full (FIFO-style eviction)
+        if len(self._preprocess_cache) >= self._max_preprocess_cache_size:
+            # Remove first 20% of entries to make room
+            keys_to_remove = list(self._preprocess_cache.keys())[:int(self._max_preprocess_cache_size * 0.2)]
+            for key in keys_to_remove:
+                self._preprocess_cache.pop(key, None)
+        
+        # ── Actual Preprocessing ────────────────────────────────────────────────
         add_multimodel_upload_info = False
         if functions or (not self.support_multimodal_input):
             add_multimodel_upload_info = True
         add_audio_upload_info = False
         if functions or (not self.support_audio_input):
             add_audio_upload_info = True
-        messages = [
+        preprocessed = [
             format_as_multimodal_message(msg,
                                          add_upload_info=True,
                                          add_multimodel_upload_info=add_multimodel_upload_info,
                                          add_audio_upload_info=add_audio_upload_info,
                                          lang=lang) for msg in messages
         ]
-        return messages
+        
+        # Cache the result (store reference, will be deep-copied on retrieval)
+        self._preprocess_cache[cache_key] = preprocessed
+        
+        return copy.deepcopy(preprocessed)
 
     def _postprocess_messages(
         self,
@@ -412,7 +483,7 @@ class BaseChatModel(ABC):
         pre_msg = []
         for pre_msg in messages:
             yield self._postprocess_messages(pre_msg, fncall_mode=fncall_mode, generate_cfg=generate_cfg)
-        logger.debug(f'LLM Output: \n{pformat([_.model_dump() for _ in pre_msg], indent=2)}')
+        # logger.debug(f'LLM Output: \n{pformat([_.model_dump() for _ in pre_msg], indent=2)}')
 
     def _convert_messages_to_target_type(self, messages: List[Message],
                                          target_type: str) -> Union[List[Message], List[Dict]]:

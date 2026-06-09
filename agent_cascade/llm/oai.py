@@ -220,7 +220,7 @@ class TextChatAtOAI(BaseFnCallModel):
         generate_cfg: dict,
     ) -> Iterator[List[Message]]:
         messages = self.convert_messages_to_dicts(messages)
-        logger.debug(f'LLM Input generate_cfg: \n{generate_cfg}')
+        # logger.debug(f'LLM Input generate_cfg: \n{generate_cfg}')
         local_model = generate_cfg.pop('model', self.model)
         request_model = local_model
         if self.dynamic_model and local_model == self.model:

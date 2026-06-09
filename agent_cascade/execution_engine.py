@@ -692,7 +692,7 @@ class ExecutionEngine:
         if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
             return True  # Skip LLM call, yield and continue loop
 
-        # ── Async message injection (drain queue) ──────────────────────────
+        # ── Async message injection (drain queue) ────────────────────────────────
         pending = self.pool.drain_queue(inst_name)
         if pending:
             for async_msg_text in pending:
@@ -705,9 +705,17 @@ class ExecutionEngine:
                     instance.conversation.append(async_msg)
                 # Fix #2: Invalidate token count cache — conversation mutated
                 instance._last_token_count_conversation_length = -1
-            return True  # Yield and continue loop to process new messages
 
-        # ── /compress manual command handling (Item 7) ──────────────────────
+                # Feature 019: Invalidate LLM preprocessing cache after queue injection
+                template = self.pool.templates.get(instance.agent_class)
+                if template and hasattr(template, 'llm') and template.llm:
+                    try:
+                        template.llm._clear_preprocess_cache()
+                    except Exception as e:
+                        logger.debug(f"Failed to clear LLM preprocess cache for {inst_name}: {e}")
+
+            return True  # Yield and continue loop to process new messages
+                
         if self._handle_compress_command(instance, messages, llm_messages):
             return True  # Command handled — yield and continue
 
@@ -919,22 +927,55 @@ class ExecutionEngine:
         self, messages: List[Message], llm_messages: List[Message], inst_name: str
     ):
         """Rebuild both working sets from pool state after compression.
-
+        
+        Feature 019: Optimized rebuild with proper cache invalidation.
+        
         With clean-trim model (DESIGN_REWRITE §2.4), the pool is already compact —
         we just replace our references with deepcopies of the current pool content.
+        
+        Cache Invalidation Strategy:
+        - Clears token count cache in AgentInstance
+        - Signals LLM to clear preprocessing cache if available
+        
+        Args:
+            messages: Full conversation working set (mutated in-place)
+            llm_messages: Sliced working set for LLM (mutated in-place)  
+            inst_name: Agent instance name to rebuild for
         """
+        # Get instance for cache invalidation
+        inst = self.pool.get_instance(inst_name)
+        
         # Rebuild messages (full conversation) using shared helper
         from agent_cascade.compression.helpers import rebuild_working_set as _rws
         _rws(messages, self.pool, inst_name)
-
+        
         # Rebuild llm_messages (sliced working set) — apply slice_history_for_llm
         conv = self.pool.get_conversation(inst_name)
         if not conv:
             return
-
+        
         sliced = self.pool.slice_history_for_llm(conv)
         llm_messages.clear()
         llm_messages.extend(list(sliced))  # Already a new list from slice_history_for_llm
+        
+        # ── Feature 019: Cache Invalidation ────────────────────────────────────
+        # Invalidate token count cache so next _count_history_tokens does fresh count
+        if inst:
+            inst._cached_token_count = 0
+            inst._last_token_count_conversation_length = -1
+        
+        # Invalidate LLM preprocessing cache for this instance's template
+        template = self.pool.templates.get(inst.agent_class) if inst else None
+        if template and hasattr(template, 'llm') and template.llm:
+            try:
+                template.llm._clear_preprocess_cache()
+            except Exception as e:
+                logger.debug(f"Failed to clear LLM preprocess cache for {inst_name}: {e}")
+        
+        logger.debug(
+            f"Rebuilt working sets for {inst_name}: "
+            f"messages={len(messages)}, llm_messages={len(llm_messages)}"
+        )
 
     def _update_streaming_responses(self, instance: AgentInstance, last_output: List[Message]):
         """Update streaming responses only when content actually changes (performance optimization).

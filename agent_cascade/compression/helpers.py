@@ -67,9 +67,15 @@ def rebuild_working_set(
     """
     Rebuild a caller's working set from pool state after compression.
 
+    Feature 019: Optimized rebuild with cache invalidation support.
+
     With clean trim, the pool is already compact — we just replace the
     caller's list with a deepcopy of the current pool content.
-
+    
+    Cache Invalidation:
+    - Clears token count cache in AgentInstance if accessible
+    - Ensures fresh preprocessing on next LLM call
+    
     Mutates messages_list in-place (caller passes their own list reference).
 
     Args:
@@ -85,6 +91,16 @@ def rebuild_working_set(
     messages_list.clear()
     messages_list.extend(copy.deepcopy(compressed))
     # deepcopy ensures callers don't accidentally mutate pool state through their references
+    
+    # Feature 019: Invalidate token count cache in AgentInstance
+    try:
+        inst = agent_pool.get_instance(agent_name)
+        if inst and hasattr(inst, '_cached_token_count'):
+            inst._cached_token_count = 0
+            inst._last_token_count_conversation_length = -1
+    except Exception:
+        # Defensive: cache invalidation is optimization, not critical path
+        pass
 
 
 def extract_instance_output(messages: list[Any], instance_name: str) -> str:

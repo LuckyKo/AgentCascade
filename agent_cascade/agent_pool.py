@@ -1030,7 +1030,21 @@ class AgentPool:
         self._mark_activity(instance_name)
 
     def drain_queue(self, instance_name: str) -> List[str]:
-        """Drain all pending messages for an instance."""
+        """Drain all pending messages for an instance atomically.
+        
+        Feature 019: Batched drain operation for efficiency.
+        
+        This operation pops the entire queue at once, minimizing lock contention
+        and ensuring no messages are missed between drain calls. Returns empty
+        list if no messages queued.
+        
+        Args:
+            instance_name: The agent instance to drain messages for.
+            
+        Returns:
+            List of message texts (may be empty). Original queue is cleared.
+        """
+        # Atomic pop ensures thread-safe batched drain
         return self.message_queues.pop(instance_name, [])
 
     def has_messages(self, instance_name: str) -> bool:
@@ -1052,13 +1066,18 @@ class AgentPool:
             self._async_results[instance_name].append(result)
 
     def drain_async_results(self, instance_name: str) -> List[str]:
-        """Drain all completed async results for an instance.
+        """Drain all completed async results for an instance atomically.
+        
+        Feature 019: Batched drain operation for efficiency.
+        
+        This operation pops the entire results list at once under lock, minimizing
+        lock contention and ensuring thread-safe access to async results.
         
         Args:
             instance_name: The agent instance to drain results for.
             
         Returns:
-            List of result strings (may be empty).
+            List of result strings (may be empty). Original buffer is cleared.
         """
         with self._async_lock:
             return self._async_results.pop(instance_name, [])
