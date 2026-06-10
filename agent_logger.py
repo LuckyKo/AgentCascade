@@ -134,6 +134,11 @@ class AgentInstanceLogger:
     def insert_compression_marker(self, summary_msg: Any, tail_count: int):
         """Insert a compression summary marker into the cumulative log at the
         correct position — calculated as an offset from the end of the log.
+        
+        DEPRECATED: This method is no longer called by the unified compression system.
+        Pool and log are now updated atomically together via apply_compression() in
+        core.py, which calls reset_history() directly. This method is kept for backward
+        compatibility in case other code paths use it.
 
         Args:
             summary_msg: The compression summary message (USER role with

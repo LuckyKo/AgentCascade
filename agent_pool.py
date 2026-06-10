@@ -646,6 +646,7 @@ rules:
         Shared helper used by compress_context() in core.py.
         
         active_start_idx: The index where the active (uncompressed) set begins.
+                          Always preserves system message + first user message.
         messages_to_compress: The list of active messages eligible for compression.
         latest_summary_idx: The index of the most recent compression marker (-1 if none).
         """
@@ -653,8 +654,16 @@ rules:
         if not history:
             return None, [], -1
         
-        # Determine start index (skip system message if present)
-        start_idx = 1 if (history[0].get(ROLE) == SYSTEM if isinstance(history[0], dict) else getattr(history[0], ROLE, '') == SYSTEM) else 0
+        # Determine start index — always preserve system message + first user message.
+        # After multiple compressions the pool looks like: [SYS][USER_MSG_0][SUM1][SUM2]...[tail]
+        start_idx = 0
+        if history:
+            is_system = (history[0].get(ROLE) == SYSTEM if isinstance(history[0], dict) else getattr(history[0], ROLE, '') == SYSTEM)
+            if is_system:
+                start_idx = 1
+                # Also skip the first user message if present
+                if len(history) > 1 and (history[1].get(ROLE) == USER if isinstance(history[1], dict) else getattr(history[1], ROLE, '') == USER):
+                    start_idx = 2
         
         # Find the latest compression marker using shared helper
         latest_summary_idx = self.find_last_marker(history)

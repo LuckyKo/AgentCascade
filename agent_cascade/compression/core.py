@@ -12,6 +12,84 @@ from agent_cascade.utils.utils import extract_text_from_message
 logger = logging.getLogger(__name__)
 
 
+def apply_compression(
+    agent_pool,
+    target_agent_name: str,
+    marker_message,          # The summary marker message (already built)
+    insert_pos: int,         # Where to insert the marker in the pool history
+    active_start_idx: int,   # Start of active set
+    messages_discarded: int, # How many were discarded
+    tail_count: int,         # How many remain after marker
+    include_force_marker: bool = False,  # Whether to include force compression marker
+) -> bool:
+    """
+    Apply compression atomically to both pool and log.
+    
+    This unified function ensures pool and log are always modified together,
+    eliminating divergence between them. All compression triggers should use
+    this function for the final mutation step.
+    
+    CRITICAL ORDER: Log is updated FIRST, then pool. If log update fails,
+    pool remains untouched — preventing the exact divergence we're eliminating.
+    
+    Args:
+        agent_pool: The AgentPool instance.
+        target_agent_name: The agent instance name whose context to compress.
+        marker_message: The compression summary marker (already built).
+        insert_pos: Position in pool history where marker should be inserted.
+        active_start_idx: Start index of the active set in pool history.
+        messages_discarded: Number of messages being discarded.
+        tail_count: Number of messages remaining after the marker.
+        include_force_marker: If True, inject a force compression marker before summary.
+    
+    Returns:
+        True if compression was applied successfully, False otherwise.
+    """
+    history = agent_pool.get_conversation(target_agent_name)
+    
+    # Build force marker if needed (for forced compression tracking)
+    force_marker = None
+    if include_force_marker:
+        force_marker = {
+            'role': 'user',
+            'content': f"[SYSTEM INFO: Forced compression started, compressing messages for agent '{target_agent_name}'.]"
+        }
+    
+    try:
+        # Validate insert_pos is within bounds to prevent silent data loss
+        if insert_pos > len(history):
+            logger.error(
+                f"Invalid insert_pos={insert_pos} for history length {len(history)} "
+                f"in agent '{target_agent_name}' — pool state may be corrupted"
+            )
+            return False
+        
+        # Build new history atomically: prefix + force_marker (optional) + summary_marker + tail
+        if include_force_marker:
+            new_history = history[:active_start_idx] + [force_marker, marker_message] + history[insert_pos:]
+        else:
+            new_history = history[:active_start_idx] + [marker_message] + history[insert_pos:]
+        
+        # LOG FIRST: Update the log file before touching the pool
+        # This ensures if log update fails, pool remains untouched (no divergence)
+        if target_agent_name in agent_pool.instance_loggers:
+            logger_inst = agent_pool.instance_loggers[target_agent_name]
+            if hasattr(logger_inst, 'reset_history'):
+                logger_inst.reset_history(new_history, rewrite=True)
+            else:
+                logger.error(f"Logger for '{target_agent_name}' lacks reset_history — log not updated")
+                return False
+        
+        # POOL SECOND: Only update pool after log succeeded
+        agent_pool.instance_conversations[target_agent_name] = new_history
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Atomic compression application failed for '{target_agent_name}': {e}")
+        return False
+
+
 def compress_context(
     agent_pool,
     target_agent_name: str,        # Which agent's context to compress
@@ -111,6 +189,15 @@ def compress_context(
 
     # ── 3. Calculate discard count ──
     target_discard_count = compute_discard_count(active_set, fraction, force)
+    
+    # Safety clamp: ensure we don't try to discard more messages than exist in active set
+    target_discard_count = min(target_discard_count, len(active_set))
+
+    # ── 3a. Flag for forced compression marker injection (done in apply_compression) ──
+    # This ensures forced compression has the same message structure as agent-triggered compression
+    # (which already has a tool call message in the stack). The force marker is injected atomically
+    # in apply_compression() along with the summary marker, preventing bloat accumulation.
+    include_force_marker = False
 
     # ── 3b. Cap discard count so compression agent can actually process the messages ──
     # If the compression agent has a known context window, don't feed it more than it can handle.
@@ -148,18 +235,6 @@ def compress_context(
                 error="Not enough messages to compress; deferring until more accumulate",
                 mode=mode,
             )
-
-    # ── 5. Force mode guard: if discard count is 0 in force mode, fail gracefully ──
-    if force and target_discard_count < 1:
-        return CompressResult(
-            success=False,
-            summary_text=None,
-            marker_message=None,
-            messages_discarded=0,
-            tail_count=len(active_set),
-            error="Force mode but compute_discard_count returned 0 — unexpected pool state",
-            mode=mode,
-        )
 
     # ── 6. Determine messages to send to the Compression Agent ──
     if latest_summary_idx != -1:
@@ -253,75 +328,55 @@ def compress_context(
             mode=mode,
         )
 
-    # ── 10. Apply to pool: trim → insert marker (atomic mutation via copy-and-replace) ──
-    # NOTE: This is single-threaded by design — forced compression halts all other agents
-    # before running, so no concurrent pool mutations can occur during this block.
+    # ── 10. Apply compression atomically to pool and log ──
+    # Use the unified apply_compression() function which handles both pool mutation and log update
+    # in a single atomic operation, eliminating divergence between them.
+    # For forced compression, include_force_marker=True injects the force marker atomically.
+    
+    tail_count = len(active_set) - target_discard_count
+    
+    # Adjust active_start_idx if force marker will be injected (it shifts indices by +1)
+    adjusted_active_start_idx = active_start_idx + (1 if force and not dry_run else 0)
+    insert_pos = adjusted_active_start_idx + target_discard_count
     
     try:
-        # NOTE: get_conversation returns the same list object as instance_conversations[].
-        # We build new_history as a new list and replace the reference on the next line.
-        history = agent_pool.get_conversation(target_agent_name)
-        insert_pos = active_start_idx + target_discard_count
-
-        # Safety check: insert position must be after the SYSTEM message
-        if insert_pos < 1:
-            raise RuntimeError(
-                f"Insert position {insert_pos} would overwrite or precede SYSTEM message — "
-                f"pool state corrupted for agent '{target_agent_name}'"
+        success = apply_compression(
+            agent_pool=agent_pool,
+            target_agent_name=target_agent_name,
+            marker_message=marker_message,
+            insert_pos=insert_pos,
+            active_start_idx=adjusted_active_start_idx,
+            messages_discarded=target_discard_count,
+            tail_count=tail_count,
+            include_force_marker=force and not dry_run,  # Include force marker for forced compression
+        )
+        
+        if not success:
+            logger.error(f"Atomic compression application failed for '{target_agent_name}'")
+            return CompressResult(
+                success=False,
+                summary_text=generated_summary,
+                marker_message=None,
+                messages_discarded=0,
+                tail_count=0,
+                error="Failed to apply compression atomically to pool and log",
+                mode=mode,
             )
-
-        # Atomic mutation via copy-and-replace: build new list and assign.
-        # This ensures that if an exception occurs, the pool is untouched.
-        new_history = history[:active_start_idx] + [marker_message] + history[insert_pos:]
-        agent_pool.instance_conversations[target_agent_name] = new_history
-
+            
     except Exception as e:
-        # Fail-safe: pool mutation failed — this shouldn't happen but protect against it
-        logger.error(f"Pool mutation during compression failed: {e}")
+        # Fail-safe: atomic application failed — this shouldn't happen but protect against it
+        logger.error(f"Atomic compression application exception for '{target_agent_name}': {e}")
         return CompressResult(
             success=False,
             summary_text=generated_summary,
             marker_message=None,
             messages_discarded=0,
             tail_count=0,
-            error=f"Pool mutation failed: {e}",
+            error=f"Atomic compression failed: {e}",
             mode=mode,
         )
 
-    # ── 11. Calculate tail count and notify logger ──
-    tail_count = len(active_set) - target_discard_count
-
-    try:
-        if target_agent_name in agent_pool.instance_loggers:
-            logger_inst = agent_pool.instance_loggers[target_agent_name]
-            # Guard: only call insert_compression_marker if the logger supports it
-            if hasattr(logger_inst, 'insert_compression_marker'):
-                logger_inst.insert_compression_marker(
-                    summary_msg=marker_message,
-                    tail_count=tail_count,
-                )
-            else:
-                logger.warning(
-                    f"Logger for agent '{target_agent_name}' does not have "
-                    "'insert_compression_marker' method — marker not logged to file"
-                )
-    except Exception as e:
-        # Logger notification failure: pool remains modified — logger can be resynced on next iteration.
-        logger.error(
-            f"Logger notification failed after compression for agent "
-            f"'{target_agent_name}': {e}. Pool remains modified — logger can be resynced on next iteration."
-        )
-        return CompressResult(
-            success=False,
-            summary_text=generated_summary,
-            marker_message=None,
-            messages_discarded=0,
-            tail_count=0,
-            error=f"Logger sync failed after pool mutation: {e}",
-            mode=mode,
-        )
-
-    # ── 12. Log the successful compression event ──
+    # ── 11. Log the successful compression event ──
     logger.info(
         f"Clean-trim compression: Discarded {target_discard_count} messages "
         f"for agent '{target_agent_name}'. Tail count: {tail_count}. "

@@ -811,17 +811,14 @@ class OrchestratorAgent(Assistant):
                     f"Halting other agents and triggering FORCEFUL compression."
                 )
 
-                # CRITICAL FIX: Sync working set to pool BEFORE compression.
-                # During sub-agent execution, the pool is stale — it only has initial messages
-                # (system + user prompt). The working set (messages) has accumulated tool calls
-                # and responses during the turn. Without this sync, compress_context() operates
-                # on the stale pool and discards everything because active_set is tiny
-                # (just 1-2 messages), resulting in tail_count=0 and total context loss.
-                # See: compression_forced_subagent_bug_analysis.md
+                # Sync working set to pool BEFORE forced compression.
+                # During sub-agent execution, the pool may be stale — sync it with the current
+                # working set so compress_context() operates on up-to-date data.
+                # The subsequent apply_compression() will atomically update both pool and log.
                 pool_conv = self.agent_pool.get_conversation(instance_name)
                 if len(messages) > len(pool_conv):
                     logger.info(
-                        f"Syncing {len(messages)} working-set messages to stale pool "
+                        f"Syncing {len(messages)} working-set messages to pool "
                         f"(pool has {len(pool_conv)}) before forced compression for {instance_name}"
                     )
                     pool_conv.clear()
@@ -850,8 +847,7 @@ class OrchestratorAgent(Assistant):
                     self._compress_fail_count[instance_name] = 0
                     # Mark that forced compression ran during this turn so _stream_sub_agent_call
                     # knows NOT to extend conv with stale final_resp (which contains pre-compression
-                    # messages already synced to the pool at lines 810-817).
-                    # Historical analysis files were removed from the tree; see the project issue tracker for related notes.
+                    # messages already synced to the pool above).
                     self._forced_compression_ran[instance_name] = True
                     # Don't reset tracker on success — keep it True so next iteration lets LLM call through
                     # (agent needs to make progress with the compressed context, not compress again)
@@ -1057,7 +1053,7 @@ class OrchestratorAgent(Assistant):
             # Only log the last message for the main orchestrator session.
             # Use update_history to avoid duplicates if api_server.py already logged it during a retry.
             # Skip if compression ran last turn — the log is already in sync via
-            # insert_compression_marker + individual log_message calls.
+            # apply_compression() which atomically updates both pool and log.
             if not self._compress_tracker.get(self.session_name, False):
                 logger_inst.update_history([messages[-1]])
 
@@ -1246,29 +1242,6 @@ class OrchestratorAgent(Assistant):
                 
                 continue
 
-            # BUG-7 fix: After compress_context ran, messages was synced to sliced state at line 1675,
-            # but subsequent operations (loop detection, forced compression checks) need consistent state.
-            # Re-sync messages from the pool's sliced working set so it matches llm_messages.
-            # NOTE: cumulative compression INSERTS a summary marker (pool grows), so we check
-            # the flag rather than comparing lengths. Both messages and llm_messages stay as sliced
-            # working sets for consistency during the turn after compression.
-            if self._compress_tracker.get(self.session_name, False):
-                compressed = self.agent_pool.get_conversation(self.session_name)
-                if compressed:
-                    # Validate pool integrity after agent-triggered compression
-                    if not validate_message_pool(compressed, self.session_name):
-                        logger.error(f"[COMPRESSION BUG] Message pool validation FAILED for '{self.session_name}' after agent-triggered compression.")
-                    
-                    # Use slice_history_for_llm to get the working set — NOT the full cumulative history.
-                    # This ensures messages and llm_messages stay in sync after compression.
-                    sliced = self.agent_pool.slice_history_for_llm(compressed) if hasattr(self.agent_pool, 'slice_history_for_llm') else compressed
-                    messages.clear()
-                    messages.extend(copy.deepcopy(sliced))
-                    # NOTE: No logger sync needed here — compress_context() in core.py already
-                    # called insert_compression_marker() on the logger, which updates
-                    # logger.data["history"] to match the pool. Only forced compression recovery
-                    # (above) needs explicit logger sync because it rebuilds from scratch.
-            
             # --- LOOP DETECTION ---
             loop_info = detect_loop(messages)
             if loop_info:
