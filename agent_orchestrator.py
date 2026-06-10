@@ -1430,6 +1430,78 @@ class OrchestratorAgent(Assistant):
                     logger.info(f"Agent {self.name} halted before executing tool '{tool_name}'.")
                     break
                 
+                # ── Disabled/Inexistent Tool Auto-Deny ────────────────────────────
+                # If the LLM requests a tool that is disabled for this agent (or not in function_map),
+                # auto-deny it instead of executing. This prevents agents from learning about tools
+                # via log inspection and attempting to use them anyway.
+                disabled_tools = self._get_disabled_tool_names()
+                if tool_name in disabled_tools or tool_name not in self.function_map:
+                    # Determine precise deny reason (handle case where both conditions are true)
+                    if tool_name in disabled_tools and tool_name not in self.function_map:
+                        deny_reason = "disabled and does not exist"
+                    elif tool_name in disabled_tools:
+                        deny_reason = "disabled"
+                    else:
+                        deny_reason = "does not exist"
+                    
+                    logger.info(f"Auto-denying tool '{tool_name}' for agent {self.name} — tool is {deny_reason}.")
+                    tool_result = f"Tool '{tool_name}' was auto-denied because it is {deny_reason} for this agent. This tool cannot be used."
+                    # Feed the denial back to the LLM so it can continue without the tool
+                    fn_msg = Message(
+                        role=FUNCTION,
+                        name=tool_name,
+                        content=tool_result,
+                        extra={
+                            'function_id': (
+                                out.get('extra', {}).get('function_id', '1') if isinstance(out, dict) and isinstance(out.get('extra'), dict)
+                                else out.extra.get('function_id', '1') if getattr(out, 'extra', None) else '1'
+                            ),
+                            'tool_success': False,  # Mark as failed since the tool was denied
+                        },
+                    )
+                    messages.append(fn_msg)
+                    llm_messages.append(fn_msg)
+                    response.append(fn_msg)
+                    logger_inst.log_message(fn_msg)
+                    
+                    # Sync fn_msg to pool immediately so BUG-7 re-sync doesn't wipe it out
+                    # This is critical after compress_context which modifies the pool mid-turn
+                    try:
+                        pool_conv = self.agent_pool.get_conversation(self.session_name)
+                        pool_conv.append(fn_msg)
+                    except Exception:
+                        pass  # Pool sync failure shouldn't break tool execution
+                    
+                    # Check for urgent async messages (same as normal path at line 1757-1774)
+                    if instance:
+                        urgent_msgs = self.agent_pool.drain_queue(instance)
+                        if urgent_msgs:
+                            for async_msg_text in urgent_msgs:
+                                if not async_msg_text.strip():
+                                    continue
+                                async_msg = Message(role=USER, content=async_msg_text)
+                                messages.append(async_msg)
+                                llm_messages.append(async_msg)
+                                response.append(async_msg)
+                                logger_inst.log_message(async_msg)
+                            yield response
+                            break  # Stop executing rest of batched tools on urgent message
+                    
+                    # Record telemetry for auto-denied tool
+                    try:
+                        if hasattr(self.agent_pool, 'telemetry'):
+                            self.agent_pool.telemetry.record_tool_call_end(
+                                self.session_name, tool_name,
+                                success=False,
+                                result_chars=len(tool_result),
+                                truncated=False,
+                                error=f"Auto-denied: {deny_reason}",
+                            )
+                    except Exception:
+                        pass
+                    
+                    continue  # Skip to next tool call in the loop
+                
                 _tool_success = True
                 _tool_error = ""
                 try:
@@ -1705,7 +1777,7 @@ class OrchestratorAgent(Assistant):
                     content=tool_result,
                     extra={
                         'function_id': (
-                            out.get('extra', {}).get('function_id', '1') if isinstance(out, dict)
+                            out.get('extra', {}).get('function_id', '1') if isinstance(out, dict) and isinstance(out.get('extra'), dict)
                             else out.extra.get('function_id', '1') if getattr(out, 'extra', None) else '1'
                         ),
                         'tool_success': _tool_success,  # Pass to frontend so isToolFailure() can use it directly
