@@ -734,7 +734,11 @@ class ExecutionEngine:
             max_tokens_for_check = allocated_max
         else:
             # Fallback to manual counting when ground-truth not available (e.g., first turn)
-            current_tokens = self._count_history_tokens(llm_messages, instance)
+            # CRITICAL FIX: Count tokens on FULL conversation (messages), not sliced llm_messages
+            # llm_messages is already trimmed by slice_history_for_llm(), so it doesn't reflect
+            # actual context accumulation. We need to measure the full working set to determine
+            # when compression should trigger.
+            current_tokens = self._count_history_tokens(messages, instance)
             max_tokens_for_check = max_tokens
         
         usage_pct = (current_tokens / max_tokens_for_check * 100) if max_tokens_for_check > 0 else 0

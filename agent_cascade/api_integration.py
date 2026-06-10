@@ -58,6 +58,15 @@ _stream_token_stats_cache: Dict[str, tuple] = {}
 _STREAM_TOKEN_STATS_CACHE_MAXSIZE = 100  # Bounded cache (FIFO eviction) to prevent unbounded growth
 
 
+def _clear_performance_caches():
+    """Clear all module-level performance caches. Called during session reset."""
+    global _token_stats_cache, _max_tokens_cache, _cached_instance_data, _stream_token_stats_cache
+    _token_stats_cache.clear()
+    _max_tokens_cache.clear()
+    _cached_instance_data.clear()
+    _stream_token_stats_cache.clear()
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # WebSocket Queue Helper — safely put stream_update events without blocking
 # ═══════════════════════════════════════════════════════════════════════

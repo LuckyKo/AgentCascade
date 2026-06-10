@@ -21,8 +21,11 @@ from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
-from .agent_instance import AgentInstance, PoolSettings
+from .agent_instance import AgentInstance, PoolSettings, AgentState
 from .async_tools import AsyncResultBuffer, AsyncToolRegistry
+
+# Active states for agent lifecycle management (includes IDLE for Fix #6)
+ACTIVE_STATES = (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING, AgentState.IDLE)
 
 
 class _InstanceConversationMapping(dict):
@@ -398,6 +401,7 @@ class AgentPool:
         """
         self._instances_version += 1  # Fix #3: signal that instances changed
         self.instances.pop(instance_name, None)
+        self.terminated_instances.discard(instance_name)  # Issue #4 fix: prevent memory leaks
         self.message_queues.pop(instance_name, None)
         # Clean up mapping's dict storage to prevent stale keys
         if hasattr(self, '_instance_conversations'):
@@ -471,24 +475,48 @@ class AgentPool:
             self.resume_instance(inst_name)
         self._compression_halted.clear()
 
-    def terminate_instance(self, instance_name: str):
+    def terminate_instance(self, instance_name: str, set_global_stopped: bool = False):
         """Mark an instance for immediate termination.
 
-        Adds to terminated_instances set and sets the stopped event if active.
-        Also marks the instance itself as terminated (Fix Bug41).
+        Adds to terminated_instances set and transitions state to TERMINATED.
         Cascade-terminates all child agents recursively (Fix Bug41).
         Mirrors old AgentPool.terminate_instance() semantics.
+        
+        Args:
+            instance_name: Name of the instance to terminate.
+            set_global_stopped: If True, sets the global _stopped_event which signals
+                              ALL agents to stop. If False (default for dismissal), only
+                              THIS instance's state is changed without signaling other agents
+                              via the global event. Bug5 Fix: Dismissal uses False to avoid
+                              affecting other agents mid-execution.
         """
         # First cascade-terminate all children (recursive, Fix Bug41)
         for child_name in list(self.children.get(instance_name, [])):
             if self.instances.get(child_name):
-                self.terminate_instance(child_name)  # Recursive — handles nested trees
+                self.terminate_instance(child_name, set_global_stopped=False)  # Recursive — handles nested trees
         
         self.terminated_instances.add(instance_name)
         inst = self.instances.get(instance_name)
-        if inst and inst.is_active:
-            self._stopped_event.set()      # Global signal FIRST (minimize race window)
-            inst.is_terminated = True      # Per-instance mark second
+        if inst and inst.state in ACTIVE_STATES:
+            # Bug5 Fix #1: Only set global _stopped_event when explicitly requested
+            if set_global_stopped:
+                self._stopped_event.set()  # Global signal for ALL agents
+            with inst._state_lock:
+                inst._transition(AgentState.TERMINATED)
+        
+        # Drain async results buffer to prevent memory leaks and stale messages
+        if hasattr(self, '_async_results'):
+            try:
+                self._async_results.drain(instance_name)
+            except Exception as e:
+                logger.debug(f"Draining async results for {instance_name} failed (non-critical): {e}")
+        
+        # Clear message queue to prevent stale messages from being processed
+        if instance_name in self.message_queues:
+            try:
+                self.message_queues[instance_name].clear()
+            except Exception as e:
+                logger.debug(f"Clearing message queue for {instance_name} failed (non-critical): {e}")
 
     def dismiss_instance(self, instance_name: str):
         """Remove an instance from the pool. If active, terminate it; otherwise clean up.
@@ -496,18 +524,23 @@ class AgentPool:
         Recursively dismisses all child agents first (cascade termination, Fix Bug41).
         This is the UI-initiated termination path (WebSocket terminate_agent_instance message).
         Mirrors old AgentPool.dismiss_instance() semantics.
+        
+        Bug5 Fix #1: Dismissal should NOT set global _stopped_event to avoid affecting
+        other agents mid-execution. Only this specific instance is terminated.
         """
         # First dismiss all children (recursive cascade, Fix Bug41)
         for child_name in list(self.children.get(instance_name, [])):
             if self.instances.get(child_name):
                 self.dismiss_instance(child_name)  # Recursive — handles nested trees
         
-        if self.is_active(instance_name):
-            self.terminate_instance(instance_name)
+        inst = self.instances.get(instance_name)
+        if inst and inst.state in ACTIVE_STATES:
+            # Bug5 Fix: Pass set_global_stopped=False to ensure only THIS instance
+            # is terminated, not all agents via the global _stopped_event.
+            self.terminate_instance(instance_name, set_global_stopped=False)
         # Always remove the instance from the pool so its tab disappears from the UI
+        # remove_instance() handles terminated_instances.discard() (Issue #4 fix)
         self.remove_instance(instance_name)
-        # Clean up stale entry in terminated_instances set (Fix Bug41 reviewer feedback)
-        self.terminated_instances.discard(instance_name)
 
     # ── API bridge methods for api_server.py ────────────────────────────────
     # These methods provide access patterns that api_server.py expects.
@@ -521,25 +554,71 @@ class AgentPool:
         return list(self.templates.keys())
 
     def reset(self):
-        """Full reset of agent state (halted, active stack, tool args, terminated).
+        """Full reset of agent state for "New Session".
 
-        Clears all per-instance state including halted instances, compression halts,
-        terminated instances, active stack, last_tool_args, and instance_state.
+        Order of operations:
+          1. Clear pending approvals (unblocks any threads waiting in operation_manager)
+          2. Dismiss all non-orchestrator sub-agents (with cascade and double-dismiss guard)
+          3. Create new logger session for the main orchestrator (so new messages
+             go to a fresh JSONL file instead of appending to the old one)
+          4. Clear conversations of all instances
+          5. Clear per-instance state (halted, active_stack, tool args, etc.)
+          6. Clear performance caches and WebSocket references
+          7. Shutdown and recreate async infrastructure (Phase 4)
 
-        IMPORTANT: Does NOT delete AgentInstances — only clears their conversations.
-        The old reset() destroyed all instances via _instance_conversations.clear(),
-        which called self._pool.instances.clear(). That broke the main session after reset.
+        Does NOT delete AgentInstances — only clears their conversations.
+        The main orchestrator instance (parent_instance is None) survives reset.
+
+        Note: This method sets pool.stopped as a safety net to signal active threads 
+        to halt even if the caller forgot. The stopped event is cleared at the end of 
+        reset so executors can run in the new session. Callers may re-set 
+        pool.stopped = True after reset if they need threads halted during post-reset 
+        operations (e.g., api_server.py line 1697).
         """
-        self._halted_instances.clear()
-        self._compression_halted.clear()
-        self.terminated_instances.clear()
-        self.children.clear()  # Fix Bug41: clear parent-child tracking on reset
-        self.active_stack_clear()
-        self.last_tool_args.clear()
-        self.instance_state.clear()
-        # Fix #3: increment version since conversation state changed
-        self._instances_version += 1
-        # Clear conversations of all instances without deleting the instances
+        # Safety net: signal all active threads to halt even if caller forgot.
+        # Direct _stopped_event manipulation avoids triggering the property setter's
+        # side effects (idle.stop() + async_registry.shutdown()) which are handled
+        # explicitly later in this method at steps 6-7.
+        self._stopped_event.set()
+        
+        # ── Step 1: Clear pending approvals ──────────────────────────────────
+        # Prevent dangling threads waiting for user approval.
+        if self.operation_manager:
+            try:
+                with self.operation_manager._lock:
+                    for approval in self.operation_manager.pending.values():
+                        if not approval.event.is_set():
+                            approval.approved = False
+                            approval.outcome_reason = "Session reset"
+                            approval.event.set()
+                    self.operation_manager.pending.clear()
+            except Exception as e:
+                logger.warning(f"clear_pending failed during reset (threads may hang): {e}")
+
+        # ── Step 2: Dismiss all sub-agents (non-orchestrator) ───────────────
+        # Take a snapshot of instance keys to avoid RuntimeError during iteration.
+        # dismiss_instance() recursively cascade-dismisses children first, then
+        # calls remove_instance() which cleans up loggers, queues, caches.
+        for name in list(self.instances.keys()):
+            inst = self.instances.get(name)
+            if inst is None or inst.parent_instance is None:
+                continue  # Skip main orchestrator and already-removed instances
+            # Double-dismiss guard: instance may have been cascade-dismissed by parent
+            if name not in self.instances:
+                continue
+            self.dismiss_instance(name)
+
+        # ── Step 3: New logger session for main orchestrator ────────────────
+        # Create a new JSONL log file so the new session doesn't append to old.
+        for name, inst in list(self.instances.items()):
+            if inst.parent_instance is None:
+                try:
+                    self._logger.create_new_session(name, inst.agent_class)
+                except Exception as e:
+                    logger.warning(f"Logger reset failed for {name} (new session may append to old logs): {e}")
+                break
+
+        # ── Step 4: Clear conversations of all instances ─────────────────────
         if hasattr(self, '_instance_conversations'):
             self._instance_conversations.clear()
         else:
@@ -551,9 +630,48 @@ class AgentPool:
                     # Reset compression tracking fields (Feature 018)
                     inst._last_force_compress_time = 0.0
                     inst._force_compress_count = 0
-        # Clean up WebSocket references to prevent stale queue/loop usage in new sessions
+        self._instances_version += 1
+
+        # ── Step 5: Clear per-instance state ────────────────────────────────
+        self._halted_instances.clear()
+        self._compression_halted.clear()
+        self.terminated_instances.clear()
+        self.children.clear()
+        # Keep unified's active_stack_clear() — temp removed it but unified still needs it
+        if hasattr(self, 'active_stack_clear'):
+            self.active_stack_clear()
+        self.last_tool_args.clear()
+        self.instance_state.clear()
+        self.instance_summaries.clear()
+
+        # ── Step 6: Clear performance caches and WebSocket references ───────
+        try:
+            from agent_cascade.api_integration import _clear_performance_caches
+            _clear_performance_caches()
+        except Exception as e:
+            logger.warning(f"Cache clear failed during reset (stale data may persist): {e}")
         self._ws_send_queue = None
         self._ws_loop = None
+
+        # ── Step 7: Shutdown and recreate async infrastructure (Phase 4) ─────
+        # Shutdown executor to clean up background tool threads
+        try:
+            self._async_registry.shutdown()
+        except Exception as e:
+            logger.warning(f"Async registry shutdown failed during reset (threads may leak): {e}")
+        # Recreate for new session
+        self._async_registry = AsyncToolRegistry(pool=self)
+        # Clear async results buffer
+        self._async_results = AsyncResultBuffer()
+
+        # Restart idle checker — it may have been stopped by the caller's
+        # pool.stopped = True. IdleManager.start() is idempotent.
+        self._idle.start()
+        
+        # Clear the safety-net stopped signal so executors can run in the new session.
+        # Callers that explicitly set stopped=True before reset will need to re-set it
+        # if they want threads halted during post-reset operations (e.g., api_server line 1697).
+        self._stopped_event.clear()
 
     @property
     def _state_lock(self):
