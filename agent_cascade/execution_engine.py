@@ -2371,9 +2371,7 @@ class ExecutionEngine:
                                     else:
                                         cfg['disabled_tools'] = list(caller_disabled_tools)
                                     inst._generate_cfg_override = cfg
-                                    logger.debug(
-                                        f"Propagated disabled_tools to agent '{instance_name}': {caller_disabled_tools}"
-                                    )
+                                    # logger.debug(f"Propagated disabled_tools to agent '{instance_name}': {caller_disabled_tools}")
             except Exception as e:
                 logger.debug(f"Settings propagation from {caller} to {instance_name} failed (non-critical): {e}")
 

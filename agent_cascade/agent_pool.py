@@ -22,6 +22,7 @@ from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
 from .agent_instance import AgentInstance, PoolSettings
+from .async_tools import AsyncResultBuffer, AsyncToolRegistry
 
 
 class _InstanceConversationMapping(dict):
@@ -286,14 +287,13 @@ class AgentPool:
         # These attributes support the SLEEPING state guard for async background tools.
         # _async_results: buffer storing completed async tool results by instance name
         # _async_registry: tracks pending async tool calls by instance name
-        self._async_results = {}  # type: Dict[str, List[str]]  # instance_name -> list of result strings
-        self._async_lock = threading.RLock()  # Lock for _async_results access
+        self._async_results: AsyncResultBuffer = AsyncResultBuffer()
+        self._async_registry: AsyncToolRegistry = AsyncToolRegistry(pool=self)
         
-        # Simple inline registry for tracking pending async tools
-        self._async_registry = {
-            'pending': {},  # type: Dict[str, set]  # instance_name -> set of tool call IDs
-            'lock': threading.RLock()  # Lock for pending tracking
-        }
+        # Backward compatibility: track pending call IDs for register_async_call/complete_async_call
+        # This supports the existing API where callers use string call_ids instead of callables.
+        self._async_pending_calls: Dict[str, set] = {}  # instance_name -> set of call_ids
+        self._async_pending_lock = threading.Lock()     # separate lock for pending call tracking
 
         # ── Global state ─────────────────────────────────────────────────────
         self._stopped_event = threading.Event()         # M3 fix: stopped flag for emergency shutdown
@@ -330,6 +330,10 @@ class AgentPool:
                 self._idle.stop()
             except Exception as e:
                 logger.debug(f"Idle manager shutdown failed (non-critical): {e}")
+            try:
+                self._async_registry.shutdown()
+            except Exception as e:
+                logger.debug(f"Async registry shutdown failed (non-critical): {e}")
         else:
             self._stopped_event.clear()
 
@@ -1056,20 +1060,20 @@ class AgentPool:
     def add_async_result(self, instance_name: str, result: str):
         """Add a completed async tool result to the buffer for an instance.
         
+        Delegate method for backward compatibility — delegates to AsyncResultBuffer.
+        
         Args:
             instance_name: The agent instance that dispatched this async tool.
             result: The string result from the completed async tool.
         """
-        with self._async_lock:
-            if instance_name not in self._async_results:
-                self._async_results[instance_name] = []
-            self._async_results[instance_name].append(result)
+        self._async_results.put(instance_name, result)
 
     def drain_async_results(self, instance_name: str) -> List[str]:
         """Drain all completed async results for an instance atomically.
         
         Feature 019: Batched drain operation for efficiency.
         
+        Delegate method for backward compatibility — delegates to AsyncResultBuffer.
         This operation pops the entire results list at once under lock, minimizing
         lock contention and ensuring thread-safe access to async results.
         
@@ -1079,8 +1083,7 @@ class AgentPool:
         Returns:
             List of result strings (may be empty). Original buffer is cleared.
         """
-        with self._async_lock:
-            return self._async_results.pop(instance_name, [])
+        return self._async_results.drain(instance_name)
 
     # Alias for compatibility with execution_engine.py usage
     _async_results_drain = drain_async_results
@@ -1088,40 +1091,52 @@ class AgentPool:
     def has_pending(self, instance_name: str) -> bool:
         """Check if there are pending async tool calls for an instance.
         
+        Checks both:
+        1. Legacy string-based call tracking (_async_pending_calls)
+        2. New BackgroundToolEntry tracking (_async_registry)
+        
         Args:
             instance_name: The agent instance to check.
             
         Returns:
             True if the instance has pending async tools, False otherwise.
         """
-        with self._async_registry['lock']:
-            return bool(self._async_registry['pending'].get(instance_name))
+        # Check legacy string-based tracking
+        with self._async_pending_lock:
+            if self._async_pending_calls.get(instance_name):
+                return True
+        # Check new BackgroundToolEntry tracking
+        return self._async_registry.has_pending(instance_name)
 
     def register_async_call(self, instance_name: str, call_id: str):
         """Register a new async tool call for an instance.
         
+        Delegate method for backward compatibility. New implementation uses
+        AsyncToolRegistry.register() with BackgroundToolEntry instead of string IDs.
+        
         Args:
             instance_name: The agent instance making the async call.
-            call_id: Unique identifier for this async call.
+            call_id: Unique identifier for this async call (maintained for compatibility).
         """
-        with self._async_registry['lock']:
-            if instance_name not in self._async_registry['pending']:
-                self._async_registry['pending'][instance_name] = set()
-            self._async_registry['pending'][instance_name].add(call_id)
+        with self._async_pending_lock:
+            self._async_pending_calls.setdefault(instance_name, set()).add(call_id)
 
     def complete_async_call(self, instance_name: str, call_id: str):
         """Mark an async tool call as completed for an instance.
         
+        Delegate method for backward compatibility. New implementation tracks completion
+        via BackgroundToolEntry.completed flag instead of string IDs.
+        
         Args:
             instance_name: The agent instance that made the async call.
-            call_id: The identifier of the completed call.
+            call_id: The identifier of the completed call (maintained for compatibility).
         """
-        with self._async_registry['lock']:
-            if instance_name in self._async_registry['pending']:
-                self._async_registry['pending'][instance_name].discard(call_id)
+        with self._async_pending_lock:
+            if instance_name in self._async_pending_calls:
+                self._async_pending_calls[instance_name].discard(call_id)
                 # Clean up empty sets
-                if not self._async_registry['pending'][instance_name]:
-                    del self._async_registry['pending'][instance_name]
+                if not self._async_pending_calls[instance_name]:
+                    del self._async_pending_calls[instance_name]
 
     # ── Halt state management ──────────────────────────────────────────────
 

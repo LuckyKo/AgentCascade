@@ -110,7 +110,7 @@ class QwenVLChatAtOAI(TextChatAtOAI):
                         if item.get('input_audio', {}).get('data', '').startswith('data:'):
                             item['input_audio']['data'] = item['input_audio']['data'][:64] + '...'
 
-            logger.debug(f'LLM Input: \n{pformat(lite_messages, indent=2)}')
+            # logger.debug(f'LLM Input: \n{pformat(lite_messages, indent=2)}')
 
         return new_messages
 

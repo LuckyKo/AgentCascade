@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import hashlib
 import json
 import os
 import random
