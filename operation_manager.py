@@ -20,7 +20,7 @@ import signal
 import subprocess
 import fnmatch
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Literal
 from collections import Counter
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -96,6 +96,88 @@ def _path_is_contained_cached(path_str: str, container_str: str) -> bool:
     except ValueError:
         # Different drive letters on Windows (e.g., C:\ vs D:\)
         return False
+
+
+def resolve_path(om: 'OperationManager', path: str, mode: Literal["ro", "rw"] = "ro") -> Tuple[Path, int]:
+    """
+    Resolve and validate a file path against the workspace security tiers.
+    
+    This is the global path resolver function that unifies all path resolution logic
+    for Agent Cascade. It returns both the resolved path and its security tier.
+    
+    Args:
+        om: The OperationManager instance (provides base_dir + extra folders).
+        path: The path string to resolve (can be relative, absolute, or have /workspace/ prefix).
+        mode: "ro" to allow read-only access, "rw" to require write access.
+    
+    Returns:
+        Tuple of (resolved_path, tier) where:
+        - resolved_path is the fully resolved Path object (absolute path)
+        - tier is 0 (outside allowed dirs), 1 (RO zone only), or 2 (RW zone)
+    
+    Tier definitions:
+        - Tier 2 (RW): Path is contained in base_dir OR any folder in extra_work_folders_rw
+        - Tier 1 (RO): Path is contained only in extra_work_folders_ro (and mode=="ro")
+        - Tier 0 (Outside): Path is not contained in any allowed directory
+    
+    Note: The path is ALWAYS resolved to an absolute path. If tier==0, 
+          the path is still returned but callers should reject it.
+          
+          If mode=="rw" and tier==1, the path is readable but may not be writable.
+          Callers requiring write access should check tier >= 2.
+          
+    Example:
+        >>> resolved, tier = resolve_path(om, "src/main.py", mode="rw")
+        ... if tier == 0:
+        ...     raise ValueError(f"Path outside workspace: {resolved}")
+    """
+    # Validate mode parameter
+    if mode not in ("ro", "rw"):
+        raise ValueError(f"Invalid mode '{mode}': must be 'ro' or 'rw'")
+    
+    # Handle virtual /workspace/ prefix (Docker container convention)
+    clean_path = path
+    
+    # Normalize double slashes before prefix stripping to avoid edge cases
+    # e.g., "workspace//test.txt" should not become "/test.txt"
+    while "//" in clean_path:
+        clean_path = clean_path.replace("//", "/")
+    
+    if clean_path.startswith('/workspace/'):
+        clean_path = clean_path[len('/workspace/'):]
+    elif clean_path.startswith('workspace/'):
+        clean_path = clean_path[len('workspace/'):]
+    elif clean_path == '/workspace' or clean_path == 'workspace':
+        clean_path = '.'
+    
+    # If the path is already absolute (e.g., an agent passing 
+    # "N:\work\WD\AgentCascade" to access an extra work folder), use it directly
+    # instead of joining with base_dir — on Windows, Path(base) / abs_path
+    # replaces base entirely, which can cause security check mismatches.
+    if Path(clean_path).is_absolute():
+        resolved = Path(clean_path).resolve()
+    else:
+        resolved = (om.base_dir / clean_path).resolve()
+    
+    # Determine the security tier
+    
+    # Tier 2: Base directory is always RW (and thus RO)
+    if om._path_is_contained(resolved, om.base_dir):
+        return resolved, 2
+    
+    # Tier 2: Check extra RW folders (allowed for both RO and RW modes)
+    for extra in om.extra_work_folders_rw:
+        if om._path_is_contained(resolved, extra):
+            return resolved, 2
+    
+    # Tier 1: Check extra RO folders (allowed only if mode is "ro")
+    if mode == "ro":
+        for extra in om.extra_work_folders_ro:
+            if om._path_is_contained(resolved, extra):
+                return resolved, 1
+    
+    # Tier 0: Path is outside all allowed directories
+    return resolved, 0
 
 
 # Cache tool availability at module level — doesn't change at runtime
@@ -191,19 +273,23 @@ class OperationManager:
 
     # ─── Auto-Approval for Agent-Owned Files ──────────────────────────────
 
-    def _is_auto_approved(self, path: str, agent_name: str, creating_new: bool = False) -> bool:
+    def _is_auto_approved(self, path: str, agent_name: str, creating_new: bool = False, resolved_path: Optional[Path] = None) -> bool:
         """
         Check if this operation can skip user approval.
         Auto-approved when:
           - The file was created by this agent during the current session.
           - The agent is creating a brand new file (doesn't exist yet).
+        
+        Args:
+            resolved_path: If provided, skip internal path resolution and use this directly.
+                          This avoids redundant filesystem stat calls when the caller already resolved the path.
         """
         if creating_new:
-            resolved = self._resolve_path(path, mode="rw")
+            resolved = resolved_path if resolved_path is not None else self._resolve_path(path, mode="rw")
             if not resolved.exists():
                 return True  # New file — no existing work affected
 
-        resolved = self._resolve_path(path, mode="rw")
+        resolved = resolved_path if resolved_path is not None else self._resolve_path(path, mode="rw")
         owner = self.file_ownership.get(str(resolved))
         return owner == agent_name
 
@@ -312,41 +398,25 @@ class OperationManager:
         return _path_is_contained_cached(str(path), str(container))
 
     def _resolve_path(self, path: str, mode: str = "ro") -> Path:
-        """Resolve a path to be within the allowed directories (security)."""
-        # Handle virtual /workspace/ prefix
-        clean_path = path
-        if clean_path.startswith('/workspace/'):
-            clean_path = clean_path[len('/workspace/'):]
-        elif clean_path.startswith('workspace/'):
-            clean_path = clean_path[len('workspace/'):]
-        elif clean_path == '/workspace' or clean_path == 'workspace':
-            clean_path = '.'
+        """Resolve a path to be within the allowed directories (security).
         
-        # If the path is already absolute (e.g., an agent passing 
-        # "N:\work\WD\AgentCascade" to access an extra work folder), use it directly
-        # instead of joining with base_dir — on Windows, Path(base) / abs_path
-        # replaces base entirely, which can cause security check mismatches.
-        if Path(clean_path).is_absolute():
-            resolved = Path(clean_path).resolve()
-        else:
-            resolved = (self.base_dir / clean_path).resolve()
+        This method delegates to the global resolve_path function and raises
+        ValueError if the path is outside allowed directories (tier 0).
         
-        # 1. Base directory is always RW (and thus RO)
-        if self._path_is_contained(resolved, self.base_dir):
-            return resolved
-
-        # 2. Check extra RW folders (allowed for both RO and RW)
-        for extra in self.extra_work_folders_rw:
-            if self._path_is_contained(resolved, extra):
-                return resolved
-
-        # 3. Check extra RO folders (allowed only if mode is "ro")
-        if mode == "ro":
-            for extra in self.extra_work_folders_ro:
-                if self._path_is_contained(resolved, extra):
-                    return resolved
-
-        raise ValueError(f"Path '{path}' is outside the allowed {mode.upper()} directories")
+        Args:
+            path: The path string to resolve.
+            mode: "ro" for read-only access, "rw" for write access.
+            
+        Returns:
+            The resolved Path object.
+            
+        Raises:
+            ValueError: If the path is outside allowed directories.
+        """
+        resolved, tier = resolve_path(self, path, mode)
+        if tier == 0:
+            raise ValueError(f"Path '{path}' is outside the allowed {mode.upper()} directories")
+        return resolved
 
 
     # ─── Read Operations (Free Access) ────────────────────────────────────
@@ -377,7 +447,7 @@ class OperationManager:
             if dirs:
                 result += "Directories:\n"
                 for d in sorted(dirs):
-                    result += f"  [dir] {d}\n"
+                    result += f"  {d}\n"
 
             if files:
                 result += "\nFiles:\n"
@@ -386,7 +456,7 @@ class OperationManager:
                         size_str = f"{size:,} bytes" if size > 1000 else f"{size} bytes"
                     else:
                         size_str = "?"
-                    result += f"  [file] {fname} ({size_str})\n"
+                    result += f"  {fname} ({size_str})\n"
 
             if not dirs and not files:
                 result += "  (empty directory)"
@@ -953,7 +1023,8 @@ class OperationManager:
             return f"ERROR: {str(e)}"
         is_new = not resolved.exists()
 
-        if not self._is_auto_approved(path, agent_name, creating_new=True):
+        # Pass the already-resolved path to avoid a second resolution in _is_auto_approved
+        if not self._is_auto_approved(path, agent_name, creating_new=True, resolved_path=resolved):
             description = f"Overwrite existing file: {path} ({len(content)} chars)"
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
@@ -968,8 +1039,9 @@ class OperationManager:
             justification = ""
 
 
+        # Use the already-resolved path directly - no second resolve needed
         try:
-            resolved = self._resolve_path(path, mode="rw")
+            # resolved is already set from above, use it directly
             
             # Backup if overwriting
             backup_path_str = ""
@@ -1329,7 +1401,8 @@ class OperationManager:
         description = f"Surgical edit to: {path} (mode: {match_mode})"
         tool_args = {'path': path, 'old_content': old_content, 'new_content': new_content, 'match_mode': match_mode}
 
-        if not self._is_auto_approved(path, agent_name):
+        # Pass the already-resolved path to avoid a second resolution in _is_auto_approved
+        if not self._is_auto_approved(path, agent_name, resolved_path=resolved):
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='edit_file',
@@ -1343,9 +1416,10 @@ class OperationManager:
             justification = ""
 
 
+        # Use the already-resolved path directly - no second resolve needed
         try:
             import time, shutil
-            resolved = self._resolve_path(path, mode="rw")
+            # resolved is already set from validation above, use it directly
             safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
             backup_dir = self.base_dir / "logs" / "backups" / safe_agent
             backup_dir.mkdir(parents=True, exist_ok=True)
@@ -1392,7 +1466,8 @@ class OperationManager:
         if not resolved.exists():
             return f"File not found: {path}"
 
-        if not self._is_auto_approved(path, agent_name):
+        # Pass the already-resolved path to avoid a second resolution in _is_auto_approved
+        if not self._is_auto_approved(path, agent_name, resolved_path=resolved):
             description = f"Delete: {path}"
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
@@ -1407,8 +1482,9 @@ class OperationManager:
             justification = ""
 
 
+        # Use the already-resolved path directly - no second resolve needed
         try:
-            resolved = self._resolve_path(path, mode="rw")
+            # resolved is already set from above, use it directly
             if resolved.is_dir():
                 import shutil
                 shutil.rmtree(resolved)
@@ -1433,7 +1509,8 @@ class OperationManager:
         if not src_path.exists():
             return f"Source not found: {source}"
 
-        if not self._is_auto_approved(destination, agent_name, creating_new=True):
+        # Pass the already-resolved destination path to avoid a second resolution in _is_auto_approved
+        if not self._is_auto_approved(destination, agent_name, creating_new=True, resolved_path=dest_path_check):
             description = f"Copy: {source} → {destination}"
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
@@ -1448,9 +1525,11 @@ class OperationManager:
             justification = ""
 
 
+        # Use the already-resolved paths directly - no second resolve needed
         try:
-            dest_path = self._resolve_path(destination, mode="rw")
             import shutil
+            # src_path and dest_path_check are already resolved, use dest_path_check as dest_path
+            dest_path = dest_path_check
             if src_path.is_dir():
                 shutil.copytree(src_path, dest_path, dirs_exist_ok=True)
             else:
@@ -1474,7 +1553,8 @@ class OperationManager:
         if not src_path.exists():
             return f"Source not found: {source}"
 
-        if not self._is_auto_approved(source, agent_name):
+        # Pass the already-resolved source path to avoid a second resolution in _is_auto_approved
+        if not self._is_auto_approved(source, agent_name, resolved_path=src_path):
             description = f"Move: {source} → {destination}"
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
@@ -1489,9 +1569,11 @@ class OperationManager:
             justification = ""
 
 
+        # Use the already-resolved paths directly - no second resolve needed
         try:
-            dest_path = self._resolve_path(destination, mode="rw")
             import shutil
+            # src_path and dest_path_check are already resolved, use dest_path_check as dest_path
+            dest_path = dest_path_check
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(src_path, dest_path)
             if str(src_path) in self.file_ownership:
@@ -1844,5 +1926,18 @@ class OperationManager:
     # ─── Utilities ────────────────────────────────────────────────────────
 
     def get_file_owner(self, path: str) -> Optional[str]:
-        """Get the owner of a file."""
-        return self.file_ownership.get(path)
+        """Get the owner of a file.
+        
+        Resolves the input path to match how ownership is stored (absolute paths).
+        
+        Args:
+            path: The file path to check ownership for.
+            
+        Returns:
+            The owner name if found, None otherwise or if path is outside allowed directories.
+        """
+        try:
+            resolved = self._resolve_path(path, mode="ro")
+            return self.file_ownership.get(str(resolved))
+        except ValueError:
+            return None  # Path outside allowed directories

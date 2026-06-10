@@ -9,17 +9,26 @@ File Manager - Handles file operations with permission system
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Set, Optional, Tuple
+from typing import Dict, List, Set, Optional, Tuple, Literal
 from datetime import datetime
 from agent_cascade.settings import DEFAULT_WORKSPACE
+
+# Import the cached path containment check from operation_manager for unified security
+from operation_manager import _path_is_contained_cached
 
 
 class FileManager:
     """Manages file operations with a permission system."""
     
     def __init__(self, base_dir: str = DEFAULT_WORKSPACE):
-        self.base_dir = Path(base_dir)
+        self.base_dir = Path(base_dir).resolve()
         self.base_dir.mkdir(exist_ok=True)
+        
+        # Extra work folders (mirrors OperationManager's tiered access system)
+        # Tier 1 (RO): Read-only extra directories
+        # Tier 2 (RW): Read-write extra directories (base_dir is always RW)
+        self.extra_work_folders_ro: List[Path] = []
+        self.extra_work_folders_rw: List[Path] = []
         
         # Track which files belong to which agent
         # Format: {file_path: agent_name}
@@ -32,16 +41,120 @@ class FileManager:
         # Request counter for generating IDs
         self.request_counter = 0
     
-    def _resolve_path(self, path: str) -> Path:
-        """Resolve a path to be within the base directory (security)."""
-        # Prevent path traversal attacks
-        if Path(path).is_absolute():
-            resolved = Path(path).resolve()
+    def set_extra_work_folders(self, folders_ro: List[str], folders_rw: List[str]):
+        """
+        Set extra directories that agents can access.
+        
+        This mirrors OperationManager's set_extra_work_folders for unified path resolution.
+        
+        Args:
+            folders_ro: List of read-only directory paths (Tier 1)
+            folders_rw: List of read-write directory paths (Tier 2)
+        """
+        # Clear and rebuild RO folders list
+        self.extra_work_folders_ro = []
+        for folder in folders_ro:
+            if not folder.strip():
+                continue
+            try:
+                p = Path(folder.strip()).resolve()
+                self.extra_work_folders_ro.append(p)
+            except Exception as e:
+                # Silently skip invalid paths (can add logging if needed)
+                pass
+        
+        # Clear and rebuild RW folders list
+        self.extra_work_folders_rw = []
+        for folder in folders_rw:
+            if not folder.strip():
+                continue
+            try:
+                p = Path(folder.strip()).resolve()
+                self.extra_work_folders_rw.append(p)
+            except Exception as e:
+                # Silently skip invalid paths (can add logging if needed)
+                pass
+    
+    def _path_is_contained(self, path: Path, container: Path) -> bool:
+        """Check if *path* is inside *container* using the cached containment check."""
+        return _path_is_contained_cached(str(path), str(container))
+    
+    def _resolve_path(self, path: str, mode: Literal["ro", "rw"] = "ro") -> Path:
+        """
+        Resolve a path to be within the allowed directories (security).
+        
+        This method implements unified path resolution matching operation_manager's logic.
+        It supports tiered access (base_dir is RW, extra folders can be RO or RW),
+        virtual /workspace/ prefix handling for Docker containers, and proper containment checks.
+        
+        Args:
+            path: The path string to resolve (can be relative, absolute, or have /workspace/ prefix)
+            mode: "ro" for read-only access (allows Tier 1 + Tier 2), 
+                  "rw" for write access (requires Tier 2 only)
+                  
+        Returns:
+            The resolved Path object (absolute path)
+            
+        Raises:
+            ValueError: If the path is outside allowed directories for the given mode
+            
+        Security Tiers (matched in priority order):
+            - Tier 2 (RW): Path contained in base_dir or any extra_work_folders_rw
+            - Tier 1 (RO): Path contained in extra_work_folders_ro (mode must be "ro")
+            - Tier 0: Path not contained in any allowed directory
+        """
+        # Validate mode parameter
+        if mode not in ("ro", "rw"):
+            raise ValueError(f"Invalid mode '{mode}': must be 'ro' or 'rw'")
+        
+        # Handle virtual /workspace/ prefix (Docker container convention)
+        clean_path = path
+        
+        # Normalize double slashes before prefix stripping to avoid edge cases
+        # e.g., "workspace//test.txt" should not become "/test.txt"
+        while "//" in clean_path:
+            clean_path = clean_path.replace("//", "/")
+        
+        if clean_path.startswith('/workspace/'):
+            clean_path = clean_path[len('/workspace/'):]
+        elif clean_path.startswith('workspace/'):
+            clean_path = clean_path[len('workspace/'):]
+        elif clean_path == '/workspace' or clean_path == 'workspace':
+            clean_path = '.'
+        
+        # If the path is already absolute, use it directly instead of joining with base_dir
+        # On Windows, Path(base) / abs_path replaces base entirely
+        if Path(clean_path).is_absolute():
+            resolved = Path(clean_path).resolve()
         else:
-            resolved = (self.base_dir / path).resolve()
-        if not str(resolved).startswith(str(self.base_dir.resolve())):
-            raise ValueError(f"Path '{path}' is outside the allowed directory")
-        return resolved
+            resolved = (self.base_dir / clean_path).resolve()
+        
+        # Determine the security tier
+        
+        # Tier 2: Base directory is always RW (and thus RO)
+        if self._path_is_contained(resolved, self.base_dir):
+            return resolved
+        
+        # Tier 2: Check extra RW folders (allowed for both RO and RW modes)
+        for extra in self.extra_work_folders_rw:
+            if self._path_is_contained(resolved, extra):
+                return resolved
+        
+        # Tier 1: Check extra RO folders (allowed only if mode is "ro")
+        if mode == "ro":
+            for extra in self.extra_work_folders_ro:
+                if self._path_is_contained(resolved, extra):
+                    return resolved
+        
+        # Tier 0: Path is outside all allowed directories
+        # Build a helpful error message listing permitted directories
+        allowed = [str(self.base_dir)] + [str(f) for f in self.extra_work_folders_rw]
+        if mode == "ro":
+            allowed.extend(str(f) for f in self.extra_work_folders_ro)
+        raise ValueError(
+            f"Path '{path}' is outside the allowed {mode.upper()} directories. "
+            f"Permitted: {allowed}"
+        )
     
     def read_file(self, path: str, agent_name: str = None) -> Tuple[bool, str]:
         """
@@ -71,7 +184,7 @@ class FileManager:
             request_id if approval needed, or success message if auto-approved
         """
         try:
-            resolved = self._resolve_path(path)
+            resolved = self._resolve_path(path, mode="rw")
             
             # Check if file exists and who owns it
             file_key = str(resolved)
@@ -192,7 +305,7 @@ class FileManager:
     def delete_file(self, path: str, agent_name: str) -> str:
         """Delete a file (only if agent owns it, or needs manager approval)."""
         try:
-            resolved = self._resolve_path(path)
+            resolved = self._resolve_path(path, mode="rw")
             if not resolved.exists():
                 return f"File not found: {path}"
             
@@ -228,17 +341,17 @@ class FileManager:
     def file_exists(self, path: str) -> bool:
         """Check if a file exists."""
         try:
-            resolved = self._resolve_path(path)
+            resolved = self._resolve_path(path, mode="ro")
             return resolved.exists() and resolved.is_file()
-        except:
+        except Exception:
             return False
     
     def get_file_owner(self, path: str) -> Optional[str]:
         """Get the owner of a file."""
         try:
-            resolved = self._resolve_path(path)
+            resolved = self._resolve_path(path, mode="ro")
             return self.file_ownership.get(str(resolved))
-        except:
+        except Exception:
             return None
     
     def approve_request(self, request_id: str, approver_name: str) -> str:
