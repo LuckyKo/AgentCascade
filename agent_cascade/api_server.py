@@ -1785,6 +1785,8 @@ def create_app(agents, agent_pool, config=None):
                         is_auto = data.get('automated', False)
                         logger.info(f"[{'AUTO' if is_auto else 'USER'}] Approving request: {rid}")
                         agent_pool.operation_manager.user_approve(rid)
+                        # Fix #7: Immediate broadcast after approve to update UI instantly (~300ms latency reduction)
+                        await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'reject':
                     rid = data.get('request_id')
@@ -1793,6 +1795,8 @@ def create_app(agents, agent_pool, config=None):
                         is_auto = data.get('automated', False)
                         logger.info(f"[{'AUTO' if is_auto else 'USER'}] Rejecting request: {rid}. Reason: {reason}")
                         agent_pool.operation_manager.user_reject(rid, reason)
+                        # Fix #7: Immediate broadcast after reject to update UI instantly (~300ms latency reduction)
+                        await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'ask_security':
                     if not hasattr(app, 'security_check_lock'):

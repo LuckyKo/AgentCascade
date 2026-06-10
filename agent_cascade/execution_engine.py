@@ -2382,7 +2382,7 @@ class ExecutionEngine:
         # Item 12: Initialize sub-agent WebUI state before execution begins (Fix #3: lighter snapshot)
         try:
             initial_state = {
-                'active': True,
+                'active': inst.state in (AgentState.RUNNING, AgentState.SLEEPING),
                 'agent_name': f"{instance_name} ({agent_class})",
                 'message_count': len(conv),
                 'latest_message_summary': '',
@@ -2460,7 +2460,7 @@ class ExecutionEngine:
                             content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
                             latest_summary = str(content)[:500] if content else ''
                         state = {
-                            'active': True,
+                            'active': inst.state in (AgentState.RUNNING, AgentState.SLEEPING),
                             'agent_name': f"{instance_name} ({agent_class})",
                             'message_count': len(current_conv),  # inst.conversation already includes final_resp
                             'latest_message_summary': latest_summary,
@@ -2531,7 +2531,7 @@ class ExecutionEngine:
                     content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
                     latest_summary = str(content)[:500] if content else ''
                 final_state = {
-                    'active': False,  # Execution complete — agent is no longer active
+                    'active': inst.state in (AgentState.RUNNING, AgentState.SLEEPING),  # Dynamic state check for consistency
                     'agent_name': f"{instance_name} ({agent_class})",
                     'message_count': len(current_conv),  # inst.conversation already includes final_resp
                     'latest_message_summary': latest_summary,
