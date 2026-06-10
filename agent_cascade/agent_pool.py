@@ -1740,13 +1740,30 @@ class IdleManager:
         self._checker_thread.start()
 
     def stop(self):
-        """Signal the checker to stop and wait for it to exit."""
+        """Signal the checker to stop (non-blocking).
+        
+        Sets the stop event so the checker loop exits on its next iteration.
+        Does NOT join the thread — that would block the calling thread for up to
+        (idle_check_interval + 5) seconds when called from an async handler.
+        Use stop_and_join() for blocking cleanup during server shutdown.
+        """
+        self._stop_event.set()
+
+    def stop_and_join(self, timeout: Optional[float] = None):
+        """Signal the checker and wait for it to exit (blocking).
+        
+        Used during full server shutdown where blocking is acceptable.
+        Falls back to idle_check_interval + 5s default if no timeout given.
+        
+        Note: After calling this method, _checker_thread is set to None. Calling
+        start() again will create a new thread.
+        """
+        self.stop()
         if self._checker_thread is not None and self._checker_thread.is_alive():
-            self._stop_event.set()
-            timeout = self.pool.settings.idle_check_interval + 5.0
-            self._checker_thread.join(timeout=timeout)
+            join_timeout = timeout if timeout is not None else self.pool.settings.idle_check_interval + 5.0
+            self._checker_thread.join(timeout=join_timeout)
             if self._checker_thread.is_alive():
-                logger.warning("Idle checker thread did not exit in time, forcing shutdown.")
+                logger.warning("Idle checker thread did not exit in time.")
         self._checker_thread = None
 
     def _checker_loop(self):

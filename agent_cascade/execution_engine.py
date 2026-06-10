@@ -86,6 +86,17 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     return [func.function for name, func in func_map.items() if name not in disabled]
 
 
+def _make_token_count_callback(instance):
+    """Create a callback for capturing token counts from llm/base.py (Force Compression Fix)."""
+    def _on_token_count(all_tokens: int, available_token: int, max_tokens: int):
+        """Callback invoked by llm/base.py after computing token counts."""
+        instance._last_actual_token_count = all_tokens
+        # Always update with actual max_tokens from base.py — this is the ground truth
+        if max_tokens > 0:  # Defensive validation
+            instance._allocated_max_input_tokens = max_tokens
+    return _on_token_count
+
+
 def _build_resources_block(pool, template, instance=None) -> str:
     """Build the '--- CURRENT AVAILABLE RESOURCES' block reflecting current disabled_tools.
 
@@ -751,12 +762,21 @@ class ExecutionEngine:
         if usage_pct > self.pool.settings.compression_warning_threshold:
             self._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens_for_check)
 
-        # ── Loop detection ────────────────────────────────────────────────
-        loop_info = self._detect_loop(messages)
-        if loop_info:
-            reason, pop_count = loop_info
-            logger.warning(f"Loop detected for {inst_name}: {reason}")
-            raise LoopDetectedError(reason=reason, pop_count=pop_count)
+        # ── Loop detection (with post-compression cooldown — Bug3 fix) ─────
+        # After compression, the conversation state has concentrated patterns that
+        # can trigger false-positive loop detection. Skip detection on the turn
+        # immediately following compression via _suppress_loop_detection_next_turn flag.
+        # Thread safety: Python GIL ensures atomic reads/writes for simple boolean attributes.
+        if not getattr(instance, '_suppress_loop_detection_next_turn', False):
+            loop_info = self._detect_loop(messages)
+            if loop_info:
+                reason, pop_count = loop_info
+                logger.warning(f"Loop detected for {inst_name}: {reason}")
+                raise LoopDetectedError(reason=reason, pop_count=pop_count)
+        else:
+            # Clear the cooldown flag now that we've skipped loop detection this turn.
+            # Next turn will run normal loop detection (no more suppression).
+            instance._suppress_loop_detection_next_turn = False
 
         return False  # Continue to LLM call normally
 
@@ -875,6 +895,8 @@ class ExecutionEngine:
                                 conv = recov
                                 # Rebuild working sets from recovered data
                                 self._rebuild_working_set(messages, llm_messages, inst_name)
+                                # Bug3 fix: Set cooldown flag after successful recovery (compression occurred)
+                                instance._suppress_loop_detection_next_turn = True
                             else:
                                 logger.error("Recovery from log also failed — message pool may be corrupted")
                                 self._append_system_notification(
@@ -897,7 +919,9 @@ class ExecutionEngine:
                                                           f"Pool may desync — manual intervention required. "
                                                           f"Note: Compression notification was injected into instance.conversation "
                                                           f"but not synced to logger history.")
-                    
+                    # Bug3 fix: Set cooldown flag to suppress loop detection on next turn after compression
+                    instance._suppress_loop_detection_next_turn = True
+            
             else:  # Compression failed or returned error
                 logger.error(f"Forced compression failed for {inst_name}: {result.error}")
                 notification = (
@@ -1116,6 +1140,9 @@ class ExecutionEngine:
                     val = merged_cfg['max_input_tokens']
                     if isinstance(val, int) and val > 0:
                         instance._allocated_max_input_tokens = val
+                
+                # Feature 006: Register token count callback to capture actual token usage from LLM
+                merged_cfg['_on_token_count'] = _make_token_count_callback(instance)
 
                 return llm.chat(
                     messages=messages,
@@ -1142,6 +1169,9 @@ class ExecutionEngine:
                 val = merged_cfg['max_input_tokens']
                 if isinstance(val, int) and val > 0:
                     instance._allocated_max_input_tokens = val
+            
+            # Feature 006: Register token count callback to capture actual token usage from LLM
+            merged_cfg['_on_token_count'] = _make_token_count_callback(instance)
 
             return llm.chat(
                 messages=messages,
@@ -1889,6 +1919,8 @@ class ExecutionEngine:
         if result.success:
             # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
             inst._last_token_count_conversation_length = -1
+            # Bug3 fix: Set cooldown flag to suppress loop detection on next turn after compression
+            inst._suppress_loop_detection_next_turn = True
 
             # Sync logger's internal data["history"] to match pool state (Item 11)
             # Without this, update_history() will treat pool messages not yet seen by
@@ -2042,7 +2074,18 @@ class ExecutionEngine:
                 precomputed_summary=summary,  # Skip LLM summary generation
             )
             logger.info(f"/compress applied for {inst_name}: {result}")
-
+            
+            # Check if compression succeeded (tool returns string, not CompressResult)
+            result_str = str(result) if result else ""
+            if result_str.startswith("Compression failed"):
+                logger.warning(f"/compress silently failed for {inst_name}: {result}")
+                # Do NOT proceed with success logic — compression didn't happen
+                self._append_system_notification(
+                    messages, "[SYSTEM NOTIFICATION: Compression command failed",
+                    f"/compress failed for {inst_name}: {result}"
+                )
+                return True
+            
             # Validate message pool after compression (Item 10)
             conv = self.pool.get_conversation(inst_name)
             working_set_rebuilt = False  # Fix #4: Track whether rebuild already happened
@@ -2077,6 +2120,9 @@ class ExecutionEngine:
 
             # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
             instance._last_token_count_conversation_length = -1
+            
+            # Bug3 fix: Set cooldown flag to suppress loop detection on next turn after compression
+            instance._suppress_loop_detection_next_turn = True
 
             # Sync logger's internal data["history"] to match pool state (Item 11)
             # Without this, update_history() will treat pool messages not yet seen by

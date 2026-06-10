@@ -253,10 +253,14 @@ class BaseChatModel(ABC):
         # Not precise. It's hard to estimate tokens related with function calling and multimodal items.
         max_input_tokens = generate_cfg.pop('max_input_tokens', DEFAULT_MAX_INPUT_TOKENS)
 
+        # Feature 006: Extract token count callback BEFORE agent_settings loop
+        on_token_count_cb = generate_cfg.pop('_on_token_count', None)
+
         agent_settings = [
             'disabled_tools', 'max_turns', 'auto_continue', 'auto_rollback_on_loop',
             'read_file_limit', 'mcpServers', 'work_access_folders',
-            'grep_char_limit', 'shell_char_limit', 'code_char_limit', 'seed'
+            'grep_char_limit', 'shell_char_limit', 'code_char_limit', 'seed',
+            '_on_token_count'  # Safety net: also pop here in case it wasn't extracted above
         ]
         for setting in agent_settings:
             generate_cfg.pop(setting, None)
@@ -267,6 +271,7 @@ class BaseChatModel(ABC):
                 messages=messages,
                 max_tokens=max_input_tokens,
                 agent_name=agent_name,
+                on_token_count_cb=on_token_count_cb,
             )
 
         if functions:
@@ -748,7 +753,7 @@ def _truncate_at_stop_word(text: str, stop: List[str]):
     return truncated, text
 
 
-def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int, agent_name: str = 'Unknown') -> List[Message]:
+def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int, agent_name: str = 'Unknown', on_token_count_cb=None) -> List[Message]:
     if len([m for m in messages if m.role == SYSTEM]) >= 2:
         raise ModelServiceError(
             code='400',
@@ -926,6 +931,14 @@ def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int, a
     all_tokens = sum([x for x in message_tokens.values()])
     # Log stats with agent name to avoid confusion in multi-agent logs
     logger.info(f'Agent [{agent_name}] - ALL tokens: {all_tokens}, Available tokens: {available_token}')
+    
+    # Feature 006: Invoke token count callback if registered (for compression tracking)
+    if on_token_count_cb is not None and callable(on_token_count_cb):
+        try:
+            on_token_count_cb(all_tokens, available_token, max_tokens)
+        except Exception as e:
+            logger.debug(f"Token count callback failed for agent {agent_name}: {e}")
+    
     if all_tokens <= available_token:
         return messages
     if available_token <= 0:
