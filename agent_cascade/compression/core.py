@@ -75,7 +75,37 @@ def apply_compression(
         if target_agent_name in agent_pool.instance_loggers:
             logger_inst = agent_pool.instance_loggers[target_agent_name]
             if hasattr(logger_inst, 'reset_history'):
-                logger_inst.reset_history(new_history, rewrite=True)
+                # Use tail-offset insertion method to preserve all existing log entries
+                # Instead of passing truncated history (which destroys discarded messages),
+                # we calculate the insertion offset from the tail and insert markers there.
+                # This mirrors what update_history() does during sync operations.
+                log_history = logger_inst.data["history"]
+                
+                # Calculate insert offset from tail — preserves all existing log entries
+                log_insert_pos = len(log_history) - tail_count
+                
+                # Safety: never insert before SYSTEM message (index 0)
+                if log_insert_pos == 0 and log_history and log_history[0].get('role') == 'system':
+                    log_insert_pos = 1
+                
+                # Clamp to valid range (both lower and upper bounds)
+                # Prevents negative indices (when tail_count > len) and out-of-range errors
+                log_insert_pos = max(0, min(log_insert_pos, len(log_history)))
+                
+                # Build formatted markers using logger's formatting (adds timestamps)
+                formatted_marker = logger_inst._format_message(marker_message)
+                
+                if include_force_marker:
+                    # Insert force marker first, then summary marker
+                    formatted_force = logger_inst._format_message(force_marker)
+                    log_history.insert(log_insert_pos, formatted_force)
+                    log_history.insert(log_insert_pos + 1, formatted_marker)
+                else:
+                    # Just insert the summary marker
+                    log_history.insert(log_insert_pos, formatted_marker)
+                
+                # Rewrite the entire file since we inserted in the middle
+                logger_inst.reset_history(log_history, rewrite=True)
             else:
                 logger.error(f"Logger for '{target_agent_name}' lacks reset_history — log not updated")
                 return False
