@@ -97,6 +97,12 @@ def _make_token_count_callback(instance):
     return _on_token_count
 
 
+def _invalidate_token_cache(instance):
+    """Invalidate all token count caches after conversation mutation."""
+    instance._last_actual_token_count = 0
+    instance._last_token_count_conversation_length = -1
+
+
 def _build_resources_block(pool, template, instance=None) -> str:
     """Build the '--- CURRENT AVAILABLE RESOURCES' block reflecting current disabled_tools.
 
@@ -339,9 +345,8 @@ class ExecutionEngine:
                 if instance.state == AgentState.SLEEPING:
                     # Drain async tool results and user queue messages
                     async_results = self.pool.drain_async_results(inst_name)
-                    user_msgs = self.pool.drain_queue(inst_name)
 
-                    if async_results or user_msgs:
+                    if async_results or self.pool.has_messages(inst_name):
                         # New data available — transition back to RUNNING and inject messages
                         with instance._state_lock:
                             # CHECK TERMINATED BEFORE TRANSITION — prevents resuming terminated agent
@@ -356,33 +361,30 @@ class ExecutionEngine:
                             instance._last_wakeup_log = time.monotonic()  # Reset to current time
                             logger.debug(
                                 f"[CALL_AGENT_DEBUG] engine.run() — RESUMED from SLEEPING for instance={inst_name}, "
-                                f"async_results={len(async_results)}, user_msgs={len(user_msgs)}"
+                                f"async_results={len(async_results)}, has_user_messages={self.pool.has_messages(inst_name)}"
                             )
 
                         # Inject async results as USER messages at wakeup
-                        for result in async_results:
-                            result_msg = Message(
-                                role=USER, 
-                                content=f"[BACKGROUND TOOL RESULT]: {result}"
-                            )
-                            messages.append(result_msg)
-                            llm_messages.append(result_msg)
-                            response.append(result_msg)
-                            with instance._compression_lock:
-                                instance.conversation.append(result_msg)
-                                instance._last_token_count_conversation_length = -1
-
-                        # Inject user messages as USER messages  
-                        for msg_text in user_msgs:
-                            if msg_text.strip():
-                                user_msg = Message(role=USER, content=msg_text)
-                                messages.append(user_msg)
-                                llm_messages.append(user_msg)
-                                response.append(user_msg)
+                        # Manually inject async_results since we already drained them above
+                        if async_results:
+                            for result in async_results:
+                                result_msg = Message(
+                                    role=USER, 
+                                    content=f"[BACKGROUND TOOL RESULT]: {result}"
+                                )
+                                messages.append(result_msg)
+                                llm_messages.append(result_msg)
+                                response.append(result_msg)
                                 with instance._compression_lock:
-                                    instance.conversation.append(user_msg)
-                                    instance._last_token_count_conversation_length = -1
-
+                                    instance.conversation.append(result_msg)
+                            _invalidate_token_cache(instance)
+                        
+                        # Inject user messages using helper method
+                        self._inject_pending_messages(
+                            instance, messages, llm_messages, response, inst_name, 
+                            log_level="debug", used_any_tool=False
+                        )
+                        
                         # Continue to normal LLM processing below (in RUNNING state now)
                         continue
 
@@ -393,24 +395,19 @@ class ExecutionEngine:
                             break
                         
                         # Check for new user messages that arrived while waiting
-                        more_user_msgs = self.pool.drain_queue(inst_name)
-                        if more_user_msgs:
-                            with instance._state_lock:
-                                instance._transition(AgentState.RUNNING)
-                                instance.sleeping_since = None
-                                instance._last_wakeup_log = time.monotonic()
-                            
-                            for msg_text in more_user_msgs:
-                                if msg_text.strip():
-                                    user_msg = Message(role=USER, content=msg_text)
-                                    messages.append(user_msg)
-                                    llm_messages.append(user_msg)
-                                    response.append(user_msg)
-                                    with instance._compression_lock:
-                                        instance.conversation.append(user_msg)
-                                        instance._last_token_count_conversation_length = -1
-                            
-                            continue  # Go process via LLM; async results will arrive later
+                        if self.pool.has_messages(inst_name):
+                            # Drain and inject user messages using helper method
+                            injected, _ = self._inject_pending_messages(
+                                instance, messages, llm_messages, response, inst_name, 
+                                log_level="debug", used_any_tool=False
+                            )
+                            if injected:
+                                with instance._state_lock:
+                                    instance._transition(AgentState.RUNNING)
+                                    instance.sleeping_since = None
+                                    instance._last_wakeup_log = time.monotonic()
+                                
+                                continue  # Go process via LLM; async results will arrive later
 
                         # If no user messages, proceed with waiting logic
                         current_time = time.monotonic()
@@ -475,7 +472,7 @@ class ExecutionEngine:
                                 response.append(result_msg)
                                 with instance._compression_lock:
                                     instance.conversation.append(result_msg)
-                                    instance._last_token_count_conversation_length = -1
+                                    _invalidate_token_cache(instance)
                             drain_count += 1
                         
                         if drain_count >= max_drain_iterations:
@@ -495,7 +492,7 @@ class ExecutionEngine:
                                 response.append(result_msg)
                                 with instance._compression_lock:
                                     instance.conversation.append(result_msg)
-                                    instance._last_token_count_conversation_length = -1
+                                    _invalidate_token_cache(instance)
                         
                         # If any results were found, transition to RUNNING so LLM processes them
                         if results_found:
@@ -627,7 +624,7 @@ class ExecutionEngine:
                 conv.insert(0, sys_msg)
                 with instance._compression_lock:
                     instance.conversation.insert(0, sys_msg)
-                instance._last_token_count_conversation_length = -1
+                _invalidate_token_cache(instance)
                 m0 = sys_msg
                 m0_role = SYSTEM
 
@@ -704,26 +701,19 @@ class ExecutionEngine:
             return True  # Skip LLM call, yield and continue loop
 
         # ── Async message injection (drain queue) ────────────────────────────────
-        pending = self.pool.drain_queue(inst_name)
-        if pending:
-            for async_msg_text in pending:
-                if not async_msg_text.strip():
-                    continue  # Skip empty messages
-                async_msg = Message(role=USER, content=async_msg_text)
-                messages.append(async_msg)
-                llm_messages.append(async_msg)
-                with instance._compression_lock:
-                    instance.conversation.append(async_msg)
-                # Fix #2: Invalidate token count cache — conversation mutated
-                instance._last_token_count_conversation_length = -1
-
-                # Feature 019: Invalidate LLM preprocessing cache after queue injection
-                template = self.pool.templates.get(instance.agent_class)
-                if template and hasattr(template, 'llm') and template.llm:
-                    try:
-                        template.llm._clear_preprocess_cache()
-                    except Exception as e:
-                        logger.debug(f"Failed to clear LLM preprocess cache for {inst_name}: {e}")
+        injected, _ = self._inject_pending_messages(
+            instance, messages, llm_messages, response, inst_name, 
+            log_level="debug", used_any_tool=False
+        )
+        
+        if injected:
+            # Feature 019: Invalidate LLM preprocessing cache after queue injection
+            template = self.pool.templates.get(instance.agent_class)
+            if template and hasattr(template, 'llm') and template.llm:
+                try:
+                    template.llm._clear_preprocess_cache()
+                except Exception as e:
+                    logger.debug(f"Failed to clear LLM preprocess cache for {inst_name}: {e}")
 
             return True  # Yield and continue loop to process new messages
                 
@@ -850,7 +840,7 @@ class ExecutionEngine:
                 # Rebuild working set from compressed pool state
                 self._rebuild_working_set(messages, llm_messages, inst_name)
                 # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
-                instance._last_token_count_conversation_length = -1
+                _invalidate_token_cache(instance)
                 # Use summary_text directly from CompressResult (P2 fix — no fragile tag parsing)
                 instance.compression_summary = result.summary_text
                 # Update latest_marker_index to point to the new marker in the conversation (P2 fix)
@@ -890,7 +880,7 @@ class ExecutionEngine:
                                 with instance._compression_lock:  # Thread-safe recovery write
                                     instance.conversation = list(recov)
                                 # Invalidate token count cache — conversation was replaced (Fix #2)
-                                instance._last_token_count_conversation_length = -1
+                                _invalidate_token_cache(instance)
                                 logger.info(f"Recovered message pool from log for '{inst_name}' ({len(recov)} messages)")
                                 conv = recov
                                 # Rebuild working sets from recovered data
@@ -989,8 +979,8 @@ class ExecutionEngine:
         # ── Feature 019: Cache Invalidation ────────────────────────────────────
         # Invalidate token count cache so next _count_history_tokens does fresh count
         if inst:
+            _invalidate_token_cache(inst)
             inst._cached_token_count = 0
-            inst._last_token_count_conversation_length = -1
         
         # Invalidate LLM preprocessing cache for this instance's template
         template = self.pool.templates.get(inst.agent_class) if inst else None
@@ -1235,7 +1225,7 @@ class ExecutionEngine:
             instance._streaming_responses = []
 
         # Fix #2: Invalidate token count cache — conversation length changed
-        instance._last_token_count_conversation_length = -1  # Force cache miss on next call
+        _invalidate_token_cache(instance)
         
         # Feature 006: Extract ground-truth usage info from LLM response and update instance fields
         # This replaces manual token counting with actual API-reported values
@@ -1272,7 +1262,7 @@ class ExecutionEngine:
             with instance._compression_lock:
                 instance.conversation.append(cont_msg)
             # Fix #2: Invalidate token count cache — conversation mutated
-            instance._last_token_count_conversation_length = -1
+            _invalidate_token_cache(instance)
             return True  # Continue to next LLM call
 
         # ── Tool detection and execution ────────────────────────────────────
@@ -1385,7 +1375,7 @@ class ExecutionEngine:
             with instance._compression_lock:
                 instance.conversation.append(fn_msg)
             # Fix #2: Invalidate token count cache — conversation mutated
-            instance._last_token_count_conversation_length = -1
+            _invalidate_token_cache(instance)
             
             # Track executed tool for orphan handling
             executed_tools.append(tool_name)
@@ -1435,25 +1425,67 @@ class ExecutionEngine:
             if tools_processed > 0:
                 logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
             # Invalidate token count cache — conversation mutated
-            instance._last_token_count_conversation_length = -1
+            _invalidate_token_cache(instance)
 
         # ── Post-tool urgent injection ───────────────────────────────────
         # Inject urgent messages AFTER all tools complete to avoid orphaned tool_call_id's
-        urgent = self.pool.drain_queue(inst_name)
-        if urgent:
-            for text in urgent:
-                if text.strip():
-                    async_msg = Message(role=USER, content=text)
-                    messages.append(async_msg)
-                    llm_messages.append(async_msg)
-                    response.append(async_msg)  # Stream urgent message to UI
-                    with instance._compression_lock:
-                        instance.conversation.append(async_msg)
-            # Invalidate token count cache — conversation mutated by urgent injection
-            instance._last_token_count_conversation_length = -1
+        injected, _ = self._inject_pending_messages(
+            instance, messages, llm_messages, response, inst_name, 
+            log_level="debug", used_any_tool=True
+        )
+        
+        if injected:
             return True  # Continue to next LLM call for urgent message processing
 
         return used_any_tool or is_truncated  # Continue loop if tool was used
+
+    def _inject_pending_messages(
+        self, instance: AgentInstance, messages: List[Message], llm_messages: List[Message], 
+        response: List[Message], inst_name: str, log_level: str = "info", used_any_tool: bool = False
+    ) -> tuple[bool, bool]:
+        """Inject pending user messages from the queue into all message lists.
+        
+        This is a shared helper used at multiple drain points for both code paths
+        (no-real-content and real-content). It handles the common pattern of: draining the queue,
+        creating USER messages, appending to all 4 message sets, and invalidating the token cache.
+        
+        Args:
+            instance: The agent instance receiving the messages.
+            messages: Full working set of messages.
+            llm_messages: Messages for LLM API context.
+            response: Response accumulator for streaming/frontend display.
+            inst_name: Instance name for logging.
+            log_level: Either "info" or "debug" for appropriate logging level.
+            used_any_tool: Value to return as second element of tuple if messages were injected.
+            
+        Returns:
+            Tuple of (injected: bool, used_any_tool: bool) where injected indicates if 
+            messages were injected, and used_any_tool is the value passed in if injected.
+        """
+            
+        pending = self.pool.drain_queue(inst_name)
+        if not pending:
+            return (False, False)  # Return tuple: (injected=False, used_any_tool=False)
+        
+        if log_level == "info":
+            logger.info(f"Draining {len(pending)} queued messages for {inst_name} after turn completion.")
+        else:
+            logger.debug(f"Draining {len(pending)} queued messages for {inst_name}.")
+            
+        for async_msg_text in pending:
+            if not async_msg_text.strip():
+                continue  # Skip empty messages
+            async_msg = Message(role=USER, content=async_msg_text)
+            messages.append(async_msg)
+            llm_messages.append(async_msg)
+            response.append(async_msg)
+            with instance._compression_lock:
+                instance.conversation.append(async_msg)
+        
+        # Invalidate token cache after injecting all messages (once, not per-message)
+        _invalidate_token_cache(instance)
+        
+        return (True, used_any_tool)  # Return tuple: (injected, used_any_tool_value)
 
     def _post_turn_checks(self, instance: AgentInstance, messages: List[Message]) -> bool:
         """Phase 5: Check for final answer, wait for parallel agents, drain post-generation queue.
@@ -1918,7 +1950,7 @@ class ExecutionEngine:
 
         if result.success:
             # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
-            inst._last_token_count_conversation_length = -1
+            _invalidate_token_cache(inst)
             # Bug3 fix: Set cooldown flag to suppress loop detection on next turn after compression
             inst._suppress_loop_detection_next_turn = True
 
@@ -2099,7 +2131,7 @@ class ExecutionEngine:
                         with instance._compression_lock:
                             instance.conversation = list(recov)
                         # Invalidate token count cache — conversation was replaced (Fix #2)
-                        instance._last_token_count_conversation_length = -1
+                        _invalidate_token_cache(instance)
                         logger.info(f"Recovered message pool after /compress for '{inst_name}' ({len(recov)} messages)")
                         # Rebuild working sets from recovered data (matches forced compression path)
                         self._rebuild_working_set(messages, llm_messages, inst_name)
@@ -2119,7 +2151,7 @@ class ExecutionEngine:
                 self._rebuild_working_set(messages, llm_messages, inst_name)
 
             # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
-            instance._last_token_count_conversation_length = -1
+            _invalidate_token_cache(instance)
             
             # Bug3 fix: Set cooldown flag to suppress loop detection on next turn after compression
             instance._suppress_loop_detection_next_turn = True
@@ -2251,8 +2283,8 @@ class ExecutionEngine:
                 
                 # FIX #4: Clear is_terminated flag and invalidate token cache
                 inst.is_terminated = False
+                _invalidate_token_cache(inst)
                 inst._cached_token_count = 0
-                inst._last_token_count_conversation_length = -1
                 
                 # FIX #2: Preserve & extend conversation
                 # Update system message in-place (first message is always system)
@@ -2347,7 +2379,7 @@ class ExecutionEngine:
             with inst._compression_lock:
                 inst.conversation = conv
                 # Invalidate token count cache — conversation replaced
-                inst._last_token_count_conversation_length = -1
+                _invalidate_token_cache(inst)
 
                 # Log initial messages to agent's JSONL file (P1 continuation)
                 try:
