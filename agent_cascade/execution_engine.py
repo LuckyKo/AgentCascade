@@ -319,7 +319,15 @@ class ExecutionEngine:
             f"[CALL_AGENT_DEBUG] engine.run() ENTRY — instance={instance.instance_name}, "
             f"class={instance.agent_class}, nest_depth={getattr(instance, '_nest_depth', 'N/A')}"
         )
-        instance.is_active = True  # Mark active before execution starts
+        # Transition to RUNNING state (replaces is_active=True)
+        with instance._state_lock:
+            if instance.state == AgentState.IDLE:
+                instance._transition(AgentState.RUNNING)
+            elif instance.state != AgentState.RUNNING:
+                logger.warning(
+                    f"[STATE TRANSITION] instance={instance.instance_name} entering run() "
+                    f"from unexpected state {instance.state.name}"
+                )
         self._current_instance = instance  # Fix #2: set for token count cache lookups
         
         # Clear truncation state at the start of each agent turn to prevent stale markers
@@ -578,12 +586,37 @@ class ExecutionEngine:
             yield [error_msg]
 
         finally:
-            # C4 fix: Always clean up — mark inactive regardless of how we exit
-            instance.is_active = False
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] engine.run() EXIT — instance={instance.instance_name}, "
-                f"is_active=False (cleanup in finally)"
-            )
+            # C4 fix: Always clean up — transition to IDLE regardless of how we exit
+            with instance._state_lock:
+                current_state = instance.state
+                if current_state == AgentState.RUNNING:
+                    instance._transition(AgentState.IDLE)
+                    logger.debug(
+                        f"[CALL_AGENT_DEBUG] engine.run() EXIT — instance={instance.instance_name}, "
+                        f"transited RUNNING → IDLE (cleanup in finally)"
+                    )
+                elif current_state == AgentState.SLEEPING:
+                    instance._transition(AgentState.IDLE)
+                    logger.debug(
+                        f"[CALL_AGENT_DEBUG] engine.run() EXIT — instance={instance.instance_name}, "
+                        f"transited SLEEPING → IDLE (cleanup in finally)"
+                    )
+                elif current_state == AgentState.COMPLETING:
+                    instance._transition(AgentState.IDLE)
+                    logger.debug(
+                        f"[CALL_AGENT_DEBUG] engine.run() EXIT — instance={instance.instance_name}, "
+                        f"transited COMPLETING → IDLE (cleanup in finally)"
+                    )
+                elif current_state == AgentState.TERMINATED:
+                    logger.debug(
+                        f"[CALL_AGENT_DEBUG] engine.run() EXIT — instance={instance.instance_name}, "
+                        f"already TERMINATED (no transition)"
+                    )
+                else:
+                    logger.debug(
+                        f"[CALL_AGENT_DEBUG] engine.run() EXIT — instance={instance.instance_name}, "
+                        f"in {current_state.name} state (cleanup skipped)"
+                    )
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Phase Methods — each ~20-60 lines, independently testable
@@ -2227,26 +2260,33 @@ class ExecutionEngine:
         now = time.monotonic()
         existing = self.pool.instances.get(instance_name)
         is_reuse = False
+        inst = None  # Initialize to ensure it's always defined
         
-        if existing is not None and not getattr(existing, 'is_active', False):
-            # Reuse existing inactive instance instead of creating new one
-            inst = existing
-            is_reuse = True
-            
-            # Update _nest_depth to reflect current call chain depth (Fix #1 improvement)
-            inst._nest_depth = nest_depth
-            
-            logger.debug(
-                f"[INSTANCE REUSE] '{instance_name}' ({agent_class}) reusing existing inactive instance. "
-                f"Conversation history will be preserved and extended."
-            )
-        else:
+        if existing is not None:
+            # Reuse existing instance if it's IDLE or TERMINATED (not currently executing)
+            existing_state = getattr(existing, 'state', None)
+            if existing_state in (AgentState.IDLE, AgentState.TERMINATED):
+                # Reuse existing inactive instance instead of creating new one
+                inst = existing
+                is_reuse = True
+                
+                # Update _nest_depth to reflect current call chain depth (Fix #1 improvement)
+                inst._nest_depth = nest_depth
+                
+                logger.debug(
+                    f"[INSTANCE REUSE] '{instance_name}' ({agent_class}) reusing existing inactive instance. "
+                    f"Conversation history will be preserved and extended."
+                )
+            else:
+                # Existing instance is still active (RUNNING/SLEEPING/COMPLETING), fall through to create new one
+                existing = None  # Clear so we don't incorrectly log about reusing an active instance
+        
+        if inst is None or not is_reuse:
             # Create new instance (existing is None or still active)
             inst = AgentInstance(
                 instance_name=instance_name,
                 agent_class=agent_class,
                 conversation=[],
-                is_active=False,
                 max_turns=None,  # Will be set below via settings propagation (P6)
                 parent_instance=caller,
                 created_at=now,
@@ -2259,7 +2299,7 @@ class ExecutionEngine:
             if existing is not None:
                 # Warn about overwriting an active instance
                 logger.warning(
-                    f"[INSTANCE REUSE] '{instance_name}' ({agent_class}) is being reused while still active. "
+                    f"[NEW INSTANCE] '{instance_name}' ({agent_class}) replacing active instance. "
                     f"Previous instance conversation will be replaced."
                 )
 
@@ -2483,9 +2523,13 @@ class ExecutionEngine:
 
         # Item 12: Initialize sub-agent WebUI state before execution begins (Fix #3: lighter snapshot)
         try:
+            # FIX: Thread-safe state read - snapshot under lock before building dict
+            with inst._state_lock:
+                current_state = inst.state
+            
             initial_state = {
-                'active': inst.state in (AgentState.RUNNING, AgentState.SLEEPING),
-                'agent_state': inst.state.name,  # Send actual state name for activity indicator coloring
+                'active': current_state in (AgentState.RUNNING, AgentState.SLEEPING),
+                'agent_state': current_state.name,  # Send actual state name for activity indicator coloring
                 'agent_name': f"{instance_name} ({agent_class})",
                 'message_count': len(conv),
                 'latest_message_summary': '',
@@ -2535,7 +2579,6 @@ class ExecutionEngine:
 
             # Bug #43 Fix: Pre-execution check — don't start if this instance was terminated while waiting
             if self.pool.is_instance_terminated(instance_name):
-                inst.is_active = False
                 logger.info(
                     f"[CALL_AGENT_DEBUG] _create_and_run_agent — instance {instance_name} was terminated "
                     f"before execution started, skipping"
@@ -2562,9 +2605,14 @@ class ExecutionEngine:
                             last_msg = final_resp[-1]
                             content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
                             latest_summary = str(content)[:500] if content else ''
+                        
+                        # FIX: Thread-safe state read - snapshot under lock before building dict
+                        with inst._state_lock:
+                            current_state = inst.state
+                        
                         state = {
-                            'active': inst.state in (AgentState.RUNNING, AgentState.SLEEPING),
-                            'agent_state': inst.state.name,  # Send actual state name for activity indicator coloring
+                            'active': current_state in (AgentState.RUNNING, AgentState.SLEEPING),
+                            'agent_state': current_state.name,  # Send actual state name for activity indicator coloring
                             'agent_name': f"{instance_name} ({agent_class})",
                             'message_count': len(current_conv),  # inst.conversation already includes final_resp
                             'latest_message_summary': latest_summary,
@@ -2634,9 +2682,14 @@ class ExecutionEngine:
                     last_msg = final_resp[-1]
                     content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
                     latest_summary = str(content)[:500] if content else ''
+                
+                # FIX: Thread-safe state read - snapshot under lock before building dict
+                with inst._state_lock:
+                    current_state = inst.state
+                
                 final_state = {
-                    'active': inst.state in (AgentState.RUNNING, AgentState.SLEEPING),  # Dynamic state check for consistency
-                    'agent_state': inst.state.name,  # Send actual state name for activity indicator coloring
+                    'active': current_state in (AgentState.RUNNING, AgentState.SLEEPING),  # Dynamic state check for consistency
+                    'agent_state': current_state.name,  # Send actual state name for activity indicator coloring
                     'agent_name': f"{instance_name} ({agent_class})",
                     'message_count': len(current_conv),  # inst.conversation already includes final_resp
                     'latest_message_summary': latest_summary,

@@ -106,7 +106,6 @@ class TestDismissal:
             instance_name="ghost",
             agent_class="researcher",
             conversation=[Message(role="user", content="hi")],
-            is_active=False,
             max_turns=None,
             parent_instance=None,
             created_at=time.monotonic(),
@@ -121,13 +120,13 @@ class TestDismissal:
 
     def test_dismiss_active_agent_sets_stop_flag(self, agent_pool):
         """Dismissing an active agent should set the stopped flag."""
-        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.agent_instance import AgentInstance, AgentState
         import time
         inst = AgentInstance(
             instance_name="busy_agent",
             agent_class="researcher",
             conversation=[],
-            is_active=True,
+            state=AgentState.RUNNING,
             max_turns=None,
             parent_instance=None,
             created_at=time.monotonic(),
@@ -158,13 +157,13 @@ class TestDismissal:
 
     def test_terminate_instance_sets_stop_when_active(self, agent_pool):
         """Terminating an active instance should set the stopped flag."""
-        from agent_cascade.agent_instance import AgentInstance
+        from agent_cascade.agent_instance import AgentInstance, AgentState
         import time
         inst = AgentInstance(
             instance_name="term_agent",
             agent_class="researcher",
             conversation=[],
-            is_active=True,
+            state=AgentState.RUNNING,
             max_turns=None,
             parent_instance=None,
             created_at=time.monotonic(),
@@ -207,7 +206,6 @@ class TestHaltLifecycle:
                 instance_name=name,
                 agent_class="researcher",
                 conversation=[],
-                is_active=False,
                 max_turns=None,
                 parent_instance=None,
                 created_at=time.monotonic(),
@@ -235,7 +233,6 @@ class TestHaltLifecycle:
                 instance_name=name,
                 agent_class="researcher",
                 conversation=[],
-                is_active=False,
                 max_turns=None,
                 parent_instance=None,
                 created_at=time.monotonic(),
@@ -276,7 +273,6 @@ class TestSnapshots:
                 Message(role="user", content="hi"),
                 Message(role="assistant", content="ok"),
             ],
-            is_active=False,
             max_turns=None,
             parent_instance=None,
             created_at=time.monotonic(),

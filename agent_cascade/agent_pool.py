@@ -24,8 +24,8 @@ from agent_cascade.settings import DEFAULT_WORKSPACE
 from .agent_instance import AgentInstance, PoolSettings, AgentState
 from .async_tools import AsyncResultBuffer, AsyncToolRegistry
 
-# Active states for agent lifecycle management (includes IDLE for Fix #6)
-ACTIVE_STATES = (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING, AgentState.IDLE)
+# Active states for agent lifecycle management (not IDLE — it means "not executing")
+ACTIVE_STATES = (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING)
 
 
 class _InstanceConversationMapping(dict):
@@ -367,7 +367,6 @@ class AgentPool:
             instance_name=instance_name,
             agent_class=agent_class,
             conversation=conversation or [],
-            is_active=False,
             max_turns=max_turns,
             parent_instance=parent_instance,
             created_at=now,
@@ -497,7 +496,14 @@ class AgentPool:
         
         self.terminated_instances.add(instance_name)
         inst = self.instances.get(instance_name)
-        if inst and inst.state in ACTIVE_STATES:
+        
+        # FIX: Thread-safe state read - snapshot under lock before checking ACTIVE_STATES
+        is_active = False
+        if inst:
+            with inst._state_lock:
+                is_active = inst.state in ACTIVE_STATES
+        
+        if is_active:
             # Bug5 Fix #1: Only set global _stopped_event when explicitly requested
             if set_global_stopped:
                 self._stopped_event.set()  # Global signal for ALL agents
@@ -534,7 +540,14 @@ class AgentPool:
                 self.dismiss_instance(child_name)  # Recursive — handles nested trees
         
         inst = self.instances.get(instance_name)
-        if inst and inst.state in ACTIVE_STATES:
+        
+        # FIX: Thread-safe state read - snapshot under lock before checking ACTIVE_STATES
+        is_active = False
+        if inst:
+            with inst._state_lock:
+                is_active = inst.state in ACTIVE_STATES
+        
+        if is_active:
             # Bug5 Fix: Pass set_global_stopped=False to ensure only THIS instance
             # is terminated, not all agents via the global _stopped_event.
             self.terminate_instance(instance_name, set_global_stopped=False)
@@ -922,7 +935,6 @@ class AgentPool:
                 instance_name=instance_name,
                 agent_class=agent_class,
                 conversation=restored_messages,
-                is_active=False,
                 max_turns=None,
                 parent_instance=None,
                 created_at=now,
@@ -1281,9 +1293,9 @@ class AgentPool:
     # ── Convenience methods (thin wrappers around instance state) ───────────
 
     def is_active(self, instance_name: str) -> bool:
-        """Check if an instance is currently executing."""
+        """Check if an instance is currently executing (derived from state machine)."""
         inst = self.instances.get(instance_name)
-        return inst.is_active if inst else False
+        return inst.is_running if inst else False
 
     def is_instance_terminated(self, instance_name: str) -> bool:
         """Check if an instance has been marked for termination.

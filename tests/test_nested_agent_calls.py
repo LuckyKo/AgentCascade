@@ -316,7 +316,6 @@ class TestDisabledToolsMergeOnSettingsPropagation:
             instance_name="child1",
             agent_class="test_child",
             conversation=[],
-            is_active=False,
             max_turns=None,
             parent_instance="parent1",
             created_at=0.0,

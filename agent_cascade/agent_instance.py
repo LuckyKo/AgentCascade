@@ -21,19 +21,23 @@ class AgentState(Enum):
     """Agent lifecycle states for the state machine.
     
     States and valid transitions:
-    - RUNNING: Agent is actively processing (initial state after creation)
+    - IDLE: Agent exists but is not currently executing (initial state after creation)
+    - RUNNING: Agent is actively processing inside engine.run()
     - SLEEPING: Agent is waiting for async background tools to complete
     - COMPLETING: Agent has finished its work, cleaning up
     - TERMINATED: Agent has been terminated (final state)
-    - IDLE: Agent is idle (used for parallel execution tracking)
     
     Valid transitions are enforced by _transition() method.
+    
+    The state machine fully replaces the old is_active boolean field:
+    - IDLE replaces is_active=False (agent not executing)
+    - RUNNING replaces is_active=True (agent executing)
     """
+    IDLE = auto()
     RUNNING = auto()
     SLEEPING = auto()
     COMPLETING = auto()
     TERMINATED = auto()
-    IDLE = auto()
 
 
 class InvalidStateTransition(Exception):
@@ -53,13 +57,16 @@ class AgentInstance:
     Required fields (no default): instance_name, agent_class, conversation, 
         created_at, last_activity, latest_marker_index.
 
-    Optional fields (has defaults): is_active (default False), state (default RUNNING),
-        and all remaining fields for compression, token tracking, nesting, etc.
+    Optional fields (has defaults): state (default IDLE), and all remaining fields 
+        for compression, token tracking, nesting, etc.
 
     The instance_name uniquely identifies an agent in the pool.
 
     Design principle: AgentInstance is primarily DATA. All orchestration logic
     lives in ExecutionEngine, not here. This dataclass just holds state.
+    
+    State machine replaces the old is_active boolean field. Use the state property
+    or is_running() helper method to check execution status.
     """
 
     # ── Identity (no defaults) ─────────────────────────────────────────
@@ -77,8 +84,7 @@ class AgentInstance:
     latest_marker_index: int             # Index in conversation where latest summary marker was inserted
 
     # ── Execution State (with defaults) ─────────────────────────────────
-    is_active: bool = False              # Currently executing a run() turn (default: inactive)
-    state: AgentState = field(default=AgentState.RUNNING)  # Current lifecycle state (state machine)
+    state: AgentState = field(default=AgentState.IDLE)  # Current lifecycle state (default: IDLE, not RUNNING)
     _state_lock: threading.RLock = field(default_factory=threading.RLock)  # Lock for state transitions
     
     # SLEEPING state tracking fields (for async tools) - part of Execution State
@@ -128,8 +134,8 @@ class AgentInstance:
         # Valid transitions matrix
         valid_transitions = {
             AgentState.RUNNING: {AgentState.SLEEPING, AgentState.COMPLETING, AgentState.TERMINATED, AgentState.IDLE},
-            AgentState.SLEEPING: {AgentState.RUNNING, AgentState.COMPLETING, AgentState.TERMINATED},
-            AgentState.COMPLETING: {AgentState.TERMINATED},
+            AgentState.SLEEPING: {AgentState.RUNNING, AgentState.COMPLETING, AgentState.TERMINATED, AgentState.IDLE},
+            AgentState.COMPLETING: {AgentState.TERMINATED, AgentState.IDLE},
             AgentState.TERMINATED: set(),  # Terminal state - no transitions out
             AgentState.IDLE: {AgentState.RUNNING, AgentState.TERMINATED},
         }
@@ -138,6 +144,32 @@ class AgentInstance:
             raise InvalidStateTransition(self.state, new_state)
         
         self.state = new_state
+
+    # ── Helper properties (replaces the old is_active boolean) ──────────
+
+    @property
+    def is_running(self) -> bool:
+        """Check if this agent is currently executing inside engine.run().
+        
+        Replaces the old is_active boolean field. Returns True when state is RUNNING.
+        Thread-safe: reads self.state under _state_lock protection.
+        
+        Returns:
+            bool: True if state == AgentState.RUNNING, False otherwise.
+        """
+        with self._state_lock:
+            return self.state == AgentState.RUNNING
+
+    def is_executing(self) -> bool:
+        """Alias for is_running, provided for code clarity in some contexts.
+        
+        Thread-safe: reads self.state under _state_lock protection.
+        
+        Returns:
+            bool: True if agent is actively processing (RUNNING state).
+        """
+        with self._state_lock:
+            return self.state == AgentState.RUNNING
 
 
 @dataclass

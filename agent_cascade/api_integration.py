@@ -20,7 +20,7 @@ from agent_cascade.llm.schema import (
 )
 from agent_cascade.log import logger
 
-from .agent_instance import AgentInstance, LoopDetectedError
+from .agent_instance import AgentInstance, AgentState, LoopDetectedError
 from .agent_pool import AgentPool
 from .execution_engine import ExecutionEngine, _build_resources_block, _replace_resources_block, _build_session_metadata, _replace_section
 
@@ -133,10 +133,14 @@ def _build_activity_update(
     if hasattr(instance, '_last_actual_token_count') and instance._last_actual_token_count > 0:
         token_count = instance._last_actual_token_count
     
+    # FIX 3: Thread-safe state read - snapshot under lock before returning
+    with instance._state_lock:
+        current_state = instance.state
+    
     return {
         'instance_name': instance_name,
         'preview': preview,
-        'is_active': True,
+        'is_active': current_state == AgentState.RUNNING,
         'is_waiting': is_waiting,
         'token_count': token_count,
     }
@@ -219,9 +223,14 @@ def create_main_agent_instance(
     agent_label = f"{instance_name} (Orchestrator)"
     with instance._compression_lock:
         conv_snapshot = list(instance.conversation)
+    
+    # FIX 4: Read state under _state_lock for thread safety
+    with instance._state_lock:
+        current_state = instance.state
+    
     pool.instance_state[instance_name] = {
         'active': False,
-        'agent_state': instance.state.name,  # Send actual state name for activity indicator coloring
+        'agent_state': current_state.name,  # Send actual state name for activity indicator coloring
         'agent_name': agent_label,
         'messages': conv_snapshot,
     }
@@ -970,11 +979,15 @@ def _serialize_instance(
     Fingerprint includes (content, reasoning_content, function_call, name) to prevent
     duplicates when messages committed in Phase 4 also appear in _streaming_responses.
     """
+    # FIX 3: Thread-safe state read - snapshot state under lock before building result dict
+    with inst._state_lock:
+        current_state = inst.state  # Snapshot under lock
+    
     result = {
         'instance_name': inst.instance_name,
         'agent_class': inst.agent_class,
-        'active': inst.is_active,                              # Maps to frontend's agentData.active
-        'agent_state': inst.state.name,  # Send actual state name for activity indicator (RUNNING, SLEEPING, IDLE, etc.)
+        'active': current_state == AgentState.RUNNING,          # Maps to frontend's agentData.active (derived from state)
+        'agent_state': current_state.name,  # Send actual state name for activity indicator (RUNNING, SLEEPING, IDLE, etc.)
         'is_halted': pool.is_instance_halted(inst.instance_name),
         'parent_instance': inst.parent_instance,
         'has_queued_messages': pool.has_messages(inst.instance_name),
@@ -992,7 +1005,7 @@ def _serialize_instance(
         # Use passed parameter if provided, otherwise read from instance (fallback for callers not passing it)
         stream_responses = list(inst._streaming_responses) if streaming and streaming_responses is None and len(inst._streaming_responses) > 0 else streaming_responses
 
-    if streaming and inst.is_active and len(msgs) > 30:
+    if streaming and current_state == AgentState.RUNNING and len(msgs) > 30:
         # During active generation only send the tail (last 3 messages) for large
         # conversations to avoid O(N²) serialisation on every ~150ms tick.
         # Smaller conversations are sent in full — dropping early context during
@@ -1287,7 +1300,7 @@ def get_agent_state_from_pool(
         'instance_name': instance.instance_name,
         'agent_class': instance.agent_class,
         'messages': msg_list,
-        'is_active': instance.is_active,
+        'is_active': instance.is_running,
         'is_halted': pool.is_instance_halted(instance_name),
         'parent_instance': instance.parent_instance,
         'has_queued_messages': pool.has_messages(instance_name),

@@ -463,51 +463,6 @@ body {
   flex-shrink: 0;
 }
 
-.main-tab .activity-dot {
-  position: absolute;
-  top: 8px;
-  right: 6px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-muted);  /* Default fallback color for unknown states */
-  display: none;
-}
-
-.main-tab.agent-active .activity-dot {
-  display: block;
-  box-shadow: 0 0 4px var(--success);
-}
-
-/* Activity indicator colors based on agent state */
-.main-tab.state-running .activity-dot {
-  background: #58a6ff;  /* Blue for RUNNING - currently processing/calling LLM */
-  box-shadow: 0 0 4px #58a6ff;
-}
-
-.main-tab.state-sleeping .activity-dot {
-  background: #d29922;  /* Orange for SLEEPING - waiting for async tools to complete */
-  box-shadow: 0 0 4px #d29922;
-}
-
-.main-tab.state-idle .activity-dot,
-.main-tab.state-completing .activity-dot,
-.main-tab.state-terminated .activity-dot {
-  background: #8b949e;  /* Gray for IDLE/COMPLETING/TERMINATED - not actively doing anything */
-  box-shadow: 0 0 2px #8b949e;
-}
-
-/* Reserved state classes for future use (not currently in AgentState enum) */
-.main-tab.state-active .activity-dot {
-  background: #58a6ff;
-  box-shadow: 0 0 4px #58a6ff;
-}
-
-.main-tab.state-waiting .activity-dot {
-  background: #d29922;
-  box-shadow: 0 0 4px #d29922;
-}
-
 .main-tab:hover {
   color: var(--text-secondary);
   background: var(--bg-hover);
@@ -553,9 +508,27 @@ body {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--accent);    /* Default blue for RUNNING */
   opacity: 1;
-  transition: opacity 0.3s ease-in-out;
+  transition: opacity 0.3s ease-in-out, background 0.3s ease-in-out;
+}
+
+/* State-based colors for the pulse indicator */
+.main-tab.state-running .sub-tab-pulse {
+  background: #58a6ff;         /* Blue for RUNNING - currently processing/calling LLM */
+  box-shadow: 0 0 4px #58a6ff;
+}
+
+.main-tab.state-sleeping .sub-tab-pulse {
+  background: #d29922;         /* Orange for SLEEPING - waiting for async tools to complete */
+  box-shadow: 0 0 4px #d29922;
+}
+
+.main-tab.state-idle .sub-tab-pulse,
+.main-tab.state-completing .sub-tab-pulse,
+.main-tab.state-terminated .sub-tab-pulse {
+  background: #8b949e;         /* Gray for IDLE/COMPLETING/TERMINATED - not actively doing anything */
+  box-shadow: none;
 }
 
 .sub-tab-pulse.dimmed {
@@ -2423,7 +2396,6 @@ body {
 
 /* ─── GPU Savings: Pause infinite animations when NOT generating ──────────── */
 body:not(.is-generating) .sub-tab-pulse,
-body:not(.is-generating) .activity-dot,
 body:not(.is-generating) .activity-queued,
 body:not(.is-generating) .waiting-spin {
   animation-play-state: paused !important;

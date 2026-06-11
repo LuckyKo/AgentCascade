@@ -361,7 +361,6 @@ class ListAgents(BaseTool):
 
         # 2. Active & Persistent Instances
         lines.append("## 2. Active Instances (Sessions)")
-        active_set = set(self.agent_pool.active_stack)
         
         # Get all known instances from classes or conversations
         all_instances = sorted(list(set(self.agent_pool.instance_classes.keys()) | 
@@ -370,11 +369,12 @@ class ListAgents(BaseTool):
         if not all_instances:
             lines.append("- No active or persistent instances.")
         else:
-            for inst in all_instances:
-                cls_name = self.agent_pool.instance_classes.get(inst, "Unknown")
-                is_active = inst in active_set
-                status_emoji = "🟢" if is_active else "⚪"
-                status_text = "ACTIVE" if is_active else "IDLE"
+            for inst_name in all_instances:
+                cls_name = self.agent_pool.instance_classes.get(inst_name, "Unknown")
+                inst_obj = self.agent_pool.instances.get(inst_name)
+                is_executing = inst_obj.is_running if inst_obj else False
+                status_emoji = "🟢" if is_executing else "⚪"
+                status_text = "ACTIVE" if is_executing else "IDLE"
                 
                 # Context Metrics
                 msgs = self.agent_pool.get_conversation(inst)

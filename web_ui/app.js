@@ -219,8 +219,6 @@ const ActivityBar = {
     
     // Update active state indicators
     this.el.classList.toggle('active', isActive);
-    const dot = this.el.querySelector('.activity-dot');
-    if (dot) dot.parentElement.classList.toggle('active', isActive);
     
     if (isActive) {
       let status = '';
@@ -282,8 +280,6 @@ const ActivityBar = {
     const isActive = agentData?.active ?? false;
     
     this.el.classList.toggle('active', isActive);
-    const dot = this.el.querySelector('.activity-dot');
-    if (dot) dot.parentElement.classList.toggle('active', isActive);
     
     if (isActive) {
       let status = '';
@@ -2434,34 +2430,32 @@ function renderSubAgents() {
     // Update tab content safely (preserves handlers on closeBtn)
     const iconSpan = tabBtn.querySelector('.tab-icon-container');
     if (iconSpan) {
+      // Get agent state for visibility logic
+      const agentState = agentData?.agent_state || 'idle';
+      // Show indicator for RUNNING or SLEEPING states (agent is actively doing something)
+      const shouldShowIndicator = isActive || agentState === 'SLEEPING';
+      
       // Only update icon innerHTML when active state actually changed to avoid GPU churn
       const prevActive = tabBtn.dataset.isActive === 'true';
-      if (prevActive !== isActive) {
+      if (prevActive !== shouldShowIndicator) {
         const icon = agentData?.agent_class === 'orchestrator' ? '💬' : '🤖';
-        iconSpan.innerHTML = isActive ? '<span class="sub-tab-pulse"></span> ' + `<span class="main-tab-icon">${icon}</span>` : `<span class="main-tab-icon">${icon}</span>`;
+        iconSpan.innerHTML = shouldShowIndicator 
+          ? '<span class="sub-tab-pulse"></span> ' + `<span class="main-tab-icon">${icon}</span>` 
+          : `<span class="main-tab-icon">${icon}</span>`;
       }
-      tabBtn.dataset.isActive = String(isActive);
+      tabBtn.dataset.isActive = String(shouldShowIndicator);
     }
     
-    // Activity indicator dot - create if not exists
-    let activityDot = tabBtn.querySelector('.activity-dot');
-    if (!activityDot) {
-      activityDot = document.createElement('span');
-      activityDot.className = 'activity-dot';
-      activityDot.title = 'Agent state indicator';
-      tabBtn.appendChild(activityDot);
-    }
-    
-    // Update agent state class for colored activity indicator
-    const agentState = agentData?.agent_state || 'idle';
+    // Update agent state class for colored activity indicator (needed for CSS selectors)
+    const agentStateForClass = agentData?.agent_state || 'idle';
     const prevStateClass = tabBtn.dataset.agentState;
-    if (prevStateClass !== agentState) {
+    if (prevStateClass !== agentStateForClass) {
       // Remove old state classes
       tabBtn.classList.remove('state-running', 'state-sleeping', 'state-idle', 'state-completing', 'state-terminated');
       // Add new state class
-      const stateClass = 'state-' + agentState.toLowerCase();
+      const stateClass = 'state-' + agentStateForClass.toLowerCase();
       tabBtn.classList.add(stateClass);
-      tabBtn.dataset.agentState = agentState;
+      tabBtn.dataset.agentState = agentStateForClass;
     }
     
     const labelSpan = tabBtn.querySelector('.tab-label');

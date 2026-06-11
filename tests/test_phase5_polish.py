@@ -181,7 +181,6 @@ class TestSubAgentStateMainSession:
                     instance_name=instance_name,
                     agent_class=agent_class,
                     conversation=list(conversation),
-                    is_active=False,
                     max_turns=max_turns,
                     parent_instance=parent_instance,
                     created_at=0.0,
