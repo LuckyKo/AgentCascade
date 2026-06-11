@@ -20,6 +20,19 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Canonical agent type mapping for case-insensitive normalization and idempotency
+# Maps lowercase agent types to their canonical PascalCase form
+CANONICAL_AGENT_TYPES: Dict[str, str] = {
+    "coder": "Coder",
+    "researcher": "Researcher",
+    "orchestrator": "Orchestrator",
+    "security": "Security",
+    "writer": "Writer",
+    "reviewer": "Reviewer",
+    "compressor": "Compressor",
+    "generalist": "Generalist",
+}
+
 
 # ── Data Models ──────────────────────────────────────────────────────────────
 
@@ -359,20 +372,33 @@ class APIRouter:
     # ── Agent Priority Management ────────────────────────────────────────
 
     def set_agent_priorities(self, agent_type: str, endpoint_ids: List[str]):
-        """Set the priority-ordered endpoint list for an agent type."""
+        """
+        Set the priority-ordered endpoint list for an agent type.
+        
+        Performs case-insensitive key normalization to prevent duplicate keys
+        when frontend (PascalCase) and backend (lowercase) both update priorities.
+        """
         with self._lock:
+            # Normalize to canonical case (existing key or input as-is)
+            canonical = self._normalize_agent_type(agent_type)
+            
+            # If normalized key differs from input and input exists, remove it to prevent duplicates
+            if canonical != agent_type and agent_type in self.agent_priorities:
+                del self.agent_priorities[agent_type]
+            
             # Validate that all IDs exist
             valid_ids = [eid for eid in endpoint_ids if eid in self.endpoints]
             if valid_ids:
-                self.agent_priorities[agent_type] = valid_ids
-            elif agent_type in self.agent_priorities:
-                del self.agent_priorities[agent_type]
+                self.agent_priorities[canonical] = valid_ids
+            elif canonical in self.agent_priorities:
+                del self.agent_priorities[canonical]
             self._save()
 
     def get_agent_priorities(self, agent_type: str) -> List[str]:
         """Get the endpoint ID list for a specific agent type."""
         with self._lock:
-            return list(self.agent_priorities.get(agent_type, []))
+            normalized = self._normalize_agent_type(agent_type)
+            return list(self.agent_priorities.get(normalized, []))
 
     def get_effective_concurrency(self, agent_type: str) -> int:
         """
@@ -390,8 +416,10 @@ class APIRouter:
         """
         defaults = self.default_llm_cfg or {}
         with self._lock:
+            # Normalize agent_type for case-insensitive lookup (Fix Finding 1)
+            normalized_agent_type = self._normalize_agent_type(agent_type)
             # First check agent-specific priorities
-            for eid in self.agent_priorities.get(agent_type, []):
+            for eid in self.agent_priorities.get(normalized_agent_type, []):
                 ep = self.endpoints.get(eid)
                 if ep and ep.enabled:
                     return ep.concurrency_limit
@@ -438,7 +466,10 @@ class APIRouter:
             defaults = self.default_llm_cfg or {}
             general_limit = defaults.get('max_input_tokens', 0)
             
-            for eid in self.agent_priorities.get(agent_type, []):
+            # Normalize agent_type for case-insensitive lookup (Fix Finding 1)
+            normalized_agent_type = self._normalize_agent_type(agent_type)
+            
+            for eid in self.agent_priorities.get(normalized_agent_type, []):
                 ep = self.endpoints.get(eid)
                 if ep and ep.enabled:
                     ep_limit = ep.max_input_tokens
@@ -450,6 +481,45 @@ class APIRouter:
         if ep_limit <= 0:
             return general_limit
         return min(general_limit, ep_limit)
+
+    def _normalize_agent_type(self, agent_type: str) -> str:
+        """
+        Normalize agent_type for case-insensitive lookup.
+        
+        Frontend stores priorities with PascalCase keys (e.g., "Coder", "Security")
+        while backend uses lowercase during streaming (e.g., "coder", "security").
+        This method performs case-insensitive lookup to ensure live updates work.
+        
+        Returns the canonical key from agent_priorities if found, otherwise returns
+        the canonical form from CANONICAL_AGENT_TYPES or the original agent_type.
+        
+        CONTRACT: Must be called under self._lock to prevent concurrent modification.
+        """
+        # Fix Finding 4: Strip whitespace before processing
+        if not agent_type:
+            return agent_type
+        
+        agent_type = agent_type.strip()
+        if not agent_type:
+            return agent_type
+        
+        agent_type_lower = agent_type.lower()
+        
+        # Fix Finding 2: Take a snapshot of keys to prevent concurrent modification issues
+        existing_keys_snapshot = list(self.agent_priorities.keys())
+        
+        # Try exact match first (fastest path)
+        if agent_type in self.agent_priorities:
+            return agent_type
+        
+        # Case-insensitive fallback - check existing keys first
+        for key in existing_keys_snapshot:
+            if key.lower() == agent_type_lower:
+                return key
+        
+        # If no match found, return the canonical form (Fix Finding 3)
+        # This ensures consistent behavior across restarts regardless of source ordering
+        return CANONICAL_AGENT_TYPES.get(agent_type_lower, agent_type)
 
     def get_endpoint_chain(self, agent_type: str, allocated_tokens: Optional[int] = None) -> List[dict]:
         """
@@ -473,7 +543,10 @@ class APIRouter:
             defaults = self.default_llm_cfg or {}
             general_limit = defaults.get('max_input_tokens', 0)
             
-            for eid in self.agent_priorities.get(agent_type, []):
+            # Normalize agent_type for case-insensitive lookup (Fix Finding 1)
+            normalized_agent_type = self._normalize_agent_type(agent_type)
+            
+            for eid in self.agent_priorities.get(normalized_agent_type, []):
                 ep = self.endpoints.get(eid)
                 if ep and ep.enabled:
                     cfg = ep.to_llm_cfg()
@@ -703,6 +776,41 @@ class APIRouter:
         except Exception as e:
             logger.error(f"[APIRouter] Failed to save config: {e}")
 
+    def _normalize_agent_priorities(self, priorities: dict) -> dict:
+        """
+        Normalize agent_priorities dict to remove case-insensitive duplicate keys.
+        
+        When both 'Coder' and 'coder' exist, keeps the first one encountered
+        (typically PascalCase from frontend). This prevents double entries in UI.
+        
+        Args:
+            priorities: Raw agent_priorities dict that may have duplicates
+            
+        Returns:
+            Normalized dict with only one key per agent type (case-insensitive)
+        """
+        normalized = {}
+        seen_lower = {}  # Maps lowercase key -> canonical key to track which we kept
+        
+        for key, value in priorities.items():
+            if not key:
+                continue
+                
+            key_lower = key.lower()
+            if key_lower not in seen_lower:
+                # First occurrence - keep it
+                normalized[key] = value
+                seen_lower[key_lower] = key
+            # Else: duplicate found, skip this one (keep the first)
+        
+        if len(normalized) != len(priorities):
+            logger.info(
+                f"[APIRouter] Normalized agent_priorities: {len(priorities)} keys → "
+                f"{len(normalized)} keys (removed {len(priorities) - len(normalized)} case duplicates)"
+            )
+        
+        return normalized
+
     def _load(self):
         """Load config from disk if available."""
         if not self._config_path.exists():
@@ -725,7 +833,9 @@ class APIRouter:
                 except Exception as e:
                     logger.error(f"[APIRouter] Failed to parse endpoint data: {e}")
 
-            self.agent_priorities = data.get('agent_priorities', {})
+            # Normalize agent_priorities to remove case-insensitive duplicates
+            raw_priorities = data.get('agent_priorities', {})
+            self.agent_priorities = self._normalize_agent_priorities(raw_priorities)
             logger.info(f"[APIRouter] Loaded {len(self.endpoints)} endpoints from {self._config_path}")
         except Exception as e:
             logger.error(f"[APIRouter] Failed to load config from {self._config_path}: {e}")
@@ -740,13 +850,22 @@ class APIRouter:
         }
 
     def from_dict(self, data: dict):
-        """Load full state from a dict (e.g. from UI update)."""
+        """
+        Load full state from a dict (e.g. from UI update).
+        
+        Normalizes agent_priorities to prevent duplicate keys from case mismatches
+        between frontend and backend updates.
+        """
         with self._lock:
             self.endpoints.clear()
             for ep_data in data.get('endpoints', []):
                 ep = APIEndpoint.from_dict(ep_data)
                 self.endpoints[ep.id] = ep
-            self.agent_priorities = data.get('agent_priorities', {})
+            
+            # Normalize agent_priorities to remove case-insensitive duplicates
+            raw_priorities = data.get('agent_priorities', {})
+            self.agent_priorities = self._normalize_agent_priorities(raw_priorities)
+            
             self._save()
 
     def update_default_llm_cfg(self, new_cfg: dict):

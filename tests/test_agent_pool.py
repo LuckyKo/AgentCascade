@@ -173,7 +173,7 @@ class TestDismissal:
             latest_marker_index=-1,
         )
         agent_pool.instances["term_agent"] = inst
-        agent_pool.terminate_instance("term_agent")
+        agent_pool.terminate_instance("term_agent", set_global_stopped=True)  # Bug5: explicitly request global stop
         assert agent_pool.stopped is True
         assert "term_agent" in agent_pool.terminated_instances
 

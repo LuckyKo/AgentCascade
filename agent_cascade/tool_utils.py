@@ -4,7 +4,6 @@ Import via: from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 """
 
 import copy
-import os
 import re
 import threading
 from pathlib import Path

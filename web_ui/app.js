@@ -1029,7 +1029,29 @@ function handleServerMessage(data) {
         }
         
         if (!isEditingAssignments) {
-          state.api_router.agent_priorities = data.api_router.agent_priorities || {};
+          // Client-side deduplication: normalize agent_priorities to prevent duplicate keys
+          // from case mismatches between frontend (PascalCase) and backend (lowercase)
+          const rawPriorities = data.api_router.agent_priorities || {};
+          const normalizedPriorities = {};
+          const seenLower = new Set();
+          
+          for (const [key, value] of Object.entries(rawPriorities)) {
+            if (!key) continue;
+            const keyLower = key.toLowerCase();
+            if (!seenLower.has(keyLower)) {
+              normalizedPriorities[key] = value;
+              seenLower.add(keyLower);
+            }
+          }
+          
+          // Only update if we actually removed duplicates
+          if (Object.keys(normalizedPriorities).length !== Object.keys(rawPriorities).length) {
+            console.log('[WebSocket] Normalized agent_priorities:', 
+              Object.keys(rawPriorities).length, '→', 
+              Object.keys(normalizedPriorities).length, 'keys');
+          }
+          
+          state.api_router.agent_priorities = normalizedPriorities;
           renderAgentApiAssignments();
         }
       }
