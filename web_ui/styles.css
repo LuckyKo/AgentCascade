@@ -667,8 +667,8 @@ body {
 
 .system-toast-bar {
   padding: 8px 16px;
-  background: rgba(255, 193, 7, 0.08);
-  border-bottom: 1px solid rgba(255, 193, 7, 0.2);
+  background: rgba(45, 27, 52, 0.15); /* Purple theme to match .msg-system */
+  border-bottom: 1px solid rgba(61, 41, 70, 0.3); /* Purple border to match --system-border */
   max-height: 150px;
   overflow-y: auto;
 }
@@ -1125,14 +1125,11 @@ body {
 /* === Tab Unification: Subtle accent for sub-agent messages (no indent) === */
 /* Applied via .message — unified visual style for ALL agents (root and sub-agents identical) */
 
-.message {
-    border-left: 2px solid var(--accent-dim, #555);
-}
-
-.message .msg-name {
-    font-size: 12px;
-    color: var(--text-secondary);
-    font-weight: 600;
+/* FIX: Added missing .msg-tool styling to match .msg-function */
+.msg-tool {
+  background: var(--function-bg);
+  border-color: var(--function-border);
+  border-left: 3px solid var(--function-border);
 }
 
 /* ─── Tool calls & results ────────────────────────────────────────────────── */

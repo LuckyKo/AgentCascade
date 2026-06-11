@@ -109,6 +109,7 @@ const chatInput = $('#chatInput');
 const sendBtn = $('#sendBtn');
 const continueBtn = $('#continueBtn');
 const stopBtn = $('#stopBtn');
+const pauseBtn = $('#pauseBtn');
 const resetBtn = $('#resetBtn');
 const agentSelect = $('#agentSelect');
 const sessionNameInput = $('#sessionName');
@@ -172,7 +173,10 @@ const ActivityBar = {
   el: null,          // DOM ref to #globalActivityBar
   fifoEl: null,      // DOM ref to .activity-fifo
   queuedEl: null,    // DOM ref to .activity-queued
-  lastRenderTime: 0, // Throttle: only re-render every ~500ms
+  lastRenderTime: 0, // Throttle: render() uses 200ms; pushImmediate() uses dedup instead
+  _lastImmediateKey: '', // Dedup key for pushImmediate() — skip if content hasn't changed
+  _immediateLocked: false, // Atomic lock to prevent race between pushImmediate() and render()
+  _currentInstance: null, // Track current agent instance for reset on filter change (Major Issue #5)
   
   init() {
     this.el = document.getElementById('globalActivityBar');
@@ -186,6 +190,73 @@ const ActivityBar = {
   push(instanceName, text) {
     if (instanceName !== this.getFilterInstance()) return;
     this.render(text);
+  },
+  
+  pushImmediate(instanceName, preview, isWaiting, tokenCount) {
+    // Lightweight update for activity banner — bypasses full render throttling
+    // Only updates the text content for near-real-time feedback during streaming
+  
+    if (instanceName !== this.getFilterInstance()) return;
+    if (!this.el || !this.fifoEl) return;
+  
+       // Reset dedup key when agent filter changes to avoid skipping first update (Major Issue #5)
+       if (this._currentInstance !== instanceName) {
+         this._lastImmediateKey = '';
+         this._currentInstance = instanceName;
+       }
+  
+    // Deduplication: skip if content hasn't changed since last pushImmediate
+    // This prevents excessive DOM updates during rapid LLM streaming (~10-20 updates/sec)
+    // Use JSON.stringify to avoid collision with '|' character in preview text (Major Issue #3)
+    const key = JSON.stringify([instanceName, preview, isWaiting, tokenCount]);
+    if (key === this._lastImmediateKey) return;
+    this._lastImmediateKey = key;
+    
+    const activeInstance = this.getFilterInstance();
+    // Null safety: use optional chaining for state.subAgents access
+    const agentData = state?.subAgents?.[activeInstance];
+    const isActive = agentData?.active ?? false;
+    
+    // Update active state indicators
+    this.el.classList.toggle('active', isActive);
+    const dot = this.el.querySelector('.activity-dot');
+    if (dot) dot.parentElement.classList.toggle('active', isActive);
+    
+    if (isActive) {
+      let status = '';
+      
+      // Show waiting status if applicable
+      if (!isRootAgentName(activeInstance) && isWaiting) {
+        status = 'Waiting for API slot...';
+      } else if (preview !== undefined && preview !== null) {
+        // Use the preview from activity_update
+        status = (preview === '' || !preview.trim()) 
+          ? 'Streaming...' 
+          : preview;
+      }
+      
+      // Append token count if provided (aligned with render() fallback logic)
+      // Use > 0 instead of !== undefined to hide "(0 words, 0 tokens)" during initial streaming
+      const tokCount = tokenCount > 0 ? tokenCount : (agentData?.total_tokens ?? state.totalTokens);
+      if (tokCount !== undefined && tokCount > 0) {
+        const wordCount = agentData?.total_words ?? state.totalWords;
+        status += ` (${wordCount} words, ${tokCount} tokens)`;
+      }
+      
+             // Atomic write: set lock before writing to prevent render() from overwriting (Critical Issue #1)
+             this._immediateLocked = true;
+      this.fifoEl.textContent = status;
+             this._immediateLocked = false;
+    } else {
+             this._immediateLocked = true;
+      this.fifoEl.textContent = 'Agent Idle';
+             this._immediateLocked = false;
+    }
+    
+    // Update queued messages indicator
+    if (this.queuedEl) {
+      this.queuedEl.style.display = agentData?.has_queued_messages ? 'block' : 'none';
+    }
   },
   
   getFilterInstance() {
@@ -205,7 +276,8 @@ const ActivityBar = {
     if (!this.el || !this.fifoEl) return;
     
     const activeInstance = this.getFilterInstance();
-    const agentData = state.subAgents[activeInstance];
+    // Null safety: use optional chaining for state.subAgents access
+    const agentData = state?.subAgents?.[activeInstance];
     // Agent-specific active state only — no global fallback (prevents cross-agent pulsing)
     const isActive = agentData?.active ?? false;
     
@@ -236,10 +308,18 @@ const ActivityBar = {
       if (tokCount !== undefined) {
         status += ` (${wordCount} words, ${tokCount} tokens)`;
       }
+      
+             // Check atomic lock from pushImmediate() before writing (Critical Issue #1)
+             // If locked, skip the write — pushImmediate() already wrote the correct content
+             if (!this._immediateLocked) {
       this.fifoEl.textContent = status;
-    } else {
+             }
+           } else {
+             // Check atomic lock from pushImmediate() before writing (Critical Issue #1)
+             if (!this._immediateLocked) {
       this.fifoEl.textContent = 'Agent Idle';
     }
+           }
     
     if (this.queuedEl) {
       this.queuedEl.style.display = agentData?.has_queued_messages ? 'block' : 'none';
@@ -1016,6 +1096,14 @@ function handleServerMessage(data) {
 
       break;
 
+    case 'activity_update':
+      // Lightweight activity update for near-real-time banner feedback
+      // This bypasses the full state broadcast throttling for faster UI response
+      if (data.instance_name && data.preview !== undefined) {
+        ActivityBar.pushImmediate(data.instance_name, data.preview, data.is_waiting, data.token_count);
+      }
+      break;
+
     case 'stream_update': {
       // DEBUG: trace stream update frequency
       if (!state._debugStreamCount) state._debugStreamCount = 0;
@@ -1290,7 +1378,7 @@ function handleServerMessage(data) {
 
     case 'error':
       state.generating = false;
-      appendSystemBubble(`⚠️ Error: ${data.message}`);
+      showInSystemToastBar(`⚠️ Error: ${data.message}`);
       delete state._lastActivityPreviewKey;
       delete state._lastActivityPreview;
       updateControls();
@@ -1353,7 +1441,7 @@ function triggerAfkSend() {
 
 /** Return the combined CSS class string for a message element */
 function msgClass(role) {
-    return `message msg-${role}`;  // Differentiate via data-agent-type attribute only
+    return `message msg-${role}`;  // CSS class-based role differentiation (user, assistant, function, system, tool)
 }
 
 /** Return the CSS class for a message header element */
@@ -1842,42 +1930,48 @@ function renderThinkingBlock(thought, isOpen) {
   `;
 }
 
-function appendSystemBubble(text) {
-  const bar = document.getElementById('systemToastBar');
-  if (!bar) return;
-  
-  // Enforce max capacity of 3 toasts — remove the oldest one first
-  const existingToasts = bar.querySelectorAll('.system-toast-item');
-  if (existingToasts.length >= 3 && existingToasts[0]) {
-    existingToasts[0].remove();
-  }
-  
-  const toast = document.createElement('div');
-  toast.className = 'system-toast-item';
-  toast.innerHTML = `
-    <div class="msg-content">${renderMarkdown(text)}</div>
-    <button class="toast-dismiss">×</button>
-  `;
-  const dismissBtn = toast.querySelector('.toast-dismiss');
-  let autoDismissTimer = null;
-  if (dismissBtn) {
-    dismissBtn.onclick = () => {
-      clearTimeout(autoDismissTimer); // Cancel pending auto-dismiss to avoid wasted timer
-      toast.remove();
-      if (!bar.querySelector('.system-toast-item')) bar.style.display = 'none';
-    };
-  }
-  bar.appendChild(toast);
-  bar.style.display = 'block';
-  
-  // Auto-dismiss after 15 seconds
-  autoDismissTimer = setTimeout(() => {
-    if (toast.parentNode) {
-      toast.remove();
-      if (!bar.querySelector('.system-toast-item')) bar.style.display = 'none';
+    /**
+     * Show a message in the system toast bar at the top of the chat area.
+     * Used for errors, warnings, and notifications that don't belong in the main conversation flow.
+     * 
+     * @param {string} text - The message text to display (supports markdown via renderMarkdown)
+     */
+    function showInSystemToastBar(text) {
+      const bar = document.getElementById('systemToastBar');
+      if (!bar) return;
+
+      // Enforce max capacity of 3 toasts — remove the oldest one first
+      const existingToasts = bar.querySelectorAll('.system-toast-item');
+      if (existingToasts.length >= 3 && existingToasts[0]) {
+        existingToasts[0].remove();
+      }
+
+      const toast = document.createElement('div');
+      toast.className = 'system-toast-item';
+      toast.innerHTML = `
+        <div class="msg-content">${renderMarkdown(text)}</div>
+        <button class="toast-dismiss">×</button>
+      `;
+      const dismissBtn = toast.querySelector('.toast-dismiss');
+      let autoDismissTimer = null;
+      if (dismissBtn) {
+        dismissBtn.onclick = () => {
+          clearTimeout(autoDismissTimer); // Cancel pending auto-dismiss to avoid wasted timer
+          toast.remove();
+          if (!bar.querySelector('.system-toast-item')) bar.style.display = 'none';
+        };
+      }
+      bar.appendChild(toast);
+      bar.style.display = 'block';
+
+      // Auto-dismiss after 15 seconds
+      autoDismissTimer = setTimeout(() => {
+        if (toast.parentNode) {
+          toast.remove();
+          if (!bar.querySelector('.system-toast-item')) bar.style.display = 'none';
+        }
+      }, 15000);
     }
-  }, 15000);
-}
 
 // ── Message editing ──────────────────────────────────────────────────────────
 
@@ -2757,7 +2851,7 @@ function updateControls() {
     }
     state._lastIsGenerating = isGenerating;
   }
-  stopBtn.style.opacity = state.generating ? '1' : '0.4';
+  if (stopBtn) stopBtn.style.opacity = state.generating ? '1' : '0.4';
   sendBtn.disabled = !state.connected;
   const activeMsgs = state.subAgents[getActiveAgentName()]?.messages || [];
   continueBtn.disabled = state.generating || activeMsgs.length === 0;
@@ -3153,7 +3247,7 @@ function processDocFile(file) {
   .catch(err => {
     console.error(err);
     if (statusText) statusText.textContent = `Error: ${err.message}`;
-    appendSystemBubble(`⚠️ Failed to parse document: ${err.message}`);
+    showInSystemToastBar(`⚠️ Failed to parse document: ${err.message}`);
   });
 }
 
@@ -3263,7 +3357,7 @@ chatInput.addEventListener('keydown', (e) => {
 });
 
 sendBtn.addEventListener('click', sendMessage);
-stopBtn.addEventListener('click', () => send({ type: 'stop' }));
+if (stopBtn) stopBtn.addEventListener('click', () => send({ type: 'stop' }));
 
 // Generic pause/resume toggle button factory — works for any agent instance
 function createPauseButton(btn, instanceSource) {

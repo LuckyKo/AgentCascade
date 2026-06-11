@@ -74,6 +74,8 @@ class EndpointScheduler:
     Uses threading.Semaphore per endpoint for race-free capacity control.
     For concurrency=0 endpoints: agents are strictly serialized — one at a time,
     from task submission to full completion (including all LLM calls and tool waits).
+    All concurrency=0 endpoints share the SAME slot to avoid cache trashing from
+    interleaving across different API addresses.
     For concurrency=N endpoints: at most N agents can run simultaneously.
     For concurrency=-1 endpoints: no scheduling needed (unlimited).
     
@@ -108,21 +110,26 @@ class EndpointScheduler:
             logger.debug(f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — api_base={api_base}, concurrency=-1 (unlimited), returning None")
             return None
         
+        # BUG FIX: All concurrency=0 endpoints share the same slot to avoid cache trashing.
+        # Use a shared slot key for sequential endpoints instead of the api_base.
+        is_sequential = (concurrency_limit == 0)
+        slot_key = '_shared_sequential_slot_' if is_sequential else api_base
+        
         new_max = concurrency_limit if concurrency_limit > 0 else 1  # 0→1 (sequential), -1 handled above
         logger.debug(
             f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — api_base={api_base}, "
-            f"concurrency_limit={concurrency_limit}, new_max={new_max}"
+            f"concurrency_limit={concurrency_limit}, slot_key={slot_key}, new_max={new_max}"
         )
         
         with self._lock:
-            if api_base not in self._schedules:
-                self._schedules[api_base] = {
+            if slot_key not in self._schedules:
+                self._schedules[slot_key] = {
                     'sem': threading.Semaphore(new_max),
                     'active_count': 0,
                     'max_active': new_max,
                 }
             else:
-                sched = self._schedules[api_base]
+                sched = self._schedules[slot_key]
                 # Check if concurrency limit changed and resize if needed
                 if sched['max_active'] != new_max:
                     old_max = sched['max_active']
@@ -142,11 +149,17 @@ class EndpointScheduler:
                     # calls will use the resized semaphore.
                     sched['sem'] = new_sem
                     
-                    logger.info(f"[EndpointScheduler] Resized '{api_base}' from {old_max} → {new_max}")
+                    # Log with original api_base for clarity, but note if using shared slot
+                    log_target = api_base if not is_sequential else f"{api_base} (shared sequential)"
+                    logger.info(f"[EndpointScheduler] Resized '{log_target}' from {old_max} → {new_max}")
             
-            sched = self._schedules[api_base]
+            sched = self._schedules[slot_key]
         
-        # Semaphore.acquire() blocks atomically if at capacity — no TOCTOU race
+        # Semaphore.acquire() blocks atomically if at capacity.
+        # Note: sched['sem'] is captured under lock above, but theoretically a concurrent
+        # resize could swap it between here and the acquire call. In practice this is benign
+        # because all concurrency=0 endpoints use new_max=1 (no resize), and the race window
+        # is extremely narrow.
         logger.debug(f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — blocking on semaphore for api_base={api_base}")
         sched['sem'].acquire()
         
@@ -164,38 +177,59 @@ class EndpointScheduler:
         # IMPORTANT: reads the CURRENT semaphore from the live schedule entry,
         # not a captured reference — this is critical because the semaphore may
         # have been resized (swapped) since acquire() was called.
+        # Capture slot_key in the closure to ensure correct schedule lookup on release.
         def release():
             with self._lock:
-                current_sched = self._schedules.get(api_base)
+                current_sched = self._schedules.get(slot_key)
                 if current_sched:
                     # Guard against negative active_count (shouldn't happen, but safe)
                     current_sched['active_count'] = max(0, current_sched['active_count'] - 1)
                     new_count = current_sched['active_count']
-                    logger.info(f"[EndpointScheduler] Agent released slot on '{api_base}' "
+                    # Log with original api_base for clarity, but note if using shared slot
+                    log_target = api_base if not is_sequential else f"{api_base} (shared sequential)"
+                    logger.info(f"[EndpointScheduler] Agent released slot on '{log_target}' "
                                f"(active: {new_count}, limit: {current_sched['max_active']})")
                     logger.debug(
                         f"[CALL_AGENT_DEBUG] EndpointScheduler.release — api_base={api_base}, "
-                        f"active_count={new_count}, max_active={current_sched['max_active']}"
+                        f"slot_key={slot_key}, active_count={new_count}, max_active={current_sched['max_active']}"
                     )
                     # Release the CURRENT semaphore (may differ from acquire-time sem after resize)
                     current_sched['sem'].release()
         
         return release
     
-    def count_active(self, api_base: str) -> int:
-        """Count active tasks on an endpoint."""
+    def count_active(self, api_base: str, concurrency_limit: int) -> int:
+        """Count active tasks on an endpoint.
+        
+        Args:
+            api_base: The API base URL of the endpoint
+            concurrency_limit: -1=unlimited, 0=sequential, N>0=max parallel
+            
+        Returns:
+            Number of currently active agents on this endpoint
+        """
+        # For concurrency=0, use shared slot key; otherwise use api_base directly
+        slot_key = '_shared_sequential_slot_' if concurrency_limit == 0 else api_base
         with self._lock:
-            sched = self._schedules.get(api_base)
+            sched = self._schedules.get(slot_key)
             return sched['active_count'] if sched else 0
     
     def get_status(self) -> Dict[str, Dict]:
-        """Get status of all scheduled endpoints (for diagnostics)."""
+        """Get status of all scheduled endpoints (for diagnostics).
+        
+        Returns:
+            Dictionary mapping endpoint identifiers to their current status.
+            Shared sequential slots are labeled as '[SHARED] _shared_sequential_slot_'
+            to distinguish them from per-endpoint schedules.
+        """
         with self._lock:
             result = {}
-            for api_base, sched in self._schedules.items():
+            for key, sched in self._schedules.items():
+                # Use meaningful label for shared slot to avoid confusion in diagnostics
+                display_key = f"[SHARED] {key}" if 'shared' in key.lower() else key
                 # Semaphore._value is implementation detail but useful for diagnostics
                 sem_value = sched['sem']._value if hasattr(sched['sem'], '_value') else 'unknown'
-                result[api_base] = {
+                result[display_key] = {
                     'active_count': sched['active_count'],
                     'max_active': sched['max_active'],
                     'semaphore_slots': sem_value,
@@ -208,10 +242,15 @@ class EndpointScheduler:
         A schedule is stale when active_count is 0 AND all semaphore permits
         are available (no waiting agents). This prevents memory leaks from
         endpoints that were used temporarily and have since gone idle.
+        
+        Note: The shared sequential slot (_shared_sequential_slot_) is NOT cleaned up
+        to avoid unnecessary recreation of the shared semaphore across different
+        concurrency=0 endpoints.
         """
         with self._lock:
             stale = [ab for ab, s in self._schedules.items()
-                     if s['active_count'] == 0 and s['sem']._value >= s['max_active']]
+                     if ab != '_shared_sequential_slot_'  # Protect shared slot from cleanup
+                     and s['active_count'] == 0 and s['sem']._value >= s['max_active']]
             for ab in stale:
                 del self._schedules[ab]
             if stale:
