@@ -1587,38 +1587,35 @@ class ExecutionEngine:
             logger.info(f"Pure reasoning turn detected for {inst_name}. Continuing.")
             return True
 
-        # If no real content at all — likely the agent is done
-        if not has_real_content:
-            # Wait for parallel agent results
-            if self.pool._execution.has_active_tasks(inst_name):
-                while (self.pool._execution.has_active_tasks(inst_name) and
-                       not self.pool.stopped and
-                       not self.pool.is_instance_halted(inst_name) and
-                       not self.pool.is_instance_terminated(inst_name)):
-                    time.sleep(0.5)
+        # Check for pending async tool calls (including call_agent) before completing
+        # This applies regardless of whether agent has real content or not
+        if self.pool.has_pending(inst_name):
+            logger.debug(f"Pending async tools for {inst_name} (has_real_content={has_real_content}). Transitioning to SLEEPING.")
+            self._transition_to_sleeping(instance)
+            return True  # Continue loop → hits SLEEPING guard at top
 
-            # Post-generation queue drain
-            if self.pool.has_messages(inst_name):
-                logger.info(f"Queued messages for {inst_name} after turn completion. Looping back.")
-                return True  # Loop back to process injected messages
-
-            # Agent has truly completed
-            return False
-
-        # Wait for parallel agent results even if it has real content
-        if self.pool._execution.has_active_tasks(inst_name):
-            while (self.pool._execution.has_active_tasks(inst_name) and
-                   not self.pool.stopped and
-                   not self.pool.is_instance_halted(inst_name) and
-                   not self.pool.is_instance_terminated(inst_name)):
-                time.sleep(0.5)
-                
         # Post-generation queue drain
         if self.pool.has_messages(inst_name):
             logger.info(f"Queued messages for {inst_name} after turn completion. Looping back.")
             return True  # Loop back to process injected messages
 
-        return False  # Has real content but NO tool calls — agent is done
+        # Agent has truly completed (no pending async, no queued messages)
+        return False
+
+    def _transition_to_sleeping(self, instance: 'AgentInstance') -> None:
+        """Transition an agent instance to SLEEPING state.
+
+        Helper method to reduce code duplication in _post_turn_checks.
+        Sets the appropriate timestamps and transitions state atomically.
+
+        Args:
+            instance: The agent instance to transition.
+        """
+        with instance._state_lock:
+            if instance.state == AgentState.RUNNING:
+                instance._transition(AgentState.SLEEPING)
+                instance.sleeping_since = time.monotonic()
+                instance._last_wakeup_log = time.monotonic()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Tool Execution — unified path for ALL tools including call_agent
@@ -1868,65 +1865,39 @@ class ExecutionEngine:
                     f"The caller '{instance.instance_name}' is at depth {caller_depth}. "
                     f"Cannot create agent '{instance_name}' at depth {child_depth}.")
 
-        # Check concurrency limits
-        is_parallel_allowed = True
-        effective_concurrency = 0
-        if self.pool.api_router:
-            try:
-                effective_concurrency = self.pool.api_router.get_effective_concurrency(agent_class)
-            except Exception as e:
-                logger.debug(f"Concurrency lookup failed for {agent_class} (using default): {e}")
-
-        if effective_concurrency == 0:
-            is_parallel_allowed = False
-        elif effective_concurrency > 0:
-            active_count = self.pool._execution.count_by_class(agent_class)
-            if active_count >= effective_concurrency:
-                is_parallel_allowed = False
-
+        # NOTE: Concurrency enforcement now happens in _acquire_slot() within submit_task().
+        # The effective_concurrency check below was previously used to decide between sync/async paths,
+        # but since both paths now use submit_parallel(), the actual slot acquisition handles concurrency.
+        # This block is kept for logging/debugging purposes only.
         logger.debug(
-            f"[CALL_AGENT_DEBUG] Concurrency — is_parallel_allowed={is_parallel_allowed}, "
-            f"effective_concurrency={effective_concurrency}, parallel_launch_arg={args.get('parallel_launch')}"
+            f"[CALL_AGENT_DEBUG] Concurrency check — agent_class={agent_class}, "
+            f"parallel_launch_arg={args.get('parallel_launch')}"
         )
 
-        # Parallel launch path
-        if is_parallel_allowed and args.get('parallel_launch') is True:
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] Taking PARALLEL path — caller={caller_name}, target={instance_name}, "
-                f"class={agent_class}, child_depth={child_depth}"
-            )
-            
-            # Generate call_id once — it will be passed through the parallel execution chain
-            call_id = f"{instance_name}_{time.monotonic()}"
-            
-            result = self.pool.submit_parallel(
-                agent_class, instance_name, args, messages, instance.instance_name, child_depth, call_id=call_id
-            )
-            
-            # Transition caller to SLEEPING state after dispatching parallel agent
-            # The caller will wait in SLEEPING until the parallel agent sends completion message
-            with instance._state_lock:
-                if instance.state != AgentState.TERMINATED:
-                    instance._transition(AgentState.SLEEPING)
-                    instance.sleeping_since = time.monotonic()
-                    instance._last_wakeup_log = time.monotonic()
-            
-            # Register this async call in the pool's registry using the generated call_id
-            self.pool.register_async_call(caller_name, call_id)
-            
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] EXIT (parallel) — caller={caller_name} transitioned to SLEEPING, "
-                f"target={instance_name}, call_id={call_id}, result_preview={str(result)[:200]}"
-            )
-            return result
-
-        # Synchronous execution — the unified path
+        # Async launch path — unified for all call_agent calls (parallel_launch parameter is now ignored)
+        # Generate call_id once — it will be passed through the parallel execution chain
+        call_id = f"{instance_name}_{time.monotonic()}"
+        
         logger.debug(
-            f"[CALL_AGENT_DEBUG] Taking SYNC path — caller={caller_name}, target={instance_name}, "
-            f"class={agent_class}, child_depth={child_depth}"
+            f"[CALL_AGENT_DEBUG] Taking ASYNC path — caller={caller_name}, target={instance_name}, "
+            f"class={agent_class}, child_depth={child_depth}, call_id={call_id}"
         )
-        result = self._execute_agent_sync(agent_class, instance_name, args, messages, instance.instance_name, child_depth)
-        logger.debug(f"[CALL_AGENT_DEBUG] EXIT (sync) — caller={caller_name}, target={instance_name}, result_preview={str(result)[:200]}")
+        
+        # Register this async call BEFORE submitting to avoid TOCTOU race condition.
+        # If we register after submit_parallel, there's a window where the task completes
+        # before has_pending() knows about it, causing the caller to miss the SLEEPING transition.
+        self.pool.register_async_call(caller_name, call_id)
+        
+        # Launch agent asynchronously via submit_parallel (runs in ThreadPoolExecutor)
+        # Caller continues its turn; SLEEPING transition happens at end-of-turn in _post_turn_checks
+        result = self.pool.submit_parallel(
+            agent_class, instance_name, args, messages, instance.instance_name, child_depth, call_id=call_id
+        )
+        
+        logger.debug(
+            f"[CALL_AGENT_DEBUG] EXIT (async) — caller={caller_name}, target={instance_name}, "
+            f"call_id={call_id}, result_preview={str(result)[:200]}"
+        )
         return result
 
     def _handle_dismiss_agent(self, args: Any, instance: AgentInstance) -> str:
