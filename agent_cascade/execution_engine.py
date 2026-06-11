@@ -859,12 +859,27 @@ class ExecutionEngine:
                         f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%. "
                         f"Forced compression applied. Continue your work — context has been preserved.]"
                     )
-                    notification_msg = Message(role=USER, content=notification_text)
+                    
+                    # ── Dedup Guard: Prevent duplicate forced compression notifications ────────────────
+                    # When forced compression runs multiple times (e.g., after consecutive turns hitting the threshold),
+                    # the same "Forced compression triggered" notification message gets appended to the conversation 
+                    # multiple times. This creates duplicate system messages that pollute the conversation history.
+                    # Check if notification already exists before appending — ENTIRE check+append under lock (TOCTOU fix).
                     with instance._compression_lock:
-                        instance.conversation.append(notification_msg)
-                    messages.append(notification_msg)
-                    llm_messages.append(notification_msg)
-                    logger.info(f"Compression notification injected into conversation pool for '{inst_name}'")
+                        notification_exists = any(
+                            m.role == USER and isinstance(m.content, str) and notification_text == m.content
+                            for m in instance.conversation
+                        )
+                        
+                        if not notification_exists:
+                            # Only append and log if notification doesn't exist
+                            notification_msg = Message(role=USER, content=notification_text)
+                            instance.conversation.append(notification_msg)
+                            messages.append(notification_msg)
+                            llm_messages.append(notification_msg)
+                            logger.info(f"Compression notification injected into conversation pool for '{inst_name}'")
+                        else:
+                            logger.debug(f"Compression notification already exists in conversation for '{inst_name}' — skipping. Conv length: {len(instance.conversation)}")
 
                     # Re-fetch conv after notification append so validation includes the notification message
                     conv = self.pool.get_conversation(inst_name)
@@ -2465,6 +2480,7 @@ class ExecutionEngine:
         try:
             initial_state = {
                 'active': inst.state in (AgentState.RUNNING, AgentState.SLEEPING),
+                'agent_state': inst.state.name,  # Send actual state name for activity indicator coloring
                 'agent_name': f"{instance_name} ({agent_class})",
                 'message_count': len(conv),
                 'latest_message_summary': '',
@@ -2543,6 +2559,7 @@ class ExecutionEngine:
                             latest_summary = str(content)[:500] if content else ''
                         state = {
                             'active': inst.state in (AgentState.RUNNING, AgentState.SLEEPING),
+                            'agent_state': inst.state.name,  # Send actual state name for activity indicator coloring
                             'agent_name': f"{instance_name} ({agent_class})",
                             'message_count': len(current_conv),  # inst.conversation already includes final_resp
                             'latest_message_summary': latest_summary,
@@ -2614,6 +2631,7 @@ class ExecutionEngine:
                     latest_summary = str(content)[:500] if content else ''
                 final_state = {
                     'active': inst.state in (AgentState.RUNNING, AgentState.SLEEPING),  # Dynamic state check for consistency
+                    'agent_state': inst.state.name,  # Send actual state name for activity indicator coloring
                     'agent_name': f"{instance_name} ({agent_class})",
                     'message_count': len(current_conv),  # inst.conversation already includes final_resp
                     'latest_message_summary': latest_summary,

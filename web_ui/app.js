@@ -2326,6 +2326,28 @@ function renderSubAgents() {
       }
       tabBtn.dataset.isActive = String(isActive);
     }
+    
+    // Activity indicator dot - create if not exists
+    let activityDot = tabBtn.querySelector('.activity-dot');
+    if (!activityDot) {
+      activityDot = document.createElement('span');
+      activityDot.className = 'activity-dot';
+      activityDot.title = 'Agent state indicator';
+      tabBtn.appendChild(activityDot);
+    }
+    
+    // Update agent state class for colored activity indicator
+    const agentState = agentData?.agent_state || 'idle';
+    const prevStateClass = tabBtn.dataset.agentState;
+    if (prevStateClass !== agentState) {
+      // Remove old state classes
+      tabBtn.classList.remove('state-running', 'state-sleeping', 'state-idle', 'state-completing', 'state-terminated');
+      // Add new state class
+      const stateClass = 'state-' + agentState.toLowerCase();
+      tabBtn.classList.add(stateClass);
+      tabBtn.dataset.agentState = agentState;
+    }
+    
     const labelSpan = tabBtn.querySelector('.tab-label');
     if (labelSpan && labelSpan.textContent !== ` ${name}`) {
       labelSpan.textContent = ` ${name}`;

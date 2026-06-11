@@ -146,6 +146,7 @@ def create_main_agent_instance(
         conv_snapshot = list(instance.conversation)
     pool.instance_state[instance_name] = {
         'active': False,
+        'agent_state': instance.state.name,  # Send actual state name for activity indicator coloring
         'agent_name': agent_label,
         'messages': conv_snapshot,
     }
@@ -898,6 +899,7 @@ def _serialize_instance(
         'instance_name': inst.instance_name,
         'agent_class': inst.agent_class,
         'active': inst.is_active,                              # Maps to frontend's agentData.active
+        'agent_state': inst.state.name,  # Send actual state name for activity indicator (RUNNING, SLEEPING, IDLE, etc.)
         'is_halted': pool.is_instance_halted(inst.instance_name),
         'parent_instance': inst.parent_instance,
         'has_queued_messages': pool.has_messages(inst.instance_name),
