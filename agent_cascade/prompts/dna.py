@@ -142,7 +142,7 @@ TOOL_METADATA = {
             'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
             'old_content': 'The EXACT literal text to replace. Include at least 3 lines of context with matching whitespace and indentation.',
             'new_content': 'The exact literal text to replace old_content with.',
-            'match_mode': "Optional: Match mode for old_content. Can be 'exact' (default) or 'heuristic'. Heuristic mode is useful when matching tricky bits of code with subtle whitespace or line ending differences.",
+            'match_mode': "Optional: Match mode for old_content. Can be 'exact' (default), 'heuristic' (Python-aware structure matching), or 'heuristic_agnostic' (language-agnostic whitespace-only normalization).",
             'justification': 'Why you need to edit this file'
         }
     },
