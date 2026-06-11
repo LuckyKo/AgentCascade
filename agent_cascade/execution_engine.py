@@ -325,6 +325,11 @@ class ExecutionEngine:
         # Clear truncation state at the start of each agent turn to prevent stale markers
         clear_truncation_state()
         
+        # Initialize variables before try block to handle exceptions during _setup_turn
+        messages = None
+        llm_messages = None
+        response = None
+        
         try:
             # ── Phase 1: Setup ─────────────────────────────────────────────
             messages, llm_messages, response = self._setup_turn(instance)
@@ -521,7 +526,7 @@ class ExecutionEngine:
 
                 # ── Phase 2: Pre-LLM Checks ────────────────────────────────
                 # Stop/halt checks, async message injection, compression check/force, loop detection
-                if self._pre_llm_checks(instance, messages, llm_messages, turns_available):
+                if self._pre_llm_checks(instance, messages, llm_messages, response, turns_available):
                     yield response
                     continue
 
@@ -686,7 +691,7 @@ class ExecutionEngine:
 
     def _pre_llm_checks(
         self, instance: AgentInstance, messages: List[Message],
-        llm_messages: List[Message], turns_available: int
+        llm_messages: List[Message], response: List[Message], turns_available: int
     ) -> bool:
         """Phase 2: Stop/halt checks, async injection, compression check, loop detection.
 
