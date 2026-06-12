@@ -2005,12 +2005,41 @@ class ExecutionEngine:
             # Import here to match pattern in agent_pool.py:1287
             from agent_cascade.compression.helpers import extract_instance_output
             
+            def _reacquire_slot(slot_holder, slot_holder_name, context_label):
+                """Re-acquire caller's slot with retry logic.
+                
+                Args:
+                    slot_holder: Instance holding the slot (has .agent_class attr)
+                    slot_holder_name: Name of the instance for logging
+                    context_label: Description of context for warning messages
+                    
+                Returns True if successfully re-acquired, False otherwise.
+                """
+                import time
+                
+                if not slot_holder:
+                    return False
+                    
+                for attempt in range(2):
+                    try:
+                        slot_holder._slot_release = self.pool._acquire_slot(
+                            slot_holder.agent_class, slot_holder_name
+                        )
+                        return True
+                    except Exception as e:
+                        if attempt == 0:
+                            logger.warning(f"First attempt failed to re-acquire caller slot after {context_label}: {e}. Retrying...")
+                            time.sleep(0.1)  # Brief pause before retry
+                        else:
+                            logger.warning(f"Failed to re-acquire caller slot after {context_label} (all attempts exhausted): {e}. Subsequent calls will use ASYNC path.")
+                            
+                slot_holder._slot_release = None
+                return False
+            
             # Release caller's slot so the child can acquire it inside engine.run()
-            caller_slot_release = None
             if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release:
-                caller_slot_release = caller_slot_holder._slot_release
                 try:
-                    caller_slot_release()
+                    caller_slot_holder._slot_release()
                 except Exception as e:
                     logger.warning(f"Error releasing caller slot before sync child: {e}")
                 caller_slot_holder._slot_release = None
@@ -2020,13 +2049,9 @@ class ExecutionEngine:
                 inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller_name, child_depth)
                 
                 # Re-acquire caller's slot so it can continue its turn
-                if caller_slot_release is not None and caller_slot_holder:
-                    try:
-                        caller_slot_holder._slot_release = self.pool._acquire_slot(
-                            caller_slot_holder.agent_class, caller_name
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to re-acquire caller slot after sync child: {e}")
+                if not _reacquire_slot(caller_slot_holder, caller_name, "sync child"):
+                    # Helper already logged warnings and set _slot_release = None
+                    pass
                 
                 # Consolidated null/empty check for cleaner logic
                 if inst is None or not conv:
@@ -2046,13 +2071,9 @@ class ExecutionEngine:
             
             except Exception as e:
                 # Re-acquire caller's slot before returning error
-                if caller_slot_release is not None and caller_slot_holder:
-                    try:
-                        caller_slot_holder._slot_release = self.pool._acquire_slot(
-                            caller_slot_holder.agent_class, caller_name
-                        )
-                    except Exception as e2:
-                        logger.warning(f"Failed to re-acquire caller slot after sync child error: {e2}")
+                if not _reacquire_slot(caller_slot_holder, caller_name, "sync child error"):
+                    # Helper already logged warnings and set _slot_release = None
+                    pass
                 
                 # Match ASYNC path error handling pattern (agent_pool.py:1301-1302)
                 logger.error(
