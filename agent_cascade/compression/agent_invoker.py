@@ -7,6 +7,7 @@ outside the orchestrator context (e.g., from API server forced compression).
 """
 import logging
 import time as _time
+import copy
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 from agent_cascade.llm.schema import SYSTEM, USER
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
@@ -178,47 +179,68 @@ def invoke_compression_agent(
                     subagent_return_value = e.value
 
         else:
-            # ── Fallback: direct comp_agent.run() when no orchestrator or method available ──
+            # ── Fallback: Use engine-based execution via _create_system_agent() ──
+            # This provides full AgentInstance lifecycle (state tracking, WebUI visibility, API points)
             logger.info(
-                "Compression agent invoked via direct run() — "
+                "Compression agent invoked via engine-based execution — "
                 "no orchestrator reference for call_agent pattern"
             )
 
-            # Initialize sub-agent state for WebUI visibility (direct path)
-            agent_pool.sub_agent_state[comp_state_key] = {
-                'active': True,
-                'agent_name': f"Compressor",
-                'messages': list(comp_history),
-            }
-            if comp_state_key not in agent_pool.active_stack:
-                agent_pool.active_stack.append(comp_state_key)
-            agent_pool.instance_conversations[comp_state_key] = list(comp_history)
+            # Get the caller name for parent tracking  
+            caller_name = getattr(agent_pool, 'session_name', 'Orchestrator')
+            
+            # Create proper AgentInstance via _create_system_agent() — handles all state setup
+            # The system message comes from Compressor_soul.md template, task contains the summary prompt
+            engine = agent_pool._execution
+            comp_instance = engine._create_system_agent(
+                agent_class='Compressor',
+                instance_name=comp_state_key,
+                task=summary_prompt,  # Contains history_text and existing_summary context
+                caller=caller_name,
+            )
 
+            # Configure Compressor settings (similar to Security agent pattern)
+            NON_LLM_KEYS = (
+                'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
+                'max_turns', 'mcpServers', 'work_access_folders', 'seed',
+                'read_file_limit', 'grep_char_limit', 'grep_spillover', 'shell_char_limit', 'code_char_limit',
+                'disabled_tools',
+                'model', 'model_server', 'api_base', 'base_url', 'api_key', 'model_type'
+            )
+            if hasattr(agent_pool, 'operation_manager'):
+                session = getattr(agent_pool.operation_manager, '_current_session', None)
+                if session:
+                    template = agent_pool.templates.get('Compressor')
+                    if template and hasattr(template, 'llm'):
+                        cfg = (template.llm.generate_cfg or {}).copy()
+                        ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
+                        llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
+                        cfg.update(llm_safe_cfg)
+                        comp_instance._generate_cfg_override = cfg
+            
+            # Execute via engine.run() — handles LLM call, retries, streaming
             final_msgs = []
-            start_time = _time.monotonic()   # Monotonic clock for timeout (same as call_agent path)
-            max_poll_time = 300            # 5-minute timeout for large compression tasks
-            poll_count = 0
-
-            for partial in comp_agent.run(comp_history, agent_instance_name=comp_state_key):
-                final_msgs = partial
-                # Note: poll_count here counts run() yields (~1 per LLM turn), not token chunks
-                poll_count += 1
-
-                # Time-based check — adapts to any streaming chunk rate (same as call_agent path)
-                elapsed = _time.monotonic() - start_time
-                if elapsed > max_poll_time:
-                    raise RuntimeError(
-                        f"Compression agent timed out after {elapsed:.0f}s "
-                        f"({poll_count} iterations in direct run path)"
-                    )
-
-                # Update sub_agent_state during streaming so WebUI reflects progress
-                agent_pool.sub_agent_state[comp_state_key]['messages'] = (
-                    list(comp_history) + (list(final_msgs) if isinstance(final_msgs, list) else [final_msgs])
-                )
-                agent_pool.instance_conversations[comp_state_key] = list(
-                    agent_pool.sub_agent_state[comp_state_key]['messages']
-                )
+            start_time = _time.monotonic()
+            max_poll_time = 300  # 5-minute timeout for large compression tasks
+            
+            try:
+                for resp in engine.run(comp_instance):
+                    elapsed = _time.monotonic() - start_time
+                    if elapsed > max_poll_time:
+                        raise RuntimeError(
+                            f"Compression agent timed out after {elapsed:.0f}s — "
+                            f"further processing may have been incomplete"
+                        )
+                    # Capture conversation for summary extraction (engine manages conversation state)
+                    if comp_instance.conversation:
+                        final_msgs = list(comp_instance.conversation)
+                    
+            except Exception as e:
+                logger.error(f"Compression agent execution error: {e}")
+                raise
+            finally:
+                # Cleanup handled by outer finally block — no need for duplicate removal
+                pass
 
         # 2. Extract the summary from the last assistant message
         if final_msgs:
@@ -265,5 +287,7 @@ def invoke_compression_agent(
         # Always clean up compression agent state when done
         if comp_state_key in agent_pool.sub_agent_state:
             agent_pool.sub_agent_state[comp_state_key]['active'] = False
-            if comp_state_key in agent_pool.active_stack:
-                agent_pool.active_stack.remove(comp_state_key)
+            try:
+                agent_pool.active_stack_remove(comp_state_key)
+            except Exception:
+                pass  # Already removed or never existed - non-critical

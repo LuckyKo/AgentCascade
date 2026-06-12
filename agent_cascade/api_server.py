@@ -976,7 +976,8 @@ def create_app(agents, agent_pool, config=None):
                 'name': getattr(a, 'name', f'Agent-{i}'),
                 'index': i,
                 'description': getattr(a, 'description', ''),
-                'tools': list(a.function_map.keys()) if hasattr(a, 'function_map') else [],
+                # Use _get_active_functions() to respect disabled_tools configuration
+                'tools': [f['name'] for f in a._get_active_functions()] if hasattr(a, '_get_active_functions') else [],
             }
             for i, a in enumerate(agents)
         ]
@@ -1822,16 +1823,14 @@ def create_app(agents, agent_pool, config=None):
                             loop = asyncio.get_running_loop()
                             def _security_check():
                                 sec_state_key = None  # Defined early so finally can reference it directly (Fix #4)
-                                sec_endpoint_release = None  # Fix #3: endpoint slot release callback
+                                sec_instance = None   # Pre-initialize for defensive programming
+                                engine = None         # Pre-initialize for defensive programming
                                 try:
                                     import platform
                                     import json
                                     import copy
 
                                     with app.security_check_lock:
-                                        if not agent_pool.get_agent('Security'):
-                                            agent_pool.load_agent('Security')
-                                        sec_agent = agent_pool.get_agent('Security')
                                         workspace_info = f"Main workspace: {agent_pool.operation_manager.base_dir}\n"
                                         if agent_pool.operation_manager.extra_work_folders_ro:
                                             extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_ro]
@@ -1839,7 +1838,7 @@ def create_app(agents, agent_pool, config=None):
                                         if agent_pool.operation_manager.extra_work_folders_rw:
                                             extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_rw]
                                             workspace_info += f"Additional RW folders: {', '.join(extra)}\n"
-                                            
+                                    
                                         prompt = SECURITY_ADVISOR_PROMPT.format(
                                             tool_name=ap.get('tool_name', 'unknown'),
                                             description=ap.get('description', ''),
@@ -1847,34 +1846,18 @@ def create_app(agents, agent_pool, config=None):
                                             os_info=f"{platform.system()} {platform.release()}",
                                             workspace_info=workspace_info
                                         )
-                                        
-                                        history = [
-                                            {'role': USER, 'content': prompt},
-                                        ]
-                                        
-                                        # ── Fix #3: Acquire endpoint scheduling slot before execution ──
-                                        if hasattr(agent_pool, '_execution') and hasattr(agent_pool._execution, '_acquire_slot'):
-                                            try:
-                                                sec_endpoint_release = agent_pool._execution._acquire_slot('Security', 'Security')
-                                            except Exception as e:
-                                                logger.warning(f"Failed to acquire endpoint slot for Security: {e}")
 
-                                        # Register security advisor in instance_state so it shows a tab (Fix #4: thread-safe)
+                                        # Create proper AgentInstance via _create_system_agent() — this handles all state setup
                                         sec_state_key = 'Security'
-                                        with agent_pool._execution._state_lock:
-                                            agent_pool.instance_state[sec_state_key] = {
-                                                'active': True,
-                                                'agent_name': f"Security Advisor (Security)",
-                                                'messages': list(history),
-                                            }
-                                            if not any(n == sec_state_key for n, _depth in agent_pool._execution.active_stack):
-                                                agent_pool._execution.active_stack.append((sec_state_key, 1))
-                                        # Broadcast initial state so the tab appears immediately
-                                        asyncio.run_coroutine_threadsafe(
-                                            send_queue.put({'type': 'stream_update', **build_stream_update([])}),
-                                            loop
+                                        engine = agent_pool._execution
+                                        sec_instance = engine._create_system_agent(
+                                            agent_class='Security',
+                                            instance_name=sec_state_key,
+                                            task=prompt,
+                                            caller=session.get('session_name', 'Orchestrator')
                                         )
-                                        
+
+                                        # Configure with UI settings (preserve NON_LLM_KEYS filtering from existing code)
                                         NON_LLM_KEYS = (
                                             'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
                                             'max_turns', 'mcpServers', 'work_access_folders', 'seed',
@@ -1885,75 +1868,20 @@ def create_app(agents, agent_pool, config=None):
                                         )
                                         ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
                                         llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
-                                        
-                                        final_msgs = []
-                                        sec_first_broadcast = True
-                                        
-                                        # ── Timeout protection: prevent AFK rejection cascades ──
-                                        sec_start_time = time.monotonic()
+                                    
+                                        template = agent_pool.templates.get('Security')
+                                        if template and hasattr(template, 'llm'):
+                                            cfg = (template.llm.generate_cfg or {}).copy()
+                                            cfg.update(llm_safe_cfg)
+                                            sec_instance._generate_cfg_override = cfg
+
+                                        logger.info(f"[SECURITY] Created AgentInstance '{sec_state_key}' for request {rid}")
+                                        # Initialize variables for engine.run() flow
                                         sec_timeout_reached = False
-                                        sec_elapsed_at_timeout = None  # Fix #5: store elapsed at the moment of timeout
+                                        sec_elapsed_at_timeout = None
+                                        sec_start_time = time.monotonic()
 
-                                        # ── Fix #2: Route LLM call through API router instead of direct sec_agent.run() ──
-                                        api_router_sec = getattr(agent_pool, 'api_router', None)
-
-                                        if api_router_sec and hasattr(api_router_sec, 'call_with_fallback'):
-                                            def _security_llm_call(llm_cfg: dict):
-                                                """Execute the security advisor's LLM call with the given config."""
-                                                # Build messages list — prepend system message like Agent.run() does
-                                                messages_to_send = list(history)
-                                                if sec_agent.system_message and (not messages_to_send or
-                                                        messages_to_send[0].get('role') != SYSTEM):
-                                                    messages_to_send.insert(
-                                                        0, {'role': SYSTEM, 'content': sec_agent.system_message}
-                                                    )
-
-                                                # Merge configs: agent extra → LLM generate_cfg → UI settings → router config
-                                                merged_cfg = {}
-                                                if hasattr(sec_agent, 'extra_generate_cfg') and sec_agent.extra_generate_cfg:
-                                                    merged_cfg.update(sec_agent.extra_generate_cfg)
-                                                if hasattr(sec_agent.llm, 'generate_cfg'):
-                                                    merged_cfg.update(sec_agent.llm.generate_cfg)
-                                                # Apply non-LLM config (max_turns, etc.) from UI settings
-                                                merged_cfg.update(llm_safe_cfg)
-                                                # Endpoint config (from router) overwrites — including max_input_tokens.
-                                                # This allows user's configured limit to take effect naturally via merge order.
-                                                merged_cfg.update(llm_cfg)
-                                                merged_cfg['agent_name'] = sec_agent.name
-
-                                                return sec_agent.llm.chat(
-                                                    messages=messages_to_send,
-                                                    stream=True,
-                                                    delta_stream=False,
-                                                    extra_generate_cfg=merged_cfg,
-                                                )
-
-                                            # call_with_fallback handles retries, per-endpoint concurrency semaphores, and failover
-                                            run_gen = api_router_sec.call_with_fallback('Security', _security_llm_call)
-                                        else:
-                                            # Fallback: direct LLM call if no router available (preserves old behavior)
-                                            logger.warning("API router unavailable — using direct LLM call for security advisor")
-                                            # Prepend system message like Agent.run() does
-                                            messages_to_send = list(history)
-                                            if sec_agent.system_message and (not messages_to_send or
-                                                    messages_to_send[0].get('role') != SYSTEM):
-                                                messages_to_send.insert(
-                                                    0, {'role': SYSTEM, 'content': sec_agent.system_message}
-                                                )
-                                            # Include agent_name in config for proper tracking
-                                            fallback_cfg = {}
-                                            if hasattr(sec_agent, 'extra_generate_cfg') and sec_agent.extra_generate_cfg:
-                                                fallback_cfg.update(sec_agent.extra_generate_cfg)
-                                            fallback_cfg.update(llm_safe_cfg)
-                                            fallback_cfg['agent_name'] = sec_agent.name
-                                            run_gen = sec_agent.llm.chat(
-                                                messages=messages_to_send,
-                                                stream=True,
-                                                delta_stream=False,
-                                                extra_generate_cfg=fallback_cfg,
-                                            )
-                                        
-                                        # Schedule warning AFTER generator creation so timer is only created if gen succeeded
+                                        # Schedule warning timer (keep existing _sec_warning_injector logic)
                                         def _sec_warning_injector():
                                             try:
                                                 agent_pool.enqueue_message(
@@ -1963,110 +1891,57 @@ def create_app(agents, agent_pool, config=None):
                                                 )
                                             except Exception as e:
                                                 logger.debug(f"Security advisor warning injection failed (non-critical): {e}")
-                                        
+
                                         sec_warning_timer = threading.Timer(SECURITY_ADVISOR_WARNING_SECONDS, _sec_warning_injector)
                                         sec_warning_timer.daemon = True
                                         sec_warning_timer.start()
-                                        try:
-                                            for partial in run_gen:
-                                                # ── Check if we've exceeded the timeout ──
-                                                elapsed = time.monotonic() - sec_start_time
-                                                if elapsed > SECURITY_ADVISOR_TIMEOUT_SECONDS:
-                                                    sec_timeout_reached = True
-                                                    sec_elapsed_at_timeout = elapsed  # Fix #5: capture exact elapsed at break point
-                                                    logger.warning(
-                                                        f"[SECURITY] Timeout reached after {elapsed:.0f}s for request {rid}. "
-                                                        f"Terminating security advisor to prevent AFK rejection."
-                                                    )
-                                                    break
-                                                
-                                                final_msgs = partial
-                                                # Fix #4: Update instance_state with lock protection during streaming
-                                                with agent_pool._execution._state_lock:
-                                                    agent_pool.instance_state[sec_state_key]['messages'] = (
-                                                        list(history) + (list(final_msgs) if isinstance(final_msgs, list) else [final_msgs])
-                                                    )
-                                                # Only broadcast at start and end of security check (not every token)
-                                                if sec_first_broadcast:
-                                                    asyncio.run_coroutine_threadsafe(
-                                                        send_queue.put({'type': 'stream_update', **build_stream_update([])}),
-                                                        loop
-                                                    )
-                                                    sec_first_broadcast = False
-                                        finally:
-                                            # Cancel the warning timer if we finished before it fires
-                                            sec_warning_timer.cancel()
-                                            # Fix #1: Close the generator to abort any active LLM call / HTTP connection
-                                            try:
-                                                run_gen.close()
-                                            except Exception as e:
-                                                logger.debug(f"Security advisor generator cleanup failed (non-critical): {e}")
 
-                                    display_response = ""
-                                    parsing_response = ""
+                                    try:
+                                        # Execute via engine.run() — this handles LLM call, retries, and streaming
+                                        for resp in engine.run(sec_instance):
+                                            elapsed = time.monotonic() - sec_start_time
+                                            if elapsed > SECURITY_ADVISOR_TIMEOUT_SECONDS:
+                                                sec_timeout_reached = True
+                                                sec_elapsed_at_timeout = elapsed
+                                                logger.warning(
+                                                    f"[SECURITY] Timeout reached after {elapsed:.0f}s for request {rid}. "
+                                                    f"Terminating security advisor to prevent AFK rejection."
+                                                )
+                                                break
 
-                                    new_msgs = final_msgs
-                                    for msg in new_msgs:
-                                        role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-                                        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                                        reasoning = msg.get('reasoning_content', '') if isinstance(msg, dict) else getattr(msg, 'reasoning_content', '')
-                                        fc = msg.get('function_call', None) if isinstance(msg, dict) else getattr(msg, 'function_call', None)
+
+                                            # Update instance_state for UI visibility (thread-safe)
+                                            with agent_pool._execution._state_lock:
+                                                if sec_state_key in agent_pool.instance_state:
+                                                    agent_pool.instance_state[sec_state_key]['message_count'] = len(sec_instance.conversation)
+
+                                    except Exception as e:
+                                        logger.error(f"Security agent execution error: {e}")
+                                        raise
+                                    finally:
+                                        sec_warning_timer.cancel()
+
+                                        # Note: engine.run() handles IDLE state transition internally.
+
+                                    # Extract output using helper function
+                                    from agent_cascade.compression.helpers import extract_instance_output
+                                    parsing_response = extract_instance_output(sec_instance.conversation, sec_state_key)
                                         
-                                        # Normalize content and reasoning to string for regex safety
-                                        if isinstance(content, list):
-                                            content_str = " ".join([str(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')) for item in content])
-                                        else:
-                                            content_str = str(content)
-                                            
-                                        if isinstance(reasoning, list):
-                                            reasoning_str = " ".join([str(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')) for item in reasoning])
-                                        else:
-                                            reasoning_str = str(reasoning)
-
-                                        if role == 'assistant':
-                                            # Deduplicate: if content already contains the reasoning, don't add it twice
-                                            clean_content = content_str
-                                            if reasoning_str:
-                                                # Check if content starts with a thinking block that matches reasoning
-                                                think_match = _THINK_SEARCH_RE.match(content_str)
-                                                if think_match:
-                                                    embedded_thought = think_match.group(2).strip()
-                                                    # If they are very similar, we consider it a duplicate
-                                                    if reasoning_str.strip() in embedded_thought or embedded_thought in reasoning_str.strip():
-                                                        # Remove embedded thinking block from display_response part (only if at the start)
-                                                        clean_content = strip_thinking_blocks(content_str).strip()
-                                                
-                                                display_response += f"<think>\n{reasoning_str.strip()}\n</think>\n\n"
-                                            
-                                            if fc:
-                                                fname = fc.get('name', '') if isinstance(fc, dict) else getattr(fc, 'name', '')
-                                                display_response += f"*(Tool call: {fname})*\n\n"
-
-                                            if clean_content:
-                                                display_response += f"{clean_content}\n\n"
-                                                
-                                            # For parsing, we always want the content WITHOUT any thinking blocks at the start
-                                            if content_str:
-                                                parsing_response = strip_thinking_blocks(content_str).strip()
-                                                
-                                        elif role == 'function':
-                                            display_response += f"*(Result from {fname} - {len(str(content_str))} chars)*\n\n"
-
-                                    parsing_text = parsing_response
-                                    
-                                    parsing_response = parsing_text.strip()
-                                    
-                                    # 1. Clean the text: Remove reasoning blocks completely to avoid false positives in "thinking"
-                                    # This handles both <think> tags and [THINK] tags
+                                    # Clean up: Remove thinking blocks before [YES]/[NO] parsing
                                     clean_text = parsing_response
                                     try:
                                         if '<think' in clean_text.lower() or '<thought' in clean_text.lower():
                                             clean_text = _THINK_BLOCK_RE.sub('', clean_text)
                                         if '[think' in clean_text.lower() or '[thought' in clean_text.lower():
                                             clean_text = _THINK_BLOCK_BRACKET_RE.sub('', clean_text).strip()
-                                        clean_text = clean_text.strip()
+                                    except Exception:
+                                        pass
                                         
-                                        check_text = clean_text.upper()
+                                    # Initialize verdict defaults before parsing
+                                    is_yes = False
+                                    is_no = False
+                                    justification = ""
+                                    try:
                                         
                                         # 2. Simplified Verdict Extraction: Check ONLY the last non-empty line
                                         lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
@@ -2116,9 +1991,10 @@ def create_app(agents, agent_pool, config=None):
                                                         justification = _JUSTIFICATION_PREFIX_RE.sub('', just_text).strip()
                                                         break
                                     except Exception as e:
-                                        logger.error(f"Error extracting security verdict from {security_instance}: {e}")
+                                        logger.error(f"Error extracting security verdict from {sec_state_key}: {e}")
                                         is_yes = False
                                         is_no = False
+                                        justification = ""
                                     
                                     # ── Handle security advisor timeout ──
                                     if sec_timeout_reached:
@@ -2174,13 +2050,22 @@ def create_app(agents, agent_pool, config=None):
                                                 # Auto-rejection message
                                                 reject_msg = f"SECURITY REJECTED: {justification}" if justification else "SECURITY REJECTED: The security advisor flagged this operation as unsafe."
                                                 agent_pool.operation_manager.user_reject(rid, reject_msg)
+                                            
+                                            # Broadcast updated approvals list to UI after auto-apply
+                                            asyncio.run_coroutine_threadsafe(
+                                                send_queue.put({
+                                                    'type': 'approvals',
+                                                    'approvals': agent_pool.operation_manager.list_pending_approvals()
+                                                }),
+                                                loop
+                                            )
                                         else:
                                             # Valid format but auto_apply is off: Send to UI for manual confirmation
                                             asyncio.run_coroutine_threadsafe(
                                                 send_queue.put({
                                                     'type': 'security_response', 
                                                     'request_id': rid, 
-                                                    'response': display_response,
+                                                    'response': parsing_response,
                                                     'verdict': 'YES' if is_yes else 'NO',
                                                     'reason': justification if is_no else ""
                                                 }),
@@ -2195,14 +2080,14 @@ def create_app(agents, agent_pool, config=None):
                                             
                                             # Also notify the UI
                                             asyncio.run_coroutine_threadsafe(
-                                                send_queue.put({'type': 'security_response', 'request_id': rid, 'response': display_response + f"\n\n**[AUTO-REJECTED: Ambiguous Format]**", 'verdict': 'AMBIGUOUS'}),
+                                                send_queue.put({'type': 'security_response', 'request_id': rid, 'response': parsing_response + f"\n\n**[AUTO-REJECTED: Ambiguous Format]**", 'verdict': 'AMBIGUOUS'}),
                                                 loop
                                             )
                                         else:
                                             # Manual mode: Let the user see the ambiguous response and decide
                                             logger.info(f"[SECURITY] Ambiguous response for {rid} in manual mode. Waiting for user decision.")
                                             asyncio.run_coroutine_threadsafe(
-                                                send_queue.put({'type': 'security_response', 'request_id': rid, 'response': display_response, 'verdict': 'AMBIGUOUS'}),
+                                                send_queue.put({'type': 'security_response', 'request_id': rid, 'response': parsing_response, 'verdict': 'AMBIGUOUS'}),
                                                 loop
                                             )
                                 except Exception as e:
@@ -2215,23 +2100,16 @@ def create_app(agents, agent_pool, config=None):
                                             loop
                                         )
                                 finally:
-                                    # Always clean up security advisor state when done (Fix #4: thread-safe)
+                                    # Always clean up security advisor state when done (thread-safe)
                                     if sec_state_key and sec_state_key in agent_pool.instance_state:
                                         with agent_pool._execution._state_lock:
                                             agent_pool.instance_state[sec_state_key]['active'] = False
-                                            if any(n == sec_state_key for n, _depth in agent_pool._execution.active_stack):
-                                                for i, (n, _depth) in enumerate(agent_pool._execution.active_stack):
-                                                    if n == sec_state_key:
-                                                        agent_pool._execution.active_stack.pop(i)
-                                                        break
+                                        try:
+                                            agent_pool.active_stack_remove(sec_state_key)
+                                        except Exception:
+                                            pass  # Already removed or never existed - non-critical
 
                                     # Fix #3: Release endpoint slot when done
-                                    if sec_endpoint_release is not None:
-                                        try:
-                                            sec_endpoint_release()
-                                        except Exception as e:
-                                            logger.warning(f"Failed to release endpoint slot for Security: {e}")
-
                                     if hasattr(app, 'active_security_checks') and rid:
                                         with app.active_security_checks_lock:
                                             app.active_security_checks.discard(rid)

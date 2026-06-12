@@ -160,7 +160,8 @@ def _build_resources_block(pool, template, instance=None) -> str:
 
     # List enabled tools (excluding disabled ones)
     # Descriptions are omitted — LLM already knows them via native function schemas
-    enabled_tools = sorted(t_name for t_name in template.function_map.keys() if t_name not in disabled_tools)
+    active_functions = _get_active_functions_from_template(template, instance)
+    enabled_tools = sorted(f['name'] for f in active_functions)
     if enabled_tools:
         res += "\nEnabled Tools (can change per interaction): " + ", ".join(enabled_tools) + "\n"
 
@@ -2046,7 +2047,9 @@ class ExecutionEngine:
             
             try:
                 # Run child synchronously via _create_and_run_agent
-                inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller_name, child_depth)
+                # Pass force_fresh=True for system agents (Security, Compressor) to ensure fresh instances
+                force_fresh = agent_class in ('Security', 'Compressor')
+                inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller_name, child_depth, force_fresh=force_fresh)
                 
                 # Re-acquire caller's slot so it can continue its turn
                 if not _reacquire_slot(caller_slot_holder, caller_name, "sync child"):
@@ -2417,7 +2420,7 @@ class ExecutionEngine:
 
     def _create_and_run_agent(
         self, agent_class: str, instance_name: str,
-        args: dict, caller: str, nest_depth: int = 0
+        args: dict, caller: str, nest_depth: int = 0, force_fresh: bool = False
     ) -> tuple:
         """Create an AgentInstance and run it through the unified loop.
 
@@ -2430,6 +2433,8 @@ class ExecutionEngine:
 
         Args:
             nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
+            force_fresh: If True, always create new instance even if inactive one exists.
+                        Used for Security/Compressor agents that should start fresh each time.
         """
         logger.debug(
             f"[CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target={instance_name}, class={agent_class}, "
@@ -2444,7 +2449,8 @@ class ExecutionEngine:
         is_reuse = False
         inst = None  # Initialize to ensure it's always defined
         
-        if existing is not None:
+        # Skip reuse logic if force_fresh=True (for Security/Compressor agents)
+        if not force_fresh and existing is not None:
             # Reuse existing instance if it's IDLE or TERMINATED (not currently executing)
             existing_state = getattr(existing, 'state', None)
             if existing_state in (AgentState.IDLE, AgentState.TERMINATED):
@@ -2922,6 +2928,133 @@ class ExecutionEngine:
             )
 
         return inst, conv
+
+    def _create_system_agent(
+        self, agent_class: str, instance_name: str,
+        task: str, caller: str, context: str = ""
+    ) -> 'AgentInstance':
+        """Create a fresh AgentInstance for system-invoked agents (Security, Compressor).
+        
+        Unlike _create_and_run_agent(), this always creates a NEW instance even if one
+        with the same name exists. This is needed for agents that should start fresh
+        each time they're invoked (no conversation history carryover).
+        
+        This method:
+        - Creates new AgentInstance (never reuses existing)
+        - Adds to pool.instances
+        - Initializes pool.instance_state for UI visibility
+        - Sets up active_stack tracking
+        - Returns the instance ready for engine.run() execution
+        
+        Args:
+            agent_class: The agent class name (e.g., 'Security', 'Compressor')
+            instance_name: The instance name (usually same as agent_class for system agents)
+            task: The task prompt to give the agent
+            caller: The parent/caller instance name
+            context: Optional context to prepend to task
+            
+        Returns:
+            AgentInstance ready for execution via engine.run()
+        """
+        now = time.monotonic()
+        
+        # Create fresh instance (always new, no reuse)
+        inst = AgentInstance(
+            instance_name=instance_name,
+            agent_class=agent_class,
+            conversation=[],
+            max_turns=None,
+            parent_instance=caller,
+            created_at=now,
+            last_activity=now,
+            compression_summary=None,
+            latest_marker_index=-1,
+            _nest_depth=0,  # System agents run at root level
+        )
+        
+        # Register in pool (overwrite any existing)
+        self.pool.instances[instance_name] = inst
+        logger.debug(f"[SYSTEM AGENT] Created fresh instance '{instance_name}' ({agent_class})")
+        
+        # Build system message from template
+        template = self.pool.templates.get(agent_class)
+        if not template:
+            logger.error(f"[SYSTEM AGENT] NO TEMPLATE for agent_class={agent_class}")
+            raise ValueError(f"No template for agent class {agent_class}")
+        
+        sys_content = getattr(template, 'base_system_message',
+                              getattr(template, 'system_message', ''))
+        lines = sys_content.strip().split('\n') if sys_content else []
+        
+        # Replace identity line
+        if lines and f" {instance_name}" not in lines[0]:
+            lines[0] = f"You are {instance_name}."
+        
+        sys_msg = Message(role=SYSTEM, content="\n".join(lines))
+        
+        # Build task message
+        task_text = f"{context}\n\n{task}" if context else task
+        
+        # Create task message (plain text for system agents)
+        task_msg = Message(role=USER, content=task_text)
+        
+        # Initialize conversation
+        conv = [sys_msg, task_msg]
+        with inst._compression_lock:
+            inst.conversation = conv
+            # Invalidate token cache
+            _invalidate_token_cache(inst)
+            
+            # Log initial messages
+            try:
+                log_inst = self.pool.get_logger(instance_name, agent_class)
+                log_inst.log_message(sys_msg)
+                log_inst.log_message(task_msg)
+                log_inst.data["history"] = [
+                    log_inst._format_message(sys_msg),
+                    log_inst._format_message(task_msg),
+                ]
+            except Exception as e:
+                logger.debug(f"Logging initial messages for {instance_name} failed (non-critical): {e}")
+        
+        # Track in active stack (thread-safe)
+        self.pool.active_stack_append(instance_name, 0)
+        
+        # Initialize WebUI state for immediate tab visibility
+        try:
+            with inst._state_lock:
+                current_state = inst.state
+            
+            initial_state = {
+                'active': current_state in (AgentState.RUNNING, AgentState.SLEEPING),
+                'agent_state': current_state.name,
+                'agent_name': f"{instance_name} ({agent_class})",
+                'message_count': len(conv),
+                'latest_message_summary': '',
+                'conversation_length_tokens': getattr(inst, '_cached_token_count', 0),
+            }
+            with self.pool._execution._state_lock:
+                self.pool.instance_state[instance_name] = initial_state
+                
+            # Broadcast stream_update for immediate tab appearance
+            ws_queue = getattr(self.pool, '_ws_send_queue', None)
+            ws_loop = getattr(self.pool, '_ws_loop', None)
+            if ws_queue and ws_loop and not ws_loop.is_closed():
+                from agent_cascade.api_integration import build_stream_update_from_pool, _put_stream_update
+                su = build_stream_update_from_pool(
+                    pool=self.pool,
+                    instance_name=caller,
+                    responses=None,
+                )
+                if su is not None:
+                    asyncio.run_coroutine_threadsafe(
+                        _put_stream_update(ws_queue, {'type': 'stream_update', **su}),
+                        ws_loop,
+                    )
+        except Exception as e:
+            logger.debug(f"WebUI initial state update for {instance_name} failed (non-critical): {e}")
+        
+        return inst
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Helper methods — token counting, tool detection, truncation
