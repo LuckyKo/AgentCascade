@@ -1512,6 +1512,48 @@ class ParallelAgentManager:
             return sum(1 for (name, _depth) in self.active_stack if self.pool.get_instance(name) and
                        self.pool.get_instance(name).agent_class.lower() == agent_class.lower())
 
+    def _notify_async_error(self, instance_name: str, caller: str, error_msg: str, call_id: Optional[str] = None):
+        """Helper to send error message to caller and complete async call (DRY principle).
+        
+        Used by task_wrapper in submit_task() to consolidate duplicated error handling logic.
+        Each operation is individually wrapped in try-except to ensure complete_async_call
+        always runs even if add_async_result fails, preventing parent from hanging in SLEEPING.
+        
+        Args:
+            instance_name: Name of the agent instance that failed
+            caller: Name of the calling agent
+            error_msg: Error message to send
+            call_id: Optional async call ID to complete (if None, logs warning)
+        """
+        # Ensure complete_async_call is called even if add_async_result fails
+        try:
+            self.pool.add_async_result(caller, error_msg)
+        except Exception as e:
+            logger.error(
+                f"[CALL_AGENT_DEBUG] _notify_async_error — failed to add async result "
+                f"for caller={caller}: {e}"
+            )
+        
+        if call_id:
+            try:
+                self.pool.complete_async_call(caller, call_id)
+                logger.debug(
+                    f"[CALL_AGENT_DEBUG] _notify_async_error — completed async call {call_id} "
+                    f"for caller {caller}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"[CALL_AGENT_DEBUG] _notify_async_error — failed to complete async call "
+                    f"{call_id} for caller={caller}: {e}"
+                )
+        else:
+            logger.warning(
+                f"[CALL_AGENT_DEBUG] _notify_async_error — no call_id provided for {instance_name}"
+            )
+        
+        # Note: send_message removed to avoid orphan queue entries (see MAJOR FIX 4)
+        # The async result buffer is sufficient for error notification
+
     def _acquire_slot(self, agent_class: str, instance_name: str):
         """Acquire an endpoint scheduling slot. Returns a release callback or None for unlimited endpoints."""
 
@@ -1541,8 +1583,10 @@ class ParallelAgentManager:
     def submit_task(self, agent_class, instance_name, args, history, caller, nest_depth: int = 0, call_id: str = None):
         """Submit an agent to run in the background thread pool. Returns immediately.
         
-        Item 13: Acquires endpoint scheduling slot BEFORE submitting to thread pool,
-        with proper release in finally block when the task completes.
+        Item 13: Endpoint scheduling slot is acquired INSIDE the worker thread (task_wrapper),
+        NOT before submit() - this prevents blocking the parent's thread when child agents share
+        an endpoint with other agents. The parent submits and returns immediately; the child
+        waits for the slot in its own worker thread.
 
         Args:
             nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
@@ -1557,14 +1601,6 @@ class ParallelAgentManager:
             logger.error(f"[CALL_AGENT_DEBUG] submit_task EXIT (early) — target={instance_name}, reason=no_executor")
             return f"[Agent '{instance_name}' requested in parallel mode but no thread pool available.]"
 
-        # Acquire endpoint slot before submitting (blocks if at capacity)
-        try:
-            endpoint_release = self._acquire_slot(agent_class, instance_name)
-            logger.debug(f"[CALL_AGENT_DEBUG] submit_task — acquired endpoint slot for {instance_name}")
-        except Exception as e:
-            logger.error(f"[CALL_AGENT_DEBUG] submit_task EXIT (early) — target={instance_name}, reason=slot_acquisition_failed, error={e}")
-            return f"[Agent '{instance_name}' failed to acquire endpoint slot: {e}]"
-
         # Deep copy history for thread safety
         import copy as _copy
         safe_history = _copy.deepcopy(history)
@@ -1574,82 +1610,119 @@ class ParallelAgentManager:
                 f"[CALL_AGENT_DEBUG] task_wrapper START — target={instance_name}, class={agent_class}, "
                 f"caller={caller}, nest_depth={nest_depth}"
             )
+            
+            # Initialize endpoint_release for the finally block
+            endpoint_release = None
+            
             try:
-                from agent_cascade.execution_engine import ExecutionEngine
-                from agent_cascade.compression.helpers import extract_instance_output
+                # Acquire endpoint slot INSIDE worker thread (non-blocking from parent's perspective)
+                # This is the key fix: slot acquisition happens in the worker thread, not the parent
+                endpoint_release = self._acquire_slot(agent_class, instance_name)
+                logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — acquired endpoint slot for {instance_name}")
+                
+                try:
+                    from agent_cascade.execution_engine import ExecutionEngine
+                    from agent_cascade.compression.helpers import extract_instance_output
 
-                # NOTE: This creates a NEW ExecutionEngine instance per parallel task.
-                # This is intentional — each thread gets its own engine to avoid shared state issues.
-                engine = ExecutionEngine(self.pool)
-                logger.debug(
-                    f"[CALL_AGENT_DEBUG] task_wrapper — created new ExecutionEngine for {instance_name}, "
-                    f"engine_id={id(engine)}"
-                )
+                    # NOTE: This creates a NEW ExecutionEngine instance per parallel task.
+                    # This is intentional — each thread gets its own engine to avoid shared state issues.
+                    engine = ExecutionEngine(self.pool)
+                    logger.debug(
+                        f"[CALL_AGENT_DEBUG] task_wrapper — created new ExecutionEngine for {instance_name}, "
+                        f"engine_id={id(engine)}"
+                    )
 
-                # Use shared helper for agent creation and execution
-                # _create_and_run_agent handles active_stack append/cleanup in its finally block
-                logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — calling engine._create_and_run_agent for {instance_name}")
-                inst, conv = engine._create_and_run_agent(agent_class, instance_name, args, caller, nest_depth)
+                    # Use shared helper for agent creation and execution
+                    # _create_and_run_agent handles active_stack append/cleanup in its finally block
+                    logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — calling engine._create_and_run_agent for {instance_name}")
+                    inst, conv = engine._create_and_run_agent(agent_class, instance_name, args, caller, nest_depth)
 
-                # Check return values — Bug #1 check
-                if inst is None or conv is None:
+                    # Check return values — Bug #1 check
+                    if inst is None or conv is None:
+                        logger.error(
+                            f"[CALL_AGENT_DEBUG] BUG DETECTED in task_wrapper — _create_and_run_agent returned None for {instance_name}: "
+                            f"inst={inst}, conv_type={type(conv).__name__}"
+                        )
+                        error_msg = f"[Parallel Agent '{instance_name}' Failed]: Internal error — agent creation returned None."
+                        self._notify_async_error(instance_name, caller, error_msg, call_id)
+                        return
+
+                    # Check for empty conversation — indicates aborted/terminated execution
+                    if not conv:
+                        logger.warning(
+                            f"[CALL_AGENT_DEBUG] task_wrapper — empty conversation for {instance_name}, "
+                            f"treating as error (agent may have been terminated or aborted)"
+                        )
+                        error_msg = f"[Parallel Agent '{instance_name}' Failed]: Execution terminated with no output."
+                        self._notify_async_error(instance_name, caller, error_msg, call_id)
+                        return
+
+                    logger.debug(
+                        f"[CALL_AGENT_DEBUG] task_wrapper — _create_and_run_agent returned for {instance_name}: "
+                        f"inst_type={type(inst).__name__}, conv_len={len(conv)}"
+                    )
+
+                    # Notify caller via async message queue (inside try block for proper exception handling)
+                    result = extract_instance_output(conv, instance_name)
+                    if not result:
+                        logger.warning(
+                            f"[CALL_AGENT_DEBUG] task_wrapper — extract_instance_output returned empty for {instance_name}"
+                        )
+                    logger.debug(
+                        f"[CALL_AGENT_DEBUG] task_wrapper — extract_instance_output for {instance_name}: "
+                        f"result_preview={str(result)[:200]}"
+                    )
+                    completion_msg = f"[Parallel Agent '{instance_name}' Finished]:\n{result}"
+
+                    logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — sending completion message to caller {caller}")
+                    
+                    # Add result to async results buffer for the caller (with error handling)
+                    try:
+                        self.pool.add_async_result(caller, completion_msg)
+                    except Exception as e:
+                        logger.error(
+                            f"[CALL_AGENT_DEBUG] task_wrapper — failed to add async result "
+                            f"for {instance_name} to caller={caller}: {e}"
+                        )
+                    
+                    # Complete the async call in the registry using the passed-through call_id
+                    if call_id:
+                        try:
+                            self.pool.complete_async_call(caller, call_id)
+                            logger.debug(
+                                f"[CALL_AGENT_DEBUG] task_wrapper — completed async call {call_id} "
+                                f"for caller {caller}"
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"[CALL_AGENT_DEBUG] task_wrapper — failed to complete async call "
+                                f"{call_id} for caller={caller}: {e}"
+                            )
+                    else:
+                        logger.warning(f"[CALL_AGENT_DEBUG] task_wrapper — no call_id provided for {instance_name}")
+                    
+                    # Note: send_message removed to avoid orphan queue entries (MAJOR FIX 4)
+                    # The async result buffer is sufficient for completion notification
+
+                except Exception as e:
+                    # Handle execution errors (after slot was acquired)
                     logger.error(
-                        f"[CALL_AGENT_DEBUG] BUG DETECTED in task_wrapper — _create_and_run_agent returned None for {instance_name}: "
-                        f"inst={inst}, conv_type={type(conv).__name__}"
+                        f"[CALL_AGENT_DEBUG] task_wrapper EXCEPTION (after slot acquired) — target={instance_name}, "
+                        f"error_type={type(e).__name__}, error={e}"
                     )
-                    error_msg = f"[Parallel Agent '{instance_name}' Failed]: Internal error — agent creation returned None."
-                    self.pool.send_message(instance_name, caller, error_msg)
-                    return
-
-                logger.debug(
-                    f"[CALL_AGENT_DEBUG] task_wrapper — _create_and_run_agent returned for {instance_name}: "
-                    f"inst_type={type(inst).__name__}, conv_len={len(conv)}"
-                )
-
-                # Notify caller via async message queue
-                result = extract_instance_output(conv, instance_name)
-                if not result:
-                    logger.warning(
-                        f"[CALL_AGENT_DEBUG] task_wrapper — extract_instance_output returned empty for {instance_name}"
-                    )
-                logger.debug(
-                    f"[CALL_AGENT_DEBUG] task_wrapper — extract_instance_output for {instance_name}: "
-                    f"result_preview={str(result)[:200]}"
-                )
-                completion_msg = f"[Parallel Agent '{instance_name}' Finished]:\n{result}"
-
-                logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — sending completion message to caller {caller}")
-                
-                # Add result to async results buffer for the caller
-                self.pool.add_async_result(caller, completion_msg)
-                
-                # Complete the async call in the registry using the passed-through call_id
-                if call_id:
-                    self.pool.complete_async_call(caller, call_id)
-                    logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — completed async call {call_id} for caller {caller}")
-                else:
-                    logger.warning(f"[CALL_AGENT_DEBUG] task_wrapper — no call_id provided for {instance_name}")
-                
-                self.pool.send_message(instance_name, caller, completion_msg)
-
+                    error_msg = f"[Parallel Agent '{instance_name}' Failed]:\n{str(e)}"
+                    # Use helper method to consolidate error handling logic (DRY principle)
+                    self._notify_async_error(instance_name, caller, error_msg, call_id)
+            
             except Exception as e:
+                # Handle slot acquisition failures or any other setup errors
                 logger.error(
-                    f"[CALL_AGENT_DEBUG] task_wrapper EXCEPTION — target={instance_name}, "
+                    f"[CALL_AGENT_DEBUG] task_wrapper EXCEPTION (slot acquisition or setup) — target={instance_name}, "
                     f"error_type={type(e).__name__}, error={e}"
                 )
                 error_msg = f"[Parallel Agent '{instance_name}' Failed]:\n{str(e)}"
-                
-                # Add error to async results buffer for the caller
-                self.pool.add_async_result(caller, error_msg)
-                
-                # Complete the async call in the registry using the passed-through call_id
-                if call_id:
-                    self.pool.complete_async_call(caller, call_id)
-                    logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — completed async call {call_id} for caller {caller}")
-                else:
-                    logger.warning(f"[CALL_AGENT_DEBUG] task_wrapper — no call_id provided for {instance_name}")
-                
-                self.pool.send_message(instance_name, caller, error_msg)
+                # Use helper method to consolidate error handling logic (DRY principle)
+                self._notify_async_error(instance_name, caller, error_msg, call_id)
             finally:
                 # Release endpoint slot when agent completes
                 if endpoint_release is not None:

@@ -20,6 +20,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Timeout for acquiring endpoint scheduling slots (5 minutes)
+# Matches sleeping_timeout used elsewhere in the system
+ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = 300
+
 # Canonical agent type mapping for case-insensitive normalization and idempotency
 # Maps lowercase agent types to their canonical PascalCase form
 CANONICAL_AGENT_TYPES: Dict[str, str] = {
@@ -174,7 +178,11 @@ class EndpointScheduler:
         # because all concurrency=0 endpoints use new_max=1 (no resize), and the race window
         # is extremely narrow.
         logger.debug(f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — blocking on semaphore for api_base={api_base}")
-        sched['sem'].acquire()
+        if not sched['sem'].acquire(timeout=ENDPOINT_SLOT_ACQUIRE_TIMEOUT):
+            raise TimeoutError(
+                f"Timed out after {ENDPOINT_SLOT_ACQUIRE_TIMEOUT}s waiting for endpoint slot on {api_base}. "
+                f"Current active count: {sched['active_count']}, max allowed: {sched['max_active']}"
+            )
         
         with self._lock:
             sched['active_count'] += 1

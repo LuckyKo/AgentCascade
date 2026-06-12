@@ -561,7 +561,7 @@ class ExecutionEngine:
                     continue
 
                 # ── Phase 5: Post-Turn Checks ───────────────────────────────
-                if not self._post_turn_checks(instance, messages):
+                if not self._post_turn_checks(instance, messages, llm_messages, response):
                     break
 
             # ── Cleanup: Turn limit reached ────────────────────────────────
@@ -1540,7 +1540,13 @@ class ExecutionEngine:
         
         return (True, used_any_tool)  # Return tuple: (injected, used_any_tool_value)
 
-    def _post_turn_checks(self, instance: AgentInstance, messages: List[Message]) -> bool:
+    def _post_turn_checks(
+        self, 
+        instance: AgentInstance, 
+        messages: List[Message],
+        llm_messages: List[Message],
+        response: List[Message]
+    ) -> bool:
         """Phase 5: Check for final answer, wait for parallel agents, drain post-generation queue.
 
         Returns False when agent has truly completed (break from loop).
@@ -1550,6 +1556,8 @@ class ExecutionEngine:
         Args:
             instance: The agent being executed.
             messages: Full working set of messages.
+            llm_messages: Messages formatted for LLM API.
+            response: Response list to yield back to caller.
 
         Returns:
             True to continue the turn loop, False to break (agent complete).
@@ -1600,6 +1608,29 @@ class ExecutionEngine:
             return True  # Loop back to process injected messages
 
         # Agent has truly completed (no pending async, no queued messages)
+        # Safety drain: catch any results from fast-completing children that completed
+        # between register_async_call() and the has_pending() check above
+        try:
+            final_drain = self.pool.drain_async_results(inst_name)
+            if final_drain:
+                logger.debug(
+                    f"[CALL_AGENT_DEBUG] _post_turn_checks — safety drain caught {len(final_drain)} "
+                    f"result(s) for {inst_name}"
+                )
+                for result in final_drain:
+                    result_msg = Message(role=USER, content=f"[BACKGROUND TOOL RESULT]: {result}")
+                    messages.append(result_msg)
+                    llm_messages.append(result_msg)
+                    response.append(result_msg)
+                    with instance._compression_lock:
+                        instance.conversation.append(result_msg)
+                _invalidate_token_cache(instance)
+                return True  # Continue loop to process drained results
+        except Exception as e:
+            logger.error(
+                f"[CALL_AGENT_DEBUG] _post_turn_checks — safety drain failed for {inst_name}: {e}"
+            )
+
         return False
 
     def _transition_to_sleeping(self, instance: 'AgentInstance') -> None:
