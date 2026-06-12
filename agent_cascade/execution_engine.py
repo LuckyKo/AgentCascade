@@ -2649,10 +2649,12 @@ class ExecutionEngine:
                         # fall back to template's generate_cfg
                         llm_cfg = getattr(caller_inst, '_generate_cfg_override', None) or getattr(caller_template.llm, 'generate_cfg', {})
 
-                        # Propagate max_turns from caller's config
-                        caller_max_turns = llm_cfg.get('max_turns')
-                        if caller_max_turns is None:
-                            caller_max_turns = 50  # DEFAULT_MAX_TURNS
+                        # Propagate max_turns from caller's instance directly.
+                        # Do NOT read from llm_cfg — it was stripped out of _generate_cfg_override
+                        # because 'max_turns' is in NON_LLM_KEYS and must not leak to the LLM API.
+                        caller_max_turns = getattr(caller_inst, 'max_turns', None)
+                        if not caller_max_turns:
+                            caller_max_turns = 50  # DEFAULT_MAX_TURNS fallback
                         inst.max_turns = caller_max_turns
 
                         target_template = self.pool.templates.get(agent_class)
