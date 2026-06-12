@@ -2832,6 +2832,18 @@ document.querySelectorAll('.settings-tab').forEach(btn => {
   });
 });
 
+// Sub-tabs within Agent & Tools panel (System vs Per Agent)
+document.querySelectorAll('.settings-sub-tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.settings-sub-tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.settings-sub-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    // Use data-target attribute to explicitly link button to its panel (more maintainable than string concatenation)
+    const targetPanel = document.getElementById(btn.dataset.target);
+    if (targetPanel) targetPanel.classList.add('active');
+  });
+});
+
 // ── Controls ─────────────────────────────────────────────────────────────────
 
 function updateControls() {

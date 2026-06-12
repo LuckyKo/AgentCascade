@@ -801,6 +801,55 @@ body {
   display: flex;
 }
 
+/* Sub-tabs within Agent & Tools panel */
+.settings-sub-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--bg-elevated);
+  padding: 0 16px 8px;
+}
+
+.settings-sub-tab-btn {
+  flex: 1;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.settings-sub-tab-btn:hover {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+
+.settings-sub-tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Sub-panel containers for System and Per Agent tabs */
+.settings-sub-panel {
+  display: none;
+  flex-direction: column;
+  flex: 1;
+}
+
+.settings-sub-panel.active {
+  display: flex;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 .settings-content {
   flex: 1;
   overflow-y: auto;

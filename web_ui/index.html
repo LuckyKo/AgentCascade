@@ -380,108 +380,129 @@
           <!-- Agent & Tools Tab -->
           <div class="settings-tab-panel" id="settings-agent">
             <div class="settings-content">
-
-              <!-- API Endpoints Section -->
-              <div class="settings-section">
-                <h3 class="settings-section-title">API Endpoints
-                  <button id="btn-add-endpoint" class="btn-small" title="Add new API endpoint" style="margin-left:auto;font-size:11px;padding:2px 10px;">+ Add</button>
-                </h3>
-                <div id="api-endpoints-list" class="settings-section-body" style="gap:0;">
-                  <!-- Endpoint cards injected here by JS -->
-                  <div class="api-endpoint-empty" style="text-align:center;color:var(--text-muted);padding:12px;font-size:12px;">
-                    No extra endpoints configured. Agents use the General Settings API.
+              <!-- Sub-tabs for System vs Per-Agent settings -->
+              <div class="settings-sub-tabs">
+                <button class="settings-sub-tab-btn active" data-target="subtab-system">System</button>
+                <button class="settings-sub-tab-btn" data-target="subtab-per-agent">Per Agent</button>
+              </div>
+              
+              <!-- System Sub-tab: Global Settings -->
+              <div class="settings-sub-panel active" id="subtab-system">
+                
+                <!-- API Endpoints Section -->
+                <div class="settings-section">
+                  <h3 class="settings-section-title">API Endpoints
+                    <button id="btn-add-endpoint" class="btn-small" title="Add new API endpoint" style="margin-left:auto;font-size:11px;padding:2px 10px;">+ Add</button>
+                  </h3>
+                  <div id="api-endpoints-list" class="settings-section-body" style="gap:0;">
+                    <!-- Endpoint cards injected here by JS -->
+                    <div class="api-endpoint-empty" style="text-align:center;color:var(--text-muted);padding:12px;font-size:12px;">
+                      No extra endpoints configured. Agents use the General Settings API.
+                    </div>
+                  </div>
+                  <div style="padding:4px 8px;font-size:11px;color:var(--text-muted);">
+                    ℹ️ The General Settings API is always the last-resort fallback for all agents.
                   </div>
                 </div>
-                <div style="padding:4px 8px;font-size:11px;color:var(--text-muted);">
-                  ℹ️ The General Settings API is always the last-resort fallback for all agents.
-                </div>
-              </div>
 
-              <!-- Agent API Assignments Section -->
-              <div class="settings-section">
-                <h3 class="settings-section-title">Agent API Assignments</h3>
-                <div id="agent-api-assignments" class="settings-section-body">
-                  <!-- Per-agent-type endpoint priority lists injected here by JS -->
-                  <div style="text-align:center;color:var(--text-muted);padding:12px;font-size:12px;">
-                    Add endpoints above, then assign them to agent types.
+                <!-- Agent API Assignments Section -->
+                <div class="settings-section">
+                  <h3 class="settings-section-title">Agent API Assignments</h3>
+                  <div id="agent-api-assignments" class="settings-section-body">
+                    <!-- Per-agent-type endpoint priority lists injected here by JS -->
+                    <div style="text-align:center;color:var(--text-muted);padding:12px;font-size:12px;">
+                      Add endpoints above, then assign them to agent types.
+                    </div>
+                  </div>
+                  <div style="padding:4px 8px;font-size:11px;color:var(--text-muted);">
+                    ℹ️ Agents try endpoints top-to-bottom. Falls back to General Settings API.
                   </div>
                 </div>
-                <div style="padding:4px 8px;font-size:11px;color:var(--text-muted);">
-                  ℹ️ Agents try endpoints top-to-bottom. Falls back to General Settings API.
-                </div>
-              </div>
 
-              <div class="settings-section">
-                <h3 class="settings-section-title">Agent Configuration</h3>
-                <div class="settings-section-body">
-                  <label class="setting-field">
-                    <span>Target Agent</span>
-                    <select id="setting-agent-select" class="sidebar-select"></select>
-                  </label>
+                <!-- Multi-Agent Control Section (all global settings) -->
+                <div class="settings-section">
+                  <h3 class="settings-section-title">Multi-Agent Control</h3>
+                  <div class="settings-section-body">
+                    <label class="setting-field" style="flex-direction: column; align-items: stretch; gap: 4px;">
+                      <span>AFK Auto-Reply Message</span>
+                      <textarea id="setting-afk-message" rows="3"
+                        style="width: 100%; font-family: inherit; padding: 6px; border-radius: 4px; border: 1px solid var(--bg-elevated); background: var(--bg-tertiary); color: var(--text-primary); resize: vertical;">User is AFK, continue working on given task or polish/verify your work if there are things to improve...</textarea>
+                    </label>
+                    <label class="setting-field">
+                      <span>Max Turns per Run</span>
+                      <input type="number" id="setting-max-turns" min="1" max="500" value="50" />
+                    </label>
+                    <label class="setting-field">
+                      <span>Max Parallel Agents</span>
+                      <input type="number" id="setting-max-parallel" min="1" max="10" value="3" />
+                    </label>
+                    <label class="setting-field toggle-field">
+                      <span>Auto-Continue (Truncation)</span>
+                      <input type="checkbox" id="setting-auto-continue" checked />
+                    </label>
+                    <label class="setting-field toggle-field">
+                      <span>Auto-Rollback on Loop</span>
+                      <input type="checkbox" id="setting-auto-rollback" checked />
+                    </label>
+                    <label class="setting-field toggle-field">
+                      <span>Log API POST Dump</span>
+                      <input type="checkbox" id="setting-log-api-post" />
+                    </label>
+                    <label class="setting-field">
+                      <span>Max Auto-Rollbacks (-1=∞)</span>
+                      <input type="number" id="setting-max-rollbacks" min="-1" max="100" value="3" />
+                    </label>
+                    <label class="setting-field">
+                      <span>Auto-Discard Idle Agents (seconds, 0=off)</span>
+                      <input type="number" id="setting-idle-timeout" min="0" max="3600" step="10" value="300" />
+                    </label>
+                    <label class="setting-field">
+                      <span>Wild Read Threshold (Chars)</span>
+                      <input type="number" id="setting-tool-result-max-chars" min="1000" max="500000" step="1000" value="10000" />
+                    </label>
+                    <label class="setting-field toggle-field">
+                      <span>Grep Spillover</span>
+                      <input type="checkbox" id="setting-grep-spillover" checked />
+                    </label>
+                    <label class="setting-field">
+                      <span>Grep Char Limit</span>
+                      <input type="number" id="setting-grep-char-limit" min="-1" max="100000" step="100" value="2000" />
+                    </label>
+                    <label class="setting-field">
+                      <span>Shell Output Char Limit <output id="val-shell-char-limit">2000</output></span>
+                      <input type="range" id="setting-shell-char-limit" min="-1" max="8000" step="100" value="2000" />
+                    </label>
+                    <label class="setting-field">
+                      <span>Code Output Char Limit <output id="val-code-char-limit">2000</output></span>
+                      <input type="range" id="setting-code-char-limit" min="-1" max="8000" step="100" value="2000" />
+                    </label>
+                  </div>
                 </div>
               </div>
-              <div class="settings-section">
-                <h3 class="settings-section-title">Multi-Agent Control</h3>
-                <div class="settings-section-body">
-                  <label class="setting-field" style="flex-direction: column; align-items: stretch; gap: 4px;">
-                    <span>AFK Auto-Reply Message</span>
-                    <textarea id="setting-afk-message" rows="3"
-                      style="width: 100%; font-family: inherit; padding: 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); resize: vertical;">User is AFK, continue working on given task or polish/verify your work if there are things to improve...</textarea>
-                  </label>
-                  <label class="setting-field">
-                    <span>Max Turns per Run</span>
-                    <input type="number" id="setting-max-turns" min="1" max="500" value="50" />
-                  </label>
-                  <label class="setting-field">
-                    <span>Max Parallel Agents</span>
-                    <input type="number" id="setting-max-parallel" min="1" max="10" value="3" />
-                  </label>
-                  <label class="setting-field toggle-field">
-                    <span>Auto-Continue (Truncation)</span>
-                    <input type="checkbox" id="setting-auto-continue" checked />
-                  </label>
-                  <label class="setting-field toggle-field">
-                    <span>Auto-Rollback on Loop</span>
-                    <input type="checkbox" id="setting-auto-rollback" checked />
-                  </label>
-                  <label class="setting-field toggle-field">
-                    <span>Log API POST Dump</span>
-                    <input type="checkbox" id="setting-log-api-post" />
-                  </label>
-                  <label class="setting-field">
-                    <span>Max Auto-Rollbacks (-1=∞)</span>
-                    <input type="number" id="setting-max-rollbacks" min="-1" max="100" value="3" />
-                  </label>
-                  <label class="setting-field">
-                    <span>Auto-Discard Idle Agents (seconds, 0=off)</span>
-                    <input type="number" id="setting-idle-timeout" min="0" max="3600" step="10" value="300" />
-                  </label>
-                  <label class="setting-field">
-                    <span>Wild Read Threshold (Chars)</span>
-                    <input type="number" id="setting-tool-result-max-chars" min="1000" max="500000" step="1000" value="10000" />
-                  </label>
-                  <label class="setting-field toggle-field">
-                    <span>Grep Spillover</span>
-                    <input type="checkbox" id="setting-grep-spillover" checked />
-                  </label>
-                  <label class="setting-field">
-                    <span>Grep Char Limit</span>
-                    <input type="number" id="setting-grep-char-limit" min="-1" max="100000" step="100" value="2000" />
-                  </label>
-                  <label class="setting-field">
-                    <span>Shell Output Char Limit <output id="val-shell-char-limit">2000</output></span>
-                    <input type="range" id="setting-shell-char-limit" min="-1" max="8000" step="100" value="2000" />
-                  </label>
-                  <label class="setting-field">
-                    <span>Code Output Char Limit <output id="val-code-char-limit">2000</output></span>
-                    <input type="range" id="setting-code-char-limit" min="-1" max="8000" step="100" value="2000" />
-                  </label>
+              
+              <!-- Per Agent Sub-tab: Individual Agent Settings -->
+              <div class="settings-sub-panel" id="subtab-per-agent">
+                
+                <!-- Target Agent Section (selector only) -->
+                <div class="settings-section">
+                  <h3 class="settings-section-title">Target Agent</h3>
+                  <div class="settings-section-body">
+                    <label class="setting-field">
+                      <span>Select Agent</span>
+                      <select id="setting-agent-select" class="sidebar-select"></select>
+                    </label>
+                  </div>
+                  <div style="padding:4px 8px;font-size:11px;color:var(--text-muted);">
+                    ℹ️ Select an agent to configure its active tools below.
+                  </div>
                 </div>
-              </div>
-              <div class="settings-section">
-                <h3 class="settings-section-title">Active Tools</h3>
-                <div id="setting-tools-list" class="settings-section-body">
-                  <!-- Tool toggles injected here -->
+                
+                <!-- Active Tools Section -->
+                <div class="settings-section">
+                  <h3 class="settings-section-title">Active Tools</h3>
+                  <div id="setting-tools-list" class="settings-section-body">
+                    <!-- Tool toggles injected here -->
+                  </div>
                 </div>
               </div>
             </div>
