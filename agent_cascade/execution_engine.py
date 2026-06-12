@@ -338,6 +338,19 @@ class ExecutionEngine:
         llm_messages = None
         response = None
         
+        # ── Acquire concurrency slot for this agent's endpoint ───────────────
+        # On sequential endpoints (concurrency_limit=0), only one agent should 
+        # be making API calls at a time. The parent acquires the slot, then releases
+        # it when transitioning to SLEEPING so children can proceed.
+        instance._slot_release = None  # Initialize for proper cleanup in finally block
+        if hasattr(self.pool, '_acquire_slot'):
+            try:
+                instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
+            except Exception as e:
+                logger.error(f"Failed to acquire slot for {instance.instance_name}: {e}")
+                # Re-raise on initial acquisition failure — don't proceed without concurrency protection
+                raise
+        
         try:
             # ── Phase 1: Setup ─────────────────────────────────────────────
             messages, llm_messages, response = self._setup_turn(instance)
@@ -386,6 +399,14 @@ class ExecutionEngine:
                             log_level="debug", used_any_tool=False
                         )
                         
+                        # Re-acquire concurrency slot after waking from SLEEPING (async results + user messages)
+                        if hasattr(self.pool, '_acquire_slot'):
+                            try:
+                                instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
+                            except Exception as e:
+                                logger.error(f"Failed to re-acquire slot for {inst_name} after wakeup (async+user): {e}")
+                                raise
+                        
                         # Continue to normal LLM processing below (in RUNNING state now)
                         continue
 
@@ -408,8 +429,16 @@ class ExecutionEngine:
                                     instance.sleeping_since = None
                                     instance._last_wakeup_log = time.monotonic()
                                 
+                                # Re-acquire concurrency slot after waking from SLEEPING due to user messages
+                                if hasattr(self.pool, '_acquire_slot'):
+                                    try:
+                                        instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
+                                    except Exception as e:
+                                        logger.error(f"Failed to re-acquire slot for {inst_name} after wakeup (user message): {e}")
+                                        raise
+                                
                                 continue  # Go process via LLM; async results will arrive later
-
+                                
                         # If no user messages, proceed with waiting logic
                         current_time = time.monotonic()
                         sleeping_duration = 0.0
@@ -494,6 +523,14 @@ class ExecutionEngine:
                                 instance.sleeping_since = None
                                 instance._last_wakeup_log = time.monotonic()
                             
+                            # Re-acquire concurrency slot after waking from SLEEPING due to async results
+                            if hasattr(self.pool, '_acquire_slot'):
+                                try:
+                                    instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
+                                except Exception as e:
+                                    logger.error(f"Failed to re-acquire slot for {inst_name} after wakeup (async results): {e}")
+                                    raise
+                            
                             # Loop back; now in RUNNING state → LLM processes injected results
                             yield []
                             continue
@@ -565,6 +602,15 @@ class ExecutionEngine:
 
         finally:
             # C4 fix: Always clean up — transition to IDLE regardless of how we exit
+            
+            # Release concurrency slot on exit if still held
+            if instance._slot_release is not None:
+                try:
+                    instance._slot_release()
+                except Exception:
+                    pass
+                instance._slot_release = None
+            
             with instance._state_lock:
                 current_state = instance.state
                 if current_state == AgentState.RUNNING:
@@ -1647,10 +1693,19 @@ class ExecutionEngine:
 
         Helper method to reduce code duplication in _post_turn_checks.
         Sets the appropriate timestamps and transitions state atomically.
+        Also releases the concurrency slot so children can proceed.
 
         Args:
             instance: The agent instance to transition.
         """
+        # Release concurrency slot when sleeping — allows children to proceed
+        if instance._slot_release is not None:
+            try:
+                instance._slot_release()
+            except Exception:
+                pass
+            instance._slot_release = None
+        
         with instance._state_lock:
             if instance.state == AgentState.RUNNING:
                 instance._transition(AgentState.SLEEPING)

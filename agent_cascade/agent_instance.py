@@ -122,6 +122,9 @@ class AgentInstance:
     # ── Streaming State (Streaming UI Content Update Fix) ──────────────────
     _streaming_responses: List[Message] = field(default_factory=list)  # Partial LLM content during streaming, updated every ~150ms
 
+    # ── Concurrency Slot Management (Parent Slot Acquisition Fix) ───────────
+    _slot_release: Optional[callable] = None  # Callback to release the endpoint concurrency slot when transitioning to SLEEPING or exiting
+
     def _transition(self, new_state: AgentState) -> None:
         """Transition to a new state with validation.
         
