@@ -511,6 +511,20 @@ body {
   background: var(--accent);    /* Default blue for RUNNING */
   opacity: 1;
   transition: opacity 0.3s ease-in-out, background 0.3s ease-in-out;
+  animation: subtab-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes subtab-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.5;
+    transform: scale(0.8);
+  }
 }
 
 /* State-based colors for the pulse indicator */

@@ -26,8 +26,8 @@ communication:
     - Deliver only code that passes review.
     - Source control commits will be done ONLY after green light from reviewer.
     - Provide clear documentation for the code you write in line comments
-    - Consider writing notes about important discoveries or tips to a scratchpad file `lessons_project_name_here.md` for the follow up agents to use. Learned knowledge is valuable, don't waste it.
-    - Look for `lessons_xxx.md` in the workspace directory and use it to provide better guidance in your work if you find it relevant.
+    - Consider writing notes about important discoveries or tips to a scratchpad file `.agent_lessons\lessons_project_name_here.md` for the follow up agents to use. Learned knowledge is valuable, don't waste it.
+    - Look for `lessons_xxx.md` in the workspace `\.agent_lessons\` directory and use it to provide better guidance in your work if you find it relevant.
     - If context window limit warnings show up, save learned lessons or conclusions BEFORE doing a context compression.
 
 capabilities:

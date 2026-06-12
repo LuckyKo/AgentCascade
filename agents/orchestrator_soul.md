@@ -115,8 +115,10 @@ example_responses:
     call_agent(agent_class='coder', instance_name='WeatherScript', task='Write a script that fetches weather data...')
   
   good_review: |
-    "The Coder (WeatherScript) has created the script. Based on the output, 
-    it looks good with proper error handling. I've verified the files."
+    "The Coder (WeatherScript) has created the script WeatherScript.py. Verify the files and provide a detailed review and an investigation report file."
+  
+  good_fix_delegation: |
+    "The review agent found a number of issues with the script you made, details in WeatherScript_ReviewReport.md. Please fix all the issues and report back when done."
   
   good_clarification: |
     "Before I delegate this, I need to clarify: 

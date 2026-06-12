@@ -223,8 +223,8 @@ const ActivityBar = {
     if (isActive) {
       let status = '';
       
-      // Show waiting status if applicable
-      if (!isRootAgentName(activeInstance) && isWaiting) {
+      // Show waiting status if applicable (exclude session primary agent - its waiting is global)
+      if (!isSessionPrimaryAgent(activeInstance) && isWaiting) {
         status = 'Waiting for API slot...';
       } else if (preview !== undefined && preview !== null) {
         // Use the preview from activity_update
@@ -283,7 +283,8 @@ const ActivityBar = {
     
     if (isActive) {
       let status = '';
-      if (!isRootAgentName(activeInstance) && agentData?.is_waiting) {
+      // Show waiting status for sub-agents only (session primary agent waiting is global)
+      if (!isSessionPrimaryAgent(activeInstance) && agentData?.is_waiting) {
         status = 'Waiting for API slot...';
       } else if (streamingText !== undefined) {
         // When streamingText is empty but the agent IS generating, show "Streaming..." instead of blank.
@@ -1084,12 +1085,7 @@ function handleServerMessage(data) {
       
       // Ensure the session primary agent's tab is active on initial load or if no tab is selected.
       if (!state.activeSubTab) {
-        const primaryTab = getAgentTabId(state.sessionName);
-        state.activeSubTab = primaryTab;
-        const primaryTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${primaryTab}"]`);
-        if (primaryTabEl) primaryTabEl.classList.add('active');
-        const primaryPanel = document.getElementById('panelSub-' + state.sessionName);
-        if (primaryPanel) primaryPanel.classList.add('active');
+        switchMainTab(getAgentTabId(state.sessionName));
       }
       updateControls();
 
@@ -1134,6 +1130,8 @@ function handleServerMessage(data) {
       const activeName = getActiveAgentName();
       if (state.subAgents[activeName]?.is_halted) break;
       
+      let completionDetected = false;
+      
       const oldStackStr = (state.activeStack || []).join(',');
       // Track changes to decide render urgency:
       //   subAgentNewVisibleMessage — a new bubble was added to a VISIBLE panel (force immediate render)
@@ -1145,9 +1143,17 @@ function handleServerMessage(data) {
       
             // All agents (including root) flow through agent_instances — no special root path
       if (data.agent_instances) {
-               for (const [name, sa] of Object.entries(data.agent_instances)) {
+        for (const [name, sa] of Object.entries(data.agent_instances)) {
           const existing = state.subAgents[name];
           const prevMsgCount = existing ? existing.messages.length : 0;
+          const wasActive = existing ? Boolean(existing.active) : false;
+          const isNowActive = Boolean(sa.active);
+          
+                         // Completion detected when agent goes inactive AND is not on the active execution stack
+                         // This prevents premature completion during race conditions or tool handoffs
+                         if (wasActive && !isNowActive && state.activeStack.indexOf(name) === -1) {
+            completionDetected = true;
+          }
           
           if (sa.is_partial) {
             if (existing && existing.messages) {
@@ -1282,8 +1288,13 @@ function handleServerMessage(data) {
       // Throttle sub-agent rendering to ~50ms during streaming (BUG31: reduced from 100ms for snappier updates)
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
       const subThrottleContent = 50;
-      // Force render on: stack change, new visible message, content streaming in existing bubble, or time threshold
-      if (stackChanged || subAgentNewVisibleMessage || subAgentContentChanged || now - state.genStats.lastSubAgentRender > subThrottleContent) {
+      // Force render on: completion detected, stack change, new visible message, content streaming in existing bubble, or time threshold
+      const shouldRender = completionDetected || 
+                           stackChanged || 
+                           subAgentNewVisibleMessage || 
+                           (subAgentContentChanged && (now - state.genStats.lastSubAgentRender > subThrottleContent)) ||
+                           (now - state.genStats.lastSubAgentRender > 500);
+      if (shouldRender) {
         // Only call renderSubAgents if we're NOT about to call switchMainTab,
         // since switchMainTab calls renderSubAgents internally at the end.
         // This avoids redundant rendering when stackChanged triggers a tab switch.
@@ -1584,7 +1595,10 @@ function createMessageEl(msg, index, config) {
 
   // Double click edit
   div.addEventListener('dblclick', (e) => {
-    if (state.generating || !isEditable) return;
+    const isAgentGenerating = instName 
+      ? (state.subAgents[instName]?.active ?? state.generating)
+      : state.generating;
+    if (isAgentGenerating || !isEditable) return;
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return;
 
@@ -1650,7 +1664,13 @@ function createMessageEl(msg, index, config) {
   }
 
   contentDiv.innerHTML = html;
-
+  
+  // Initialize streaming optimization dataset attributes
+  // lastFlushTime ensures the 100ms flush window starts from bubble creation
+  div.dataset.lastFlushTime = String(performance.now());
+  div.dataset.prevContent = msg.content || '';
+  div.dataset.prevReasoning = msg.reasoning_content || '';
+  
   div.appendChild(contentDiv);
   return div;
 }
@@ -1668,42 +1688,28 @@ function updateBubbleContent(bubble, msg, config) {
   // on every tick when N is large (thousands of words).
   const prevContent = bubble.dataset.prevContent;
   const curContent = msg.content || '';
+  const prevReasoning = bubble.dataset.prevReasoning;
+  const curReasoning = msg.reasoning_content || '';
   
-  // Use config.isGenerating if provided (for sub-agent streaming), otherwise check agent-specific active state
-  const isGenerating = config.isGenerating !== undefined
-    ? config.isGenerating
-    : (state.subAgents[config.instanceName]?.active ?? false);
+  if (curContent === prevContent && curReasoning === prevReasoning) {
+    return; // Content hasn't changed at all — skip re-render
+  }
   
-  if (isGenerating && prevContent !== undefined && !msg.function_call && msg.role !== 'function') {
-    // Force full re-render if reasoning_content changed — incremental path only handles plain content
-    const prevReasoning = bubble.dataset.prevReasoning;
-    const curReasoning = msg.reasoning_content || '';
-    if (prevReasoning !== curReasoning) {
-      delete bubble.dataset.prevContent;
-      delete bubble.dataset.prevReasoning;
-    } else if (curContent.startsWith(prevContent)) {
-      // Streaming delta detected — just update the tracking marker and skip re-render.
-      // The throttle loop will trigger a full re-render at the next tick, which avoids
-      // the "chunked lines" bug where raw text injection creates visible gaps mid-paragraph.
+  // STREAMING DELTA OPTIMIZATION: During generation, skip full DOM re-render for
+  // incremental content growth to avoid O(N) marked.parse() on every tick. Force render
+  // every 100ms to show streaming progress. After generation stops, always full render.
+  const isGenerating = config.isGenerating;
+  if (isGenerating && !msg.function_call && msg.role !== 'function') {
+    const lastFlush = parseInt(bubble.dataset.lastFlushTime || '0');
+    const now = performance.now();
+    // Skip re-render if within 100ms window AND reasoning unchanged AND content growing incrementally
+    if ((now - lastFlush < 100) && prevReasoning === curReasoning && curContent.startsWith(prevContent)) {
       bubble.dataset.prevContent = curContent;
-      
-      // PERIODIC FLUSH: Force a full re-render every 3 ticks to ensure streaming content
-      // actually appears in the DOM. Without this, incremental tracking can skip indefinitely.
-      const flushCount = parseInt(bubble.dataset.flushCounter || '0');
-      bubble.dataset.flushCounter = String(flushCount + 1);
-      if (flushCount >= 3) {
-        bubble.dataset.flushCounter = '0';
-        console.log(`[STREAM-FLUSH] Bubble flush after ${flushCount} incremental ticks — re-rendering`); // DEBUG: remove or gate with window.__DEBUG_STREAM__ before shipping
-        delete bubble.dataset.prevContent; // Force full re-render on next pass
-      } else {
-        return;
-      }
+      return; // Skip re-render during streaming delta (will render at flush boundary)
     }
   }
   
-  // Fallback: full re-render (content changed non-incrementally, or not generating)
-  delete bubble.dataset.prevContent;
-  delete bubble.dataset.prevReasoning;
+  // Full re-render path: content changed non-incrementally, not generating, or flush time elapsed
 
   let html = '';
 
@@ -1757,8 +1763,10 @@ function updateBubbleContent(bubble, msg, config) {
 
   // Restore prevContent/prevReasoning after full re-render so the next tick
   // can use the incremental path if only plain content grew.
+  // Also reset lastFlushTime to start the 100ms optimization window again.
   bubble.dataset.prevContent = curContent;
   bubble.dataset.prevReasoning = msg.reasoning_content || '';
+  bubble.dataset.lastFlushTime = String(performance.now());
 }
 
 function renderMarkdown(text, allowThinking = true) {
@@ -2413,16 +2421,18 @@ function renderSubAgents() {
       labelSpan.className = 'tab-label';
       tabBtn.appendChild(labelSpan);
 
-      const closeBtn = document.createElement('span');
-      closeBtn.className = 'close-tab';
-      closeBtn.title = 'Close Agent';
-      closeBtn.textContent = '\u00d7';
-      closeBtn.onclick = (e) => {
-        e.stopPropagation();
-        send({ type: 'terminate_agent_instance', instance_name: name });
-        switchMainTab(getAgentTabId(state.sessionName));
-      };
-      tabBtn.appendChild(closeBtn);
+      if (!isSessionPrimary) {
+        const closeBtn = document.createElement('span');
+        closeBtn.className = 'close-tab';
+        closeBtn.title = 'Close Agent';
+        closeBtn.textContent = '\u00d7';
+        closeBtn.onclick = (e) => {
+          e.stopPropagation();
+          send({ type: 'terminate_agent_instance', instance_name: name });
+          switchMainTab(getAgentTabId(state.sessionName));
+        };
+        tabBtn.appendChild(closeBtn);
+      }
 
       mainTabBar.appendChild(tabBtn);
     }

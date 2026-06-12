@@ -30,7 +30,7 @@ ACTIVE_STATES = (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING)
 
 class _InstanceConversationMapping(dict):
     """Custom dict that bridges writes to instance_conversations with instances[name].conversation.
-    
+
     When api_server.py does `pool.instance_conversations[name] = some_list`, this class
     intercepts the write and also updates `pool.instances[name].conversation` to maintain
     bidirectional sync. Reads return the conversation from instances, not from dict storage.
@@ -42,7 +42,7 @@ class _InstanceConversationMapping(dict):
 
     def _sync_from_instances(self):
         """Rebuild the mapping from pool.instances.
-        
+
         Preserves dict-only entries (from session rename patterns) that don't have
         corresponding instances — they would otherwise be lost on every sync.
         """
@@ -51,19 +51,19 @@ class _InstanceConversationMapping(dict):
         for key in super().keys():
             if key not in self._pool.instances:
                 dict_only[key] = super().__getitem__(key)
-        
+
         super().clear()
         for name, inst in self._pool.instances.items():
             with inst._compression_lock:
                 super().__setitem__(name, list(inst.conversation))
-        
+
         # Restore dict-only entries (e.g., renamed session names without instances)
         for key, val in dict_only.items():
             super().__setitem__(key, val)
 
     def __getitem__(self, key: str) -> List[Message]:
         """Read from instances[name].conversation, falling back to dict storage.
-        
+
         Falls back to dict storage for entries created by pop+write rename patterns
         (e.g., set_session_name in api_server.py which pops an old name and writes
         the value under a new name without creating a corresponding instance).
@@ -80,7 +80,7 @@ class _InstanceConversationMapping(dict):
 
     def __setitem__(self, key: str, value: List[Message]) -> None:
         """Write propagates to instances[name].conversation AND dict storage.
-        
+
         NOTE: Token count cache is invalidated automatically here when the instance exists.
         If callers bypass this method (e.g., direct assignment), they must invalidate manually.
         See Fix #2 for details.
@@ -116,20 +116,20 @@ class _InstanceConversationMapping(dict):
             if args:
                 return args[0]
             raise KeyError(key)
-        
+
         # Copy under lock BEFORE clearing — prevents both data loss and races
         with inst._compression_lock:
             value = list(inst.conversation)
             inst.conversation.clear()
-        
+
         # Remove from dict storage only — don't delete the instance
         super().pop(key, None)
-        
+
         return value  # Returns a copy of the old conversation data
 
     def items(self):
         """Return (name, conversation) pairs from instances + dict-only entries.
-        
+
         Includes dict-only entries created by session rename patterns where the
         new name has no corresponding AgentInstance yet.
         """
@@ -145,7 +145,7 @@ class _InstanceConversationMapping(dict):
 
     def values(self):
         """Return conversation lists from instances + dict-only entries.
-        
+
         Includes dict-only entries created by session rename patterns.
         """
         seen = set()
@@ -160,7 +160,7 @@ class _InstanceConversationMapping(dict):
 
     def keys(self):
         """Return instance names from pool + any dict-only entries.
-        
+
         Includes dict-only entries created by session rename patterns where the
         new name has no corresponding AgentInstance yet. Returns a view-like iterable
         rather than a static set to reflect live state.
@@ -280,7 +280,7 @@ class AgentPool:
         self.last_tool_args: Dict[str, Dict[str, Dict[str, Any]]] = {}  # tool arg cache for __USE_PREV_ARG__
         self.instance_summaries: Dict[str, str] = {}         # per-instance compression summaries
         self._ws_loop = None                                 # asyncio event loop ref (set by api_server at runtime)
-        
+
         # instance_state bridges the old WebUI state pattern with the new unified model.
         # Maintained for agent_invoker.py and session rename patterns.
         self.instance_state: Dict[str, dict] = {}
@@ -320,7 +320,7 @@ class AgentPool:
 
     @stopped.setter
     def stopped(self, value: bool):
-        
+
         if value:
             self._stopped_event.set()
             # Shut down background services when pool stops
@@ -475,7 +475,7 @@ class AgentPool:
         Adds to terminated_instances set and transitions state to TERMINATED.
         Cascade-terminates all child agents recursively (Fix Bug41).
         Mirrors old AgentPool.terminate_instance() semantics.
-        
+
         Args:
             instance_name: Name of the instance to terminate.
             set_global_stopped: If True, sets the global _stopped_event which signals
@@ -488,30 +488,30 @@ class AgentPool:
         for child_name in list(self.children.get(instance_name, [])):
             if self.instances.get(child_name):
                 self.terminate_instance(child_name, set_global_stopped=False)  # Recursive — handles nested trees
-        
+
         self.terminated_instances.add(instance_name)
         inst = self.instances.get(instance_name)
-        
+
         # FIX: Thread-safe state read - snapshot under lock before checking ACTIVE_STATES
         is_active = False
         if inst:
             with inst._state_lock:
                 is_active = inst.state in ACTIVE_STATES
-        
+
         if is_active:
             # Bug5 Fix #1: Only set global _stopped_event when explicitly requested
             if set_global_stopped:
                 self._stopped_event.set()  # Global signal for ALL agents
             with inst._state_lock:
                 inst._transition(AgentState.TERMINATED)
-        
+
         # Drain async results buffer to prevent memory leaks and stale messages
         if hasattr(self, '_async_results'):
             try:
                 self._async_results.drain(instance_name)
             except Exception as e:
                 logger.debug(f"Draining async results for {instance_name} failed (non-critical): {e}")
-        
+
         # Clear message queue to prevent stale messages from being processed
         if instance_name in self.message_queues:
             try:
@@ -525,7 +525,7 @@ class AgentPool:
         Recursively dismisses all child agents first (cascade termination, Fix Bug41).
         This is the UI-initiated termination path (WebSocket terminate_agent_instance message).
         Mirrors old AgentPool.dismiss_instance() semantics.
-        
+
         Bug5 Fix #1: Dismissal should NOT set global _stopped_event to avoid affecting
         other agents mid-execution. Only this specific instance is terminated.
         """
@@ -533,15 +533,15 @@ class AgentPool:
         for child_name in list(self.children.get(instance_name, [])):
             if self.instances.get(child_name):
                 self.dismiss_instance(child_name)  # Recursive — handles nested trees
-        
+
         inst = self.instances.get(instance_name)
-        
+
         # FIX: Thread-safe state read - snapshot under lock before checking ACTIVE_STATES
         is_active = False
         if inst:
             with inst._state_lock:
                 is_active = inst.state in ACTIVE_STATES
-        
+
         if is_active:
             # Bug5 Fix: Pass set_global_stopped=False to ensure only THIS instance
             # is terminated, not all agents via the global _stopped_event.
@@ -570,10 +570,17 @@ class AgentPool:
         template = self.templates.get(name)
         if template is None:
             return None
+
+        # Get active functions using the same logic as agents use at runtime
+        # This respects disabled_tools configuration from UI settings
+        # Defensive guard: fallback to empty list if method doesn't exist
+        active_functions = getattr(template, '_get_active_functions', lambda: [])()
+        active_tool_names = [f['name'] for f in active_functions]
+
         return {
             'name': getattr(template, 'name', name),
             'tagline': getattr(template, 'description', ''),
-            'tools': list(getattr(template, 'function_map', {}).keys()),
+            'tools': active_tool_names,  # Now filtered by disabled_tools config
         }
 
     def reset(self):
@@ -592,10 +599,10 @@ class AgentPool:
         Does NOT delete AgentInstances — only clears their conversations.
         The main orchestrator instance (parent_instance is None) survives reset.
 
-        Note: This method sets pool.stopped as a safety net to signal active threads 
-        to halt even if the caller forgot. The stopped event is cleared at the end of 
-        reset so executors can run in the new session. Callers may re-set 
-        pool.stopped = True after reset if they need threads halted during post-reset 
+        Note: This method sets pool.stopped as a safety net to signal active threads
+        to halt even if the caller forgot. The stopped event is cleared at the end of
+        reset so executors can run in the new session. Callers may re-set
+        pool.stopped = True after reset if they need threads halted during post-reset
         operations (e.g., api_server.py line 1697).
         """
         # Safety net: signal all active threads to halt even if caller forgot.
@@ -603,7 +610,7 @@ class AgentPool:
         # side effects (idle.stop() + async_registry.shutdown()) which are handled
         # explicitly later in this method at steps 6-7.
         self._stopped_event.set()
-        
+
         # ── Step 1: Clear pending approvals ──────────────────────────────────
         # Prevent dangling threads waiting for user approval.
         if self.operation_manager:
@@ -690,7 +697,7 @@ class AgentPool:
         # Restart idle checker — it may have been stopped by the caller's
         # pool.stopped = True. IdleManager.start() is idempotent.
         self._idle.start()
-        
+
         # Clear the safety-net stopped signal so executors can run in the new session.
         # Callers that explicitly set stopped=True before reset will need to re-set it
         # if they want threads halted during post-reset operations (e.g., api_server line 1697).
@@ -700,7 +707,7 @@ class AgentPool:
     def _state_lock(self):
         """Delegate to ParallelAgentManager's state lock.
 
-        Required by code that references self.agent_pool._state_lock (e.g., 
+        Required by code that references self.agent_pool._state_lock (e.g.,
         agent_invoker.py for thread-safe access).
         """
         return self._execution._state_lock
@@ -772,7 +779,7 @@ class AgentPool:
 
     def rollback_to_snapshots(self, snapshots: Dict[str, int], reason: Optional[str] = None):
         """Rollback all instances to the lengths recorded in snapshots.
-        
+
         Truncates conversation lists and notifies loggers via LoggerManager.
         """
         for name, target_len in snapshots.items():
@@ -791,7 +798,7 @@ class AgentPool:
 
     def load_session_from_log(self, log_input: str, target_instance: Optional[str] = None) -> str:
         """Load session history from a log file path or JSON string.
-        
+
         Reads JSONL log, restores conversation into self.instances[name].conversation,
         and sets up the logger for the restored session.
         Returns a status message string.
@@ -1048,7 +1055,7 @@ class AgentPool:
                 log_inst.log_message(message)
             except Exception as e:
                             logger.debug(f"Log message write failed for {instance_name} (non-critical): {e}")
-            
+
     # ── Compression module compatibility layer
     # The compress_context() API in core.py expects agent_pool.get_conversation() and
     # agent_pool.instance_conversations[] — these bridge to the new instance.conversation model.
@@ -1056,13 +1063,13 @@ class AgentPool:
     @property
     def instance_conversations(self) -> Dict[str, List[Message]]:
         """View of all conversations as a dict (required by compression module and api_server.py).
-        
+
         Returns the live _instance_conversations mapping which is kept in sync with
         self.instances. Writes to this dict propagate back to instances[name].conversation.
-        
+
         Uses version-based lazy sync (Fix #3): only re-syncs when instances have changed,
         avoiding O(n) work on every read during streaming (~23+ accesses/sec).
-        
+
         Version tracking lives on AgentPool (not the mapping) so it survives recreation.
         """
         if not hasattr(self, '_instance_conversations'):
@@ -1175,16 +1182,16 @@ class AgentPool:
 
     def drain_queue(self, instance_name: str) -> List[str]:
         """Drain all pending messages for an instance atomically.
-        
+
         Feature 019: Batched drain operation for efficiency.
-        
+
         This operation pops the entire queue at once, minimizing lock contention
         and ensuring no messages are missed between drain calls. Returns empty
         list if no messages queued.
-        
+
         Args:
             instance_name: The agent instance to drain messages for.
-            
+
         Returns:
             List of message texts (may be empty). Original queue is cleared.
         """
@@ -1199,9 +1206,9 @@ class AgentPool:
 
     def add_async_result(self, instance_name: str, result: str, function_id: Optional[str] = None):
         """Add a completed async tool result to the buffer for an instance.
-        
+
         Delegate method for backward compatibility — delegates to AsyncResultBuffer.
-        
+
         Args:
             instance_name: The agent instance that dispatched this async tool.
             result: The string result from the completed async tool.
@@ -1211,16 +1218,16 @@ class AgentPool:
 
     def drain_async_results(self, instance_name: str) -> List[Tuple[str, Optional[str]]]:
         """Drain all completed async results for an instance atomically.
-        
+
         Feature 019: Batched drain operation for efficiency.
-        
+
         Delegate method for backward compatibility — delegates to AsyncResultBuffer.
         This operation pops the entire results list at once under lock, minimizing
         lock contention and ensuring thread-safe access to async results.
-        
+
         Args:
             instance_name: The agent instance to drain results for.
-            
+
         Returns:
             List of (result_string, function_id) tuples (may be empty). Original buffer is cleared.
             Each tuple element is Tuple[str, Optional[str]] where the second element may be None.
@@ -1232,12 +1239,12 @@ class AgentPool:
 
     def has_pending(self, instance_name: str) -> bool:
         """Check if there are pending async tool calls for an instance.
-        
+
         Uses AsyncToolRegistry to track pending background tool entries.
-        
+
         Args:
             instance_name: The agent instance to check.
-            
+
         Returns:
             True if the instance has pending async tools, False otherwise.
         """
@@ -1245,24 +1252,24 @@ class AgentPool:
 
     def _acquire_slot(self, agent_class: str, instance_name: str):
         """Acquire an endpoint scheduling slot. Returns a release callback or None for unlimited endpoints."""
-        
+
         if not hasattr(self, 'api_router') or not self.api_router:
             return None
-        
+
         router = self.api_router
         try:
             # Get the effective concurrency for this agent class (includes default fallback)
             concurrency_limit = router.get_effective_concurrency(agent_class)
-            
+
             # Resolve the actual api_base that will be used
             llm_cfg = router.get_llm_config(agent_class)
             api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
-            
+
             logger.debug(
                 f"[CALL_AGENT_DEBUG] _acquire_slot — agent_class={agent_class}, "
                 f"instance_name={instance_name}, api_base={api_base}, concurrency_limit={concurrency_limit}"
             )
-            
+
             # Acquire a slot on the endpoint scheduler (blocks if at capacity)
             return router.scheduler.acquire(api_base, concurrency_limit)
         except Exception as e:
@@ -1273,11 +1280,11 @@ class AgentPool:
                             agent_class: Optional[str] = None, child_instance_name: Optional[str] = None,
                             args: Optional[dict] = None, caller: Optional[str] = None, nest_depth: int = 0):
         """Register and execute an async tool call via AsyncToolRegistry.
-        
+
         Creates a callable that wraps the child agent execution logic (endpoint slot
         acquisition, ExecutionEngine creation, result extraction) and submits it to
         the thread pool via AsyncToolRegistry.
-        
+
         Args:
             instance_name: The caller's instance name (results go here)
             function_id: The LLM's tool_call_id for this call
@@ -1290,34 +1297,34 @@ class AgentPool:
         if not agent_class or not child_instance_name:
             logger.error(f"register_async_call requires agent_class and child_instance_name")
             return
-        
+
         def run_child_agent() -> str:
             """Callable that runs the child agent and returns the result string.
-            
+
             NOTE: We do NOT acquire the endpoint slot here — engine.run() inside
             _create_and_run_agent acquires its own slot at line 348 of execution_engine.py.
-            Acquiring before AND inside would deadlock on Semaphore(1) (same thread, 
+            Acquiring before AND inside would deadlock on Semaphore(1) (same thread,
             same semaphore). The child's engine.run() handles all concurrency control.
             """
             try:
                 from agent_cascade.execution_engine import ExecutionEngine
                 from agent_cascade.compression.helpers import extract_instance_output
-                
+
                 engine = ExecutionEngine(self)
                 inst, child_conv = engine._create_and_run_agent(agent_class, child_instance_name, args, caller, nest_depth)
-                
+
                 if inst is None or child_conv is None:
                     return f"[Parallel Agent '{child_instance_name}' Failed]: Internal error — agent creation returned None."
-                
+
                 if not child_conv:
                     return f"[Parallel Agent '{child_instance_name}' Failed]: Execution terminated with no output."
-                
+
                 result = extract_instance_output(child_conv, child_instance_name)
                 return f"[Parallel Agent '{child_instance_name}' Finished]:\n{result}"
-            
+
             except Exception as e:
                 return f"[Parallel Agent '{child_instance_name}' Failed]:\n{str(e)}"
-        
+
         self._async_registry.register(instance_name, run_child_agent, function_id=function_id)
 
     # ── Halt state management ──────────────────────────────────────────────
@@ -1351,7 +1358,7 @@ class AgentPool:
 
     def is_instance_terminated(self, instance_name: str) -> bool:
         """Check if an instance has been marked for termination.
-        
+
         Per-instance termination check — does NOT affect other agents (unlike _stopped_event).
         Checks terminated_instances set first (authoritative), then falls back to inst.is_terminated flag.
         """
@@ -1481,10 +1488,10 @@ class AgentPool:
 
 class ParallelAgentManager:
     """Manages parallel agent execution state. Active_stack for tracking nested agent calls."""
-    
+
     def __init__(self, pool: AgentPool):
         """Initialize the parallel agent manager.
-        
+
         Args:
             pool: Reference to the AgentPool instance.
         """
@@ -1525,7 +1532,7 @@ class LoggerManager:
 
     def create_new_session(self, instance_name: str, agent_class: str) -> None:
         """Replace the logger for an instance with a fresh one (new timestamp = new JSONL file).
-        
+
         Used by "New Session" to start writing to a new log file instead of appending.
         Closes the old logger's file handle before replacing it.
         """
@@ -1577,7 +1584,7 @@ class IdleManager:
 
     def stop(self):
         """Signal the checker to stop (non-blocking).
-        
+
         Sets the stop event so the checker loop exits on its next iteration.
         Does NOT join the thread — that would block the calling thread for up to
         (idle_check_interval + 5) seconds when called from an async handler.
@@ -1587,10 +1594,10 @@ class IdleManager:
 
     def stop_and_join(self, timeout: Optional[float] = None):
         """Signal the checker and wait for it to exit (blocking).
-        
+
         Used during full server shutdown where blocking is acceptable.
         Falls back to idle_check_interval + 5s default if no timeout given.
-        
+
         Note: After calling this method, _checker_thread is set to None. Calling
         start() again will create a new thread.
         """

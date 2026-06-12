@@ -373,13 +373,13 @@ class ListAgents(BaseTool):
                 status_text = "ACTIVE" if is_executing else "IDLE"
                 
                 # Context Metrics
-                msgs = self.agent_pool.get_conversation(inst)
+                msgs = self.agent_pool.get_conversation(inst_name)
                 # We slice history to show exactly what the LLM is currently working with
                 active_msgs = self.agent_pool.slice_history_for_llm(msgs) if self.agent_pool else msgs
                 stats = get_history_stats(active_msgs)
                 
                 # Metadata & Traceability
-                logger_inst = self.agent_pool.instance_loggers.get(inst)
+                logger_inst = self.agent_pool.instance_loggers.get(inst_name)
                 log_path = logger_inst.log_path if logger_inst and hasattr(logger_inst, 'log_path') else "N/A"
                 
                 last_active = "Unknown"
@@ -392,11 +392,11 @@ class ListAgents(BaseTool):
                         except:
                             last_active = ts_str
 
-                summary = self.agent_pool.instance_summaries.get(inst, "None")
+                summary = self.agent_pool.instance_summaries.get(inst_name, "None")
                 if len(summary) > 150:
                     summary = summary[:147] + "..."
 
-                lines.append(f"### {status_emoji} Instance: `{inst}`")
+                lines.append(f"### {status_emoji} Instance: `{inst_name}`")
                 lines.append(f"  - **Status**: {status_text} | **Class**: {cls_name}")
                 lines.append(f"  - **Context Usage**: {stats['tokens']} tokens / {stats['words']} words")
                 lines.append(f"  - **Last Activity**: {last_active}")

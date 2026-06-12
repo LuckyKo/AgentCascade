@@ -77,3 +77,6 @@ config/api_endpoints.json
 
 # Agent lessons
 .agent_lessons/ 
+
+# Playback data (large JSONL files)
+playback/ 
