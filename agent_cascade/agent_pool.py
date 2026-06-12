@@ -13,7 +13,7 @@ import time
 import threading
 import copy
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from agent_cascade.agents import Assistant
 from agent_cascade.llm.schema import Message
@@ -1194,7 +1194,7 @@ class AgentPool:
         """
         self._async_results.put(instance_name, result, function_id=function_id)
 
-    def drain_async_results(self, instance_name: str) -> List[str]:
+    def drain_async_results(self, instance_name: str) -> List[Tuple[str, Optional[str]]]:
         """Drain all completed async results for an instance atomically.
         
         Feature 019: Batched drain operation for efficiency.
@@ -1207,7 +1207,8 @@ class AgentPool:
             instance_name: The agent instance to drain results for.
             
         Returns:
-            List of result strings (may be empty). Original buffer is cleared.
+            List of (result_string, function_id) tuples (may be empty). Original buffer is cleared.
+            Each tuple element is Tuple[str, Optional[str]] where the second element may be None.
         """
         return self._async_results.drain(instance_name)
 
@@ -1254,8 +1255,8 @@ class AgentPool:
             raise
 
     def register_async_call(self, instance_name: str, call_id: str, function_id: Optional[str] = None,
-                            agent_class: str = None, child_instance_name: str = None,
-                            args: dict = None, history: list = None, caller: str = None, nest_depth: int = 0):
+                            agent_class: Optional[str] = None, child_instance_name: Optional[str] = None,
+                            args: Optional[dict] = None, caller: Optional[str] = None, nest_depth: int = 0):
         """Register and execute an async tool call via AsyncToolRegistry.
         
         Creates a callable that wraps the child agent execution logic (endpoint slot
@@ -1269,16 +1270,12 @@ class AgentPool:
             agent_class: Class of child agent to run
             child_instance_name: Name of the child agent instance
             args: Tool arguments for the child agent
-            history: Conversation history to pass to child
             caller: Name of the calling agent
             nest_depth: Nesting depth for max_nesting_depth enforcement
         """
         if not agent_class or not child_instance_name:
             logger.error(f"register_async_call requires agent_class and child_instance_name")
             return
-        
-        # Deep copy history for thread safety
-        safe_history = copy.deepcopy(history) if history else []
         
         def run_child_agent() -> str:
             """Callable that runs the child agent and returns the result string."""
@@ -1470,7 +1467,7 @@ class AgentPool:
                 logger.error("[ERROR] Failed to load agent %s: %s", agent_name, e)
 
 
-# ── Placeholder manager classes (to be implemented in later phases) ─────
+# ── Manager classes for parallel execution state ─────
 
 class ParallelAgentManager:
     """Manages parallel agent execution state. Active_stack for tracking nested agent calls."""
@@ -1486,22 +1483,6 @@ class ParallelAgentManager:
         # RLock (re-entrant) — compression can run in the same thread as outer ExecutionEngine.run()
         # which may already hold this lock. Using RLock prevents deadlock.
         self._state_lock = threading.RLock()
-
-    def _acquire_slot(self, agent_class: str, instance_name: str):
-        """Acquire an endpoint scheduling slot. Returns a release callback or None for unlimited endpoints.
-        
-        This method is kept for backward compatibility with execution_engine.py which still uses
-        self.pool._execution._acquire_slot(). New code should use pool._acquire_slot() directly.
-        
-        Args:
-            agent_class: The agent class to acquire a slot for.
-            instance_name: The instance name for logging purposes.
-            
-        Returns:
-            A callable release function, or None if no slot management is needed.
-        """
-        # Delegate to the pool's _acquire_slot method
-        return self.pool._acquire_slot(agent_class, instance_name)
 
 
 class LoggerManager:

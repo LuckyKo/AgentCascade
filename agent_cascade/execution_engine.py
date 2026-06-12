@@ -377,25 +377,8 @@ class ExecutionEngine:
                                 f"async_results={len(async_results)}, has_user_messages={self.pool.has_messages(inst_name)}"
                             )
 
-                        # Inject async results as USER messages at wakeup
-                        # Manually inject async_results since we already drained them above
-                        if async_results:
-                            for result_tuple in async_results:
-                                result_content, function_id = result_tuple  # Unpack (result_string, function_id) tuple
-                                if function_id:
-                                    prefix = f"[BACKGROUND TOOL RESULT for {function_id}]"
-                                else:
-                                    prefix = "[BACKGROUND TOOL RESULT]"
-                                result_msg = Message(
-                                    role=USER, 
-                                    content=f"{prefix}: {result_content}"
-                                )
-                                messages.append(result_msg)
-                                llm_messages.append(result_msg)
-                                response.append(result_msg)
-                                with instance._compression_lock:
-                                    instance.conversation.append(result_msg)
-                            _invalidate_token_cache(instance)
+                        # Inject async results as USER messages at wakeup using helper
+                        self._inject_async_results(instance, async_results, messages, llm_messages, response)
                         
                         # Inject user messages using helper method
                         self._inject_pending_messages(
@@ -447,6 +430,8 @@ class ExecutionEngine:
                             final_results = self.pool.drain_async_results(inst_name)
                             if final_results:
                                 logger.debug(f"Drained {len(final_results)} late-arriving results before timeout")
+                                # Inject the drained results to prevent data loss
+                                self._inject_async_results(instance, final_results, messages, llm_messages, response)
                             with instance._state_lock:
                                 instance._transition(AgentState.COMPLETING)
                                 instance.sleeping_since = None  # Reset for consistency
@@ -483,19 +468,8 @@ class ExecutionEngine:
                             if not more_results:
                                 break
                             results_found = True
-                            for result_tuple in more_results:
-                                result_content, function_id = result_tuple  # Unpack (result_string, function_id) tuple
-                                if function_id:
-                                    prefix = f"[BACKGROUND TOOL RESULT for {function_id}]"
-                                else:
-                                    prefix = "[BACKGROUND TOOL RESULT]"
-                                result_msg = Message(role=USER, content=f"{prefix}: {result_content}")
-                                messages.append(result_msg)
-                                llm_messages.append(result_msg)
-                                response.append(result_msg)
-                                with instance._compression_lock:
-                                    instance.conversation.append(result_msg)
-                                    _invalidate_token_cache(instance)
+                            # Use helper to inject async results
+                            self._inject_async_results(instance, more_results, messages, llm_messages, response)
                             drain_count += 1
                         
                         if drain_count >= max_drain_iterations:
@@ -508,19 +482,8 @@ class ExecutionEngine:
                         final_drain = self.pool.drain_async_results(inst_name)
                         if final_drain:
                             results_found = True
-                            for result_tuple in final_drain:
-                                result_content, function_id = result_tuple  # Unpack (result_string, function_id) tuple
-                                if function_id:
-                                    prefix = f"[BACKGROUND TOOL RESULT for {function_id}]"
-                                else:
-                                    prefix = "[BACKGROUND TOOL RESULT]"
-                                result_msg = Message(role=USER, content=f"{prefix}: {result_content}")
-                                messages.append(result_msg)
-                                llm_messages.append(result_msg)
-                                response.append(result_msg)
-                                with instance._compression_lock:
-                                    instance.conversation.append(result_msg)
-                                    _invalidate_token_cache(instance)
+                            # Use helper to inject async results
+                            self._inject_async_results(instance, final_drain, messages, llm_messages, response)
                         
                         # If any results were found, transition to RUNNING so LLM processes them
                         if results_found:
@@ -1634,19 +1597,8 @@ class ExecutionEngine:
                     f"[CALL_AGENT_DEBUG] _post_turn_checks — safety drain caught {len(final_drain)} "
                     f"result(s) for {inst_name}"
                 )
-                for result_tuple in final_drain:
-                    result_content, function_id = result_tuple  # Unpack (result_string, function_id) tuple
-                    if function_id:
-                        prefix = f"[BACKGROUND TOOL RESULT for {function_id}]"
-                    else:
-                        prefix = "[BACKGROUND TOOL RESULT]"
-                    result_msg = Message(role=USER, content=f"{prefix}: {result_content}")
-                    messages.append(result_msg)
-                    llm_messages.append(result_msg)
-                    response.append(result_msg)
-                    with instance._compression_lock:
-                        instance.conversation.append(result_msg)
-                _invalidate_token_cache(instance)
+                # Use helper to inject async results
+                self._inject_async_results(instance, final_drain, messages, llm_messages, response)
                 return True  # Continue loop to process drained results
         except Exception as e:
             logger.error(
@@ -1654,6 +1606,41 @@ class ExecutionEngine:
             )
 
         return False
+
+    def _inject_async_results(self, instance, results, messages, llm_messages, response):
+        """Inject async results as USER messages with function_id tracking.
+        
+        Consolidates duplicated code for unpacking (result, function_id) tuples and injecting
+        them as USER messages. Used in SLEEPING guard injection, stable-state drain loop,
+        final safety drain, and _post_turn_checks safety drain.
+        
+        Args:
+            instance: The agent instance to update conversation for.
+            results: List of (result_string, function_id) tuples from drain_async_results.
+            messages: Current message list to append to.
+            llm_messages: LLM-formatted messages list to append to.
+            response: Response list to append to.
+        """
+        if not results:
+            return
+        
+        for result_tuple in results:
+            # Unpack (result_string, function_id) tuple — contract: drain_async_results always returns tuples
+            result_content, function_id = result_tuple
+            
+            # Build prefix with optional function_id tracking
+            prefix = f"[BACKGROUND TOOL RESULT for {function_id}]" if function_id else "[BACKGROUND TOOL RESULT]"
+            
+            # Create and inject the result message
+            result_msg = Message(role=USER, content=f"{prefix}: {result_content}")
+            messages.append(result_msg)
+            llm_messages.append(result_msg)
+            response.append(result_msg)
+            with instance._compression_lock:
+                instance.conversation.append(result_msg)
+        
+        # Invalidate token cache after injection
+        _invalidate_token_cache(instance)
 
     def _transition_to_sleeping(self, instance: 'AgentInstance') -> None:
         """Transition an agent instance to SLEEPING state.
@@ -1945,7 +1932,6 @@ class ExecutionEngine:
             agent_class=agent_class,
             child_instance_name=instance_name,
             args=args,
-            history=messages,
             caller=caller_name,
             nest_depth=child_depth,
         )
@@ -2769,123 +2755,6 @@ class ExecutionEngine:
     # ═══════════════════════════════════════════════════════════════════════
     #  Helper methods — token counting, tool detection, truncation
     # ═══════════════════════════════════════════════════════════════════════
-
-    def _execute_agent_sync(
-        self, agent_class: str, instance_name: str,
-        args: dict, caller_history: List[Message], caller: str, nest_depth: int = 0
-    ) -> str:
-        """Execute an agent synchronously through the unified loop. Replaces _stream_agent_instance_call().
-
-        Fix #5: Acquires endpoint scheduling slot before execution (matching async tasks in register_async_call).
-
-        Args:
-            nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
-        """
-        from agent_cascade.compression.helpers import extract_instance_output
-
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] _execute_agent_sync ENTRY — target={instance_name}, class={agent_class}, "
-            f"caller={caller}, nest_depth={nest_depth}"
-        )
-
-        template = self.pool.templates.get(agent_class)
-        if not template:
-            logger.error(
-                f"[CALL_AGENT_DEBUG] _execute_agent_sync EXIT (early) — target={instance_name}, "
-                f"reason=no_template, class={agent_class}"
-            )
-            return f"Error: Agent class '{agent_class}' not found."
-
-        # ── Endpoint scheduling: acquire slot for root agents, skip for nested ──
-        # Root agents (nest_depth=0) acquire a slot via _acquire_slot.
-        # Nested agents (nest_depth>0) skip — the parent already holds the slot.
-        # This prevents deadlock where both parent and child try to acquire the same slot.
-        # Known trade-off: nested sync agents bypass per-endpoint concurrency enforcement.
-        # This is acceptable because nested calls are serialized by the caller anyway,
-        # and top-level concurrency control (via parallel task slots) limits total capacity.
-        endpoint_release = None
-        if nest_depth > 0:
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] _execute_agent_sync — SKIPPING endpoint slot acquisition for {instance_name} "
-                f"(nest_depth={nest_depth}, caller already holds the slot)"
-            )
-        else:
-            # Root-level call: acquire a slot (or log why we can't)
-            if not hasattr(self.pool, '_execution') or not hasattr(self.pool._execution, '_acquire_slot'):
-                logger.error(
-                    f"[CALL_AGENT_DEBUG] _execute_agent_sync — fatal: pool missing _ExecutionManager "
-                    f"or _acquire_slot for {instance_name}. Endpoint scheduling is unavailable."
-                )
-                return f"Error: Endpoint scheduling not available for '{instance_name}'."
-            try:
-                endpoint_release = self.pool._execution._acquire_slot(agent_class, instance_name)
-                logger.debug(f"[CALL_AGENT_DEBUG] _execute_agent_sync — acquired endpoint slot for {instance_name}")
-            except Exception as e:
-                logger.warning(
-                    f"[CALL_AGENT_DEBUG] _execute_agent_sync — warning: failed to acquire endpoint slot for {instance_name}, "
-                    f"continuing without slot constraint (error={e})"
-                )
-
-        try:
-            # Bug #43 Fix: Pre-execution check — don't start if this instance was terminated while waiting
-            if self.pool.is_instance_terminated(instance_name):
-                logger.info(
-                    f"[CALL_AGENT_DEBUG] _execute_agent_sync — instance {instance_name} was terminated "
-                    f"before execution started, returning early"
-                )
-                return f"[{instance_name}\'s output]:\n(instance was terminated before execution)"
-
-            # Create and run via shared helper
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] _execute_agent_sync — calling _create_and_run_agent for {instance_name}"
-            )
-            inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller, nest_depth)
-
-            # Check return values — Bug #1 check: ensure _create_and_run_agent didn't return None
-            if inst is None or conv is None:
-                logger.error(
-                    f"[CALL_AGENT_DEBUG] BUG DETECTED — _create_and_run_agent returned None for {instance_name}: "
-                    f"inst={inst}, conv_type={type(conv).__name__}"
-                )
-                return f"Error running agent '{instance_name}': Internal error — agent creation returned None."
-
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] _execute_agent_sync — _create_and_run_agent returned for {instance_name}: "
-                f"inst_type={type(inst).__name__}, conv_len={len(conv)}"
-            )
-
-            # Note: _create_and_run_agent handles active_stack cleanup via its own finally block.
-            result_str = extract_instance_output(conv, instance_name)
-            if not result_str:
-                logger.warning(
-                    f"[CALL_AGENT_DEBUG] _execute_agent_sync — extract_instance_output returned empty for {instance_name}"
-                )
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] _execute_agent_sync — extract_instance_output for {instance_name}: "
-                f"result_preview={str(result_str)[:200]}"
-            )
-
-            # Bug #43 Fix: Clear leftover queued messages for this completed sub-agent
-            q = self.pool.message_queues.get(instance_name)
-            if q:
-                q.clear()
-
-            return f"[{instance_name}\'s output]:\n{result_str}"
-        except Exception as e:
-            # Catch exceptions from agent creation/execution and return as clean tool error
-            logger.error(
-                f"[CALL_AGENT_DEBUG] _execute_agent_sync EXIT (exception) — target={instance_name}, "
-                f"error_type={type(e).__name__}, error={e}"
-            )
-            return f"Error running agent '{instance_name}': {e}"
-        finally:
-            # Release endpoint slot when sync execution completes (only for root-level calls)
-            if endpoint_release is not None:
-                try:
-                    endpoint_release()
-                    logger.debug(f"[CALL_AGENT_DEBUG] _execute_agent_sync — released endpoint slot for {instance_name}")
-                except Exception as e:
-                    logger.warning(f"Failed to release endpoint slot for {instance_name}: {e}")
 
     def _get_max_tokens(self, instance: AgentInstance) -> int:
         """Resolve the effective max_input_tokens from LLM config.
