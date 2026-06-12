@@ -489,8 +489,10 @@ class ExecutionEngine:
                         results_found = False
                         
                         # Stable-state drain — keep draining until no more results arrive
-                        # Add iteration cap to prevent infinite spinning if results keep arriving
-                        max_drain_iterations = 100
+                        # Use a much higher cap since there's no real cost to draining 
+                        # (results are already in memory). 10,000 should handle cases where
+                        # many children complete simultaneously without silently dropping results.
+                        max_drain_iterations = 10000
                         drain_count = 0
                         while drain_count < max_drain_iterations:
                             more_results = self.pool.drain_async_results(inst_name)
@@ -1711,6 +1713,15 @@ class ExecutionEngine:
                 instance._transition(AgentState.SLEEPING)
                 instance.sleeping_since = time.monotonic()
                 instance._last_wakeup_log = time.monotonic()
+            else:
+                # Log warning when transition is skipped to help identify bugs where
+                # _transition_to_sleeping is called on agents not in RUNNING state.
+                # This indicates a logic bug in the caller — the agent should be
+                # in RUNNING state before attempting to sleep it.
+                logger.warning(
+                    f"_transition_to_sleeping skipped for {instance.instance_name}: "
+                    f"current state={instance.state.name} (expected RUNNING)"
+                )
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Tool Execution — unified path for ALL tools including call_agent
@@ -1982,7 +1993,6 @@ class ExecutionEngine:
         # - Result extraction and injection into async results buffer
         self.pool.register_async_call(
             instance_name=caller_name,
-            call_id=f"{instance_name}_{time.monotonic()}",  # Synthetic tracking ID
             function_id=function_id,
             agent_class=agent_class,
             child_instance_name=instance_name,

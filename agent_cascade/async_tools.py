@@ -106,9 +106,10 @@ class AsyncToolRegistry:
         marks the entry as completed. If pool is configured, puts result into
         AsyncResultBuffer with the function_id for proper LLM API matching.
         
-        Lock ordering note: _lock is released BEFORE calling put() to avoid
-        nested locks. Race condition where completed=True but put() not yet
-        called is harmless (has_pending returns False, which is acceptable).
+        Lock ordering note: _lock is held through BOTH marking completed AND put() 
+        to prevent race condition where has_pending returns False (entry.completed=True)
+        but the result isn't in the buffer yet. If an exception occurs between 
+        has_pending and the safety drain, results could be lost without this fix.
         
         Args:
             entry: BackgroundToolEntry to execute.
@@ -118,16 +119,24 @@ class AsyncToolRegistry:
         except Exception as e:
             entry.error = str(e)
         finally:
-            # Mark completed while holding lock
+            # Mark completed AND put result into buffer WHILE holding lock to prevent
+            # race condition where has_pending returns False but result isn't in buffer yet
             with self._lock:
                 entry.completed = True
-            # Put result into buffer (outside lock to avoid nested locking)
-            if self.pool and hasattr(self.pool, '_async_results'):
-                if entry.error:
-                    result_msg = f"[Background Tool Error]:\n{entry.error}"
-                else:
-                    result_msg = f"[Background Tool Result]:\n{entry.result}"
-                self.pool._async_results.put(entry.agent_instance_name, result_msg, function_id=entry.function_id)
+                # Put result into buffer while holding lock (put() is also thread-safe)
+                if self.pool and hasattr(self.pool, '_async_results'):
+                    if entry.error:
+                        result_msg = f"[Background Tool Error]:\n{entry.error}"
+                    else:
+                        result_msg = f"[Background Tool Result]:\n{entry.result}"
+                    try:
+                        self.pool._async_results.put(entry.agent_instance_name, result_msg, function_id=entry.function_id)
+                    except Exception as e:
+                        # Log but don't propagate — we want to mark entry as completed even if put fails
+                        # This prevents the tool from being stuck in pending state forever
+                        logger.error(
+                            f"[AsyncToolRegistry] Failed to buffer result for {entry.agent_instance_name}: {e}"
+                        )
     
     def has_pending(self, instance_name: str) -> bool:
         """Check if any background tools are still pending for this instance.

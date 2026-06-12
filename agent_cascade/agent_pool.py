@@ -1254,7 +1254,7 @@ class AgentPool:
             logger.error(f"Failed to acquire endpoint slot for {instance_name}: {e}")
             raise
 
-    def register_async_call(self, instance_name: str, call_id: str, function_id: Optional[str] = None,
+    def register_async_call(self, instance_name: str, function_id: Optional[str] = None,
                             agent_class: Optional[str] = None, child_instance_name: Optional[str] = None,
                             args: Optional[dict] = None, caller: Optional[str] = None, nest_depth: int = 0):
         """Register and execute an async tool call via AsyncToolRegistry.
@@ -1265,7 +1265,6 @@ class AgentPool:
         
         Args:
             instance_name: The caller's instance name (results go here)
-            call_id: Synthetic tracking ID for this async call
             function_id: The LLM's tool_call_id for this call
             agent_class: Class of child agent to run
             child_instance_name: Name of the child agent instance

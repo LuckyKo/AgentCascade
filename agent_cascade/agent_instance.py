@@ -11,7 +11,7 @@ See DESIGN_REWRITE.md §2.1 for design rationale.
 import threading
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from agent_cascade.llm.schema import Message
 from agent_cascade.settings import DEFAULT_COMPRESSION_COOLDOWN_SECONDS
@@ -123,7 +123,7 @@ class AgentInstance:
     _streaming_responses: List[Message] = field(default_factory=list)  # Partial LLM content during streaming, updated every ~150ms
 
     # ── Concurrency Slot Management (Parent Slot Acquisition Fix) ───────────
-    _slot_release: Optional[callable] = None  # Callback to release the endpoint concurrency slot when transitioning to SLEEPING or exiting
+    _slot_release: Optional[Callable[[], None]] = None  # Callback to release the endpoint concurrency slot when transitioning to SLEEPING or exiting
 
     def _transition(self, new_state: AgentState) -> None:
         """Transition to a new state with validation.
