@@ -561,6 +561,21 @@ class AgentPool:
         """Return all available agent template names."""
         return list(self.templates.keys())
 
+    def get_agent_info(self, name: str) -> dict | None:
+        """Return info dict for an agent template (name, tagline/description, tools).
+
+        Used by list_agents tool and the default prompt builder.
+        Returns None if the template is not found.
+        """
+        template = self.templates.get(name)
+        if template is None:
+            return None
+        return {
+            'name': getattr(template, 'name', name),
+            'tagline': getattr(template, 'description', ''),
+            'tools': list(getattr(template, 'function_map', {}).keys()),
+        }
+
     def reset(self):
         """Full reset of agent state for "New Session".
 
