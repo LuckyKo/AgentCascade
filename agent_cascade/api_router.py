@@ -661,7 +661,7 @@ class APIRouter:
                         break
             
             # ── CONCURRENCY CONTROL (Per-API-Call Semaphore, Layer 2) ──
-            # Layer 1 (EndpointScheduler in submit_task): serializes agent lifecycles.
+            # Layer 1 (EndpointScheduler in register_async_call): serializes agent lifecycles.
             # Layer 2 (this semaphore): limits parallel API calls WITHIN an agent's window.
             # For concurrency=0 endpoints both layers are active but redundant — 
             # EndpointScheduler ensures only one agent at a time, so this just adds

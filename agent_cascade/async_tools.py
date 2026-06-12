@@ -31,6 +31,8 @@ class BackgroundToolEntry:
         error: Error message as string if error occurred (None if successful).
                Note: Using str instead of Exception to avoid serialization issues.
         completed: Whether the tool has finished executing
+        function_id: The LLM's tool_call_id (function_id) for this async tool call.
+                     Used to match results back to original tool calls in the LLM API.
     """
     tool_call: Callable[[], str]
     agent_instance_name: str
@@ -39,6 +41,7 @@ class BackgroundToolEntry:
     result: Optional[str] = None
     error: Optional[str] = None
     completed: bool = False
+    function_id: Optional[str] = None
 
 
 class AsyncToolRegistry:
@@ -71,7 +74,7 @@ class AsyncToolRegistry:
             thread_name_prefix="async_tool"
         )
     
-    def register(self, instance_name: str, tool_call: Callable[[], str]) -> BackgroundToolEntry:
+    def register(self, instance_name: str, tool_call: Callable[[], str], function_id: Optional[str] = None) -> BackgroundToolEntry:
         """Register a background tool for execution.
         
         Creates a BackgroundToolEntry, adds it to the pending list, and submits
@@ -80,6 +83,7 @@ class AsyncToolRegistry:
         Args:
             instance_name: The agent instance name owning this tool call.
             tool_call: Callable that executes the tool (no args, returns str).
+            function_id: The LLM's tool_call_id for this async call (optional).
             
         Returns:
             BackgroundToolEntry tracking this tool's execution.
@@ -87,7 +91,8 @@ class AsyncToolRegistry:
         with self._lock:
             entry = BackgroundToolEntry(
                 tool_call=tool_call,
-                agent_instance_name=instance_name
+                agent_instance_name=instance_name,
+                function_id=function_id
             )
             self._pending.setdefault(instance_name, []).append(entry)
             # Submit to executor outside lock to avoid holding lock during execution
@@ -99,7 +104,7 @@ class AsyncToolRegistry:
         
         Runs the tool_call in a worker thread, captures result or error, and
         marks the entry as completed. If pool is configured, puts result into
-        AsyncResultBuffer.
+        AsyncResultBuffer with the function_id for proper LLM API matching.
         
         Lock ordering note: _lock is released BEFORE calling put() to avoid
         nested locks. Race condition where completed=True but put() not yet
@@ -122,7 +127,7 @@ class AsyncToolRegistry:
                     result_msg = f"[Background Tool Error]:\n{entry.error}"
                 else:
                     result_msg = f"[Background Tool Result]:\n{entry.result}"
-                self.pool._async_results.put(entry.agent_instance_name, result_msg)
+                self.pool._async_results.put(entry.agent_instance_name, result_msg, function_id=entry.function_id)
     
     def has_pending(self, instance_name: str) -> bool:
         """Check if any background tools are still pending for this instance.
@@ -162,16 +167,17 @@ class AsyncResultBuffer:
     drain operation for efficient batch retrieval.
     
     Attributes:
-        _results: Maps instance_name to list of result strings
+        _results: Maps instance_name to list of (result_string, function_id) tuples
         _lock: Lock protecting _results dictionary
     """
     
     def __init__(self):
         """Initialize the async result buffer."""
-        self._results: Dict[str, List[str]] = {}
+        # Store (result_string, function_id) tuples so the caller knows which tool_call_id the result belongs to
+        self._results: Dict[str, List[tuple]] = {}
         self._lock = threading.Lock()
     
-    def put(self, instance_name: str, result: str):
+    def put(self, instance_name: str, result: str, function_id: Optional[str] = None):
         """Add a result to the buffer for this instance.
         
         Thread-safe append operation. Creates new list if instance not present.
@@ -179,11 +185,12 @@ class AsyncResultBuffer:
         Args:
             instance_name: The agent instance this result belongs to.
             result: The string result from a completed async tool.
+            function_id: The LLM's tool_call_id for this async call (optional).
         """
         with self._lock:
-            self._results.setdefault(instance_name, []).append(result)
+            self._results.setdefault(instance_name, []).append((result, function_id))
     
-    def drain(self, instance_name: str) -> List[str]:
+    def drain(self, instance_name: str) -> List[tuple]:
         """Remove and return all results for this instance.
         
         Atomically pops the entire results list under lock, minimizing lock
@@ -193,7 +200,7 @@ class AsyncResultBuffer:
             instance_name: The agent instance to drain results for.
             
         Returns:
-            List of result strings (may be empty). Original buffer is cleared.
+            List of (result_string, function_id) tuples (may be empty). Original buffer is cleared.
         """
         with self._lock:
             return self._results.pop(instance_name, [])

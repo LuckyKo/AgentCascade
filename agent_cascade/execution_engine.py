@@ -380,10 +380,15 @@ class ExecutionEngine:
                         # Inject async results as USER messages at wakeup
                         # Manually inject async_results since we already drained them above
                         if async_results:
-                            for result in async_results:
+                            for result_tuple in async_results:
+                                result_content, function_id = result_tuple  # Unpack (result_string, function_id) tuple
+                                if function_id:
+                                    prefix = f"[BACKGROUND TOOL RESULT for {function_id}]"
+                                else:
+                                    prefix = "[BACKGROUND TOOL RESULT]"
                                 result_msg = Message(
                                     role=USER, 
-                                    content=f"[BACKGROUND TOOL RESULT]: {result}"
+                                    content=f"{prefix}: {result_content}"
                                 )
                                 messages.append(result_msg)
                                 llm_messages.append(result_msg)
@@ -478,8 +483,13 @@ class ExecutionEngine:
                             if not more_results:
                                 break
                             results_found = True
-                            for result in more_results:
-                                result_msg = Message(role=USER, content=f"[BACKGROUND TOOL RESULT]: {result}")
+                            for result_tuple in more_results:
+                                result_content, function_id = result_tuple  # Unpack (result_string, function_id) tuple
+                                if function_id:
+                                    prefix = f"[BACKGROUND TOOL RESULT for {function_id}]"
+                                else:
+                                    prefix = "[BACKGROUND TOOL RESULT]"
+                                result_msg = Message(role=USER, content=f"{prefix}: {result_content}")
                                 messages.append(result_msg)
                                 llm_messages.append(result_msg)
                                 response.append(result_msg)
@@ -498,8 +508,13 @@ class ExecutionEngine:
                         final_drain = self.pool.drain_async_results(inst_name)
                         if final_drain:
                             results_found = True
-                            for result in final_drain:
-                                result_msg = Message(role=USER, content=f"[BACKGROUND TOOL RESULT]: {result}")
+                            for result_tuple in final_drain:
+                                result_content, function_id = result_tuple  # Unpack (result_string, function_id) tuple
+                                if function_id:
+                                    prefix = f"[BACKGROUND TOOL RESULT for {function_id}]"
+                                else:
+                                    prefix = "[BACKGROUND TOOL RESULT]"
+                                result_msg = Message(role=USER, content=f"{prefix}: {result_content}")
                                 messages.append(result_msg)
                                 llm_messages.append(result_msg)
                                 response.append(result_msg)
@@ -1343,9 +1358,14 @@ class ExecutionEngine:
             except Exception:
                 pass
 
+            # Extract function_id from the assistant message that had the tool call BEFORE executing
+            # This is critical — without it, the LLM API can't match tool results to tool calls
+            extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
+            function_id = extra_data.get('function_id')
+
             try:
                 try:
-                    tool_result = self._execute_tool(instance, tool_name, tool_args, llm_messages)
+                    tool_result = self._execute_tool(instance, tool_name, tool_args, llm_messages, function_id=function_id)
                 except Exception as e:
                     logger.error(f"Tool {tool_name} failed for {inst_name}: {e}")
                     tool_result = f"Error: {e}"
@@ -1400,10 +1420,6 @@ class ExecutionEngine:
                 except Exception:
                     pass
 
-            # Extract function_id from the assistant message that had the tool call
-            # This is critical — without it, the LLM API can't match tool results to tool calls
-            extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
-
             # Track compress_context execution
             if tool_name == 'compress_context':
                 self._rebuild_working_set(messages, llm_messages, inst_name)
@@ -1413,12 +1429,13 @@ class ExecutionEngine:
                     logger.error(f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
 
             # Build function result message — include function_id and tool_success per OpenAI spec
+            # function_id was extracted BEFORE _execute_tool call above
             fn_msg = Message(
                 role=FUNCTION,
                 name=tool_name,
                 content=tool_result,
                 extra={
-                    'function_id': extra_data.get('function_id', '1'),
+                    'function_id': function_id or '1',
                     'tool_success': _tool_success,
                 },
             )
@@ -1617,8 +1634,13 @@ class ExecutionEngine:
                     f"[CALL_AGENT_DEBUG] _post_turn_checks — safety drain caught {len(final_drain)} "
                     f"result(s) for {inst_name}"
                 )
-                for result in final_drain:
-                    result_msg = Message(role=USER, content=f"[BACKGROUND TOOL RESULT]: {result}")
+                for result_tuple in final_drain:
+                    result_content, function_id = result_tuple  # Unpack (result_string, function_id) tuple
+                    if function_id:
+                        prefix = f"[BACKGROUND TOOL RESULT for {function_id}]"
+                    else:
+                        prefix = "[BACKGROUND TOOL RESULT]"
+                    result_msg = Message(role=USER, content=f"{prefix}: {result_content}")
                     messages.append(result_msg)
                     llm_messages.append(result_msg)
                     response.append(result_msg)
@@ -1749,7 +1771,7 @@ class ExecutionEngine:
 
     def _execute_tool(
         self, instance: AgentInstance, tool_name: str,
-        tool_args, messages: List[Message]
+        tool_args, messages: List[Message], function_id: Optional[str] = None
     ) -> str:
         """Execute any tool. Including call_agent and dismiss_agent.
 
@@ -1761,6 +1783,7 @@ class ExecutionEngine:
             tool_name: Name of the tool to execute.
             tool_args: Arguments for the tool (str or dict).
             messages: Current conversation messages.
+            function_id: The LLM's tool_call_id for this tool call (optional).
 
         Returns:
             Tool execution result as a string.
@@ -1769,7 +1792,8 @@ class ExecutionEngine:
             # ── CALL_AGENT DEBUG: Entry point ──
             logger.debug(
                 f"[CALL_AGENT_DEBUG] _execute_tool ENTRY — instance={instance.instance_name}, "
-                f"tool_args_type={type(tool_args).__name__}, tool_args_preview={str(tool_args)[:200]}"
+                f"tool_args_type={type(tool_args).__name__}, tool_args_preview={str(tool_args)[:200]}, "
+                f"function_id={function_id}"
             )
             resolved = self._resolve_placeholders(tool_args, instance.instance_name, tool_name)
             logger.debug(
@@ -1781,7 +1805,7 @@ class ExecutionEngine:
                     f"[CALL_AGENT_DEBUG] _resolve_placeholders returned None for instance {instance.instance_name} — "
                     f"this means JSON parsing failed in tool args: {str(tool_args)[:300]}"
                 )
-            result = self._handle_call_agent(resolved, messages, instance)
+            result = self._handle_call_agent(resolved, messages, instance, function_id=function_id)
             logger.debug(
                 f"[CALL_AGENT_DEBUG] _handle_call_agent returned — result_type={type(result).__name__}, "
                 f"result_preview={str(result)[:200]}"
@@ -1817,7 +1841,7 @@ class ExecutionEngine:
             self._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
 
-    def _handle_call_agent(self, args: Any, messages: List[Message], instance: AgentInstance) -> str:
+    def _handle_call_agent(self, args: Any, messages: List[Message], instance: AgentInstance, function_id: Optional[str] = None) -> str:
         """Handle call_agent tool call — the unified path replacing the old sub-agent execution.
 
         Works the same for any agent calling another agent. No special paths.
@@ -1826,6 +1850,7 @@ class ExecutionEngine:
             args: Tool arguments (instance_name, agent_class, task).
             messages: Caller's conversation messages.
             instance: The calling agent instance.
+            function_id: The LLM's tool_call_id for this async call (optional).
 
         Returns:
             Result string from the called agent.
@@ -1833,7 +1858,7 @@ class ExecutionEngine:
         caller_name = instance.instance_name
         logger.debug(
             f"[CALL_AGENT_DEBUG] _handle_call_agent ENTRY — caller={caller_name}, "
-            f"args_type={type(args).__name__}, args_preview={str(args)[:300]}"
+            f"args_type={type(args).__name__}, args_preview={str(args)[:300]}, function_id={function_id}"
         )
 
         if args is None:
@@ -1896,36 +1921,40 @@ class ExecutionEngine:
                     f"The caller '{instance.instance_name}' is at depth {caller_depth}. "
                     f"Cannot create agent '{instance_name}' at depth {child_depth}.")
 
-        # NOTE: Concurrency enforcement now happens in _acquire_slot() within submit_task().
+        # NOTE: Concurrency enforcement happens in _acquire_slot() within register_async_call's callable.
         # The effective_concurrency check below was previously used to decide between sync/async paths,
-        # but since both paths now use submit_parallel(), the actual slot acquisition handles concurrency.
+        # but since all paths now use register_async_call(), the actual slot acquisition handles concurrency.
         # This block is kept for logging/debugging purposes only.
 
         # Async launch path — unified for all call_agent calls (all calls are now async)
-        # Generate call_id once — it will be passed through the parallel execution chain
-        call_id = f"{instance_name}_{time.monotonic()}"
         
         logger.debug(
             f"[CALL_AGENT_DEBUG] Taking ASYNC path — caller={caller_name}, target={instance_name}, "
-            f"class={agent_class}, child_depth={child_depth}, call_id={call_id}"
+            f"class={agent_class}, child_depth={child_depth}, function_id={function_id}"
         )
         
-        # Register this async call BEFORE submitting to avoid TOCTOU race condition.
-        # If we register after submit_parallel, there's a window where the task completes
-        # before has_pending() knows about it, causing the caller to miss the SLEEPING transition.
-        self.pool.register_async_call(caller_name, call_id)
-        
-        # Launch agent asynchronously via submit_parallel (runs in ThreadPoolExecutor)
-        # Caller continues its turn; SLEEPING transition happens at end-of-turn in _post_turn_checks
-        result = self.pool.submit_parallel(
-            agent_class, instance_name, args, messages, instance.instance_name, child_depth, call_id=call_id
+        # Register and launch agent asynchronously via AsyncToolRegistry.
+        # The callable inside register_async_call handles:
+        # - Endpoint slot acquisition
+        # - ExecutionEngine creation and agent execution
+        # - Result extraction and injection into async results buffer
+        self.pool.register_async_call(
+            instance_name=caller_name,
+            call_id=f"{instance_name}_{time.monotonic()}",  # Synthetic tracking ID
+            function_id=function_id,
+            agent_class=agent_class,
+            child_instance_name=instance_name,
+            args=args,
+            history=messages,
+            caller=caller_name,
+            nest_depth=child_depth,
         )
         
         logger.debug(
             f"[CALL_AGENT_DEBUG] EXIT (async) — caller={caller_name}, target={instance_name}, "
-            f"call_id={call_id}, result_preview={str(result)[:200]}"
+            f"function_id={function_id}"
         )
-        return result
+        return f"Agent '{instance_name}' launched asynchronously. Waiting for result."
 
     def _handle_dismiss_agent(self, args: Any, instance: AgentInstance) -> str:
         """Handle dismiss_agent tool call — removes another agent from pool.
@@ -2747,7 +2776,7 @@ class ExecutionEngine:
     ) -> str:
         """Execute an agent synchronously through the unified loop. Replaces _stream_agent_instance_call().
 
-        Fix #5: Acquires endpoint scheduling slot before execution (matching parallel tasks in submit_task).
+        Fix #5: Acquires endpoint scheduling slot before execution (matching async tasks in register_async_call).
 
         Args:
             nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.

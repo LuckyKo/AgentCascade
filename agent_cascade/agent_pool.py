@@ -11,7 +11,7 @@ See DESIGN_REWRITE.md §2.2 for design rationale.
 
 import time
 import threading
-import concurrent.futures
+import copy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -292,11 +292,6 @@ class AgentPool:
         # _async_registry: tracks pending async tool calls by instance name
         self._async_results: AsyncResultBuffer = AsyncResultBuffer()
         self._async_registry: AsyncToolRegistry = AsyncToolRegistry(pool=self)
-        
-        # Backward compatibility: track pending call IDs for register_async_call/complete_async_call
-        # This supports the existing API where callers use string call_ids instead of callables.
-        self._async_pending_calls: Dict[str, set] = {}  # instance_name -> set of call_ids
-        self._async_pending_lock = threading.Lock()     # separate lock for pending call tracking
 
         # ── Global state ─────────────────────────────────────────────────────
         self._stopped_event = threading.Event()         # M3 fix: stopped flag for emergency shutdown
@@ -1187,7 +1182,7 @@ class AgentPool:
 
     # ── Async Results Buffer (SLEEPING state support) ───────────────────────
 
-    def add_async_result(self, instance_name: str, result: str):
+    def add_async_result(self, instance_name: str, result: str, function_id: Optional[str] = None):
         """Add a completed async tool result to the buffer for an instance.
         
         Delegate method for backward compatibility — delegates to AsyncResultBuffer.
@@ -1195,8 +1190,9 @@ class AgentPool:
         Args:
             instance_name: The agent instance that dispatched this async tool.
             result: The string result from the completed async tool.
+            function_id: The LLM's tool_call_id for this async call (optional).
         """
-        self._async_results.put(instance_name, result)
+        self._async_results.put(instance_name, result, function_id=function_id)
 
     def drain_async_results(self, instance_name: str) -> List[str]:
         """Drain all completed async results for an instance atomically.
@@ -1221,9 +1217,7 @@ class AgentPool:
     def has_pending(self, instance_name: str) -> bool:
         """Check if there are pending async tool calls for an instance.
         
-        Checks both:
-        1. Legacy string-based call tracking (_async_pending_calls)
-        2. New BackgroundToolEntry tracking (_async_registry)
+        Uses AsyncToolRegistry to track pending background tool entries.
         
         Args:
             instance_name: The agent instance to check.
@@ -1231,42 +1225,93 @@ class AgentPool:
         Returns:
             True if the instance has pending async tools, False otherwise.
         """
-        # Check legacy string-based tracking
-        with self._async_pending_lock:
-            if self._async_pending_calls.get(instance_name):
-                return True
-        # Check new BackgroundToolEntry tracking
         return self._async_registry.has_pending(instance_name)
 
-    def register_async_call(self, instance_name: str, call_id: str):
-        """Register a new async tool call for an instance.
+    def _acquire_slot(self, agent_class: str, instance_name: str):
+        """Acquire an endpoint scheduling slot. Returns a release callback or None for unlimited endpoints."""
         
-        Delegate method for backward compatibility. New implementation uses
-        AsyncToolRegistry.register() with BackgroundToolEntry instead of string IDs.
+        if not hasattr(self, 'api_router') or not self.api_router:
+            return None
         
-        Args:
-            instance_name: The agent instance making the async call.
-            call_id: Unique identifier for this async call (maintained for compatibility).
-        """
-        with self._async_pending_lock:
-            self._async_pending_calls.setdefault(instance_name, set()).add(call_id)
+        router = self.api_router
+        try:
+            # Get the effective concurrency for this agent class (includes default fallback)
+            concurrency_limit = router.get_effective_concurrency(agent_class)
+            
+            # Resolve the actual api_base that will be used
+            llm_cfg = router.get_llm_config(agent_class)
+            api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
+            
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] _acquire_slot — agent_class={agent_class}, "
+                f"instance_name={instance_name}, api_base={api_base}, concurrency_limit={concurrency_limit}"
+            )
+            
+            # Acquire a slot on the endpoint scheduler (blocks if at capacity)
+            return router.scheduler.acquire(api_base, concurrency_limit)
+        except Exception as e:
+            logger.error(f"Failed to acquire endpoint slot for {instance_name}: {e}")
+            raise
 
-    def complete_async_call(self, instance_name: str, call_id: str):
-        """Mark an async tool call as completed for an instance.
+    def register_async_call(self, instance_name: str, call_id: str, function_id: Optional[str] = None,
+                            agent_class: str = None, child_instance_name: str = None,
+                            args: dict = None, history: list = None, caller: str = None, nest_depth: int = 0):
+        """Register and execute an async tool call via AsyncToolRegistry.
         
-        Delegate method for backward compatibility. New implementation tracks completion
-        via BackgroundToolEntry.completed flag instead of string IDs.
+        Creates a callable that wraps the child agent execution logic (endpoint slot
+        acquisition, ExecutionEngine creation, result extraction) and submits it to
+        the thread pool via AsyncToolRegistry.
         
         Args:
-            instance_name: The agent instance that made the async call.
-            call_id: The identifier of the completed call (maintained for compatibility).
+            instance_name: The caller's instance name (results go here)
+            call_id: Synthetic tracking ID for this async call
+            function_id: The LLM's tool_call_id for this call
+            agent_class: Class of child agent to run
+            child_instance_name: Name of the child agent instance
+            args: Tool arguments for the child agent
+            history: Conversation history to pass to child
+            caller: Name of the calling agent
+            nest_depth: Nesting depth for max_nesting_depth enforcement
         """
-        with self._async_pending_lock:
-            if instance_name in self._async_pending_calls:
-                self._async_pending_calls[instance_name].discard(call_id)
-                # Clean up empty sets
-                if not self._async_pending_calls[instance_name]:
-                    del self._async_pending_calls[instance_name]
+        if not agent_class or not child_instance_name:
+            logger.error(f"register_async_call requires agent_class and child_instance_name")
+            return
+        
+        # Deep copy history for thread safety
+        safe_history = copy.deepcopy(history) if history else []
+        
+        def run_child_agent() -> str:
+            """Callable that runs the child agent and returns the result string."""
+            endpoint_release = None
+            try:
+                # Acquire endpoint slot (blocks if at capacity, up to 300s timeout)
+                endpoint_release = self._acquire_slot(agent_class, child_instance_name)
+                
+                from agent_cascade.execution_engine import ExecutionEngine
+                from agent_cascade.compression.helpers import extract_instance_output
+                
+                engine = ExecutionEngine(self)
+                inst, child_conv = engine._create_and_run_agent(agent_class, child_instance_name, args, caller, nest_depth)
+                
+                if inst is None or child_conv is None:
+                    return f"[Parallel Agent '{child_instance_name}' Failed]: Internal error — agent creation returned None."
+                
+                if not child_conv:
+                    return f"[Parallel Agent '{child_instance_name}' Failed]: Execution terminated with no output."
+                
+                result = extract_instance_output(child_conv, child_instance_name)
+                return f"[Parallel Agent '{child_instance_name}' Finished]:\n{result}"
+            
+            except Exception as e:
+                return f"[Parallel Agent '{child_instance_name}' Failed]:\n{str(e)}"
+            finally:
+                if endpoint_release is not None:
+                    try:
+                        endpoint_release()
+                    except Exception:
+                        pass
+        
+        self._async_registry.register(instance_name, run_child_agent, function_id=function_id)
 
     # ── Halt state management ──────────────────────────────────────────────
 
@@ -1391,25 +1436,6 @@ class AgentPool:
             except Exception as e:
                 logger.debug(f"Logger truncation failed during rollback for {instance_name} (non-critical): {e}")
 
-    # ── Parallel execution delegation ──────────────────────────────────────
-
-    def submit_parallel(
-        self, agent_class: str, instance_name: str, args: dict, history: List[Message], caller: str, nest_depth: int = 0, call_id: str = None
-    ):
-        """Submit a parallel agent task.
-
-        Args:
-            nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
-            call_id: Unique identifier for this async call (generated by caller for tracking).
-        """
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] submit_parallel ENTRY — target={instance_name}, class={agent_class}, "
-            f"caller={caller}, nest_depth={nest_depth}, call_id={call_id}"
-        )
-        result = self._execution.submit_task(agent_class, instance_name, args, history, caller, nest_depth, call_id=call_id)
-        logger.debug(f"[CALL_AGENT_DEBUG] submit_parallel EXIT — target={instance_name}, result_preview={str(result)[:200]}")
-        return result
-
     # ── Logger delegation ──────────────────────────────────────────────────
 
     def get_logger(self, instance_name: str, agent_class: str):
@@ -1447,301 +1473,35 @@ class AgentPool:
 # ── Placeholder manager classes (to be implemented in later phases) ─────
 
 class ParallelAgentManager:
-    """Manages parallel agent execution via thread pool. Active_stack, task lifecycle."""
-
+    """Manages parallel agent execution state. Active_stack for tracking nested agent calls."""
+    
     def __init__(self, pool: AgentPool):
+        """Initialize the parallel agent manager.
         
+        Args:
+            pool: Reference to the AgentPool instance.
+        """
         self.pool = pool
         self.active_stack: List[tuple] = []  # Stack of (instance_name, nest_depth) tuples for active agents
-        self.active_tasks: Dict[str, tuple] = {}  # instance_name → (Future, caller, agent_class)
         # RLock (re-entrant) — compression can run in the same thread as outer ExecutionEngine.run()
         # which may already hold this lock. Using RLock prevents deadlock.
         self._state_lock = threading.RLock()
 
-        # Thread pool for parallel execution — uses pool.settings.max_workers (default 10)
-        try:
-            max_workers = pool.settings.max_workers
-            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-        except Exception as e:
-            logger.debug(f"Parallel executor initialization failed (non-critical): {e}")
-            self.executor = None
-
-    def resize_executor(self, max_workers: int) -> bool:
-        """Resize the ThreadPoolExecutor to a new worker count.
-        
-        Shuts down the old executor and creates a new one with the specified number
-        of workers. Any tasks still running on the old executor will be lost — this
-        is intended for configuration changes between sessions, not during active work.
-        
-        All submitted-but-not-started tasks are cancelled. Running tasks are NOT
-        interrupted (ThreadPoolExecutor.shutdown(wait=False) default behavior).
-
-        Args:
-            max_workers: New maximum number of worker threads.
-
-        Returns:
-            True if resize succeeded, False if executor was None or exception occurred.
-        """
-        if self.executor is None:
-            return False
-
-        old_executor = self.executor
-        try:
-            # Cancel pending tasks (don't wait for running ones to finish)
-            old_executor.shutdown(wait=False, cancel_futures=True)
-            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-            logger.info(f"[THREAD_POOL] Resized executor: {max_workers} workers (was {old_executor._max_workers})")
-            return True
-        except Exception as e:
-            # Restore old executor if resize fails
-            logger.error(f"[THREAD_POOL] Failed to resize executor to {max_workers}: {e}")
-            try:
-                old_executor.shutdown(wait=False, cancel_futures=True)
-            except Exception:
-                pass
-            self.executor = None
-            return False
-
-    def has_active_tasks(self, instance_name: str) -> bool:
-        """Check if there are active parallel tasks for a given instance (caller)."""
-        return any(caller == instance_name for _, caller, _ in self.active_tasks.values())
-
-    def count_by_class(self, agent_class: str) -> int:
-        """Count active instances of a given class. Thread-safe via _state_lock."""
-        with self._state_lock:
-            return sum(1 for (name, _depth) in self.active_stack if self.pool.get_instance(name) and
-                       self.pool.get_instance(name).agent_class.lower() == agent_class.lower())
-
-    def _notify_async_error(self, instance_name: str, caller: str, error_msg: str, call_id: Optional[str] = None):
-        """Helper to send error message to caller and complete async call (DRY principle).
-        
-        Used by task_wrapper in submit_task() to consolidate duplicated error handling logic.
-        Each operation is individually wrapped in try-except to ensure complete_async_call
-        always runs even if add_async_result fails, preventing parent from hanging in SLEEPING.
-        
-        Args:
-            instance_name: Name of the agent instance that failed
-            caller: Name of the calling agent
-            error_msg: Error message to send
-            call_id: Optional async call ID to complete (if None, logs warning)
-        """
-        # Ensure complete_async_call is called even if add_async_result fails
-        try:
-            self.pool.add_async_result(caller, error_msg)
-        except Exception as e:
-            logger.error(
-                f"[CALL_AGENT_DEBUG] _notify_async_error — failed to add async result "
-                f"for caller={caller}: {e}"
-            )
-        
-        if call_id:
-            try:
-                self.pool.complete_async_call(caller, call_id)
-                logger.debug(
-                    f"[CALL_AGENT_DEBUG] _notify_async_error — completed async call {call_id} "
-                    f"for caller {caller}"
-                )
-            except Exception as e:
-                logger.error(
-                    f"[CALL_AGENT_DEBUG] _notify_async_error — failed to complete async call "
-                    f"{call_id} for caller={caller}: {e}"
-                )
-        else:
-            logger.warning(
-                f"[CALL_AGENT_DEBUG] _notify_async_error — no call_id provided for {instance_name}"
-            )
-        
-        # Note: send_message removed to avoid orphan queue entries (see MAJOR FIX 4)
-        # The async result buffer is sufficient for error notification
-
     def _acquire_slot(self, agent_class: str, instance_name: str):
-        """Acquire an endpoint scheduling slot. Returns a release callback or None for unlimited endpoints."""
-
-        if not hasattr(self.pool, 'api_router') or not self.pool.api_router:
-            return None
-
-        router = self.pool.api_router
-        try:
-            # Get the effective concurrency for this agent class (includes default fallback)
-            concurrency_limit = router.get_effective_concurrency(agent_class)
-
-            # Resolve the actual api_base that will be used
-            llm_cfg = router.get_llm_config(agent_class)
-            api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
-
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] _acquire_slot — agent_class={agent_class}, "
-                f"instance_name={instance_name}, api_base={api_base}, concurrency_limit={concurrency_limit}"
-            )
-
-            # Acquire a slot on the endpoint scheduler (blocks if at capacity)
-            return router.scheduler.acquire(api_base, concurrency_limit)
-        except Exception as e:
-            logger.error(f"Failed to acquire endpoint slot for {instance_name}: {e}")
-            raise
-
-    def submit_task(self, agent_class, instance_name, args, history, caller, nest_depth: int = 0, call_id: str = None):
-        """Submit an agent to run in the background thread pool. Returns immediately.
+        """Acquire an endpoint scheduling slot. Returns a release callback or None for unlimited endpoints.
         
-        Item 13: Endpoint scheduling slot is acquired INSIDE the worker thread (task_wrapper),
-        NOT before submit() - this prevents blocking the parent's thread when child agents share
-        an endpoint with other agents. The parent submits and returns immediately; the child
-        waits for the slot in its own worker thread.
-
+        This method is kept for backward compatibility with execution_engine.py which still uses
+        self.pool._execution._acquire_slot(). New code should use pool._acquire_slot() directly.
+        
         Args:
-            nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
-            call_id: Unique identifier for this async call (generated by caller for tracking).
+            agent_class: The agent class to acquire a slot for.
+            instance_name: The instance name for logging purposes.
+            
+        Returns:
+            A callable release function, or None if no slot management is needed.
         """
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] submit_task ENTRY — target={instance_name}, class={agent_class}, "
-            f"caller={caller}, nest_depth={nest_depth}, call_id={call_id}"
-        )
-
-        if not self.executor:
-            logger.error(f"[CALL_AGENT_DEBUG] submit_task EXIT (early) — target={instance_name}, reason=no_executor")
-            return f"[Agent '{instance_name}' requested in parallel mode but no thread pool available.]"
-
-        # Deep copy history for thread safety
-        import copy as _copy
-        safe_history = _copy.deepcopy(history)
-
-        def task_wrapper():
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] task_wrapper START — target={instance_name}, class={agent_class}, "
-                f"caller={caller}, nest_depth={nest_depth}"
-            )
-            
-            # Initialize endpoint_release for the finally block
-            endpoint_release = None
-            
-            try:
-                # Acquire endpoint slot INSIDE worker thread (non-blocking from parent's perspective)
-                # This is the key fix: slot acquisition happens in the worker thread, not the parent
-                endpoint_release = self._acquire_slot(agent_class, instance_name)
-                logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — acquired endpoint slot for {instance_name}")
-                
-                try:
-                    from agent_cascade.execution_engine import ExecutionEngine
-                    from agent_cascade.compression.helpers import extract_instance_output
-
-                    # NOTE: This creates a NEW ExecutionEngine instance per parallel task.
-                    # This is intentional — each thread gets its own engine to avoid shared state issues.
-                    engine = ExecutionEngine(self.pool)
-                    logger.debug(
-                        f"[CALL_AGENT_DEBUG] task_wrapper — created new ExecutionEngine for {instance_name}, "
-                        f"engine_id={id(engine)}"
-                    )
-
-                    # Use shared helper for agent creation and execution
-                    # _create_and_run_agent handles active_stack append/cleanup in its finally block
-                    logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — calling engine._create_and_run_agent for {instance_name}")
-                    inst, conv = engine._create_and_run_agent(agent_class, instance_name, args, caller, nest_depth)
-
-                    # Check return values — Bug #1 check
-                    if inst is None or conv is None:
-                        logger.error(
-                            f"[CALL_AGENT_DEBUG] BUG DETECTED in task_wrapper — _create_and_run_agent returned None for {instance_name}: "
-                            f"inst={inst}, conv_type={type(conv).__name__}"
-                        )
-                        error_msg = f"[Parallel Agent '{instance_name}' Failed]: Internal error — agent creation returned None."
-                        self._notify_async_error(instance_name, caller, error_msg, call_id)
-                        return
-
-                    # Check for empty conversation — indicates aborted/terminated execution
-                    if not conv:
-                        logger.warning(
-                            f"[CALL_AGENT_DEBUG] task_wrapper — empty conversation for {instance_name}, "
-                            f"treating as error (agent may have been terminated or aborted)"
-                        )
-                        error_msg = f"[Parallel Agent '{instance_name}' Failed]: Execution terminated with no output."
-                        self._notify_async_error(instance_name, caller, error_msg, call_id)
-                        return
-
-                    logger.debug(
-                        f"[CALL_AGENT_DEBUG] task_wrapper — _create_and_run_agent returned for {instance_name}: "
-                        f"inst_type={type(inst).__name__}, conv_len={len(conv)}"
-                    )
-
-                    # Notify caller via async message queue (inside try block for proper exception handling)
-                    result = extract_instance_output(conv, instance_name)
-                    if not result:
-                        logger.warning(
-                            f"[CALL_AGENT_DEBUG] task_wrapper — extract_instance_output returned empty for {instance_name}"
-                        )
-                    logger.debug(
-                        f"[CALL_AGENT_DEBUG] task_wrapper — extract_instance_output for {instance_name}: "
-                        f"result_preview={str(result)[:200]}"
-                    )
-                    completion_msg = f"[Parallel Agent '{instance_name}' Finished]:\n{result}"
-
-                    logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — sending completion message to caller {caller}")
-                    
-                    # Add result to async results buffer for the caller (with error handling)
-                    try:
-                        self.pool.add_async_result(caller, completion_msg)
-                    except Exception as e:
-                        logger.error(
-                            f"[CALL_AGENT_DEBUG] task_wrapper — failed to add async result "
-                            f"for {instance_name} to caller={caller}: {e}"
-                        )
-                    
-                    # Complete the async call in the registry using the passed-through call_id
-                    if call_id:
-                        try:
-                            self.pool.complete_async_call(caller, call_id)
-                            logger.debug(
-                                f"[CALL_AGENT_DEBUG] task_wrapper — completed async call {call_id} "
-                                f"for caller {caller}"
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"[CALL_AGENT_DEBUG] task_wrapper — failed to complete async call "
-                                f"{call_id} for caller={caller}: {e}"
-                            )
-                    else:
-                        logger.warning(f"[CALL_AGENT_DEBUG] task_wrapper — no call_id provided for {instance_name}")
-                    
-                    # Note: send_message removed to avoid orphan queue entries (MAJOR FIX 4)
-                    # The async result buffer is sufficient for completion notification
-
-                except Exception as e:
-                    # Handle execution errors (after slot was acquired)
-                    logger.error(
-                        f"[CALL_AGENT_DEBUG] task_wrapper EXCEPTION (after slot acquired) — target={instance_name}, "
-                        f"error_type={type(e).__name__}, error={e}"
-                    )
-                    error_msg = f"[Parallel Agent '{instance_name}' Failed]:\n{str(e)}"
-                    # Use helper method to consolidate error handling logic (DRY principle)
-                    self._notify_async_error(instance_name, caller, error_msg, call_id)
-            
-            except Exception as e:
-                # Handle slot acquisition failures or any other setup errors
-                logger.error(
-                    f"[CALL_AGENT_DEBUG] task_wrapper EXCEPTION (slot acquisition or setup) — target={instance_name}, "
-                    f"error_type={type(e).__name__}, error={e}"
-                )
-                error_msg = f"[Parallel Agent '{instance_name}' Failed]:\n{str(e)}"
-                # Use helper method to consolidate error handling logic (DRY principle)
-                self._notify_async_error(instance_name, caller, error_msg, call_id)
-            finally:
-                # Release endpoint slot when agent completes
-                if endpoint_release is not None:
-                    try:
-                        endpoint_release()
-                        logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper — released endpoint slot for {instance_name}")
-                    except Exception as e:
-                        logger.error(f"Failed to release endpoint slot for {instance_name}: {e}")
-
-                self.pool._mark_activity(instance_name)
-                logger.debug(f"[CALL_AGENT_DEBUG] task_wrapper EXIT — target={instance_name}")
-
-        future = self.executor.submit(task_wrapper)
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] submit_task EXIT (success) — target={instance_name}, "
-            f"future_id={id(future)}"
-        )
-
-        return f"[Started agent '{instance_name}' in parallel. You will be notified when it finishes.]"
+        # Delegate to the pool's _acquire_slot method
+        return self.pool._acquire_slot(agent_class, instance_name)
 
 
 class LoggerManager:
