@@ -1277,12 +1277,14 @@ class AgentPool:
             return
         
         def run_child_agent() -> str:
-            """Callable that runs the child agent and returns the result string."""
-            endpoint_release = None
+            """Callable that runs the child agent and returns the result string.
+            
+            NOTE: We do NOT acquire the endpoint slot here — engine.run() inside
+            _create_and_run_agent acquires its own slot at line 348 of execution_engine.py.
+            Acquiring before AND inside would deadlock on Semaphore(1) (same thread, 
+            same semaphore). The child's engine.run() handles all concurrency control.
+            """
             try:
-                # Acquire endpoint slot (blocks if at capacity, up to 300s timeout)
-                endpoint_release = self._acquire_slot(agent_class, child_instance_name)
-                
                 from agent_cascade.execution_engine import ExecutionEngine
                 from agent_cascade.compression.helpers import extract_instance_output
                 
@@ -1300,12 +1302,6 @@ class AgentPool:
             
             except Exception as e:
                 return f"[Parallel Agent '{child_instance_name}' Failed]:\n{str(e)}"
-            finally:
-                if endpoint_release is not None:
-                    try:
-                        endpoint_release()
-                    except Exception:
-                        pass
         
         self._async_registry.register(instance_name, run_child_agent, function_id=function_id)
 

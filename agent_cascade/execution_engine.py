@@ -479,6 +479,7 @@ class ExecutionEngine:
                             f"for instance={inst_name}, sleeping_duration={sleeping_duration:.1f}s"
                         )
                         yield []  # Empty yield signals waiting state without consuming turn
+                        time.sleep(0.1)  # Prevent tight loop when no results available yet
                         continue
 
                     else:
@@ -1974,38 +1975,120 @@ class ExecutionEngine:
                     f"The caller '{instance.instance_name}' is at depth {caller_depth}. "
                     f"Cannot create agent '{instance_name}' at depth {child_depth}.")
 
-        # NOTE: Concurrency enforcement happens in _acquire_slot() within register_async_call's callable.
-        # The effective_concurrency check below was previously used to decide between sync/async paths,
-        # but since all paths now use register_async_call(), the actual slot acquisition handles concurrency.
-        # This block is kept for logging/debugging purposes only.
-
-        # Async launch path — unified for all call_agent calls (all calls are now async)
+        # ── Slot Collision Detection: Fake Sync Mode ───────────────────────────────
+        # When the caller holds a concurrency slot, using ASYNC path causes deadlock:
+        # 1. Caller holds the slot and continues making LLM calls
+        # 2. Child is submitted to ThreadPoolExecutor but can't acquire the slot
+        # 3. Child's engine.run() tries to acquire the slot at line 348, but same thread 
+        #    already holds it via run_child_agent() (agent_pool.py:1284) → DEADLOCK with Semaphore(1)
+        #
+        # Fix: Check if caller holds a slot. If so, use SYNC mode — run child directly
+        # and return actual result. This avoids deadlock and ensures child can make progress.
         
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] Taking ASYNC path — caller={caller_name}, target={instance_name}, "
-            f"class={agent_class}, child_depth={child_depth}, function_id={function_id}"
-        )
+        # Check if caller currently holds the concurrency slot
+        # Use different variable name to avoid shadowing caller_inst from line 1960 (nesting depth check)
+        caller_slot_holder = self.pool.get_instance(caller_name)
+        caller_holds_slot = False
+        if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release is not None:
+            caller_holds_slot = True
         
-        # Register and launch agent asynchronously via AsyncToolRegistry.
-        # The callable inside register_async_call handles:
-        # - Endpoint slot acquisition
-        # - ExecutionEngine creation and agent execution
-        # - Result extraction and injection into async results buffer
-        self.pool.register_async_call(
-            instance_name=caller_name,
-            function_id=function_id,
-            agent_class=agent_class,
-            child_instance_name=instance_name,
-            args=args,
-            caller=caller_name,
-            nest_depth=child_depth,
-        )
-        
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] EXIT (async) — caller={caller_name}, target={instance_name}, "
-            f"function_id={function_id}"
-        )
-        return f"Agent '{instance_name}' launched asynchronously. Waiting for result."
+        if caller_holds_slot:
+            # Fake sync mode: run child directly, return actual result.
+            # IMPORTANT: Before running the child, we must release the caller's slot.
+            # The child's engine.run() tries to acquire the same slot at line 348.
+            # If we don't release first, same-thread Semaphore(1) deadlock occurs.
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] Taking SYNC path (caller holds slot) — caller={caller_name}, "
+                f"target={instance_name}, class={agent_class}, child_depth={child_depth}"
+            )
+            
+            # Import here to match pattern in agent_pool.py:1287
+            from agent_cascade.compression.helpers import extract_instance_output
+            
+            # Release caller's slot so the child can acquire it inside engine.run()
+            caller_slot_release = None
+            if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release:
+                caller_slot_release = caller_slot_holder._slot_release
+                try:
+                    caller_slot_release()
+                except Exception as e:
+                    logger.warning(f"Error releasing caller slot before sync child: {e}")
+                caller_slot_holder._slot_release = None
+            
+            try:
+                # Run child synchronously via _create_and_run_agent
+                inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller_name, child_depth)
+                
+                # Re-acquire caller's slot so it can continue its turn
+                if caller_slot_release is not None and caller_slot_holder:
+                    try:
+                        caller_slot_holder._slot_release = self.pool._acquire_slot(
+                            caller_slot_holder.agent_class, caller_name
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to re-acquire caller slot after sync child: {e}")
+                
+                # Consolidated null/empty check for cleaner logic
+                if inst is None or not conv:
+                    logger.warning(
+                        f"[CALL_AGENT_DEBUG] SYNC path FAILED — agent '{instance_name}' creation returned "
+                        f"inst={inst}, conv_len={len(conv) if conv else 'N/A'}"
+                    )
+                    return f"Error: Agent '{instance_name}' execution failed with no output."
+                
+                # Extract and format result
+                result = extract_instance_output(conv, instance_name)
+                logger.debug(
+                    f"[CALL_AGENT_DEBUG] EXIT (sync) — caller={caller_name}, target={instance_name}, "
+                    f"result_preview={str(result)[:200]}"
+                )
+                return f"[Agent '{instance_name}' Completed]:\n{result}"
+            
+            except Exception as e:
+                # Re-acquire caller's slot before returning error
+                if caller_slot_release is not None and caller_slot_holder:
+                    try:
+                        caller_slot_holder._slot_release = self.pool._acquire_slot(
+                            caller_slot_holder.agent_class, caller_name
+                        )
+                    except Exception as e2:
+                        logger.warning(f"Failed to re-acquire caller slot after sync child error: {e2}")
+                
+                # Match ASYNC path error handling pattern (agent_pool.py:1301-1302)
+                logger.error(
+                    f"[CALL_AGENT_DEBUG] SYNC path EXCEPTION — caller={caller_name}, target={instance_name}, "
+                    f"error={type(e).__name__}: {str(e)[:200]}"
+                )
+                return f"[Agent '{instance_name}' Failed]:\n{str(e)}"
+        else:
+            # Async path: caller doesn't hold slot, use normal async path via register_async_call
+            # Note: function_id is used in ASYNC path for result tracking but not in SYNC path
+            # (SYNC path returns immediately with actual result, no async result injection needed)
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] Taking ASYNC path — caller={caller_name}, target={instance_name}, "
+                f"class={agent_class}, child_depth={child_depth}, function_id={function_id}"
+            )
+            
+            # Register and launch agent asynchronously via AsyncToolRegistry.
+            # The callable inside register_async_call handles:
+            # - Endpoint slot acquisition
+            # - ExecutionEngine creation and agent execution
+            # - Result extraction and injection into async results buffer
+            self.pool.register_async_call(
+                instance_name=caller_name,
+                function_id=function_id,
+                agent_class=agent_class,
+                child_instance_name=instance_name,
+                args=args,
+                caller=caller_name,
+                nest_depth=child_depth,
+            )
+            
+            logger.debug(
+                f"[CALL_AGENT_DEBUG] EXIT (async) — caller={caller_name}, target={instance_name}, "
+                f"function_id={function_id}"
+            )
+            return f"Agent '{instance_name}' launched asynchronously. Waiting for result."
 
     def _handle_dismiss_agent(self, args: Any, instance: AgentInstance) -> str:
         """Handle dismiss_agent tool call — removes another agent from pool.
