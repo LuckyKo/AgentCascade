@@ -42,7 +42,9 @@ def run_shell_cmd(cmd, cwd=None, timeout=15):
         cwd = str(BASE_DIR)
     try:
         result = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, shell=True
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, shell=True,
+            encoding='utf-8',          # Explicit UTF-8 to prevent cp1252 decode errors on Windows
+            errors='replace',          # Replace undecodable bytes with replacement character
         )
         return result.stdout, result.stderr, result.returncode
     except subprocess.TimeoutExpired:
@@ -84,7 +86,9 @@ def shell_rg(pattern, search_path, include="*.py", ignore_vcs=True, context=0):
     cmd.extend(['--glob', include, pattern])
     
     result = subprocess.run(
-        cmd, cwd=str(search_path), capture_output=True, text=True, timeout=15
+        cmd, cwd=str(search_path), capture_output=True, text=True, timeout=15,
+        encoding='utf-8',          # Explicit UTF-8 to prevent cp1252 decode errors on Windows
+        errors='replace',          # Replace undecodable bytes with replacement character
     )
     if result.returncode == 0:
         lines = [l.strip() for l in result.stdout.split('\n') if l.strip()]
@@ -105,7 +109,9 @@ def shell_grep(pattern, search_path, include="*.py", ignore_vcs=True, context=0)
     cmd.append(pattern)
     
     result = subprocess.run(
-        cmd, cwd=str(search_path), capture_output=True, text=True, timeout=15
+        cmd, cwd=str(search_path), capture_output=True, text=True, timeout=15,
+        encoding='utf-8',          # Explicit UTF-8 to prevent cp1252 decode errors on Windows
+        errors='replace',          # Replace undecodable bytes with replacement character
     )
     if result.returncode == 0:
         lines = [l.strip() for l in result.stdout.split('\n') if l.strip()]

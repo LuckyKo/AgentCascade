@@ -155,6 +155,8 @@ def benchmark_subprocess_grep(test_dir: Path, pattern: str = "TODO"):
             ['grep', '-ri', '--include=*.py', '-n', pattern, str(test_dir)],
             capture_output=True,
             text=True,
+            encoding='utf-8',          # Explicit UTF-8 to prevent cp1252 decode errors on Windows
+            errors='replace',          # Replace undecodable bytes with replacement character
             timeout=30,
         )
     except FileNotFoundError:
@@ -164,6 +166,8 @@ def benchmark_subprocess_grep(test_dir: Path, pattern: str = "TODO"):
                 f'find "{test_dir}" -name "*.py" -exec grep -iHn "{pattern}" {{}} \\;',
                 capture_output=True,
                 text=True,
+                encoding='utf-8',          # Explicit UTF-8 to prevent cp1252 decode errors on Windows
+                errors='replace',          # Replace undecodable bytes with replacement character
                 timeout=30,
                 shell=True,
             )

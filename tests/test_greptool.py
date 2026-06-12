@@ -24,7 +24,9 @@ def run_shell_cmd(cmd: str, cwd: str) -> tuple[str, int]:
     """Run a shell command and return (stdout_text, return_code)."""
     try:
         result = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, timeout=15, shell=True
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=15, shell=True,
+            encoding='utf-8',          # Explicit UTF-8 to prevent cp1252 decode errors on Windows
+            errors='replace',          # Replace undecodable bytes with replacement character
         )
         return result.stdout, result.returncode
     except subprocess.TimeoutExpired:

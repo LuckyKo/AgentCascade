@@ -548,6 +548,8 @@ class OperationManager:
                 cwd=str(path),
                 capture_output=True,
                 text=True,
+                encoding='utf-8',          # Explicit UTF-8 to prevent cp1252 decode errors on Windows
+                errors='replace',          # Replace undecodable bytes with replacement character
                 timeout=timeout
             )
             
@@ -1874,6 +1876,8 @@ class OperationManager:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding='utf-8',          # Explicit UTF-8 to prevent cp1252 decode errors on Windows
+                errors='replace',          # Replace undecodable bytes with replacement character
                 creationflags=creationflags,
                 start_new_session=True,  # Unix: ensures process group isolation for killpg; ignored on Windows
             )
@@ -1891,6 +1895,7 @@ class OperationManager:
                         subprocess.run(
                             ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
                             capture_output=True, timeout=10,
+                            encoding='utf-8',          # Explicit UTF-8 to prevent cp1252 decode errors on Windows
                         )
                     except Exception as e:
                         logger.warning(f"taskkill failed for PID {proc.pid}: {e}, falling back to proc.kill()")
@@ -1907,6 +1912,7 @@ class OperationManager:
                         subprocess.run(
                             ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
                             capture_output=True, timeout=10,
+                            encoding='utf-8',          # Explicit UTF-8 to prevent cp1252 decode errors on Windows
                         )
                     except Exception as e:
                         logger.debug(f"Second-pass taskkill failed (non-critical): {e}")
@@ -1921,6 +1927,8 @@ class OperationManager:
                                  f'ParentProcessId={parent_pid}',
                                  'get', 'ProcessId'],
                                 capture_output=True, text=True, timeout=5,
+                                encoding='utf-8',          # Explicit UTF-8 to prevent cp1252 decode errors on Windows
+                                errors='replace',          # Replace undecodable bytes with replacement character
                             )
                             pids = []
                             for line in res.stdout.strip().split('\n'):
@@ -1950,6 +1958,7 @@ class OperationManager:
                                 subprocess.run(
                                     ['taskkill', '/F', '/PID', str(dpid)],
                                     capture_output=True, timeout=5,
+                                    encoding='utf-8',          # Explicit UTF-8 to prevent cp1252 decode errors on Windows
                                 )
                             except Exception as e:
                                 logger.debug(f"WMIC child kill failed (non-critical): {e}")
