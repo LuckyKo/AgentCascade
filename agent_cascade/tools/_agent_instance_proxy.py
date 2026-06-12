@@ -38,10 +38,6 @@ CALL_AGENT_SCHEMA = {
                 'type': 'string',
                 'description': 'Optional background context for the agent instance'
             },
-            'parallel_launch': {
-                'type': 'boolean',
-                'description': 'Set to true to run the agent asynchronously in the background. Defaults to false (sequential).'
-            },
             'log_file': {
                 'type': 'string',
                 'description': 'Path to a JSONL log file to restore the agent session from before starting. Useful for resuming old sessions. If provided and the instance_name does not already exist in the pool, the session will be loaded from this log file.'

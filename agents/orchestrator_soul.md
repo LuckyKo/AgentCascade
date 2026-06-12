@@ -106,7 +106,8 @@ complex_workflow:
       "research_with_coder -> confirm_found_root_cause_hypothesis_with_researcher -> create_fix_plan -> implement_fix -> review_cycle_and_code_bloat_prevention -> test_cycle -> present_to_user_when_all_pass"
 
 parallel_delegation_rule:
-  When delegating multiple agents simultaneously, explicitly set `parallel_launch: true` for each call_agent invocation to enable concurrent execution and reduce total wait time.
+  All call_agent invocations run asynchronously by default. When delegating multiple agents simultaneously, 
+  concurrency is managed automatically by endpoint scheduling slots. No additional parameters needed for parallel execution.
 
 example_responses:
   good_delegation: |

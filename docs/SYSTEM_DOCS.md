@@ -305,26 +305,23 @@ When an agent calls another agent via `call_agent`:
 
 ```
 Agent A (caller)                    AgentPool                      Agent B (callee)
-══════════════════════              ══════════                     ══════════════
+═══════════════════════              ══════════                     ══════════════
 
 1. Detect tool call: call_agent    2. Check concurrency limits     6. Create AgentInstance
-   (instance_name, agent_class)      if parallel_launch=True            in pool.instances
+   (instance_name, agent_class)      via _acquire_slot()                in pool.instances
                                       │                               7. Build system + task
                                       ▼                               messages for Agent B
-                              ┌───────────────┐                       8. ExecutionEngine.run()
-                              │ Parallel?     │                       loop: Phases 1-5
-                              └───────┬───────┘                            │
-                         Yes (parallel)│                  No (sync)        │
-                                       ▼                                   ▼
-                              ThreadPoolExecutor                    Execute through
-                              .submit(task_wrapper)                 same ExecutionEngine
-                                      │                               loop
-                                      │                            9. On completion:
-                                      │                               pool.send_message() →
-                                      │                               Agent A's queue
-                                      │                                    │
-                                      │                           10. Agent A drains
-                                      │                               queue on next iteration
+                          All calls async now                        8. ExecutionEngine.run()
+                              │                                     loop: Phases 1-5
+                              ▼                                            │
+                      ThreadPoolExecutor                                  │
+                      .submit(task_wrapper)                               │
+                                      │                                    9. On completion:
+                                      │                                        pool.send_message() →
+                                      │                                    Agent A's queue
+                                      │                                         │
+                                      │                                    10. Agent A drains
+                                      │                                        queue on next iteration
 ```
 
 ### 4.3 State Broadcasting Flow
@@ -511,7 +508,7 @@ Agents can spawn sub-agents that run concurrently in a background thread pool, a
 
 ```
 Agent A calls: call_agent(agent_class="researcher", instance_name="Researcher1",
-                          task="Find latest info on X", parallel_launch=True)
+                          task="Find latest info on X")
        │
        ▼
 ┌───────────────────────────┐
@@ -521,36 +518,34 @@ Agent A calls: call_agent(agent_class="researcher", instance_name="Researcher1",
             │
             ▼
 ┌───────────────────────────┐
-│ Check Concurrency Limits  │ ← Is parallel_allowed for this agent class?
-│ (from API Router)         │    Has active count reached class limit?
+│ Check Concurrency Limits  │ ← Via _acquire_slot() in submit_task()
+│ (from API Router)         │    All calls are async now
 └───────────┬───────────────┘
             │
-     ┌──────┴──────┐
-     │             │
-  Allowed       Blocked
-     │             │
-     ▼             ▼
-┌──────────┐   ┌──────────────┐
-│ Submit to│   │ Execute      │
-│ Thread   │   │ Synchronously│
-│ Pool     │   │ (blocking)   │
-└────┬─────┘   └──────┬───────┘
-     │                 │
-     ▼                 ▼
- New thread runs:    Same thread runs:
- ExecutionEngine.    ExecutionEngine.
- run() loop          run() loop
-     │                 │
-     ▼                 ▼
- On completion:      On completion:
- pool.send_message()  Return result
- → caller's queue     directly to caller
+            ▼
+    ┌───────────────┐
+    │ Submit to     │
+    │ ThreadPoolExecutor  │
+    │ via submit_parallel()│
+    └───────┬───────┘
+            │
+            ▼
+      New thread runs:
+      ExecutionEngine.
+      run() loop
+            │
+            ▼
+      On completion:
+      pool.send_message()
+      → caller's queue
 ```
 
 **Key Details:**
 
-- The thread pool has a configurable maximum number of workers (default: 10)
-- Each parallel agent gets its own `AgentInstance` in the pool with its own conversation history, execution loop, and JSONL log file
+- All call_agent invocations use the unified async path via `submit_parallel()`
+- Concurrency is enforced by `_acquire_slot()` in `submit_task()` based on endpoint limits
+- The caller continues its turn and transitions to SLEEPING at end-of-turn if pending calls exist
+- When child completes, result is injected as USER message with `[BACKGROUND TOOL RESULT]:` prefix
 - Completion is communicated via the message queue system — the caller drains its queue on the next iteration and sees the result
 - If the pool reaches capacity, new requests block until a slot opens (via endpoint slot acquisition)
 - The `active_stack` tracks which agents are currently running for UI rendering and concurrency counting

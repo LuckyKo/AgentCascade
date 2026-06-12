@@ -1823,7 +1823,7 @@ class ExecutionEngine:
         Works the same for any agent calling another agent. No special paths.
 
         Args:
-            args: Tool arguments (instance_name, agent_class, task, parallel_launch).
+            args: Tool arguments (instance_name, agent_class, task).
             messages: Caller's conversation messages.
             instance: The calling agent instance.
 
@@ -1900,12 +1900,8 @@ class ExecutionEngine:
         # The effective_concurrency check below was previously used to decide between sync/async paths,
         # but since both paths now use submit_parallel(), the actual slot acquisition handles concurrency.
         # This block is kept for logging/debugging purposes only.
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] Concurrency check — agent_class={agent_class}, "
-            f"parallel_launch_arg={args.get('parallel_launch')}"
-        )
 
-        # Async launch path — unified for all call_agent calls (parallel_launch parameter is now ignored)
+        # Async launch path — unified for all call_agent calls (all calls are now async)
         # Generate call_id once — it will be passed through the parallel execution chain
         call_id = f"{instance_name}_{time.monotonic()}"
         

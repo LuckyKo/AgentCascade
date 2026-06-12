@@ -319,7 +319,6 @@ TOOL_METADATA = {
             'instance_name': 'A unique name for this agent instance. Use this to continue the session later.',
             'task': 'The task or question to delegate',
             'context': 'Any relevant context or background information the sub-agent needs',
-            'parallel_launch': 'Set to true to run the agent asynchronously in the background. Defaults to false (sequential).',
             'log_file': 'Path to a JSONL log file to restore the session from before starting. Useful for resuming old sessions.'
         }
     },

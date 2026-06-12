@@ -603,34 +603,17 @@ All tools execute through a single `_execute_tool()` method on ExecutionEngine:
         Unified call_agent handler. Works the same whether called by main agent or sub-agent.
         
         Steps:
-        1. Check concurrency limits
-        2. If parallel_launch=True and within limits → submit to thread pool (non-blocking)
-        3. Otherwise → execute synchronously (blocking, yields to caller)
+        1. Check concurrency limits (enforced via slot acquisition in submit_task)
+        2. All calls are now async - submit to thread pool (non-blocking)
         """
         instance_name = args['instance_name']
         agent_class = (args.get('agent_class') or '').strip().lower()
         
-        # Check concurrency
-        agent_class_lower = agent_class.lower()
-        is_parallel_allowed = True
-        if agent_class_lower and hasattr(self.pool, 'api_router'):
-            limit = self.pool.api_router.get_effective_concurrency(agent_class_lower)
-            if limit == 0:
-                is_parallel_allowed = False
-            elif limit > 0:
-                active_count = self.pool._execution.count_by_class(agent_class_lower)
-                if active_count >= limit:
-                    is_parallel_allowed = False
-        
-        if is_parallel_allowed and args.get('parallel_launch') is True:
-            # Submit to background thread pool
-            return self.pool.submit_parallel(
-                agent_class, instance_name, args, messages, instance.instance_name
-            )
-        else:
-            # Synchronous execution — this IS the unified path
-            # The sub-agent runs through the SAME ExecutionEngine.run() loop
-            return self._execute_agent_sync(agent_class, instance_name, args, messages, instance.instance_name)
+        # Concurrency enforcement happens in submit_task -> _acquire_slot()
+        # Submit to background thread pool (all calls are async now)
+        return self.pool.submit_parallel(
+            agent_class, instance_name, args, messages, instance.instance_name
+        )
 
     def _execute_agent_sync(self, agent_class: str, instance_name: str, 
                             args: dict, caller_history: List[Message], caller: str) -> str:
@@ -1659,7 +1642,7 @@ On reload: Single forward pass through JSONL → find all markers → [SYS] + [m
 ### 11.3 Parallel Agent Flow
 
 ```
-Agent A calls call_agent(parallel_launch=True)
+Agent A calls call_agent()
     │
     ▼
 pool.submit_parallel() → ThreadPoolExecutor.submit(task_wrapper)

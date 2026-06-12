@@ -31,10 +31,6 @@ class CallAgent(BaseTool):
                 'type': 'string',
                 'description': TOOL_METADATA['call_agent']['parameters']['context']
             },
-            'parallel_launch': {
-                'type': 'boolean',
-                'description': TOOL_METADATA['call_agent']['parameters']['parallel_launch']
-            },
             'log_file': {
                 'type': 'string',
                 'description': TOOL_METADATA['call_agent']['parameters']['log_file']
