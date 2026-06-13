@@ -51,6 +51,7 @@ from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX
 from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_MARKER
 from agent_cascade.llm.base import _truncate_input_messages_roughly
+from agent_cascade.execution_engine import ExecutionEngine
 
 # Timeout constants for security advisor checks
 from agent_cascade.operation_manager import SECURITY_ADVISOR_TIMEOUT_SECONDS, SECURITY_ADVISOR_WARNING_SECONDS
@@ -1849,7 +1850,7 @@ def create_app(agents, agent_pool, config=None):
 
                                         # Create proper AgentInstance via _create_system_agent() — this handles all state setup
                                         sec_state_key = 'Security'
-                                        engine = agent_pool._execution
+                                        engine = ExecutionEngine(agent_pool)
                                         sec_instance = engine._create_system_agent(
                                             agent_class='Security',
                                             instance_name=sec_state_key,

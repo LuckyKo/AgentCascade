@@ -12,6 +12,7 @@ from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 from agent_cascade.llm.schema import SYSTEM, USER
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
 from agent_cascade.utils.utils import extract_text_from_message
+from agent_cascade.execution_engine import ExecutionEngine
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +192,7 @@ def invoke_compression_agent(
             
             # Create proper AgentInstance via _create_system_agent() — handles all state setup
             # The system message comes from Compressor_soul.md template, task contains the summary prompt
-            engine = agent_pool._execution
+            engine = ExecutionEngine(agent_pool)
             comp_instance = engine._create_system_agent(
                 agent_class='Compressor',
                 instance_name=comp_state_key,
