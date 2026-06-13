@@ -431,6 +431,44 @@ class OrchestratorAgent(Assistant):
         self._compress_fail_count = {}  # instance_name -> int (consecutive forced compression failures)
         self._forced_compression_ran = {}  # instance_name -> bool (forced compression ran during current turn — prevents stale message re-injection)
 
+    def _append_feedback_and_return(self, feedback_content: str, messages: List[Message], llm_messages: List[Message], 
+                                    response: List[Message], logger_inst):
+        """Append a feedback message to all working sets, log it, sync to pool, and yield it.
+        
+        Used for user-triggered commands (like /compress) that return early without going through
+        the normal LLM loop — ensures the assistant's response is persisted in history so the agent
+        doesn't re-interpret the user command on the next turn.
+        
+        Yields a single message to the caller generator, then returns None to signal early exit.
+        
+        Args:
+            feedback_content: The feedback text to display to the user
+            messages: The working message list for this agent session
+            llm_messages: Deep copy of messages for LLM processing
+            response: Response accumulator for this turn
+            logger_inst: Logger instance for recording the message
+            
+        Yields:
+            A single-element list containing the feedback Message
+            
+        Returns:
+            None to signal early exit from the calling generator
+        """
+        feedback_msg = Message(role=ASSISTANT, content=feedback_content)
+        messages.append(feedback_msg)
+        llm_messages.append(feedback_msg)
+        response.append(feedback_msg)
+        logger_inst.log_message(feedback_msg)
+        try:
+            pool_conv = self.agent_pool.get_conversation(self.session_name)
+            pool_conv.append(feedback_msg)
+        except Exception as e:
+            # Silently handle pool sync failures to avoid breaking the flow
+            logger.debug(f"Pool conversation sync skipped for feedback message: {e}")
+        self.turn_final_messages = messages
+        yield [feedback_msg]
+        return None
+
     def _call_llm(
         self,
         messages: List[Message],
@@ -1087,11 +1125,22 @@ class OrchestratorAgent(Assistant):
                         pass
                 
                 compress_tool = self.function_map.get('compress_context')
+                
+                # Initialize llm_messages and response for the feedback helper (before any branching - Issue #4 fix)
+                llm_messages = copy.deepcopy(messages)
+                response: List[Message] = []
+                
                 if compress_tool:
                     # We no longer pop the command. It should remain in history for traceability.
                     # The cumulative log and tool logic will handle it correctly.
                     
-                    yield [Message(role=ASSISTANT, content=f"Generating context summary for {int(fraction*100)}% of history...")]
+                    # Persist "Generating..." status message to all working sets (Issue #2 fix)
+                    status_msg = Message(role=ASSISTANT, content=f"Generating context summary for {int(fraction*100)}% of history...")
+                    messages.append(status_msg)
+                    llm_messages.append(status_msg)
+                    response.append(status_msg)
+                    logger_inst.log_message(status_msg)
+                    yield [status_msg]
                     
                     params = json.dumps({
                         'fraction': fraction,
@@ -1122,21 +1171,36 @@ class OrchestratorAgent(Assistant):
                                 'fraction': fraction,
                                 'justification': 'MANUAL USER COMMAND (Approved)'
                             })
-                            result = compress_tool.call(
+                            compress_tool.call(
                                 params,
                                 messages=messages,
                                 agent_instance_name=instance,
                                 agent_obj=self,
                                 precomputed_summary=summary # Skip generation
                             )
-                            yield [Message(role=ASSISTANT, content="Context compressed successfully.")]
+                            # Use helper to properly append feedback and exit (Issue #1 fix)
+                            yield from self._append_feedback_and_return(
+                                "Context compressed successfully.", messages, llm_messages, response, logger_inst
+                            )
+                            return
                         else:
-                            yield [Message(role=ASSISTANT, content=f"Context compression cancelled: {reason}")]
+                            # Use helper to properly append feedback and exit (Issue #1 fix)
+                            yield from self._append_feedback_and_return(
+                                f"Context compression cancelled: {reason}", messages, llm_messages, response, logger_inst
+                            )
+                            return
                     else:
-                        yield [Message(role=ASSISTANT, content=f"Failed to generate summary: {summary}")]
+                        # Use helper to properly append feedback and exit (Issue #1 fix)
+                        yield from self._append_feedback_and_return(
+                            f"Failed to generate summary: {summary}", messages, llm_messages, response, logger_inst
+                        )
+                        return
                 else:
-                    yield [Message(role=ASSISTANT, content="Error: compress_context tool is not available.")]
-                return
+                    # Tool not available - use helper to properly append feedback and exit
+                    yield from self._append_feedback_and_return(
+                        "Error: compress_context tool is not available.", messages, llm_messages, response, logger_inst
+                    )
+                    return
 
         # --- Custom FnCallAgent-style loop with streaming sub-agent support ---
         # messages[0] now contains all stabilized instructions, so caches will hit across turns.
