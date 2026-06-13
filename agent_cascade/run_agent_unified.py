@@ -78,7 +78,7 @@ def run_agent_thread_unified(
         build_stream_update_from_pool,
         _apply_ui_config,
         _put_stream_update,
-        _build_activity_update,  # For lightweight activity banner updates
+        # Note: _build_activity_update removed - dual update paths created split perception
     )
 
     try:
@@ -196,33 +196,7 @@ def run_agent_thread_unified(
                         loop,
                     )
                     last_send = now
-                    
-                    # ── Push lightweight activity update for faster banner feedback ───
-                    # Activity updates are separate from full state broadcasts and can
-                    # be sent more frequently to provide near-real-time UI feedback.
-                    if streaming_text:
-                        # Throttle activity updates to minimum 50ms interval (Critical Issue #2)
-                        # During fast LLM streaming this prevents dozens of updates per second
-                        exec_state.setdefault('_last_activity_send', 0)
-                        now_time = time.time()
-                        if now_time - exec_state['_last_activity_send'] >= 0.05:  # 50ms min interval
-                            exec_state['_last_activity_send'] = now_time
-                            activity_data = _build_activity_update(
-                                pool=pool,
-                                instance_name=instance_name,
-                                streaming_text=streaming_text,
-                            )
-                            if activity_data:
-                                # Send activity update at higher frequency (50ms vs 150ms)
-                                activity_event = {
-                                    'type': 'activity_update',
-                                    **activity_data,
-                                }
-                                asyncio.run_coroutine_threadsafe(
-                                    _put_stream_update(send_queue, activity_event),
-                                    loop,
-                                )
-
+                        
                 # ── Loop detection (throttled to every 10 ticks) ─────────
                 if tick_num % 10 == 0:
                     _detect_loop_in_instance(pool, instance_name, turn_output)

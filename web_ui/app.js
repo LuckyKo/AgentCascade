@@ -70,12 +70,12 @@ const state = {
     active: false,
     // Throttle timestamps for streaming performance
     lastGenStatsUpdate: 0,       // For updateGenStats throttling (~2Hz)
-    lastSubAgentRender: 0,      // For renderSubAgents throttling (~200ms)
+        lastSubAgentRender: 0,      // For renderSubAgents throttling (~100ms during streaming)
     lastContextBarUpdate: 0,    // For updateContextBar throttling (~1Hz during streaming)
     lastUiUpdate: 0,            // For activity bar throttling (~1Hz)
     lastControlsUpdate: 0,      // For updateControls throttling (~1Hz)
     lastTelemetryUpdate: 0,     // For updateTelemetryPanel throttling (~2s)
-    subContextBarThrottle: {},  // Per-agent context bar throttle timestamps (~1Hz during streaming)
+        // Note: subContextBarThrottle removed - context bar updates are now unconditional (cheaper)
   },
   totalTokens: 0,
   totalWords: 0,
@@ -93,11 +93,8 @@ let ws = null;
 let reconnectTimer = null;
 // Root agent rendering state is now managed per-panel via panel.dataset.lastRenderedCount (same as sub-agents)
 
-// Page Visibility API: skip rendering when tab is hidden to save GPU/CPU
-let documentHidden = false;
-document.addEventListener('visibilitychange', () => {
-  documentHidden = document.hidden;
-});
+// Note: documentHidden variable removed - modern browsers optimize painting for hidden tabs automatically.
+// The early-return check in stream_update was also removed to avoid render delays when switching back.
 
 // Per-panel scroll lock state for ALL panels including root (managed via subAgentScrollLocks)
 const subAgentScrollLocks = {};
@@ -227,7 +224,7 @@ const ActivityBar = {
       if (!isSessionPrimaryAgent(activeInstance) && isWaiting) {
         status = 'Waiting for API slot...';
       } else if (preview !== undefined && preview !== null) {
-        // Use the preview from activity_update
+              // Use the preview from stream_update (activity_update path removed for consistent timing)
         status = (preview === '' || !preview.trim()) 
           ? 'Streaming...' 
           : preview;
@@ -1111,14 +1108,6 @@ function handleServerMessage(data) {
 
       break;
 
-    case 'activity_update':
-      // Lightweight activity update for near-real-time banner feedback
-      // This bypasses the full state broadcast throttling for faster UI response
-      if (data.instance_name && data.preview !== undefined) {
-        ActivityBar.pushImmediate(data.instance_name, data.preview, data.is_waiting, data.token_count);
-      }
-      break;
-
     case 'stream_update': {
       // DEBUG: trace stream update frequency
       if (!state._debugStreamCount) state._debugStreamCount = 0;
@@ -1130,7 +1119,7 @@ function handleServerMessage(data) {
       if (!state._debugLastThrottleLog || state._debugStreamCount - state._debugLastThrottleLog < 5) {
         const nowDebug = performance.now();
         const isSubActive = state.activeStack && state.activeStack.length > 0;
-        const throttleMs = isSubActive ? 150 : 750;
+              const throttleMs = isSubActive ? 100 : 750;  // Updated to match actual throttle value
         const elapsed = (state.genStats.lastSubAgentRender ? nowDebug - state.genStats.lastSubAgentRender : 999);
         if (elapsed > throttleMs) {
           console.log(`[STREAM #${state._debugStreamCount}] shouldRender=${true}, elapsed=${Math.round(elapsed)}ms, throttle=${throttleMs}ms, activeStack=[${(state.activeStack||[]).join(',')}]`);
@@ -1279,15 +1268,9 @@ function handleServerMessage(data) {
         }
       }
 
-      // Skip all rendering when tab is hidden to save GPU/CPU during tool execution
-      if (documentHidden) {
-        // Update controls minimally for button states (throttled to ~1Hz)
-        if (performance.now() - state.genStats.lastControlsUpdate > 1000) {
-          updateControls();
-          state.genStats.lastControlsUpdate = performance.now();
-        }
-        return;
-      }
+      // Note: Removed documentHidden early return check to avoid render delays when switching tabs.
+           // Modern browsers already optimize painting for hidden tabs, and the old check could cause
+           // up to 750ms delay when switching back due to throttle timers still being active.
       
              // Capture current timestamp for throttle checks below
              const now = performance.now();
@@ -1306,11 +1289,12 @@ function handleServerMessage(data) {
         state.genStats.lastControlsUpdate = now;
       }
 
-      // Throttle sub-agent rendering to ~300ms during streaming for smoother updates
+      // Throttle sub-agent rendering to ~100ms during streaming for smoother updates
       // (O(1) raw text append is fast, so we can render more frequently)
+      // Reduced from 150ms to 100ms to reduce perceived latency in streaming
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
       const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
-      const subThrottleContent = isSubAgentActive ? 150 : 750;
+      const subThrottleContent = isSubAgentActive ? 100 : 750;
       // Force render on: completion detected, stack change, new visible message, or time threshold elapsed
       // (same pattern as main branch - time check is unconditional, not gated by content changed flag)
       const shouldRender = completionDetected || 
@@ -1318,6 +1302,9 @@ function handleServerMessage(data) {
                            subAgentNewVisibleMessage || 
                            (now - state.genStats.lastSubAgentRender > subThrottleContent);
       if (shouldRender) {
+              // Reset timer BEFORE render logic to reduce latency (moved from after renderSubAgents)
+              state.genStats.lastSubAgentRender = now;
+      
         // Only call renderSubAgents if we're NOT about to call switchMainTab,
         // since switchMainTab calls renderSubAgents internally at the end.
         // This avoids redundant rendering when stackChanged triggers a tab switch.
@@ -1326,11 +1313,10 @@ function handleServerMessage(data) {
            state.activeSubTab !== 'sub-' + state.activeStack[state.activeStack.length - 1]) ||
           (state.activeStack.length === 0 && state.activeSubTab !== getAgentTabId(state.sessionName))
         );
-        
+      
         if (!willSwitchTab) {
           renderSubAgents();
         }
-        state.genStats.lastSubAgentRender = now;
         
         if (stackChanged) {
           if (state.activeStack.length > 0) {
@@ -2470,11 +2456,9 @@ function renderSubAgents() {
       tab.remove();
       const panel = document.getElementById('panelSub-' + agentName);
       if (panel) panel.remove();
-      // Step 10: Clean up per-panel state when agent is removed
+      // Clean up per-panel state when agent is removed
       delete subAgentScrollLocks[agentName];
-      if (state.genStats.subContextBarThrottle) {
-        delete state.genStats.subContextBarThrottle[agentName];
-      }
+            // Note: subContextBarThrottle cleanup removed - property no longer exists
     }
   });
 
@@ -2734,27 +2718,35 @@ function renderSubAgentPanel(panel, agentData, name) {
         }
       }
       const newMsgs = [];
-      const newIndexMap = [];
       for (let i = lastCount; i < currentCount; i++) {
         newMsgs.push(displayMsgs[i]);
-        newIndexMap.push(i);
       }
-      // Pass isGenerating via config override so all messages know the streaming state
-      const subConfig = getAgentConfig(name);
-      subConfig.isGenerating = isActive;
-      scrollContainer.appendChild(renderAgentConversation(name, newMsgs, 1, newIndexMap, subConfig));
-    }
-    
-    // Throttle context bar updates to ~1Hz during streaming for all agents including root
-    const nowInRender = performance.now();
-    const lastUpdate = state.genStats.subContextBarThrottle[name] || 0;
-    if (nowInRender - lastUpdate > 1000 || currentCount - lastCount > 1) {
+
+      // OPTIMIZATION #2: Use direct DOM append for single messages to avoid DocumentFragment overhead.
+      // For streaming deltas (commonly 1 message), direct append is faster than building a fragment.
+      if (newMsgs.length === 1) {
+        const subConfig = getAgentConfig(name);
+        subConfig.isGenerating = isActive;
+        const msgEl = createMessageEl(newMsgs[0], lastCount, subConfig);
+        scrollContainer.appendChild(msgEl);
+      } else {
+        // Multiple messages — use DocumentFragment for efficiency
+        const newIndexMap = [];
+        for (let i = lastCount; i < currentCount; i++) {
+          newIndexMap.push(i);
+        }
+        const subConfig = getAgentConfig(name);
+        subConfig.isGenerating = isActive;
+        scrollContainer.appendChild(renderAgentConversation(name, newMsgs, 1, newIndexMap, subConfig));
+      }
+
+      // OPTIMIZATION #4: Update context bar unconditionally (actual work is cheap - just updating a progress bar).
+      // Removed per-agent throttling to reduce blocking during render cycle.
       const fillEl = document.getElementById('subContextFill-' + name);
       if (fillEl) {
         updateContextBar(fillEl, displayMsgs, tokCount, maxTok);
       }
-      state.genStats.subContextBarThrottle[name] = nowInRender;
-    }
+
     // Use unified bubble content update with isGenerating passed via config
     if (scrollContainer.lastElementChild) {
       const subConfig = getAgentConfig(name);
@@ -3158,7 +3150,7 @@ function resetGenStats() {
     lastUiUpdate: 0,
     lastControlsUpdate: 0,
     lastTelemetryUpdate: 0,
-    subContextBarThrottle: {},  // Per-agent context bar throttle timestamps (~1Hz during streaming)
+        // Note: subContextBarThrottle removed - context bar updates are now unconditional (cheaper)
   };
   if (statusTokensSec) statusTokensSec.textContent = '— t/s';
   if (statusGenInfo) statusGenInfo.textContent = 'Starting...';

@@ -71,12 +71,20 @@ def _clear_performance_caches():
 # Activity Update Helper — lightweight streaming updates for UI banner
 # ═══════════════════════════════════════════════════════════════════════
 
+# DEPRECATED: _build_activity_update is no longer used by the unified execution path.
+# The dual update paths (activity_update + stream_update) created a split perception where
+# the banner updated faster than the conversation. Removed in favor of stream_update only.
+# Kept for potential future use or other code paths.
+
 def _build_activity_update(
     pool: 'AgentPool',
     instance_name: str,
     streaming_text: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a lightweight activity update for the UI banner.
+    
+    DEPRECATED: No longer used by run_agent_unified.py. The 50ms activity_update path
+    was removed to eliminate split perception (banner updates fast, conversation lags).
     
     This is a minimal payload that updates the activity banner without
     building the full state. Used for near-real-time feedback during LLM streaming.
@@ -88,13 +96,11 @@ def _build_activity_update(
         
     Returns:
         Dictionary with activity update data, or None if instance not found.
-        
+    
     Example:
-        activity = _build_activity_update(pool, "Maine", "Thinking about...")
-        asyncio.run_coroutine_threadsafe(
-            _put_stream_update(send_queue, {'type': 'activity_update', **activity}),
-            loop,
-        )
+            # No longer called by unified path — kept for reference only
+            # activity = _build_activity_update(pool, "Maine", "Thinking about...")
+            # asyncio.run_coroutine_threadsafe(...)
     """
     instance = pool.get_instance(instance_name)
     if instance is None:
