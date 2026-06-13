@@ -432,12 +432,14 @@ class OrchestratorAgent(Assistant):
         self._forced_compression_ran = {}  # instance_name -> bool (forced compression ran during current turn — prevents stale message re-injection)
 
     def _append_feedback_and_return(self, feedback_content: str, messages: List[Message], llm_messages: List[Message], 
-                                    response: List[Message], logger_inst):
-        """Append a feedback message to all working sets, log it, sync to pool, and yield it.
+                                    response: List[Message]):
+        """Append a feedback message to all working sets, sync to pool (which handles logging), and yield it.
         
         Used for user-triggered commands (like /compress) that return early without going through
         the normal LLM loop — ensures the assistant's response is persisted in history so the agent
         doesn't re-interpret the user command on the next turn.
+        
+        Note: Logging is handled via pool sync → session state → update_history(), not direct log_message().
         
         Yields a single message to the caller generator, then returns None to signal early exit.
         
@@ -446,7 +448,6 @@ class OrchestratorAgent(Assistant):
             messages: The working message list for this agent session
             llm_messages: Deep copy of messages for LLM processing
             response: Response accumulator for this turn
-            logger_inst: Logger instance for recording the message
             
         Yields:
             A single-element list containing the feedback Message
@@ -458,7 +459,8 @@ class OrchestratorAgent(Assistant):
         messages.append(feedback_msg)
         llm_messages.append(feedback_msg)
         response.append(feedback_msg)
-        logger_inst.log_message(feedback_msg)
+        # Note: Direct log_message() removed to prevent duplicate logging.
+        # The feedback is appended to pool_conv below and synced via update_history() in _save_session_history().
         try:
             pool_conv = self.agent_pool.get_conversation(self.session_name)
             pool_conv.append(feedback_msg)
@@ -1180,25 +1182,25 @@ class OrchestratorAgent(Assistant):
                             )
                             # Use helper to properly append feedback and exit (Issue #1 fix)
                             yield from self._append_feedback_and_return(
-                                "Context compressed successfully.", messages, llm_messages, response, logger_inst
+                                "Context compressed successfully.", messages, llm_messages, response
                             )
                             return
                         else:
                             # Use helper to properly append feedback and exit (Issue #1 fix)
                             yield from self._append_feedback_and_return(
-                                f"Context compression cancelled: {reason}", messages, llm_messages, response, logger_inst
+                                f"Context compression cancelled: {reason}", messages, llm_messages, response
                             )
                             return
                     else:
                         # Use helper to properly append feedback and exit (Issue #1 fix)
                         yield from self._append_feedback_and_return(
-                            f"Failed to generate summary: {summary}", messages, llm_messages, response, logger_inst
+                                                    f"Failed to generate summary: {summary}", messages, llm_messages, response
                         )
                         return
                 else:
                     # Tool not available - use helper to properly append feedback and exit
                     yield from self._append_feedback_and_return(
-                        "Error: compress_context tool is not available.", messages, llm_messages, response, logger_inst
+                                                "Error: compress_context tool is not available.", messages, llm_messages, response
                     )
                     return
 
