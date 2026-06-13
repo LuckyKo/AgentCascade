@@ -134,6 +134,29 @@ class OperationManager:
     user_approve() or user_reject() to unblock the thread.
     """
 
+    # Default exclude patterns for ripgrep (glob-style) - prevents timeout on large directories
+    _RG_DEFAULT_EXCLUDES = [
+        '!node_modules/**',
+        '!__pycache__/**',
+        '!.git/**',
+        '!*.pyc',
+        '!*.so',
+        '!*.dll',
+        '!*.exe',
+        '!*.zip',
+        '!*.egg-info/**',
+    ]
+
+    # Default exclude patterns for standard grep (basename matching)
+    _GREP_DEFAULT_EXCLUDES = [
+        '*.pyc', '*.so', '*.dll', '*.exe', '*.zip',
+    ]
+
+    # Default directory excludes for GNU grep --exclude-dir (may not be available on all systems)
+    _GREP_DEFAULT_EXCLUDE_DIRS = [
+        'node_modules', '__pycache__', '.git', '*.egg-info',
+    ]
+
     def __init__(self, base_dir: str = DEFAULT_WORKSPACE, agent_pool=None):
         self.base_dir = Path(base_dir).resolve()
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -512,6 +535,10 @@ class OperationManager:
                 if exclude:
                     cmd.extend(['--glob', f'!{exclude}'])
                 
+                # Add default excludes to prevent timeout on large directories (use class constant)
+                for _exc in self._RG_DEFAULT_EXCLUDES:
+                    cmd.extend(['--glob', _exc])
+                
                 cmd.extend([
                     '--glob', include,  # file filter (include pattern)
                     pattern,
@@ -540,6 +567,15 @@ class OperationManager:
                 # H1: Exclude glob for standard grep
                 if exclude:
                     cmd.append('--exclude=' + exclude)
+                
+                # Default directory excludes using --exclude-dir (GNU grep extension, may not be on all systems)
+                # This prevents traversal into large directories like node_modules, __pycache__, .git
+                for _dir in self._GREP_DEFAULT_EXCLUDE_DIRS:
+                    cmd.extend(['--exclude-dir', _dir])
+                
+                # Default file excludes using --exclude (matches basename only)
+                for _exc in self._GREP_DEFAULT_EXCLUDES:
+                    cmd.append('--exclude=' + _exc)
                 
                 cmd.append(pattern)
             
@@ -959,6 +995,15 @@ class OperationManager:
                         
                         if context > 0:
                             # H3: Context lines mode — store extra lines around each match
+                            # Resolve path ONCE per file, not per match — prevents log spam
+                            try:
+                                normalized_rel_path = str(file_path.relative_to(resolved)).replace('\\', '/')  # Use resolved search path first
+                            except ValueError:
+                                try:
+                                    normalized_rel_path = str(file_path.relative_to(self.base_dir)).replace('\\', '/')
+                                except ValueError:
+                                    normalized_rel_path = file_path.name  # Fallback to filename only
+                            
                             for line_num, line in enumerate(lines, 1):
                                 if pattern_re.search(line):
                                     match_count += 1  # Count actual matches
@@ -967,10 +1012,6 @@ class OperationManager:
                                     for ctx_line in range(start - 1, end):
                                         # >>> prefix on matched line, spaces for context lines
                                         prefix = ">>>" if ctx_line + 1 == line_num else "    "
-                                        try:
-                                            normalized_rel_path = str(file_path.relative_to(self.base_dir)).replace('\\', '/')
-                                        except ValueError:
-                                            normalized_rel_path = file_path.name
                                         # M3: Don't strip — preserve whitespace; H2: normalize path separators
                                         results.append(f"{normalized_rel_path}:{ctx_line + 1}: {prefix}{lines[ctx_line]}")
                                     # Separator between context groups
@@ -984,15 +1025,19 @@ class OperationManager:
                                     break
                         else:
                             # Standard mode (no context)
+                            # Resolve path ONCE per file, not per match — prevents log spam
+                            try:
+                                rel_path = file_path.relative_to(resolved)  # Use resolved search path first
+                            except ValueError:
+                                try:
+                                    rel_path = file_path.relative_to(self.base_dir)
+                                except ValueError:
+                                    rel_path = file_path.name  # Fallback to filename only
+                            normalized_rel_path = str(rel_path).replace('\\', '/')
+                            
                             for line_num, line in enumerate(lines, 1):
                                 if pattern_re.search(line):
                                     match_count += 1  # Count actual matches
-                                    try:
-                                        rel_path = file_path.relative_to(self.base_dir)
-                                    except ValueError as e:
-                                        logger.debug(f"Relative path resolution failed for {file_path} (using filename fallback): {e}")
-                                        rel_path = file_path.name  # Fallback
-                                    normalized_rel_path = str(rel_path).replace('\\', '/')
                                     # M3: Don't strip — preserve whitespace; H2: normalize path separators
                                     results.append(f"{normalized_rel_path}:{line_num}: {line}")
                                 # Periodic timeout check inside line loop to prevent single huge files from bypassing it
