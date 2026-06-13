@@ -991,8 +991,8 @@ function handleServerMessage(data) {
       }
       if (data.session_name) state.sessionName = data.session_name;
       if (data.agent_index !== undefined) state.agentIndex = data.agent_index;
-      // FIX: Use Array.isArray check to prevent empty array [] from overwriting existing approvals (JS truthy gotcha)
-      if (Array.isArray(data.approvals) && data.approvals.length > 0) {
+      // FIX: Use Array.isArray check to update approvals (including empty array to clear all)
+      if (Array.isArray(data.approvals)) {
         state.approvals = data.approvals;
       }
       renderApprovals(); // Always call to keep bar in sync, even when approvals field is missing
@@ -1276,8 +1276,8 @@ function handleServerMessage(data) {
              const now = performance.now();
       
       // Approvals require immediate rendering (user must see these promptly)
-             // FIX: Use Array.isArray check to prevent empty array [] from overwriting existing approvals (JS truthy gotcha)
-             if (Array.isArray(data.approvals) && data.approvals.length > 0) {
+      // FIX: Use Array.isArray check to update approvals (including empty array to clear all)
+      if (Array.isArray(data.approvals)) {
         state.approvals = data.approvals;
       }
       renderApprovals(); // Always call to ensure bar stays in sync with current state
@@ -1352,8 +1352,8 @@ function handleServerMessage(data) {
     break;
 
     case 'approvals':
-      // FIX: Only update if approvals is a non-empty array to prevent [] from clearing existing state (JS truthy gotcha)
-      if (Array.isArray(data.approvals) && data.approvals.length > 0) {
+    // FIX: Use Array.isArray check to update approvals (including empty array to clear all)
+    if (Array.isArray(data.approvals)) {
         state.approvals = data.approvals;
       }
       renderApprovals();
