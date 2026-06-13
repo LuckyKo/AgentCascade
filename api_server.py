@@ -1353,8 +1353,12 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                     session['history'].clear()
                     for res in tfm:
                         msg = res.model_dump() if hasattr(res, 'model_dump') else (res if isinstance(res, dict) else {})
-                        if msg.get(ROLE) != SYSTEM:
-                            session['history'].append(msg)
+                        # FIX: Keep system message to maintain consistency with pool conversation.
+                        # Previously stripped at line 1356, but this caused inconsistency where
+                        # session['history'] lost the system message while pool kept it.
+                        # This triggered full context reprocessing when slice_history_for_llm()
+                        # prepended a new system message reference to the working set.
+                        session['history'].append(msg)
                 agent_runner.turn_final_messages = None
 
             _save_session_history()
