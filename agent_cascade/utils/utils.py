@@ -752,11 +752,22 @@ def rm_default_system(messages: List[Message]) -> List[Message]:
         return messages
 
 
-def get_message_stats(msg: Union[Message, dict]) -> dict:
+def get_message_stats(msg: Union[Message, dict, list]) -> dict:
     """Return tokens and words for a message with consistency.
     Uses logic aligned with BaseChatModel._truncate_input_messages_roughly.
+    
+    BUG FIX: Handle unexpected list objects in messages list gracefully.
+    When a raw list ends up in the conversation (instead of Message/dict),
+    use defensive attribute access to prevent AttributeError.
+    
+    Args:
+        msg: Can be a Message object, dict, or list (for graceful handling).
+        
+    Returns:
+        Dictionary with 'tokens' and 'words' counts. Returns zeros for list input.
     """
     from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+    from agent_cascade.log import logger
     
     if isinstance(msg, dict):
         role = msg.get(ROLE, '')
@@ -765,9 +776,17 @@ def get_message_stats(msg: Union[Message, dict]) -> dict:
             text = f'{function_call}'
             return {'tokens': qwen_count(text), 'words': len(text.split())}
         msg_obj = Message(**msg)
+    elif isinstance(msg, list):
+        # BUG FIX: Handle unexpected list objects gracefully
+        # This can happen when streaming responses or multimodal content creates nested structures
+        logger.debug(f"get_message_stats received a list instead of Message/dict (skipping): {str(msg)[:100]}")
+        return {'tokens': 0, 'words': 0}
     else:
-        if msg.role == ASSISTANT and msg.function_call:
-            text = f'{msg.function_call}'
+        # Message object — use defensive attribute access
+        role = getattr(msg, 'role', '')
+        function_call = getattr(msg, 'function_call', None)
+        if role == ASSISTANT and function_call:
+            text = f'{function_call}'
             return {'tokens': qwen_count(text), 'words': len(text.split())}
         msg_obj = msg
 
@@ -784,13 +803,14 @@ def get_message_stats(msg: Union[Message, dict]) -> dict:
     return {'tokens': tokens, 'words': words}
 
 
-def get_history_stats(messages: List[Union[Message, dict]]) -> dict:
+def get_history_stats(messages: List[Union[Message, dict, list]]) -> dict:
     """Calculate total tokens and words in a message list with caching.
     
     Caching strategy:
     - Dict messages: cache _tokens/_words directly on the dict (mutates in place)
     - Message objects: use an LRU content-based cache keyed by (role, md5_hash_of_content)
       to avoid re-tokenizing identical messages across calls. Cache is bounded to prevent memory leaks.
+    - List items: skipped with debug logging (unexpected but handled gracefully)
     """
     if not messages:
         return {'tokens': 0, 'words': 0}
@@ -817,6 +837,11 @@ def get_history_stats(messages: List[Union[Message, dict]]) -> dict:
                 m['_words'] = stats['words']
                 total_tokens += stats['tokens']
                 total_words += stats['words']
+        elif isinstance(m, list):
+            # BUG FIX: Skip unexpected list objects in messages list
+            # These can occur from streaming responses or multimodal content handling
+            logger.debug(f"get_history_stats: skipping unexpected list item in messages list")
+            continue
         else:
             # Message object — use content-based LRU cache to avoid re-tokenizing
             role = getattr(m, 'role', '')

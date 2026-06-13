@@ -873,11 +873,14 @@ def _streaming_content_length(messages: list) -> int:
     
     total_length = 0
     for m in messages:
-        # Handle both dict and object message types
+        # Handle dict, Message object, and unexpected list types
         if isinstance(m, dict):
             total_length += len(m.get(CONTENT, '') or '')
             total_length += len(m.get(REASONING_CONTENT, '') or '')
             total_length += len(str(m.get('function_call') or ''))
+        elif isinstance(m, list):
+            # Skip unexpected list objects (can occur from streaming/multimodal content)
+            continue
         else:
             total_length += len(getattr(m, CONTENT, '') or '')
             total_length += len(getattr(m, REASONING_CONTENT, '') or '')

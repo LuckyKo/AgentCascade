@@ -3096,6 +3096,11 @@ class ExecutionEngine:
 
             total = 0
             for msg in messages:
+                # Explicit type guard for known message types (dict or Message object)
+                if isinstance(msg, list):
+                    # Skip unexpected list objects to prevent incorrect processing
+                    continue
+                
                 role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
                 func_call = (msg.get('function_call') if isinstance(msg, dict)
                              else getattr(msg, 'function_call', None))
@@ -3120,7 +3125,7 @@ class ExecutionEngine:
             # Fallback: rough estimate (4 chars per token)
             total_chars = sum(
                 len(str(m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')))
-                for m in messages
+                for m in messages if not isinstance(m, list)
             )
             return max(total_chars // 4, 100)
 
@@ -3281,6 +3286,11 @@ class ExecutionEngine:
             system_tokens = 0
             non_system_tokens = 0
             for msg in messages:
+                # Explicit type guard for known message types (dict or Message object)
+                if isinstance(msg, list):
+                    # Skip unexpected list objects to prevent incorrect processing
+                    continue
+                
                 role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
                 msg_obj = Message(**msg) if isinstance(msg, dict) else msg
                 text = extract_text_from_message(msg_obj, add_upload_info=True)
