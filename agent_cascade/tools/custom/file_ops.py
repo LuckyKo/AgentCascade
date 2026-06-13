@@ -433,7 +433,7 @@ class EditFile(BaseTool):
             },
             'match_mode': {
                 'type': 'string',
-                'enum': ['exact', 'heuristic'],
+                'enum': ['exact', 'heuristic', 'heuristic_agnostic'],
                 'default': 'exact',
                 'description': TOOL_METADATA['edit_file']['parameters']['match_mode']
             },

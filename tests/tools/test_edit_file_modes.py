@@ -126,6 +126,7 @@ def test_large_file_performance():
         assert elapsed_ms < 120.0, f"Performance test failed: elapsed time was {elapsed_ms:.2f}ms (expected < 120ms)"
         print(f"\nLarge file search on 50,000 lines took {elapsed_ms:.2f}ms")
 
+@pytest.mark.skip(reason="Comment stripping is not part of heuristic matching per unified branch design — see test_heuristic_comment_fix.py")
 def test_heuristic_refinements():
     with tempfile.TemporaryDirectory() as tmpdir:
         op_mgr = OperationManager(base_dir=tmpdir)

@@ -30,30 +30,6 @@ from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_HEURISTIC_MATCH_TH
 from agent_cascade.log import logger
 
 
-def _normalize_line_for_alignment(line: str) -> str:
-    """
-    Normalize a line for heuristic alignment matching.
-    """
-    if not line or not line.strip():
-        return ""
-    result = line
-    # Remove string content but preserve delimiters
-    result = re.sub(r'\"\"\"[^\n]*?\"\"\"', '\"\"\"...\"\"\"', result)
-    result = re.sub(r"'''[^\n]*?'''", "'''...'''", result)
-    result = re.sub(r'\"[^\"\n]*\"', '\"...\"', result)
-    result = re.sub(r"'[^'\n]*'", "'...'", result)
-    # Handle augmented assignments (+=, -=, etc.)
-    result = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\s*([+\-*/%&|^<>]=+|//=|\*\*=)', 'assign=', result)
-    # Handle regular assignment
-    result = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\s*=', 'assign=', result)
-    # Remove numeric literals but NOT array indices
-    result = re.sub(r'(?<!\[)\b\d+\b(?!])', '', result)
-    # Remove whitespace for comparison
-    result = "".join(result.split())
-    return result
-
-
-
 class OperationType(Enum):
     FILE_WRITE = "file_write"
     FILE_EDIT = "file_edit"
@@ -1117,7 +1093,7 @@ class OperationManager:
                 return f"ERROR: Pattern not found in {path}. The 'old_content' string must exactly match the existing file content character-for-character, including whitespace and indentation, or consider using heuristic match mode."
             if count > 1:
                 return f"ERROR: Pattern found {count} times in {path}. The 'old_content' block must be unique. Please include more surrounding lines in 'old_content' to make it unique."
-        elif match_mode == 'heuristic':
+        elif match_mode in ('heuristic', 'heuristic_agnostic'):
             # Normalize raw content (no comment stripping — comments are part of the structure)
             file_lines = file_content.splitlines(keepends=True)
             
@@ -1252,10 +1228,75 @@ class OperationManager:
             #   file line via difflib, then record that file line's original indent.
             # ------------------------------------------------------------------
 
-            # Normalize lines of old_content and the matched file block
-            old_norm_lines = ["".join(l.split()) for l in old_content.splitlines()]
-            file_norm_lines = ["".join(l.split()) for l in actual_old_content.splitlines()]
-            new_norm_lines = ["".join(l.split()) for l in new_content.splitlines()]
+            # Detect file type to choose appropriate normalization mode
+            _PYTHON_EXTENSIONS = frozenset(('.py', '.pyi', '.pyx'))
+            _is_python_file = resolved.suffix.lower() in _PYTHON_EXTENSIONS
+            
+            def normalize_line_generic(line: str) -> str:
+                """Language-agnostic normalization: strip leading/trailing whitespace only.
+                
+                Preserves internal spacing for ASCII art, tabular data, etc.
+                """
+                return line.strip()
+            
+            def _normalize_line_python(line: str) -> str:
+                """Python-specific normalization by removing literal values but keeping structure.
+                
+                This enables robust matching when values change:
+                  - "x = 1" matches "x = 10" (both become "assign")
+                  - "return x + y" matches "return x + y + z" (both become "return")
+                  - String literals are replaced with placeholder
+                  - Augmented assignments (+=, -=) are normalized to "assign"
+                  - Array indices are preserved to avoid false matches
+                
+                See test_heuristic_comment_fix.py for detailed test cases.
+                """
+                result = line
+                # Remove string content but preserve delimiters (handle escaped quotes)
+                result = re.sub(r'"(?:[^"\\]|\\.)*"', '', result)  # Handle escaped quotes
+                result = re.sub(r"'(?:[^'\\]|\\.)*'", '', result)  # Handle escaped quotes
+                # Remove numeric literals: floats FIRST, then integers (order matters!)
+                result = re.sub(r'\[(\d+\.\d+)\]', '[]', result)  # floats in brackets first
+                result = re.sub(r'\b\d+\.\d+\b', '', result)  # floats like 3.14
+                result = re.sub(r'\b\d+\.?\d*[eE][+-]?\d+\b', '', result)  # scientific notation
+                result = re.sub(r'-\b\d+\b', '', result)  # Remove negative integers before positive ones
+                # Exclude bracketed indices from integer removal to prevent false matches
+                result = re.sub(r'(?<!\[)\b\d+\b(?!])', '', result)  # integers, not array indices
+                # Remove hex, binary, octal literals
+                result = re.sub(r'\b0[xX][0-9a-fA-F]+\b', '', result)
+                result = re.sub(r'\b0[bB][01]+\b', '', result)
+                result = re.sub(r'\b0[oO][0-7]+\b', '', result)
+                # Normalize augmented assignments FIRST (<<=, >>= before <<, >>)
+                result = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_.\[\]()]*\s*(<<=|>>=|\*=|/=|//=|%=|\+=|-=|\|=|&=|\^=)', 'assign', result)
+                # Then regular assignments (but not comparison operators ==, !=)
+                result = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_.\[\]()]*\s*=(?!=)', 'assign', result)
+                # Normalize return statements: "return ..." -> "return"
+                result = re.sub(r'\breturn\b.*', 'return', result)
+                result = re.sub(r'\b(?:True|False)\b', '', result)  # normalize booleans
+                # Collapse trailing identifiers after assign (kwarg values, RHS of assignments)
+                prev = None
+                while prev != result:
+                    prev = result
+                    result = re.sub(r'assign\s*[a-zA-Z_]\w*', 'assign', result)
+                # Strip all whitespace for comparison
+                return "".join(result.split())
+
+            def normalize_line_for_alignment(line: str) -> str:
+                """Route to appropriate normalizer based on file type and match mode.
+                
+                - 'heuristic' + Python file → structure-aware (strips values, normalizes assignments)
+                - 'heuristic_agnostic' → whitespace-only strip for any file type
+                - non-Python files → whitespace-only strip regardless of mode
+                """
+                if _is_python_file and match_mode == 'heuristic':
+                    return _normalize_line_python(line)
+                else:
+                    return normalize_line_generic(line)
+
+            # Normalize lines using structure-aware normalization (strips literal values)
+            old_norm_lines = [normalize_line_for_alignment(l) for l in old_content.splitlines()]
+            file_norm_lines = [normalize_line_for_alignment(l) for l in actual_old_content.splitlines()]
+            new_norm_lines = [normalize_line_for_alignment(l) for l in new_content.splitlines()]
 
             # Build alignment: old_content line index -> file block line index
             matcher = difflib.SequenceMatcher(None, old_norm_lines, file_norm_lines)
@@ -1304,6 +1345,34 @@ class OperationManager:
             # Phase 2 — Preservation: apply file indents to new_content lines
             # ------------------------------------------------------------------
 
+            def find_best_indent_for_unmapped_line(
+                    line_idx: int, 
+                    new_content_lines: list,
+                    new_to_file_map: dict,
+                    file_indent_by_line: dict) -> str:
+                """Find best indentation for unmapped line by looking at context.
+                
+                When a line in new_content doesn't map to any file line (e.g., it's 
+                a new line added), we need to infer its indentation from surrounding
+                mapped lines. This prevents unmapped lines from getting wrong indent.
+                """
+                # Check previous mapped line first (most reliable)
+                for check_idx in range(line_idx - 1, -1, -1):
+                    if check_idx in new_to_file_map:
+                        f_idx = new_to_file_map[check_idx]
+                        if f_idx in file_indent_by_line:
+                            return file_indent_by_line[f_idx]
+                
+                # Check next mapped line (less reliable but better than nothing)
+                for check_idx in range(line_idx + 1, len(new_content_lines)):
+                    if check_idx in new_to_file_map:
+                        f_idx = new_to_file_map[check_idx]
+                        if f_idx in file_indent_by_line:
+                            return file_indent_by_line[f_idx]
+                
+                # Fall back to base indent if no context found
+                return file_indent if file_indent else ""
+
             new_content_lines = new_content.splitlines(keepends=True)
             adjusted_lines = []
 
@@ -1329,8 +1398,13 @@ class OperationManager:
                         adjusted_lines.append(orig_leading_ws + line.lstrip())
                         continue
 
-                # No alignment found — apply base indent delta adjustment
-                if file_indent != old_indent and delta_width != 0:
+                # No direct alignment found — find best indent from context
+                best_indent = find_best_indent_for_unmapped_line(
+                    line_idx, new_content_lines, new_to_file_map, file_indent_by_line)
+                if best_indent:
+                    adjusted_lines.append(best_indent + line.lstrip())
+                elif file_indent != old_indent and delta_width != 0:
+                    # Fallback: apply base indent delta adjustment
                     current_indent = line[:len(line) - len(line.lstrip())]
                     current_width = get_indent_width(current_indent)
 
@@ -1461,7 +1535,7 @@ class OperationManager:
             self.file_ownership[str(resolved)] = agent_name
             
             res_msg = f"APPROVED: Edited {path}"
-            if match_mode == 'heuristic':
+            if match_mode in ('heuristic', 'heuristic_agnostic'):
                 res_msg += f" (Heuristic match similarity: {match_ratio:.1%})"
                 # Warn about edit history drift risk
                 resolved_path_str = resolved.as_posix()
