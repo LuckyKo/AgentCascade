@@ -2746,6 +2746,7 @@ function renderSubAgentPanel(panel, agentData, name) {
       if (fillEl) {
         updateContextBar(fillEl, displayMsgs, tokCount, maxTok);
       }
+    }
 
     // Use unified bubble content update with isGenerating passed via config
     if (scrollContainer.lastElementChild) {
