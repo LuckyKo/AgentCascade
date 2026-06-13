@@ -560,7 +560,18 @@ class ExecutionEngine:
                 turns_available -= 1
 
                 # ── Phase 3: LLM Call with Injection Points ────────────────
-                turn_output = list(self._call_llm_with_injection(instance, llm_messages))
+                turn_output = []
+                for msg in self._call_llm_with_injection(instance, llm_messages):
+                    if msg is None:
+                        # Yield current partial conversation state to trigger streaming broadcast in run_agent_thread_unified.
+                        # We combine persisted history (response), committed turn messages (turn_output),
+                        # and currently streaming partial messages (instance._streaming_responses)
+                        # to provide a complete "current view" for activity banners and UI rendering.
+                        with instance._compression_lock:
+                            partial_msgs = list(instance._streaming_responses)
+                        yield (response + turn_output + partial_msgs, True)
+                        continue
+                    turn_output.append(msg)
 
                 if self.pool.stopped or self.pool.is_instance_halted(instance.instance_name) or self.pool.is_instance_terminated(instance.instance_name):
                     logger.debug(
@@ -1098,7 +1109,10 @@ class ExecutionEngine:
         elif len(last_output) == len(instance._streaming_responses) and len(last_output) > 0:
             # Count is same — check if any message content changed
             for old_msg, new_msg in zip(instance._streaming_responses, last_output):
-                if getattr(old_msg, 'content', None) != getattr(new_msg, 'content', None):
+                # FIX: Also check reasoning_content and function_call to catch all changes
+                if (getattr(old_msg, 'content', None) != getattr(new_msg, 'content', None) or
+                    getattr(old_msg, 'reasoning_content', None) != getattr(new_msg, 'reasoning_content', None) or
+                    getattr(old_msg, 'function_call', None) != getattr(new_msg, 'function_call', None)):
                     needs_update = True
                     break
         
@@ -1128,19 +1142,20 @@ class ExecutionEngine:
         # keeping the latest accumulated result, then yield individual messages from it.
         try:
             last_output = None
-            # Streaming UI Content Update Fix: Track partial LLM content for UI updates every ~150ms
+            # Streaming UI Content Update Fix: Track partial LLM content for UI updates every ~100ms (threshold 0.1)
             last_streaming_update_time = time.monotonic()
             
             for output in self._execute_llm_call(instance, template, llm_messages, active_functions):
                 last_output = output  # keep latest accumulated response FIRST
                 
-                # Update _streaming_responses every ~150ms with deep copy of partial content
+                # Update _streaming_responses every ~100ms with deep copy of partial content
                 current_time = time.monotonic()
-                if current_time - last_streaming_update_time >= 0.15:
+                if current_time - last_streaming_update_time >= 0.1:
                     # Only deep-copy when content actually changed (performance optimization)
                     with instance._compression_lock:
                         self._update_streaming_responses(instance, last_output)
                         last_streaming_update_time = current_time
+                    yield None  # Trigger UI refresh via engine.run() yielding to broadcast loop
                 
                 # Check stop/halt mid-stream (after capturing the current result)
                 if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):

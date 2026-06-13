@@ -121,20 +121,23 @@ def run_agent_thread_unified(
         # WebSocket connections each spawn their own execution thread.
         exec_state = {'last_resp_len': 0}
 
-        for turn_output in run_agent_in_pool_with_recovery(
+        for turn_output_raw in run_agent_in_pool_with_recovery(
             pool=pool,
             instance_name=instance_name,
             max_auto_retries=max_auto_retries,
             auto_rollback_enabled=auto_rollback_enabled,
         ):
-            # NOTE: run_agent_in_pool_with_recovery handles LoopDetectedError
-            # with retry logic. Only non-loop exceptions are terminal and
-            # yield [SYSTEM ERROR] — they don't trigger retries.
+            # Unpack (turn_output, is_streaming) signal from engine.run()
+            if isinstance(turn_output_raw, tuple) and len(turn_output_raw) == 2:
+                turn_output, is_streaming_tick = turn_output_raw
+            else:
+                turn_output, is_streaming_tick = turn_output_raw, False
+
             # Check for stop request or pool shutdown
             if pool.stopped:
                 break
 
-            now = time.time()
+            now = time.monotonic()
 
             # ── Detect state changes for sub-agent refresh ───────────────
             resp_len = len(turn_output)
@@ -153,22 +156,37 @@ def run_agent_thread_unified(
                 msg_fc = last_msg.get('function_call') if isinstance(last_msg, dict) else getattr(last_msg, 'function_call', None)
                 has_tool_event = bool(msg_fc) or msg_role == FUNCTION
                 
-                # Extract streaming text for activity banner (ASSISTANT role only)
+                # Extract streaming text for activity banner (including reasoning/tools)
                 if msg_role == ASSISTANT:
-                    streaming_text = (
-                        last_msg.get('content', '') if isinstance(last_msg, dict)
-                        else getattr(last_msg, 'content', '')
-                    )
+                    content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
+                    reasoning = last_msg.get('reasoning_content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'reasoning_content', '')
+                    
+                    if msg_fc:
+                        # Show tool call arguments in activity banner for "live" feel
+                        fc_name = msg_fc.get('name', '') if isinstance(msg_fc, dict) else getattr(msg_fc, 'name', '')
+                        fc_args = msg_fc.get('arguments', '') if isinstance(msg_fc, dict) else getattr(msg_fc, 'arguments', '')
+                        streaming_text = f"Tool {fc_name}({str(fc_args)[:100]}...)"
+                    elif reasoning:
+                        # Show thinking process
+                        streaming_text = str(reasoning)
+                    else:
+                        streaming_text = str(content)
 
             # ── Throttle state broadcasts ────────────────────────────────
+            # Bypass throttle for:
+            # 1. New committed messages (len_changed)
+            # 2. Tool events (<ctrl42>_tool, function response)
+            # 3. Explicit streaming signals from ExecutionEngine (is_streaming_tick)
+            # 4. Periodic 100ms interval (fallback)
             should_broadcast = (
-                now - last_send > 0.15
+                is_streaming_tick
                 or len_changed
                 or has_tool_event
+                or (now - last_send > 0.1)
             )
 
             if should_broadcast:
-                # Fix #2: Force full state refresh every 100 ticks (~15 seconds) to recover
+                # Fix #2: Force full state refresh every 100 ticks (~10 seconds) to recover
                 # from sync gaps. During partial streaming, some messages may be missed;
                 # periodic full refresh ensures eventual consistency.
                 force_full = (tick_num % 100 == 0)
@@ -188,9 +206,6 @@ def run_agent_thread_unified(
                     }
                     # Use put_nowait to avoid blocking the agent thread when
                     # the send_queue is full (stale events are dropped).
-                    # QueueFull is raised inside the event loop; since we don't
-                    # check the Future's result, it's silently swallowed — which
-                    # is exactly what we want (drop stale stream_updates).
                     asyncio.run_coroutine_threadsafe(
                         _put_stream_update(send_queue, event),
                         loop,

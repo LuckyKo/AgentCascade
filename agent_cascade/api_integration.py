@@ -566,11 +566,15 @@ def build_stream_update_from_pool(
         conv_snapshot = list(instance.conversation)
         stream_resp_snapshot = list(instance._streaming_responses) if instance._streaming_responses else None
     
+    # Streaming UI Content Update Fix: Calculate character length of streaming content
+    # to ensure token-by-token growth triggers version changes.
+    stream_content_len = _streaming_content_length(stream_resp_snapshot)
+
     # BUG31 Fix #4: Skip expensive slice_history_for_llm + get_history_stats during active
     # generation when the conversation hasn't changed since last stream update.
-    # Streaming UI Step 3 Fix: Include streaming response length in cache key so growing 
-    # streaming content triggers cache invalidation and fresh stats computation
-    current_version = (len(conv_snapshot), id(conv_snapshot[-1]) if conv_snapshot else None, len(stream_resp_snapshot) if stream_resp_snapshot else 0)
+    # Streaming UI Step 3 Fix: Include streaming response length AND content length in cache key 
+    # so growing streaming content triggers cache invalidation and fresh stats computation
+    current_version = (len(conv_snapshot), id(conv_snapshot[-1]) if conv_snapshot else None, len(stream_resp_snapshot) if stream_resp_snapshot else 0, stream_content_len)
     cached_stats = _stream_token_stats_cache.get(instance_name)
     
     # Feature Plan #023 Fix: Import get_history_stats before conditional to ensure availability in all branches
@@ -633,11 +637,15 @@ def build_stream_update_from_pool(
             current_msgs = list(inst.conversation)
             # Read streaming responses for this instance (field always exists due to dataclass default_factory)
             inst_streaming_responses = list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
-        current_version = (len(current_msgs), id(current_msgs[-1]) if current_msgs else None, len(inst_streaming_responses) if inst_streaming_responses else 0)
+        
+        # Calculate content length for this instance's streaming responses
+        inst_stream_content_len = _streaming_content_length(inst_streaming_responses)
+        
+        current_version = (len(current_msgs), id(current_msgs[-1]) if current_msgs else None, len(inst_streaming_responses) if inst_streaming_responses else 0, inst_stream_content_len)
 
         # Fix #2: Periodic full state refresh — every ~100 ticks force a complete
         # serialization (streaming=False) to recover from sync gaps. This ensures
-        # any missed partial messages are recovered within ~15 seconds.
+        # any missed partial messages are recovered within ~10 seconds.
         is_full_refresh = force_full
         
         # Always serialize the primary instance (it's actively streaming)
@@ -847,6 +855,37 @@ def _resolve_max_tokens(pool, instance=None):
     return DEFAULT_MAX_INPUT_TOKENS   # User-configured default from settings (Step 5 fallback)
 
 
+def _streaming_content_length(messages: list) -> int:
+    """Calculate total content length of streaming messages for version tracking.
+    
+    This helper extracts the pattern used in 3 places to calculate content length
+    for cache invalidation during streaming updates. It handles both dict and 
+    Message object types.
+    
+    Args:
+        messages: List of message dicts or Message objects from _streaming_responses.
+        
+    Returns:
+        Total character count across content, reasoning_content, and function_call fields.
+    """
+    if not messages:
+        return 0
+    
+    total_length = 0
+    for m in messages:
+        # Handle both dict and object message types
+        if isinstance(m, dict):
+            total_length += len(m.get(CONTENT, '') or '')
+            total_length += len(m.get(REASONING_CONTENT, '') or '')
+            total_length += len(str(m.get('function_call') or ''))
+        else:
+            total_length += len(getattr(m, CONTENT, '') or '')
+            total_length += len(getattr(m, REASONING_CONTENT, '') or '')
+            total_length += len(str(getattr(m, 'function_call', None) or ''))
+    
+    return total_length
+
+
 def _get_max_tokens_for_instance(pool: AgentPool, instance: AgentInstance) -> int:
     """Get the effective max_input_tokens for an agent instance.
 
@@ -1015,13 +1054,20 @@ def _serialize_instance(
 
     # ── Serialise messages ───────────────────────────────────────────────
     with inst._compression_lock:
-        msgs = list(inst.conversation)
+        full_msgs_snapshot = list(inst.conversation)
         # Read streaming_responses under compression lock for thread safety
         # Use passed parameter if provided, otherwise read from instance (fallback for callers not passing it)
         stream_responses = list(inst._streaming_responses) if streaming and streaming_responses is None and len(inst._streaming_responses) > 0 else streaming_responses
 
-    if streaming and current_state == AgentState.RUNNING and len(msgs) > 30:
-        # During active generation only send the tail for large conversations to avoid
+    msgs = full_msgs_snapshot
+    original_history_count = len(msgs)
+    
+    # Streaming UI Content Update Fix: Include content length of streaming messages in the version key.
+    # Previously, the key only included message count, making it blind to token-by-token growth.
+    stream_content_len = _streaming_content_length(stream_responses)
+
+    if streaming and current_state == AgentState.RUNNING and len(msgs) > 50:
+        # During active generation only send the tail for large conversations (>50 messages) to avoid
         # O(N²) serialisation on every ~150ms tick. Tail size is proportional (10% of
         # messages, minimum 5) to reduce sync gaps while still reducing bandwidth.
         # Smaller conversations are sent in full — dropping early context during
@@ -1031,10 +1077,12 @@ def _serialize_instance(
         serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-tail_size:], start_idx)]
         result['is_partial'] = True
     else:
+        start_idx = 0
         serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
         result['is_partial'] = False
 
     # ── Streaming UI Content Update Fix: Append partial LLM content ────────
+    num_streaming = 0
     if stream_responses and len(stream_responses) > 0:
         # Build fingerprint set from existing serialized messages for dedup
         existing_fingerprints = set()
@@ -1048,7 +1096,10 @@ def _serialize_instance(
                 existing_fingerprints.add(fingerprint)
         
         # Append streaming responses that aren't already in serialized_msgs
-        for stream_msg in stream_responses:
+        for j, stream_msg in enumerate(stream_responses):
+            # Use absolute index relative to full history for streaming messages
+            abs_index = original_history_count + j
+            
             stream_content = stream_msg.get(CONTENT, '') if isinstance(stream_msg, dict) else getattr(stream_msg, CONTENT, '') or ''
             stream_reasoning = stream_msg.get(REASONING_CONTENT, '') if isinstance(stream_msg, dict) else getattr(stream_msg, REASONING_CONTENT, '') or ''
             stream_func_call = str(stream_msg.get('function_call') if isinstance(stream_msg, dict) else getattr(stream_msg, 'function_call', None))
@@ -1057,8 +1108,9 @@ def _serialize_instance(
             
             # Only append if not duplicate and has meaningful content
             if fingerprint not in existing_fingerprints and fingerprint != ('', '', 'None', None):
-                serialized_msgs.append(serialize_message(stream_msg, len(serialized_msgs)))
+                serialized_msgs.append(serialize_message(stream_msg, abs_index))
                 existing_fingerprints.add(fingerprint)
+                num_streaming += 1
 
     # ── Token stats (Fix #1: cached by conversation identity) ─────────────
     # Cache key: (message_count, id_of_last_message). During LLM streaming,
@@ -1068,10 +1120,11 @@ def _serialize_instance(
     # Streaming UI Content Update Fix: Include streaming_responses length in cache key
     # so that growing streaming content causes cache miss and fresh stats computation
     stream_resp_len = len(stream_responses) if stream_responses else 0
-    cache_key = (len(msgs), id(msgs[-1]) if msgs else None, stream_resp_len)
+    cache_key = (original_history_count, id(msgs[-1]) if msgs else None, stream_resp_len, stream_content_len)
     
     # Streaming UI Content Update Fix: Compute token stats from combined messages (conversation + streaming_responses)
-    all_msgs_for_stats = list(msgs)
+    # Use full_msgs_snapshot (persisted history) to ensure stats reflect total usage, not just the tail.
+    all_msgs_for_stats = list(full_msgs_snapshot)
     if stream_responses:
         all_msgs_for_stats.extend(stream_responses)
     
@@ -1096,9 +1149,12 @@ def _serialize_instance(
         _max_tokens_cache[inst.instance_name] = _get_max_tokens_for_instance(pool, inst)
     max_tokens = _max_tokens_cache[inst.instance_name]
 
+    # BUG FIX: history_count must reflect the TOTAL length including unique streaming responses
+    # so that startIdx = history_count - messages.length lands exactly on the first message
+    # of the tail (or 0 if not partial).
     result.update({
         'messages': serialized_msgs,
-        'history_count': len(msgs),
+        'history_count': original_history_count + num_streaming,
         'total_tokens': stats['tokens'],
         'total_words': stats['words'],
         'max_tokens': max_tokens,

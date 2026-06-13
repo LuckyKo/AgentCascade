@@ -1290,16 +1290,20 @@ function handleServerMessage(data) {
       }
 
       // Throttle sub-agent rendering to ~100ms during streaming for smoother updates
-      // (O(1) raw text append is fast, so we can render more frequently)
+      // (O(1) raw text append was fast, but we now always re-render markdown for quality)
       // Reduced from 150ms to 100ms to reduce perceived latency in streaming
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
       const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
       const subThrottleContent = isSubAgentActive ? 100 : 750;
-      // Force render on: completion detected, stack change, new visible message, or time threshold elapsed
-      // (same pattern as main branch - time check is unconditional, not gated by content changed flag)
+      
+      // Force render on: completion detected, stack change, new visible message, 
+      // or if the visible agent's content changed (bypass throttle for visible active agent).
+      const isVisibleActiveAgentContentChanged = !!subAgentContentChanged && (state.activeSubTab === 'sub-' + activeName);
+      
       const shouldRender = completionDetected || 
                            stackChanged || 
                            subAgentNewVisibleMessage || 
+                           isVisibleActiveAgentContentChanged ||
                            (now - state.genStats.lastSubAgentRender > subThrottleContent);
       if (shouldRender) {
               // Reset timer BEFORE render logic to reduce latency (moved from after renderSubAgents)
@@ -1755,42 +1759,40 @@ function updateBubbleContent(bubble, msg, config) {
     const contentDiv = bubble.querySelector('.' + contentClass());
     if (!contentDiv) return;
 
-    // PERFORMANCE: During streaming, only render the delta (new text appended)
-    // instead of re-rendering the entire message. This avoids O(N) marked.parse()
-    // on every tick when N is large (thousands of words).
+    // Performance: Check if content actually changed before re-rendering.
+    // We still re-render the whole bubble to ensure correct Markdown formatting
+    // (O(1) append breaks formatting), but we skip it if nothing changed.
     const prevContent = bubble.dataset.prevContent;
     const curContent = msg.content || '';
+    const prevReasoning = bubble.dataset.prevReasoning;
+    const curReasoning = msg.reasoning_content || '';
+    const isGenerating = (config.isGenerating !== undefined) ? config.isGenerating : state.generating;
+
+    if (prevContent === curContent && prevReasoning === curReasoning && bubble.dataset.wasGenerating === String(isGenerating)) {
+        return; // Nothing changed
+    }
     
-    if (state.generating && prevContent !== undefined && !msg.function_call && msg.role !== 'function') {
-        // Force full re-render if reasoning_content changed — incremental path only handles plain content
-        const prevReasoning = bubble.dataset.prevReasoning;
-        const curReasoning = msg.reasoning_content || '';
-        if (prevReasoning !== curReasoning) {
-            delete bubble.dataset.prevContent;
-            delete bubble.dataset.prevReasoning;
-        } else {
-            // Incremental streaming update: only render the new portion
-            const newText = curContent.slice(prevContent.length);
-            if (newText) {
-                if (appendStreamingDelta(contentDiv, newText)) {
-                    bubble.dataset.prevContent = curContent;
-                    return;
-                }
-                // No suitable target — fall through to full re-render below
-            } else {
-                bubble.dataset.prevContent = curContent;
-                return;
+    bubble.dataset.prevContent = curContent;
+    bubble.dataset.prevReasoning = curReasoning;
+    bubble.dataset.wasGenerating = String(isGenerating);
+
+    // FIX 2: Restore incremental path for plain-text messages only - prevents UI stuttering during long message streaming
+    // This O(1) append avoids full renderMarkdown() re-parsing on every ~100ms tick for simple text streams.
+    // Only applies to messages without function_call, reasoning_content, or function role (which need full re-render).
+    if (isGenerating && prevContent !== undefined && !msg.function_call && msg.role !== 'function' && !msg.reasoning_content) {
+        const newText = curContent.slice(prevContent.length);
+        if (newText) {
+            try {
+                appendStreamingDelta(contentDiv, newText);
+                return;  // Success - skip full re-render
+            } catch(e) {
+                // If incremental fails for any reason, fall through to full re-render below
+                console.warn('Incremental streaming append failed, falling back to full render:', e);
             }
         }
     }
-    
-    // Fallback: full re-render (content changed non-incrementally, or not generating)
-    delete bubble.dataset.prevContent;
-    delete bubble.dataset.prevReasoning;
 
     let html = '';
-    const isGenerating = (config.isGenerating !== undefined) ? config.isGenerating : state.generating;
-
     if (msg.reasoning_content) {
         html += renderThinkingBlock(msg.reasoning_content, isGenerating);
     }
@@ -1811,7 +1813,9 @@ function updateBubbleContent(bubble, msg, config) {
                 }
             }
         }
-        html += renderMarkdown(text, false);
+        // Enable thinking block parsing even during streaming for "full content formatted" experience.
+        // Modern browsers handle this regex well enough for typical message sizes.
+        html += renderMarkdown(text, true);
     }
     
     // Preserve <details> open/close state and code block scroll positions during innerHTML replacement
@@ -1834,11 +1838,6 @@ function updateBubbleContent(bubble, msg, config) {
     newCodeBlocks.forEach((cb, i) => {
         if (i < codeScrollPositions.length) cb.scrollTop = codeScrollPositions[i].scrollTop;
     });
-
-    // Restore prevContent/prevReasoning after full re-render so the next tick
-    // can use the incremental path if only plain content grew.
-    bubble.dataset.prevContent = curContent;
-    bubble.dataset.prevReasoning = msg.reasoning_content || '';
 }
 
 function renderMarkdown(text, allowThinking = true) {
@@ -2717,6 +2716,17 @@ function renderSubAgentPanel(panel, agentData, name) {
           existingPlaceholder.remove();
         }
       }
+
+      // Feature Plan #021: Before adding new messages, ensure the PREVIOUS last message 
+      // gets one final full render to ensure it's fully formatted (e.g. reasoning block finished).
+      if (currentCount > lastCount && scrollContainer.lastElementChild) {
+        const subConfig = getAgentConfig(name);
+        // The previous message is by definition not the "actively generating" one anymore
+        // if a new message has arrived.
+        subConfig.isGenerating = false; 
+        updateBubbleContent(scrollContainer.lastElementChild, displayMsgs[lastCount - 1], subConfig);
+      }
+
       const newMsgs = [];
       for (let i = lastCount; i < currentCount; i++) {
         newMsgs.push(displayMsgs[i]);
