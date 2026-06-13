@@ -1068,6 +1068,7 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                 session['_last_resp_len'] = 0
                 session['_last_resp_sig'] = ''  # Reset content signature tracker
                 session['_last_sent_resp_count'] = 0  # Reset delta counter for clean state on retry
+                session.pop('_last_sa_msg_counts', None)  # Reset sub-agent message counts on retry
                 last_send = 0
                 tick_num = 0
                 prev_responses_len = 0  # Track previous response length for loop detection
@@ -1167,10 +1168,12 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                                     _sa_changed = True
                                     session['_last_sa_msg_counts'] = _cur_sa_counts
                             
-                            if _sa_changed or any_sa_active:
-                                sub_agents_cache = get_sub_agent_state(streaming=True)
-                                if agent_pool:
-                                    agent_pool._last_seen_stack = current_stack
+                            # Force recompute sub-agent state every 20 ticks to prevent staleness from missed change detection.
+                            # The _sa_changed flag relies on message count/content length tracking, which can miss some changes.
+                            if _sa_changed or any_sa_active or tick_num % 20 == 0:
+                               sub_agents_cache = get_sub_agent_state(streaming=True)
+                               if agent_pool:
+                                     agent_pool._last_seen_stack = current_stack
                             
                             # Throttle telemetry to ~3s (every 20 ticks) to keep it lightweight
                             _telem_payload = None
@@ -1397,6 +1400,8 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
             session.pop('_last_resp_len', None)
             session.pop('_last_sent_resp_count', None)
             session.pop('_last_resp_content_len', None)
+            # FIX6: Clean up sub-agent message counts tracker to prevent staleness between generations
+            session.pop('_last_sa_msg_counts', None)
             if agent_pool:
                 agent_pool.stopped = False
             if has_llm and old_cfg:
@@ -1443,9 +1448,9 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                     await broadcast(data)
             except asyncio.CancelledError:
                 break
-            except Exception:
-                pass
-
+            except Exception as e:
+                logger.error(f"Sender loop exception: {e}")
+    
     async def _approval_loop():
         """Poll for pending approvals and push to clients."""
         known_ids: Set[str] = set()

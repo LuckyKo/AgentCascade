@@ -867,18 +867,19 @@ function handleServerMessage(data) {
       break;
 
     case 'stream_update': {
-      // Don't process stale stream updates after halt
-      if (state.instance_halted) break;
-
       // Lightweight streaming delta — only response messages + sub-agents
       const historyCount = data.history_count || 0;
       const responseMsgs = data.response_messages || [];
 
-      // Merge: keep stable history, replace streaming response tail
-      if (historyCount <= state.messages.length) {
-        state.messages.length = historyCount;
+      // Don't process main chat history updates after halt, but allow sub-agent updates to flow through.
+      // This prevents the main agent from appearing to continue generating while keeping sub-agent tabs live.
+      if (!state.instance_halted) {
+        // Merge: keep stable history, replace streaming response tail
+        if (historyCount <= state.messages.length) {
+          state.messages.length = historyCount;
+        }
+        state.messages.push(...responseMsgs);
       }
-      state.messages.push(...responseMsgs);
 
       const oldStackStr = (state.activeStack || []).join(',');
       // Track subagent changes to decide render urgency:
