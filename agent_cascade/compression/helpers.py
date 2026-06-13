@@ -80,7 +80,12 @@ def rebuild_working_set(
     if not compressed:
         return
 
-    # With clean trim, the pool is already sliced — no need for slice_history_for_llm
+    # FIX 2: Use slice_history_for_llm to extract the proper working set from the pool.
+    # The pool stores the full post-compression history (system + prefix + marker + tail),
+    # but callers need only the system message + messages from the latest marker onward.
+    # slice_history_for_llm extracts this sliced view while preserving the system message.
+    sliced = agent_pool.slice_history_for_llm(compressed)
     messages_list.clear()
-    messages_list.extend(copy.deepcopy(compressed))
+    if sliced:
+        messages_list.extend(copy.deepcopy(sliced))
     # deepcopy ensures callers don't accidentally mutate pool state through their references

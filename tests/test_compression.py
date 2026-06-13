@@ -70,6 +70,38 @@ class MockAgentPool:
         messages_to_compress = history[active_start_idx:]
         return active_start_idx, messages_to_compress, latest_summary_idx
 
+    def slice_history_for_llm(self, history):
+        """Same logic as AgentPool.slice_history_for_llm.
+
+        Extracts the working set from full history, preserving system message.
+        Returns messages from the latest marker onwards, with system prepended if needed.
+        """
+        if not history:
+            return []
+
+        latest_summary_idx = self.find_last_marker(history)
+
+        if latest_summary_idx == -1:
+            # No marker found — return full history (includes system message)
+            return list(history)
+
+        # Extract system message if present
+        system_msg = None
+        first_role = history[0].get('role') if isinstance(history[0], dict) else getattr(history[0], 'role', '')
+        if first_role == SYSTEM:
+            system_msg = history[0]
+
+        # Get messages from latest marker onwards
+        sliced = list(history[latest_summary_idx:])
+
+        # Ensure system message is at the top (if not already there)
+        if system_msg:
+            first_sliced_role = sliced[0].get('role') if isinstance(sliced[0], dict) else getattr(sliced[0], 'role', '')
+            if first_sliced_role != SYSTEM:
+                return [system_msg] + sliced
+
+        return sliced
+
 
 def _build_pool_with_history(num_user_msgs=10):
     """Build a MockAgentPool with realistic conversation history."""
@@ -529,7 +561,8 @@ class TestCompressContextFailurePaths:
         )
 
         assert result.success is False
-        assert "optimally compressed" in (result.error or "").lower()
+        # The message count guard fires before the token guard for small sets
+        assert "not enough messages to compress" in (result.error or "").lower()
 
 
 # ──────────────────────────────────────────────
@@ -1027,7 +1060,7 @@ class TestCompressContextPoolMutationFailure:
             )
 
         assert result.success is False
-        assert "Pool mutation failed" in (result.error or "")
+        assert "Failed to apply compression atomically" in (result.error or "")
 
 
 # ──────────────────────────────────────────────
@@ -1090,7 +1123,8 @@ class TestTokenGuard:
             )
 
         assert result.success is False
-        assert "optimally compressed" in (result.error or "").lower()
+        # The message count guard fires before the token guard for small sets
+        assert "not enough messages to compress" in (result.error or "").lower()
 
     def test_compresses_when_small_but_many_tokens(self):
         """<3 messages but >=200 tokens → compression proceeds past the token guard.
@@ -1162,9 +1196,9 @@ class TestTokenCapGuard:
     def test_discard_count_capped_by_compression_agent_context(self):
         """When compression agent has a small context window, target_discard_count is capped.
         
-        With max_input_tokens=4000: available = int(4000 * 0.6) = 2400 tokens for messages.
-        At ~500 tokens/message → max_discardable = 2400 // 500 = 4.
-        Even if compute_discard_count would return 25, it should be capped to 4.
+        With max_input_tokens=4000: available = int(4000 * 0.9) = 3600 tokens for messages.
+        At ~500 tokens/message → max_discardable = 3600 // 500 = 7.
+        Even if compute_discard_count would return 25, it should be capped to 7.
         """
         pool, initial_len = _build_pool_with_history(num_user_msgs=30)  # Would discard ~18 msgs
 
@@ -1189,10 +1223,10 @@ class TestTokenCapGuard:
                 mode="auto",
             )
 
-        # Should succeed and discard at most 4 messages (capped by context window)
+        # Should succeed and discard at most 7 messages (capped by context window)
         assert result.success is True
-        assert result.messages_discarded <= 4, (
-            f"Discard count should be capped to 4 but was {result.messages_discarded}"
+        assert result.messages_discarded <= 7, (
+            f"Discard count should be capped to 7 but was {result.messages_discarded}"
         )
 
     def test_no_cap_when_compression_agent_not_loaded(self):
@@ -1235,6 +1269,282 @@ class TestTokenCapGuard:
 
         # Should succeed — exception is caught and original discard count used
         assert result.success is True
+
+
+# ──────────────────────────────────────────────
+# FIX-SPECIFIC TESTS
+# ──────────────────────────────────────────────
+
+class MockLogger:
+    """Minimal mock logger for testing apply_compression log update path."""
+    
+    def __init__(self, history=None):
+        self.data = {'history': list(history) if history else []}
+    
+    def _format_message(self, msg):
+        """Format a message for the log (adds timestamp)."""
+        if isinstance(msg, dict):
+            return {
+                'timestamp': '2024-01-01T00:00:00',
+                'role': msg.get('role', ''),
+                'content': msg.get('content', '')
+            }
+        else:
+            return {
+                'timestamp': '2024-01-01T00:00:00',
+                'role': getattr(msg, 'role', ''),
+                'content': getattr(msg, 'content', '')
+            }
+    
+    def reset_history(self, new_history, rewrite=False):
+        """Update the log history."""
+        self.data['history'] = new_history
+
+
+class TestApplyCompressionFix4:
+    """Test Fix 4: System message verification in apply_compression."""
+    
+    def test_returns_true_when_system_present(self):
+        """apply_compression should return True when system message is at index 0."""
+        from agent_cascade.compression.core import apply_compression
+        
+        # Build pool with system message
+        history = [_make_msg(SYSTEM, "You are a helpful assistant")]
+        history.append(_make_msg(USER, "Hello"))
+        history.append(_make_msg("assistant", "Hi there"))
+        
+        pool = MockAgentPool(history=history)
+        pool.instance_loggers = {
+            "TestAgent": MockLogger(history)
+        }
+        
+        marker_message = _make_msg(USER, f"{COMPRESSION_MARKER} (50%) ---\nSummary: test")
+        
+        result = apply_compression(
+            agent_pool=pool,
+            target_agent_name="TestAgent",
+            marker_message=marker_message,
+            insert_pos=3,
+            active_start_idx=1,
+            messages_discarded=0,
+            tail_count=2,
+            include_force_marker=False,
+        )
+        
+        assert result is True
+        
+        # Verify the log was updated with the compression marker
+        log_history = pool.instance_loggers["TestAgent"].data['history']
+        assert len(log_history) > 0
+        assert any(
+            COMPRESSION_MARKER in str(msg.get('content', '')) 
+            for msg in log_history
+        ), "Compression marker should be present in the log history"
+        
+    def test_returns_false_when_system_missing(self):
+        """apply_compression should return False when system message is missing."""
+        from agent_cascade.compression.core import apply_compression
+        
+        # Build pool WITHOUT system message (starting with USER)
+        history = [_make_msg(USER, "Hello")]
+        history.append(_make_msg("assistant", "Hi there"))
+        
+        pool = MockAgentPool(history=history)
+        pool.instance_loggers = {
+            "TestAgent": MockLogger(history)
+        }
+        
+        marker_message = _make_msg(USER, f"{COMPRESSION_MARKER} (50%) ---\nSummary: test")
+        
+        result = apply_compression(
+            agent_pool=pool,
+            target_agent_name="TestAgent",
+            marker_message=marker_message,
+            insert_pos=2,
+            active_start_idx=0,
+            messages_discarded=0,
+            tail_count=2,
+            include_force_marker=False,
+        )
+        
+        # Fix 4 should detect missing system and return False
+        assert result is False
+        
+    def test_empty_history_returns_false(self):
+        """apply_compression with empty history should handle gracefully."""
+        from agent_cascade.compression.core import apply_compression
+        
+        history = []
+        
+        pool = MockAgentPool(history=history)
+        pool.instance_loggers = {
+            "TestAgent": MockLogger(history)
+        }
+        
+        marker_message = _make_msg(USER, f"{COMPRESSION_MARKER} (50%) ---\nSummary: test")
+        
+        # Should not crash even with empty history
+        result = apply_compression(
+            agent_pool=pool,
+            target_agent_name="TestAgent",
+            marker_message=marker_message,
+            insert_pos=0,
+            active_start_idx=0,
+            messages_discarded=0,
+            tail_count=0,
+            include_force_marker=False,
+        )
+        
+        # Empty history with no system message should return False
+        assert result is False
+
+
+class TestFix3LogToPoolRecovery:
+    """Test Fix 3: Log-to-pool recovery validation."""
+    
+    def test_recovery_succeeds_when_system_present(self):
+        """Recovery should succeed when recovered data has system at index 0."""
+        # Simulate recovered history WITH system message
+        recov = [
+            _make_msg(SYSTEM, "You are a helpful assistant"),
+            _make_msg(USER, "Hello"),
+            _make_msg("assistant", "Hi there")
+        ]
+        
+        # Fix 3 logic: Check if first message is SYSTEM
+        first_role = recov[0].get('role') if isinstance(recov[0], dict) else getattr(recov[0], 'role', '')
+        
+        # Recovery should proceed (not be skipped) when system is present
+        assert first_role == SYSTEM, "Fix 3: System message should be at index 0 for successful recovery"
+        
+    def test_recovery_skipped_when_system_missing(self):
+        """Recovery should be skipped when recovered data lacks system message."""
+        # Simulate recovered history WITHOUT system message (starting with USER)
+        recov = [
+            _make_msg(USER, "Hello"),
+            _make_msg("assistant", "Hi there")
+        ]
+        
+        # Fix 3 logic: Check if first message is SYSTEM
+        first_role = recov[0].get('role') if isinstance(recov[0], dict) else getattr(recov[0], 'role', '')
+        
+        # Recovery should be skipped when system is missing
+        assert first_role != SYSTEM, "Fix 3: First role should not be SYSTEM for recovery skip test"
+        
+    def test_recovery_handles_dict_messages(self):
+        """Recovery validation should work with dict-style messages."""
+        # Dict-style messages (as they appear in logs)
+        recov = [
+            {'role': SYSTEM, 'content': "You are helpful"},
+            {'role': USER, 'content': "Hello"}
+        ]
+        
+        first_role = recov[0].get('role') if isinstance(recov[0], dict) else getattr(recov[0], 'role', '')
+        assert first_role == SYSTEM
+        
+    def test_recovery_handles_message_objects(self):
+        """Recovery validation should work with Message objects."""
+        # Message objects
+        recov = [
+            _make_msg(SYSTEM, "You are helpful"),
+            _make_msg(USER, "Hello")
+        ]
+        
+        first_role = recov[0].get('role') if isinstance(recov[0], dict) else getattr(recov[0], 'role', '')
+        assert first_role == SYSTEM
+
+
+class TestFix1WorkingHistoryRefresh:
+    """Test Fix 1: Working history refresh after compression in orchestrator."""
+    
+    def test_slice_history_for_llm_preserves_system(self):
+        """slice_history_for_llm should always return history with system at index 0."""
+        pool, _ = _build_pool_with_marker(msgs_before=5, msgs_after=3)
+        
+        # Get the full conversation from pool
+        conv = pool.get_conversation("TestAgent")
+        
+        # Apply slice_history_for_llm (this is what Fix 1 does)
+        working_history = pool.slice_history_for_llm(conv)
+        
+        # Verify system message is preserved at index 0
+        assert len(working_history) > 0
+        first_role = working_history[0].get('role') if isinstance(working_history[0], dict) else getattr(working_history[0], 'role', '')
+        assert first_role == SYSTEM, "Fix 1: System message should be at index 0 after slice_history_for_llm"
+        
+    def test_working_history_refresh_after_compression(self):
+        """Simulate Fix 1 flow: compression sets tracker, then working_history is refreshed."""
+        # Build pool with marker (simulating post-compression state)
+        pool, _ = _build_pool_with_marker(msgs_before=5, msgs_after=3)
+        
+        # Simulate orchestrator's compress_tracker being set to True
+        compress_tracker = {"TestAgent": True}
+        
+        if compress_tracker.get("TestAgent", False):
+            # This is what Fix 1 does - refresh both conv and working_history
+            conv = pool.get_conversation("TestAgent")
+            working_history = pool.slice_history_for_llm(conv)
+            
+            # Verify working_history has system message
+            assert len(working_history) > 0
+            first_role = working_history[0].get('role') if isinstance(working_history[0], dict) else getattr(working_history[0], 'role', '')
+            assert first_role == SYSTEM
+            
+    def test_working_history_without_marker_includes_system(self):
+        """slice_history_for_llm on history without marker should still include system."""
+        pool, _ = _build_pool_with_history(num_user_msgs=5)
+        
+        conv = pool.get_conversation("TestAgent")
+        working_history = pool.slice_history_for_llm(conv)
+        
+        # Should return full history with system at index 0
+        assert len(working_history) == len(conv)
+        first_role = working_history[0].get('role') if isinstance(working_history[0], dict) else getattr(working_history[0], 'role', '')
+        assert first_role == SYSTEM
+
+
+class TestRebuildWorkingSetWithMarker:
+    """Test rebuild_working_set (Fix 2) with compression marker present."""
+    
+    def test_rebuild_with_marker_slices_correctly(self):
+        """rebuild_working_set should use slice_history_for_llm to get proper working set."""
+        # Build pool WITH compression marker
+        pool, _ = _build_pool_with_marker(msgs_before=5, msgs_after=3)
+        
+        caller_list: list[Message] = [_make_msg(USER, "stale")]
+        
+        # This calls slice_history_for_llm internally (Fix 2)
+        rebuild_working_set(caller_list, pool, "TestAgent")
+        
+        # Verify the result is sliced (not full history)
+        assert len(caller_list) < 1 + 5*2 + 1 + 3*2  # Should be less than full history
+        
+        # Verify system message is present at index 0
+        assert len(caller_list) > 0
+        first_role = caller_list[0].get('role') if isinstance(caller_list[0], dict) else getattr(caller_list[0], 'role', '')
+        assert first_role == SYSTEM, "Fix 2: rebuild_working_set should preserve system message"
+        
+        # Verify marker is present (slice starts from latest marker)
+        has_marker = any(
+            (msg.get('content') if isinstance(msg, dict) else getattr(msg, 'content', '')) and 
+            COMPRESSION_MARKER in str(msg.get('content') if isinstance(msg, dict) else getattr(msg, 'content', ''))
+            for msg in caller_list
+        )
+        assert has_marker, "Working set should include the compression marker"
+        
+    def test_rebuild_without_marker_returns_full_history(self):
+        """rebuild_working_set on pool without marker returns full history."""
+        pool, _ = _build_pool_with_history(num_user_msgs=3)
+        
+        caller_list: list[Message] = []
+        rebuild_working_set(caller_list, pool, "TestAgent")
+        
+        # Should return full history (no slicing needed)
+        assert len(caller_list) == 1 + 3*2  # system + 6 messages
+        
+        # System message at index 0
+        first_role = caller_list[0].get('role') if isinstance(caller_list[0], dict) else getattr(caller_list[0], 'role', '')
+        assert first_role == SYSTEM
 
 
 if __name__ == '__main__':

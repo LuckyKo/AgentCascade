@@ -30,6 +30,30 @@ from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_HEURISTIC_MATCH_TH
 from agent_cascade.log import logger
 
 
+def _normalize_line_for_alignment(line: str) -> str:
+    """
+    Normalize a line for heuristic alignment matching.
+    """
+    if not line or not line.strip():
+        return ""
+    result = line
+    # Remove string content but preserve delimiters
+    result = re.sub(r'\"\"\"[^\n]*?\"\"\"', '\"\"\"...\"\"\"', result)
+    result = re.sub(r"'''[^\n]*?'''", "'''...'''", result)
+    result = re.sub(r'\"[^\"\n]*\"', '\"...\"', result)
+    result = re.sub(r"'[^'\n]*'", "'...'", result)
+    # Handle augmented assignments (+=, -=, etc.)
+    result = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\s*([+\-*/%&|^<>]=+|//=|\*\*=)', 'assign=', result)
+    # Handle regular assignment
+    result = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\s*=', 'assign=', result)
+    # Remove numeric literals but NOT array indices
+    result = re.sub(r'(?<!\[)\b\d+\b(?!])', '', result)
+    # Remove whitespace for comparison
+    result = "".join(result.split())
+    return result
+
+
+
 class OperationType(Enum):
     FILE_WRITE = "file_write"
     FILE_EDIT = "file_edit"

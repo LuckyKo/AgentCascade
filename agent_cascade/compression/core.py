@@ -8,6 +8,7 @@ from agent_cascade.compression.helpers import (
 )
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
 from agent_cascade.utils.utils import extract_text_from_message
+from agent_cascade.llm.schema import SYSTEM
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,16 @@ def apply_compression(
         else:
             new_history = history[:active_start_idx] + [marker_message] + history[insert_pos:]
         
+        # FIX 4: Verify system message is preserved in new_history (observability logging)
+        if new_history:
+            first_role = new_history[0].get('role', '') if isinstance(new_history[0], dict) else getattr(new_history[0], 'role', '')
+            if first_role != SYSTEM:
+                logger.error(
+                    f"[COMPRESSION BUG] System message missing from new_history for '{target_agent_name}'. "
+                    f"First role: {first_role}. active_start_idx={active_start_idx}, insert_pos={insert_pos}"
+                )
+                return False  # Prevent applying corrupted history to pool
+        
         # LOG FIRST: Update the log file before touching the pool
         # This ensures if log update fails, pool remains untouched (no divergence)
         if target_agent_name in agent_pool.instance_loggers:
@@ -85,7 +96,9 @@ def apply_compression(
                 log_insert_pos = len(log_history) - tail_count
                 
                 # Safety: never insert before SYSTEM message (index 0)
-                if log_insert_pos == 0 and log_history and log_history[0].get('role') == 'system':
+                # Handle both dict and Message object for role checking
+                first_log_role = log_history[0].get('role', '') if isinstance(log_history[0], dict) else getattr(log_history[0], 'role', '')
+                if log_insert_pos == 0 and log_history and first_log_role == SYSTEM:
                     log_insert_pos = 1
                 
                 # Clamp to valid range (both lower and upper bounds)

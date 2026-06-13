@@ -842,7 +842,13 @@ class OrchestratorAgent(Assistant):
                     # Append notification to last message — PRESERVE existing duplicate-prevention logic
                     self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
                     # compress_context() already modified the pool with compressed data — just rebuild working set from it
+                    # ── TRANSITION NOTE: agent_orchestrator.py is being phased out by Root.
+                    #     This forced compression sync may need to be revisited when migration is complete. ──
                     rebuild_working_set(messages, self.agent_pool, instance_name)
+                    # Also sync llm_messages — the LLM call uses this, not messages
+                    sliced = self.agent_pool.slice_history_for_llm(self.agent_pool.get_conversation(instance_name))
+                    llm_messages.clear()
+                    llm_messages.extend(copy.deepcopy(sliced))
                     # Reset fail counter on success
                     self._compress_fail_count[instance_name] = 0
                     # Mark that forced compression ran during this turn so _stream_sub_agent_call
@@ -1205,10 +1211,18 @@ class OrchestratorAgent(Assistant):
                         try:
                             recov = self.agent_pool.get_logger(self.session_name, self.agent_type).data.get('history', [])
                             if recov and validate_message_pool(recov, self.session_name):
-                                logger.info(f"Recovered message pool from log for '{self.session_name}' ({len(recov)} messages)")
-                                # Update the pool with recovered data
-                                self.agent_pool.instance_conversations[self.session_name] = copy.deepcopy(recov)
-                                compressed = recov
+                                # ── TRANSITION NOTE: agent_orchestrator.py is being phased out by Root.
+                                #     This recovery validation may need to be revisited when migration is complete. ──
+                                # FIX 3: Ensure recovered history starts with SYSTEM message before recovery
+                                first_role = recov[0].get('role') if isinstance(recov[0], dict) else getattr(recov[0], 'role', '')
+                                if first_role != SYSTEM:
+                                    logger.error(f"[COMPRESSION BUG] Recovered history missing SYSTEM message for '{self.session_name}' - skipping recovery. First role: {first_role}")
+                                    # Don't overwrite compressed — keep using the original value
+                                else:
+                                    logger.info(f"Recovered message pool from log for '{self.session_name}' ({len(recov)} messages)")
+                                    # Update the pool with recovered data
+                                    self.agent_pool.instance_conversations[self.session_name] = copy.deepcopy(recov)
+                                    compressed = recov  # Only assign when recovery is valid
                             else:
                                 logger.error("Recovery from log also failed — message pool may be corrupted")
                         except Exception as e:
@@ -2287,10 +2301,16 @@ class OrchestratorAgent(Assistant):
                                     self._compress_tracker[instance_name] = True
                                     self._compress_fail_count[instance_name] = 0
                         
+                        # ── TRANSITION NOTE: agent_orchestrator.py is being phased out by Root (see start_api_server.py QWEN_USE_ROOT_SUBAGENT).
+                        #     These compression sync fixes may need to be revisited when migration is complete. ──
                         # Re-sync conv if compression just ran — it replaces the pool list via copy-and-replace,
                         # making our local 'conv' stale. Check tracker BEFORE updating UI state.
                         if self._compress_tracker.get(instance_name, False):
                             conv = self.agent_pool.get_conversation(instance_name)
+                            # Note: working_history is intentionally NOT refreshed here because the agent's
+                            # deep-copied messages (passed to agent.run() earlier in this loop iteration) can't
+                            # be updated mid-run. The next call to agent.run() will get fresh data from the pool.
+                            # This refresh only updates 'conv' for stream state synchronization below.
                         
                         # Sync stream state using the conv reference.
                         state['messages'] = list(conv) + list(resp)
