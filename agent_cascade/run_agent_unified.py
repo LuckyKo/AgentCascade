@@ -168,12 +168,18 @@ def run_agent_thread_unified(
             )
 
             if should_broadcast:
+                # Fix #2: Force full state refresh every 100 ticks (~15 seconds) to recover
+                # from sync gaps. During partial streaming, some messages may be missed;
+                # periodic full refresh ensures eventual consistency.
+                force_full = (tick_num % 100 == 0)
+                
                 # Build lightweight stream update (only serializes changing messages)
                 # build_stream_update_from_pool internally handles sub-agent snapshots
                 stream_update = build_stream_update_from_pool(
                     pool=pool,
                     instance_name=instance_name,
                     responses=turn_output,
+                    force_full=force_full,
                 )
                 if stream_update is not None:
                     event = {

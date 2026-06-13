@@ -525,19 +525,22 @@ def build_stream_update_from_pool(
     pool: AgentPool,
     instance_name: str,
     responses: Optional[List[Message]] = None,
+    force_full: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Build a lightweight streaming delta directly from the pool.
 
     Replaces build_stream_update() which read from session['history']. Only
-    serializes the changing response messages — history is already on the client.
+    serializes the changing response messages - history is already on the client.
 
-    Includes sub_agents, current_model, and telemetry fields to match the frontend's
-    expected output format.
+    Includes sub_agents, current_model, and telemetry fields to match the frontend expected output format.
 
     Args:
         pool: The AgentPool managing all instances.
         instance_name: Name of the primary instance for this stream.
         responses: Current partial response messages from the engine.
+        force_full: If True, serialize all instances with full state (streaming=False)
+            to recover from sync gaps. Used periodically (~every 100 ticks) to ensure
+            any missed partial messages are recovered.
 
     Returns:
         Dictionary with streaming delta, or None if instance not found.
@@ -626,10 +629,16 @@ def build_stream_update_from_pool(
             inst_streaming_responses = list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
         current_version = (len(current_msgs), id(current_msgs[-1]) if current_msgs else None, len(inst_streaming_responses) if inst_streaming_responses else 0)
 
+        # Fix #2: Periodic full state refresh — every ~100 ticks force a complete
+        # serialization (streaming=False) to recover from sync gaps. This ensures
+        # any missed partial messages are recovered within ~15 seconds.
+        is_full_refresh = force_full
+        
         # Always serialize the primary instance (it's actively streaming)
         # and any instance whose version changed since last stream_update
-        if name == instance_name or current_version != _last_stream_versions.get(name):
-            all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=True, streaming_responses=inst_streaming_responses)
+        if name == instance_name or current_version != _last_stream_versions.get(name) or is_full_refresh:
+            # Use streaming=False for full refresh to send complete state
+            all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=(not is_full_refresh), streaming_responses=inst_streaming_responses)
             _last_stream_versions[name] = current_version
             _cached_instance_data[name] = all_instances[name]
         else:
@@ -637,7 +646,7 @@ def build_stream_update_from_pool(
             all_instances[name] = _cached_instance_data.get(name)
             # If for some reason the cached data is missing, serialize fresh
             if all_instances[name] is None:
-                all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=True, streaming_responses=inst_streaming_responses)
+                all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=(not is_full_refresh), streaming_responses=inst_streaming_responses)
                 _cached_instance_data[name] = all_instances[name]
                 _last_stream_versions[name] = current_version
 
@@ -971,8 +980,8 @@ def _serialize_instance(
     and max_tokens — matching the legacy API server path.
 
     Streaming optimisation: during active generation for large conversations (>30
-    messages), only the last 3 are sent to avoid O(N²) serialisation on every
-    ~150ms tick. Smaller conversations are sent in full.
+    messages), only a proportional tail (10% of messages, minimum 5) is sent to avoid
+    O(N²) serialisation on every ~150ms tick. Smaller conversations are sent in full.
     
     Streaming UI Content Update Fix (Step 3): When streaming_responses is provided, 
     append partial LLM content after persisted messages with fingerprint-based dedup.
@@ -1006,12 +1015,14 @@ def _serialize_instance(
         stream_responses = list(inst._streaming_responses) if streaming and streaming_responses is None and len(inst._streaming_responses) > 0 else streaming_responses
 
     if streaming and current_state == AgentState.RUNNING and len(msgs) > 30:
-        # During active generation only send the tail (last 3 messages) for large
-        # conversations to avoid O(N²) serialisation on every ~150ms tick.
+        # During active generation only send the tail for large conversations to avoid
+        # O(N²) serialisation on every ~150ms tick. Tail size is proportional (10% of
+        # messages, minimum 5) to reduce sync gaps while still reducing bandwidth.
         # Smaller conversations are sent in full — dropping early context during
         # mid-conversation streaming would break incremental rendering.
-        start_idx = max(0, len(msgs) - 3)
-        serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-3:], start_idx)]
+        tail_size = max(5, len(msgs) // 10)  # Send at least 10% or 5 messages as tail
+        start_idx = max(0, len(msgs) - tail_size)
+        serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-tail_size:], start_idx)]
         result['is_partial'] = True
     else:
         serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
