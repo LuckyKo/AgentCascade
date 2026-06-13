@@ -913,9 +913,18 @@ function handleServerMessage(data) {
               } else {
                 // Normal merge path
                 const startIdx = hCount - sa.messages.length;
-                if (startIdx >= 0 && startIdx <= existing.messages.length) {
-                  existing.messages.length = startIdx;
-                  existing.messages.push(...sa.messages);
+                if (startIdx >= 0) {
+                  // If server's partial is beyond our array length, replace entirely to avoid holes.
+                  // Hole-patching (existing.messages.length = startIdx) creates undefined entries that break contentKey computation.
+                  if (startIdx > existing.messages.length) {
+                    existing.messages = [...sa.messages];
+                  } else {
+                    existing.messages.length = startIdx;
+                    existing.messages.push(...sa.messages);
+                  }
+                } else {
+                  // Server has fewer messages than client (rollback/compression). Replace entirely to sync.
+                  existing.messages = [...sa.messages];
                 }
                 // Sync other metadata fields — but NOT messages (we just merged those above).
                 // Object.assign would overwrite our merged array with the partial sa.messages.
@@ -2409,6 +2418,19 @@ function renderSubAgentPanel(panel, agentData, name) {
 
 function createSubMsgEl(msg, index, instanceName, isGenerating) {
   const div = document.createElement('div');
+  
+  // FIX F1: Handle null/undefined messages by rendering a placeholder showing how many were missed.
+  if (!msg) {
+    div.className = 'sub-msg sub-msg-unknown missed-msg';
+    div.dataset.index = index;
+    const content = document.createElement('div');
+    content.className = 'sub-msg-content';
+    content.style = "font-style:italic;color:var(--text-dim);";
+    content.textContent = '[... Missed messages ...]';
+    div.appendChild(content);
+    return div;
+  }
+  
   div.className = `sub-msg sub-msg-${msg.role || 'unknown'}`;
   div.dataset.index = index;
 
@@ -2490,6 +2512,9 @@ function createSubMsgEl(msg, index, instanceName, isGenerating) {
 function updateSubBubbleContent(bubble, msg, isGenerating) {
   const content = bubble.querySelector('.sub-msg-content');
   if (!content) return;
+  
+  // FIX F2: Early return if msg is null/undefined to prevent crashes on hole entries.
+  if (!msg) return;
 
   // PERFORMANCE: During streaming, only render the delta (new text appended)
   // instead of re-rendering the entire message. This avoids O(N) marked.parse()
@@ -2590,6 +2615,9 @@ function switchMainTab(tabId) {
     lastRenderedCount = Infinity;
     renderMessages();
   } else {
+    // Reset sub-agent render throttle timer so the tab renders immediately when switched to.
+    // Without this, the throttle can delay rendering for up to 750ms after tab switch.
+    state.genStats.lastSubAgentRender = 0;
     renderSubAgents();
   }
 }

@@ -627,9 +627,12 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                 
                 # Optimization: During streaming, we only send the tail of the message list
                 # to avoid O(N^2) JSON traffic and parsing lag in the browser.
-                if streaming and state.get('active') and len(msgs) > 5:
-                    start_idx = max(0, len(msgs) - 3)
-                    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-3:], start_idx)]
+                # Threshold raised to 30 to reduce partial updates for short conversations.
+                # Tail size is proportional (10% of messages, min 5) to reduce sync gaps.
+                if streaming and state.get('active') and len(msgs) > 30:
+                    tail_size = max(5, len(msgs) // 10)  # Send at least 10% or 5 messages as tail
+                    start_idx = max(0, len(msgs) - tail_size)
+                    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-tail_size:], start_idx)]
                     is_partial = True
                 else:
                     serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
@@ -1170,8 +1173,11 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                             
                             # Force recompute sub-agent state every 20 ticks to prevent staleness from missed change detection.
                             # The _sa_changed flag relies on message count/content length tracking, which can miss some changes.
+                            # Every 100 iterations we force a full sub-agent state update (streaming=False) 
+                            # to ensure any missed partial messages are eventually recovered.
+                            force_full = (tick_num % 100 == 0)
                             if _sa_changed or any_sa_active or tick_num % 20 == 0:
-                               sub_agents_cache = get_sub_agent_state(streaming=True)
+                               sub_agents_cache = get_sub_agent_state(streaming=(not force_full))
                                if agent_pool:
                                      agent_pool._last_seen_stack = current_stack
                             
