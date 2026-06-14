@@ -951,6 +951,16 @@ function playSound(type) {
 function handleServerMessage(data) {
   const wasGenerating = state.generating;
   const prevApprovalsCount = (state.approvals || []).length;
+  
+  // Capture root agent state transition for 'done' event sound trigger
+  let rootCompleted = false;
+  if (data.type === 'done' && data.agent_instances) {
+    const rootAgentData = data.agent_instances[state.sessionName];
+    const prevRootState = state.subAgents[state.sessionName]?.agent_state;
+    if (rootAgentData && prevRootState === 'RUNNING' && rootAgentData.agent_state === 'IDLE') {
+      rootCompleted = true;
+    }
+  }
 
   switch (data.type) {
     case 'state':
@@ -1437,7 +1447,11 @@ function handleServerMessage(data) {
   if (newApprovalsCount > prevApprovalsCount) {
     playSound('intervention');
   } else if (wasGenerating && !state.generating) {
-    playSound('completed');
+    // Only play "completed" sound when the ROOT agent transitions RUNNING → IDLE
+    // (sub-agent completions, pauses, and errors are excluded via rootCompleted check)
+    if (data.type === 'done' && rootCompleted) {
+      playSound('completed');
+    }
     checkAfkAutoReply();
   }
 }
