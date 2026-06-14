@@ -228,7 +228,8 @@ class EndpointScheduler:
                     _released = True  # Mark as released even on error
                     return
                 
-                # FIX: Release semaphore FIRST to prevent state mismatch on failure
+                # FIX: Release semaphore FIRST, then decrement counter
+                # This prevents deadlock where active_count=0 but semaphore blocks forever
                 try:
                     current_sched['sem'].release()
                 except Exception as e:
@@ -236,11 +237,11 @@ class EndpointScheduler:
                         f"[SLOT_RELEASE_ERROR] Failed to release semaphore for {log_target}: {e}",
                         exc_info=True
                     )
-                    # On sem.release() failure, slot remains held — active_count stays accurate
+                    # On sem.release() failure, slot remains held (don't decrement counter)
                     _released = True  # Mark as released even on error
                     return
                 
-                # Decrement counter AFTER successful sem.release() to keep state in sync
+                # Decrement counter AFTER successful sem.release()
                 old_count = current_sched['active_count']
                 current_sched['active_count'] = max(0, old_count - 1)
                 new_count = current_sched['active_count']

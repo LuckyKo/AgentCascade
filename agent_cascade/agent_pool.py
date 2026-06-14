@@ -828,10 +828,15 @@ class AgentPool:
                             continue
                         try:
                             item = json.loads(line)
-                            if "metadata" in item:
-                                metadata.update(item["metadata"])
+                            # FIX BOOL_LEAK: Only accept dict as message objects from JSONL
+                            # json.loads can return bool (True/False), list, str, etc.
+                            if isinstance(item, dict):
+                                if "metadata" in item:
+                                    metadata.update(item["metadata"])
+                                else:
+                                    messages.append(item)
                             else:
-                                messages.append(item)
+                                logger.debug(f"load_session_from_log: skipping non-dict JSONL entry of type {type(item).__name__}")
                         except json.JSONDecodeError as e:
                             logger.debug(f"Skipping malformed JSONL line in log file: {e}")
                             continue
@@ -848,12 +853,21 @@ class AgentPool:
                         continue
                     try:
                         item = json.loads(line)
-                        if "metadata" in item:
-                            metadata.update(item)
+                        # FIX BOOL_LEAK: Validate types before appending
+                        if isinstance(item, dict):
+                            if "metadata" in item:
+                                metadata.update(item)
+                            else:
+                                messages.append(item)
                         elif isinstance(item, list):  # Full history block
-                            messages.extend(item)
+                            # Filter the list to only include dicts
+                            filtered = [msg for msg in item if isinstance(msg, dict)]
+                            if len(filtered) != len(item):
+                                skipped = len(item) - len(filtered)
+                                logger.debug(f"load_session_from_log: filtered {skipped} non-dict items from history block")
+                            messages.extend(filtered)
                         else:
-                            messages.append(item)
+                            logger.debug(f"load_session_from_log: skipping non-dict/non-list JSON entry of type {type(item).__name__}")
                     except json.JSONDecodeError as e:
                         if len(lines) == 1:
                             raise  # Re-raise to try full-block parse
@@ -864,13 +878,30 @@ class AgentPool:
                 try:
                     item = json.loads(log_input)
                     if isinstance(item, list):
-                        messages = item
+                        # FIX BOOL_LEAK: Filter list to only include dict messages
+                        filtered = [msg for msg in item if isinstance(msg, dict)]
+                        if len(filtered) != len(item):
+                            skipped = len(item) - len(filtered)
+                            logger.debug(f"load_session_from_log: filtered {skipped} non-dict items from JSON block")
+                        messages = filtered
                     elif isinstance(item, dict) and "history" in item:
-                        messages = item["history"]
+                        history = item["history"]
+                        if isinstance(history, list):
+                            # Filter history list to only include dicts
+                            filtered = [msg for msg in history if isinstance(msg, dict)]
+                            if len(filtered) != len(history):
+                                skipped = len(history) - len(filtered)
+                                logger.debug(f"load_session_from_log: filtered {skipped} non-dict items from history key")
+                            messages = filtered
+                        else:
+                            messages = [history] if isinstance(history, dict) else []
                         if "metadata" in item:
                             metadata.update(item["metadata"])
-                    else:
+                    elif isinstance(item, dict):
                         messages = [item]
+                    else:
+                        logger.debug(f"load_session_from_log: skipping non-dict/non-list JSON block of type {type(item).__name__}")
+                        messages = []
                     log_source = "JSON block"
                 except json.JSONDecodeError:
                     return "Error: Input is neither a valid file path nor a valid JSON."

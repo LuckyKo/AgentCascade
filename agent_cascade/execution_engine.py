@@ -346,7 +346,15 @@ class ExecutionEngine:
         instance._slot_release = None  # Initialize for proper cleanup in finally block
         if hasattr(self.pool, '_acquire_slot'):
             try:
+                logger.debug(
+                    f"[SLOT_ACQUIRE] Before acquire - instance={instance.instance_name}, "
+                    f"class={instance.agent_class}"
+                )
                 instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
+                logger.debug(
+                    f"[SLOT_ACQUIRED] After acquire - instance={instance.instance_name}, "
+                    f"has_callback={instance._slot_release is not None}"
+                )
             except Exception as e:
                 logger.error(f"Failed to acquire slot for {instance.instance_name}: {e}")
                 # Re-raise on initial acquisition failure — don't proceed without concurrency protection
@@ -403,9 +411,16 @@ class ExecutionEngine:
                         # Re-acquire concurrency slot after waking from SLEEPING (async results + user messages)
                         if hasattr(self.pool, '_acquire_slot'):
                             try:
+                                logger.debug(
+                                    f"[SLOT_ACQUIRE] After wakeup (async+user) - instance={instance.instance_name}"
+                                )
                                 instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
+                                logger.debug(
+                                    f"[SLOT_ACQUIRED] After wakeup (async+user) - instance={instance.instance_name}, "
+                                    f"has_callback={instance._slot_release is not None}"
+                                )
                             except Exception as e:
-                                logger.error(f"Failed to re-acquire slot for {inst_name} after wakeup (async+user): {e}")
+                                logger.error(f"[SLOT_ACQUIRE_FAILED] After wakeup (async+user) for {inst_name}: {e}")
                                 raise
                         
                         # Continue to normal LLM processing below (in RUNNING state now)
@@ -433,9 +448,16 @@ class ExecutionEngine:
                                 # Re-acquire concurrency slot after waking from SLEEPING due to user messages
                                 if hasattr(self.pool, '_acquire_slot'):
                                     try:
+                                        logger.debug(
+                                            f"[SLOT_ACQUIRE] After wakeup (user message) - instance={instance.instance_name}"
+                                        )
                                         instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
+                                        logger.debug(
+                                            f"[SLOT_ACQUIRED] After wakeup (user message) - instance={instance.instance_name}, "
+                                            f"has_callback={instance._slot_release is not None}"
+                                        )
                                     except Exception as e:
-                                        logger.error(f"Failed to re-acquire slot for {inst_name} after wakeup (user message): {e}")
+                                        logger.error(f"[SLOT_ACQUIRE_FAILED] After wakeup (user message) for {inst_name}: {e}")
                                         raise
                                 
                                 continue  # Go process via LLM; async results will arrive later
@@ -530,9 +552,16 @@ class ExecutionEngine:
                             # Re-acquire concurrency slot after waking from SLEEPING due to async results
                             if hasattr(self.pool, '_acquire_slot'):
                                 try:
+                                    logger.debug(
+                                        f"[SLOT_ACQUIRE] After wakeup (async results) - instance={instance.instance_name}"
+                                    )
                                     instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
+                                    logger.debug(
+                                        f"[SLOT_ACQUIRED] After wakeup (async results) - instance={instance.instance_name}, "
+                                        f"has_callback={instance._slot_release is not None}"
+                                    )
                                 except Exception as e:
-                                    logger.error(f"Failed to re-acquire slot for {inst_name} after wakeup (async results): {e}")
+                                    logger.error(f"[SLOT_ACQUIRE_FAILED] After wakeup (async results) for {inst_name}: {e}")
                                     raise
                             
                             # Loop back; now in RUNNING state → LLM processes injected results
@@ -571,7 +600,11 @@ class ExecutionEngine:
                             partial_msgs = list(instance._streaming_responses)
                         yield (response + turn_output + partial_msgs, True)
                         continue
-                    turn_output.append(msg)
+                    # FIX BOOL_LEAK: Validate message type before appending to prevent bool/list leak
+                    if isinstance(msg, (Message, dict)):
+                        turn_output.append(msg)
+                    else:
+                        logger.warning(f"[MSG_VALIDATION] Skipping non-Message in LLM response for {instance.instance_name}: type={type(msg).__name__}, value={str(msg)[:100]}")
 
                 if self.pool.stopped or self.pool.is_instance_halted(instance.instance_name) or self.pool.is_instance_terminated(instance.instance_name):
                     logger.debug(
@@ -620,8 +653,22 @@ class ExecutionEngine:
         finally:
             # C4 fix: Always clean up — transition to IDLE regardless of how we exit
             
+            # SLOT_TIMEOUT FIX: Log slot state before release for debugging
+            if hasattr(instance, '_slot_release'):
+                logger.debug(
+                    f"[SLOT_FINAL] Before finally release - instance={instance.instance_name}, "
+                    f"slot_held={instance._slot_release is not None}"
+                )
+            
             # Release concurrency slot on exit if still held (using helper method FIX Mi3)
             self._release_slot(instance, instance.instance_name)
+            
+            # SLOT_TIMEOUT FIX: Verify release happened
+            if hasattr(instance, '_slot_release'):
+                logger.debug(
+                    f"[SLOT_FINAL] After finally release - instance={instance.instance_name}, "
+                    f"slot_still_held={instance._slot_release is not None}"
+                )
             
             with instance._state_lock:
                 current_state = instance.state
@@ -1721,6 +1768,8 @@ class ExecutionEngine:
         """
         # Defensive guard: handle objects without _slot_release attribute
         if not hasattr(slot_holder, '_slot_release'):
+            suffix = f" during {context}" if context else ""
+            logger.debug(f"[SLOT_RELEASE] No _slot_release attr for {holder_name}{suffix}")
             return
         
         context_suffix = f" during {context}" if context else ""
@@ -1729,11 +1778,14 @@ class ExecutionEngine:
             slot_holder._slot_release = None  # Capture ref first, then nullify to prevent double-release
             try:
                 release_callback()
+                logger.debug(f"[SLOT_RELEASE] Successfully released for {holder_name}{context_suffix}")
             except Exception as e:
                 logger.error(
                     f"[SLOT_RELEASE_ERROR] Failed to release slot for {holder_name}{context_suffix}: {e}",
                     exc_info=True
                 )
+        else:
+            logger.debug(f"[SLOT_RELEASE] _slot_release already None for {holder_name}{context_suffix}")
 
     def _transition_to_sleeping(self, instance: 'AgentInstance') -> None:
         """Transition an agent instance to SLEEPING state.
@@ -2053,6 +2105,11 @@ class ExecutionEngine:
                     context_label: Description of context for warning messages
                     
                 Returns True if successfully re-acquired, False otherwise.
+                
+                FIX SLOT_TIMEOUT: On failure, we no longer set _slot_release = None.
+                The finally block at line 624 will release whatever slot is currently held.
+                If reacquire succeeds, it overwrites with a new callback. If it fails,
+                the old callback remains (if any) and the closure's _released flag prevents double-release.
                 """
                 import time
                 
@@ -2071,8 +2128,10 @@ class ExecutionEngine:
                             time.sleep(0.1)  # Brief pause before retry
                         else:
                             logger.warning(f"Failed to re-acquire caller slot after {context_label} (all attempts exhausted): {e}. Subsequent calls will use ASYNC path.")
-                            
-                slot_holder._slot_release = None
+                
+                # FIX SLOT_TIMEOUT: Removed 'slot_holder._slot_release = None' here.
+                # The finally block handles cleanup via _release_slot, which checks for None.
+                # If reacquire failed, the original callback (if any) remains and will be released properly.
                 return False
             
             # Release caller's slot so the child can acquire it inside engine.run() (using helper method FIX Mi3)
@@ -2087,7 +2146,7 @@ class ExecutionEngine:
                 
                 # Re-acquire caller's slot so it can continue its turn
                 if not _reacquire_slot(caller_slot_holder, caller_name, "sync child"):
-                    # Helper already logged warnings and set _slot_release = None
+                    # Helper logged warnings; original slot reference preserved for finally block cleanup
                     pass
                 
                 # Consolidated null/empty check for cleaner logic
@@ -2109,7 +2168,7 @@ class ExecutionEngine:
             except Exception as e:
                 # Re-acquire caller's slot before returning error
                 if not _reacquire_slot(caller_slot_holder, caller_name, "sync child error"):
-                    # Helper already logged warnings and set _slot_release = None
+                    # Helper logged warnings; original slot reference preserved for finally block cleanup
                     pass
                 
                 # Match ASYNC path error handling pattern (agent_pool.py:1301-1302)
@@ -2567,6 +2626,11 @@ class ExecutionEngine:
                 inst.is_terminated = False
                 _invalidate_token_cache(inst)
                 inst._cached_token_count = 0
+                
+                # SLOT_TIMEOUT FIX: Clear _slot_release to prevent stale callback issues
+                # The reused instance will acquire a fresh slot in engine.run() at line 349
+                # This ensures no leftover release callback from previous execution interferes
+                inst._slot_release = None
                 
                 # FIX #2: Preserve & extend conversation
                 # Update system message in-place (first message is always system)
