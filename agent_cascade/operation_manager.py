@@ -531,18 +531,20 @@ class OperationManager:
                         cmd.append('-i')
                 # else: Not smart case — always case-sensitive (no -i flag)
                 
-                # H1: Exclude glob pattern
-                if exclude:
-                    cmd.extend(['--glob', f'!{exclude}'])
+                # Include glob pattern first (ripgrep uses "last match wins" for --glob patterns)
+                cmd.extend([
+                    '--glob', include,  # file filter (include pattern)
+                ])
                 
                 # Add default excludes to prevent timeout on large directories (use class constant)
                 for _exc in self._RG_DEFAULT_EXCLUDES:
                     cmd.extend(['--glob', _exc])
                 
-                cmd.extend([
-                    '--glob', include,  # file filter (include pattern)
-                    pattern,
-                ])
+                # H1: User exclude glob pattern LAST so it wins over include pattern
+                if exclude:
+                    cmd.extend(['--glob', f'!{exclude}'])
+                
+                cmd.append(pattern)
             else:
                 # Standard grep — only reached on Unix-like systems (Windows grep may hang)
                 cmd = [
@@ -564,7 +566,7 @@ class OperationManager:
                 if context > 0:
                     cmd.extend(['-C', str(context)])
                 
-                # H1: Exclude glob for standard grep
+                # H1: Exclude glob for standard grep (note: --exclude matches only basenames, not full paths)
                 if exclude:
                     cmd.append('--exclude=' + exclude)
                 
