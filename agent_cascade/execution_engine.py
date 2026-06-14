@@ -620,13 +620,8 @@ class ExecutionEngine:
         finally:
             # C4 fix: Always clean up — transition to IDLE regardless of how we exit
             
-            # Release concurrency slot on exit if still held
-            if instance._slot_release is not None:
-                try:
-                    instance._slot_release()
-                except Exception:
-                    pass
-                instance._slot_release = None
+            # Release concurrency slot on exit if still held (using helper method FIX Mi3)
+            self._release_slot(instance, instance.instance_name)
             
             with instance._state_lock:
                 current_state = instance.state
@@ -1709,6 +1704,37 @@ class ExecutionEngine:
         # Invalidate token cache after injection
         _invalidate_token_cache(instance)
 
+    @staticmethod
+    def _release_slot(slot_holder: Any, holder_name: str, context: str = "") -> None:
+        """Release a concurrency slot from a slot holder with error handling.
+        
+        FIX Mi3: Extracted helper to eliminate code duplication across three locations.
+        Encapsulates the capture-nullify-release-log pattern for slot release.
+        
+        Note: This is intentionally static and accesses logger from module scope.
+        Defensive check ensures robustness even if called without hasattr guards.
+        
+        Args:
+            slot_holder: Object with _slot_release attribute (AgentInstance or similar)
+            holder_name: Name of the holder for logging purposes
+            context: Optional context description for logging (e.g., "sleep transition", "sync child")
+        """
+        # Defensive guard: handle objects without _slot_release attribute
+        if not hasattr(slot_holder, '_slot_release'):
+            return
+        
+        context_suffix = f" during {context}" if context else ""
+        if slot_holder._slot_release is not None:
+            release_callback = slot_holder._slot_release
+            slot_holder._slot_release = None  # Capture ref first, then nullify to prevent double-release
+            try:
+                release_callback()
+            except Exception as e:
+                logger.error(
+                    f"[SLOT_RELEASE_ERROR] Failed to release slot for {holder_name}{context_suffix}: {e}",
+                    exc_info=True
+                )
+
     def _transition_to_sleeping(self, instance: 'AgentInstance') -> None:
         """Transition an agent instance to SLEEPING state.
 
@@ -1719,13 +1745,8 @@ class ExecutionEngine:
         Args:
             instance: The agent instance to transition.
         """
-        # Release concurrency slot when sleeping — allows children to proceed
-        if instance._slot_release is not None:
-            try:
-                instance._slot_release()
-            except Exception:
-                pass
-            instance._slot_release = None
+        # Release concurrency slot when sleeping — allows children to proceed (using helper method FIX Mi3)
+        self._release_slot(instance, instance.instance_name, "sleep transition")
         
         with instance._state_lock:
             if instance.state == AgentState.RUNNING:
@@ -2054,13 +2075,9 @@ class ExecutionEngine:
                 slot_holder._slot_release = None
                 return False
             
-            # Release caller's slot so the child can acquire it inside engine.run()
-            if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release:
-                try:
-                    caller_slot_holder._slot_release()
-                except Exception as e:
-                    logger.warning(f"Error releasing caller slot before sync child: {e}")
-                caller_slot_holder._slot_release = None
+            # Release caller's slot so the child can acquire it inside engine.run() (using helper method FIX Mi3)
+            if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release is not None:
+                self._release_slot(caller_slot_holder, caller_name, "sync child")
             
             try:
                 # Run child synchronously via _create_and_run_agent
@@ -3431,6 +3448,7 @@ def validate_message_pool(messages: List[Message], agent_name: str) -> bool:
       - First message is SYSTEM (if present)
       - No excessive duplicate consecutive messages (>30%)
       - All message roles are valid non-empty strings
+      - No unexpected types (booleans, None, etc.) in the pool
 
     Returns True if the pool is valid, False if corruption detected.
     """
@@ -3470,6 +3488,20 @@ def validate_message_pool(messages: List[Message], agent_name: str) -> bool:
     invalid_roles = sum(1 for m in messages if not (m.get('role') if isinstance(m, dict) else getattr(m, 'role', '')))
     if invalid_roles:
         logger.error(f"[MSG POOL VALIDATION] {invalid_roles} messages with invalid roles for agent '{agent_name}'")
+        return False
+
+    # Check for unexpected types in the pool (booleans, None, etc.)
+    # These can leak via JSON parsing or logger recovery paths
+    unexpected_types = []
+    for i, msg in enumerate(messages):
+        if isinstance(msg, bool) or msg is None:
+            unexpected_types.append((i, type(msg).__name__))
+    
+    if unexpected_types:
+        logger.error(
+            f"[MSG POOL VALIDATION] Found {len(unexpected_types)} unexpected types in message pool for '{agent_name}': "
+            f"{unexpected_types[:5]}{'...' if len(unexpected_types) > 5 else ''}"
+        )
         return False
 
     return True

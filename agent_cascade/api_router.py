@@ -199,23 +199,60 @@ class EndpointScheduler:
         # not a captured reference — this is critical because the semaphore may
         # have been resized (swapped) since acquire() was called.
         # Capture slot_key in the closure to ensure correct schedule lookup on release.
+        
+        # FIX C1: Double-release protection using nonlocal flag in closure
+        _released = False  # Flag to track if release has been called
+        
         def release():
+            nonlocal _released  # Use nonlocal for cleaner Python 3 syntax
+            
+            # FIX C1: Guard against double-release - if already released, return silently
+            if _released:
+                logger.debug(
+                    f"[CALL_AGENT_DEBUG] EndpointScheduler.release — already released for slot_key={slot_key}, "
+                    f"skipping double-release"
+                )
+                return
+            
             with self._lock:
+                # Log with original api_base for clarity, but note if using shared slot
+                log_target = api_base if not is_sequential else f"{api_base} (shared sequential)"
+                
                 current_sched = self._schedules.get(slot_key)
-                if current_sched:
-                    # Guard against negative active_count (shouldn't happen, but safe)
-                    current_sched['active_count'] = max(0, current_sched['active_count'] - 1)
-                    new_count = current_sched['active_count']
-                    # Log with original api_base for clarity, but note if using shared slot
-                    log_target = api_base if not is_sequential else f"{api_base} (shared sequential)"
-                    logger.info(f"[EndpointScheduler] Agent released slot on '{log_target}' "
-                               f"(active: {new_count}, limit: {current_sched['max_active']})")
-                    logger.debug(
-                        f"[CALL_AGENT_DEBUG] EndpointScheduler.release — api_base={api_base}, "
-                        f"slot_key={slot_key}, active_count={new_count}, max_active={current_sched['max_active']}"
+                if not current_sched:
+                    # FIX: Handle case where schedule entry was deleted (e.g., stale cleanup)
+                    logger.error(
+                        f"[SLOT_RELEASE_ERROR] No schedule found for slot_key={slot_key} on release. "
+                        f"Slot may be permanently held. {log_target}"
                     )
-                    # Release the CURRENT semaphore (may differ from acquire-time sem after resize)
+                    _released = True  # Mark as released even on error
+                    return
+                
+                # FIX: Release semaphore FIRST to prevent state mismatch on failure
+                try:
                     current_sched['sem'].release()
+                except Exception as e:
+                    logger.error(
+                        f"[SLOT_RELEASE_ERROR] Failed to release semaphore for {log_target}: {e}",
+                        exc_info=True
+                    )
+                    # On sem.release() failure, slot remains held — active_count stays accurate
+                    _released = True  # Mark as released even on error
+                    return
+                
+                # Decrement counter AFTER successful sem.release() to keep state in sync
+                old_count = current_sched['active_count']
+                current_sched['active_count'] = max(0, old_count - 1)
+                new_count = current_sched['active_count']
+                
+                logger.info(f"[EndpointScheduler] Agent released slot on '{log_target}' "
+                           f"(active: {new_count}, limit: {current_sched['max_active']})")
+                logger.debug(
+                    f"[CALL_AGENT_DEBUG] EndpointScheduler.release — api_base={api_base}, "
+                    f"slot_key={slot_key}, active_count={new_count}, max_active={current_sched['max_active']}"
+                )
+                
+                _released = True  # Mark as successfully released
         
         return release
     

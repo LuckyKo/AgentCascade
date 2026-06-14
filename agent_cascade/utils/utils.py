@@ -550,18 +550,57 @@ def save_audio_to_file(base_64: str, file_name: str):
 
 
 def extract_text_from_message(
-    msg: Union[Message, dict],
+    msg: Union[Message, dict, list, bool, None],
     add_upload_info: bool,
     lang: Literal['auto', 'en', 'zh'] = 'auto',
 ) -> str:
+    """Extract text content from a message with defensive type checking.
+    
+    BUG FIX: Handle unexpected types (especially booleans and lists) that may leak into 
+    conversation history via JSON parsing or logger recovery paths.
+    
+    Args:
+        msg: Message object, dict, list, bool, or None (defensive handling).
+        add_upload_info: Whether to include upload info in text.
+        lang: Language for formatting ('auto', 'en', 'zh').
+        
+    Returns:
+        Extracted text content, or empty string for unexpected types.
+    """
+    from agent_cascade.log import logger
+    
+    # Handle None gracefully (defensive check)
+    if msg is None:
+        logger.debug("extract_text_from_message received None (returning empty)")
+        return ""
+    
+    # Handle list values gracefully (defensive check)
+    if isinstance(msg, list):
+        logger.debug(f"extract_text_from_message received a list (returning empty): {str(msg)[:50]}")
+        return ""
+    
+    # Handle boolean values gracefully (defensive check - must come before generic isinstance checks since bool is a subclass of int)
+    if isinstance(msg, bool):
+        logger.debug(f"extract_text_from_message received a bool (returning empty): {msg}")
+        return ""
+    
+    # Handle dict by converting to Message
     if isinstance(msg, dict):
         msg = Message(**msg)
+    
+    # Now msg should be a Message object - extract content safely
+    if not hasattr(msg, 'content'):
+        logger.debug(f"extract_text_from_message: message has no 'content' attribute: {type(msg)}")
+        return ""
+        
     if isinstance(msg.content, list):
         text = format_as_text_message(msg, add_upload_info=add_upload_info, lang=lang).content
     elif isinstance(msg.content, str):
         text = msg.content
     else:
-        raise TypeError(f'List of str or str expected, but received {type(msg.content).__name__}.')
+        # Handle other unexpected content types gracefully instead of raising
+        logger.debug(f"extract_text_from_message: unexpected content type {type(msg.content).__name__}")
+        return ""
     return text.strip()
 
 
@@ -752,22 +791,27 @@ def rm_default_system(messages: List[Message]) -> List[Message]:
         return messages
 
 
-def get_message_stats(msg: Union[Message, dict, list]) -> dict:
+def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
     """Return tokens and words for a message with consistency.
     Uses logic aligned with BaseChatModel._truncate_input_messages_roughly.
     
-    BUG FIX: Handle unexpected list objects in messages list gracefully.
-    When a raw list ends up in the conversation (instead of Message/dict),
+    BUG FIX: Handle unexpected list objects, boolean values, and None in messages list gracefully.
+    When a raw list, bool, or None ends up in the conversation (instead of Message/dict),
     use defensive attribute access to prevent AttributeError.
     
     Args:
-        msg: Can be a Message object, dict, or list (for graceful handling).
+        msg: Can be a Message object, dict, list, bool, or None (for graceful handling).
         
     Returns:
-        Dictionary with 'tokens' and 'words' counts. Returns zeros for list input.
+        Dictionary with 'tokens' and 'words' counts. Returns zeros for unexpected types.
     """
     from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
     from agent_cascade.log import logger
+    
+    # Handle None gracefully (defensive check)
+    if msg is None:
+        logger.debug("get_message_stats received None (skipping)")
+        return {'tokens': 0, 'words': 0}
     
     if isinstance(msg, dict):
         role = msg.get(ROLE, '')
@@ -780,6 +824,11 @@ def get_message_stats(msg: Union[Message, dict, list]) -> dict:
         # BUG FIX: Handle unexpected list objects gracefully
         # This can happen when streaming responses or multimodal content creates nested structures
         logger.debug(f"get_message_stats received a list instead of Message/dict (skipping): {str(msg)[:100]}")
+        return {'tokens': 0, 'words': 0}
+    elif isinstance(msg, bool):
+        # BUG FIX: Handle unexpected boolean values gracefully
+        # Booleans can leak into conversation history via JSON parsing or logger recovery
+        logger.debug(f"get_message_stats received a bool instead of Message/dict (skipping): {msg}")
         return {'tokens': 0, 'words': 0}
     else:
         # Message object — use defensive attribute access
@@ -803,7 +852,7 @@ def get_message_stats(msg: Union[Message, dict, list]) -> dict:
     return {'tokens': tokens, 'words': words}
 
 
-def get_history_stats(messages: List[Union[Message, dict, list]]) -> dict:
+def get_history_stats(messages: List[Union[Message, dict, list, bool, None]]) -> dict:
     """Calculate total tokens and words in a message list with caching.
     
     Caching strategy:
@@ -811,6 +860,8 @@ def get_history_stats(messages: List[Union[Message, dict, list]]) -> dict:
     - Message objects: use an LRU content-based cache keyed by (role, md5_hash_of_content)
       to avoid re-tokenizing identical messages across calls. Cache is bounded to prevent memory leaks.
     - List items: skipped with debug logging (unexpected but handled gracefully)
+    - Boolean items: skipped with debug logging (can leak via JSON parsing or logger recovery)
+    - None values: skipped with debug logging (can occur from incomplete data)
     """
     if not messages:
         return {'tokens': 0, 'words': 0}
@@ -827,7 +878,13 @@ def get_history_stats(messages: List[Union[Message, dict, list]]) -> dict:
     total_tokens = 0
     total_words = 0
     for m in messages:
-        if isinstance(m, dict):
+        # FIX Mi5: Align type-check ordering with get_message_stats: None → dict → list → bool → Message
+        if m is None:
+            # BUG FIX: Skip None values in messages list
+            # Can occur from incomplete data or serialization issues
+            logger.debug("get_history_stats: skipping None value in messages list")
+            continue
+        elif isinstance(m, dict):
             if '_tokens' in m and '_words' in m:
                 total_tokens += m['_tokens']
                 total_words += m['_words']
@@ -841,6 +898,11 @@ def get_history_stats(messages: List[Union[Message, dict, list]]) -> dict:
             # BUG FIX: Skip unexpected list objects in messages list
             # These can occur from streaming responses or multimodal content handling
             logger.debug(f"get_history_stats: skipping unexpected list item in messages list")
+            continue
+        elif isinstance(m, bool):
+            # BUG FIX: Skip unexpected boolean values in messages list
+            # Booleans can leak via JSON parsing or logger recovery paths
+            logger.debug(f"get_history_stats: skipping unexpected bool value in messages list: {m}")
             continue
         else:
             # Message object — use content-based LRU cache to avoid re-tokenizing
