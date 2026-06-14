@@ -1340,6 +1340,10 @@ class AgentPool:
     def is_instance_halted(self, instance_name: str) -> bool:
         """Query halt state for an instance."""
         return instance_name in self._halted_instances
+    
+    def get_halted_instances(self) -> list:
+        """Get a list of all currently halted instance names (Issue #4 fix)."""
+        return list(self._halted_instances)
 
     # ── Activity tracking ──────────────────────────────────────────────────
 

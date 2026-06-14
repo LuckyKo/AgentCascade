@@ -3497,20 +3497,29 @@ function createPauseButton(btn, instanceSource) {
   
   btn.addEventListener('click', async () => {
     const sessionName = instanceSource();
-    try {
-      if (btn.textContent.includes('Pause')) {
-        const resp = await fetch(`/api/halt/${encodeURIComponent(sessionName)}`, { method: 'POST' });
-        if (resp.ok) {
-          btn.textContent = '▶️ Resume';
-          if (state.subAgents[sessionName]) state.subAgents[sessionName].is_halted = true;
+    if (btn.textContent.includes('Pause')) {
+      // Send WebSocket 'pause' message to halt ALL instances (orchestrator + all sub-agents)
+      send({ type: 'pause' });
+      btn.textContent = '▶️ Resume';
+      // Update local state for all ACTIVE agents only
+      Object.keys(state.subAgents).forEach(name => {
+        const agent = state.subAgents[name];
+        if (agent && agent.active) {
+          agent.is_halted = true;
         }
-      } else {
-        // Send a WebSocket resume message so the server clears the halt flag AND restarts generation
-        send({ type: 'resume', instance_name: sessionName });
-        btn.textContent = '⏸ Pause';
-        if (state.subAgents[sessionName]) state.subAgents[sessionName].is_halted = false;
-      }
-    } catch(e) { console.error('Pause/Resume failed:', e); }
+      });
+    } else {
+      // Send WebSocket 'resume_all' message to resume ALL halted instances
+      send({ type: 'resume_all' });
+      btn.textContent = '⏸ Pause';
+      // Update local state for all ACTIVE agents only
+      Object.keys(state.subAgents).forEach(name => {
+        const agent = state.subAgents[name];
+        if (agent && agent.active) {
+          agent.is_halted = false;
+        }
+      });
+    }
   });
 }
 

@@ -578,6 +578,8 @@ class ExecutionEngine:
                         f"[CALL_AGENT_DEBUG] engine.run() — halted/stopped for instance={instance.instance_name}, "
                         f"pool_stopped={self.pool.stopped}"
                     )
+                    # Sleep to prevent tight loop when halted (Issue #6 fix)
+                    time.sleep(0.5)
                     yield response
                     continue
 
