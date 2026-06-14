@@ -2134,20 +2134,50 @@ class ExecutionEngine:
                 # If reacquire failed, the original callback (if any) remains and will be released properly.
                 return False
             
+            # SLOT_TIMEOUT FIX v2: Enhanced logging for SYNC path slot management
+            import time as time_module
+            sync_path_start = time_module.monotonic()
+            
             # Release caller's slot so the child can acquire it inside engine.run() (using helper method FIX Mi3)
             if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release is not None:
+                logger.debug(
+                    f"[SLOT_SYNC_RELEASE] Releasing slot for '{caller_name}' before running sync child '{instance_name}'"
+                )
                 self._release_slot(caller_slot_holder, caller_name, "sync child")
+                logger.debug(
+                    f"[SLOT_SYNC_RELEASE] Slot released for '{caller_name}', active agents can now acquire"
+                )
             
             try:
                 # Run child synchronously via _create_and_run_agent
                 # Pass force_fresh=True for system agents (Security, Compressor) to ensure fresh instances
                 force_fresh = agent_class in ('Security', 'Compressor')
+                logger.debug(
+                    f"[SLOT_SYNC_CHILD_START] Starting sync child '{instance_name}' ({agent_class}) for caller '{caller_name}'"
+                )
                 inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller_name, child_depth, force_fresh=force_fresh)
+                logger.debug(
+                    f"[SLOT_SYNC_CHILD_COMPLETE] Sync child '{instance_name}' completed in {time_module.monotonic() - sync_path_start:.2f}s"
+                )
                 
                 # Re-acquire caller's slot so it can continue its turn
+                logger.debug(
+                    f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child completed"
+                )
                 if not _reacquire_slot(caller_slot_holder, caller_name, "sync child"):
-                    # Helper logged warnings; original slot reference preserved for finally block cleanup
-                    pass
+                    # FIX MAJOR BUG #3: On reacquire failure, DO NOT nullify _slot_release callback.
+                    # The finally block at line ~664 uses _release_slot which relies on this callback to release the semaphore permit.
+                    # Setting it to None destroys the original release callback → SEMAPHORE PERMIT LEAK.
+                    # The closure's _released flag prevents double-release, so let the finally block handle cleanup via _release_slot.
+                    logger.warning(
+                        f"[SLOT_SYNC_REACQUIRE_FAILED] Failed to re-acquire slot for '{caller_name}' after sync child. "
+                        f"Original release callback preserved for proper cleanup. Total SYNC path elapsed: {time_module.monotonic() - sync_path_start:.2f}s"
+                    )
+                else:
+                    logger.debug(
+                        f"[SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for '{caller_name}'. "
+                        f"Total SYNC path elapsed: {time_module.monotonic() - sync_path_start:.2f}s"
+                    )
                 
                 # Consolidated null/empty check for cleaner logic
                 if inst is None or not conv:

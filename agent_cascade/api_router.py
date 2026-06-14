@@ -106,8 +106,13 @@ class EndpointScheduler:
         # Per-endpoint semaphore for blocking acquire + active counter
         # api_base -> {'sem': Semaphore(max_active), 'active_count': int}
         self._schedules: Dict[str, Dict] = {}
+        # SLOT_TIMEOUT FIX v2: Track which instances hold slots for better debugging
+        # slot_key -> list of (instance_name, agent_class, acquired_at_timestamp, acquisition_id) tuples
+        # ISSUE #2 FIX: Use unique acquisition_id to match acquire/release pairs correctly
+        self._slot_holders: Dict[str, List[tuple]] = {}
+        self._next_acquisition_id = 0  # Counter for unique acquisition IDs
     
-    def acquire(self, api_base: str, concurrency_limit: int) -> Optional[Callable[[], None]]:
+    def acquire(self, api_base: str, concurrency_limit: int, instance_name: str = "unknown", agent_class: str = "unknown") -> Optional[Callable[[], None]]:
         """
         Acquire a slot on the endpoint. Blocks if at capacity.
         Returns a cleanup callback to release the slot, or None if unlimited.
@@ -119,6 +124,8 @@ class EndpointScheduler:
         Args:
             api_base: The API base URL of the endpoint
             concurrency_limit: -1=unlimited, 0=sequential, N>0=max parallel
+            instance_name: Name of the agent instance acquiring the slot (for tracking)
+            agent_class: Class of the agent instance (for tracking)
             
         Returns:
             A callable that releases the slot when called, or None if no scheduling needed.
@@ -135,7 +142,8 @@ class EndpointScheduler:
         new_max = concurrency_limit if concurrency_limit > 0 else 1  # 0→1 (sequential), -1 handled above
         logger.debug(
             f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — api_base={api_base}, "
-            f"concurrency_limit={concurrency_limit}, slot_key={slot_key}, new_max={new_max}"
+            f"concurrency_limit={concurrency_limit}, slot_key={slot_key}, new_max={new_max}, "
+            f"instance_name={instance_name}, agent_class={agent_class}"
         )
         
         with self._lock:
@@ -179,19 +187,39 @@ class EndpointScheduler:
         # is extremely narrow.
         logger.debug(f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — blocking on semaphore for api_base={api_base}")
         if not sched['sem'].acquire(timeout=ENDPOINT_SLOT_ACQUIRE_TIMEOUT):
+            # SLOT_TIMEOUT FIX v2: Include slot holder information in timeout error
+            holder_info = ""
+            with self._lock:
+                holders = self._slot_holders.get(slot_key, [])
+                if holders:
+                    holder_names = [f"{h[0]} ({h[1]})" for h in holders]
+                    holder_info = f". Currently held by: {', '.join(holder_names)}"
+            
             raise TimeoutError(
                 f"Timed out after {ENDPOINT_SLOT_ACQUIRE_TIMEOUT}s waiting for endpoint slot on {api_base}. "
-                f"Current active count: {sched['active_count']}, max allowed: {sched['max_active']}"
+                f"Current active count: {sched['active_count']}, max allowed: {sched['max_active']}{holder_info}"
             )
         
         with self._lock:
+            # ISSUE #2 FIX: Generate unique acquisition ID BEFORE incrementing active_count
+            # This ensures atomic assignment of both the ID and the counter update
+            acquisition_id = self._next_acquisition_id
+            self._next_acquisition_id += 1
+            
             sched['active_count'] += 1
             current = sched['active_count']
-            logger.info(f"[EndpointScheduler] Agent acquired slot on '{api_base}' "
+            
+            # SLOT_TIMEOUT FIX v2: Track which instance holds the slot with unique ID
+            if slot_key not in self._slot_holders:
+                self._slot_holders[slot_key] = []
+            self._slot_holders[slot_key].append((instance_name, agent_class, time.monotonic(), acquisition_id))
+            
+            logger.info(f"[EndpointScheduler] Agent '{instance_name}' ({agent_class}) acquired slot on '{api_base}' "
                        f"(active: {current}, limit: {sched['max_active']})")
             logger.debug(
                 f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — successfully acquired, "
-                f"api_base={api_base}, active_count={current}, max_active={sched['max_active']}"
+                f"api_base={api_base}, active_count={current}, max_active={sched['max_active']}, "
+                f"instance_name={instance_name}, agent_class={agent_class}"
             )
         
         # Return cleanup callback that releases the semaphore when called.
@@ -202,6 +230,9 @@ class EndpointScheduler:
         
         # FIX C1: Double-release protection using nonlocal flag in closure
         _released = False  # Flag to track if release has been called
+        
+        # ISSUE #2 FIX: Capture acquisition_id for precise holder removal matching
+        captured_acquisition_id = acquisition_id
         
         def release():
             nonlocal _released  # Use nonlocal for cleaner Python 3 syntax
@@ -243,14 +274,51 @@ class EndpointScheduler:
                 
                 # Decrement counter AFTER successful sem.release()
                 old_count = current_sched['active_count']
+                if old_count < 0:
+                    logger.error(
+                        f"[SLOT_RELEASE_ERROR] active_count was {old_count} (negative) on release "
+                        f"for {log_target}. This indicates a double-release or tracking bug."
+                    )
+                elif old_count == 0:
+                    logger.warning(
+                        f"[SLOT_RELEASE_WARNING] active_count was {old_count} on release for {log_target}. "
+                        f"This may indicate the schedule was recreated or there's a tracking issue."
+                    )
+                
+                # SLOT_TIMEOUT FIX v2: Remove this instance from slot holders list
+                # ISSUE #2 FIX: Match by unique acquisition_id for precise removal
+                if slot_key in self._slot_holders:
+                    original_len = len(self._slot_holders[slot_key])
+                    self._slot_holders[slot_key] = [
+                        h for h in self._slot_holders[slot_key] 
+                        if h[3] != captured_acquisition_id  # Match by unique acquisition ID
+                    ]
+                    removed_count = original_len - len(self._slot_holders[slot_key])
+                    if removed_count == 1:
+                        logger.debug(
+                            f"[CALL_AGENT_DEBUG] EndpointScheduler.release — removed holder entry "
+                            f"for instance_name={instance_name}, agent_class={agent_class}, acquisition_id={captured_acquisition_id}"
+                        )
+                    elif removed_count > 1:
+                        logger.warning(
+                            f"[SLOT_RELEASE_WARNING] Removed {removed_count} holder entries for acquisition_id={captured_acquisition_id}. "
+                            f"This should typically be 1. instance_name={instance_name}, agent_class={agent_class}"
+                        )
+                    elif removed_count == 0:
+                        logger.debug(
+                            f"[CALL_AGENT_DEBUG] EndpointScheduler.release — holder entry already removed for acquisition_id={captured_acquisition_id}. "
+                            f"instance_name={instance_name}, agent_class={agent_class}"
+                        )
+                
                 current_sched['active_count'] = max(0, old_count - 1)
                 new_count = current_sched['active_count']
                 
-                logger.info(f"[EndpointScheduler] Agent released slot on '{log_target}' "
+                logger.info(f"[EndpointScheduler] Agent '{instance_name}' ({agent_class}) released slot on '{log_target}' "
                            f"(active: {new_count}, limit: {current_sched['max_active']})")
                 logger.debug(
                     f"[CALL_AGENT_DEBUG] EndpointScheduler.release — api_base={api_base}, "
-                    f"slot_key={slot_key}, active_count={new_count}, max_active={current_sched['max_active']}"
+                    f"slot_key={slot_key}, active_count={new_count}, max_active={current_sched['max_active']}, "
+                    f"instance_name={instance_name}, agent_class={agent_class}"
                 )
                 
                 _released = True  # Mark as successfully released
@@ -288,10 +356,24 @@ class EndpointScheduler:
                 display_key = f"[SHARED] {key}" if 'shared' in key.lower() else key
                 # Semaphore._value is implementation detail but useful for diagnostics
                 sem_value = sched['sem']._value if hasattr(sched['sem'], '_value') else 'unknown'
+                
+                # SLOT_TIMEOUT FIX v2: Include slot holder information in status
+                holders_info = []
+                if key in self._slot_holders:
+                    # FIX CRITICAL BUG #2: Tuple has 4 elements (instance_name, agent_class, acquired_at, acquisition_id)
+                    for instance_name, agent_class, acquired_at, _acquisition_id in self._slot_holders[key]:
+                        held_duration = time.monotonic() - acquired_at
+                        holders_info.append({
+                            'instance_name': instance_name,
+                            'agent_class': agent_class,
+                            'held_duration_seconds': held_duration
+                        })
+                
                 result[display_key] = {
                     'active_count': sched['active_count'],
                     'max_active': sched['max_active'],
                     'semaphore_slots': sem_value,
+                    'slot_holders': holders_info,  # List of instances holding slots with metadata
                 }
             return result
     
@@ -312,8 +394,74 @@ class EndpointScheduler:
                      and s['active_count'] == 0 and s['sem']._value >= s['max_active']]
             for ab in stale:
                 del self._schedules[ab]
+                # Also clean up slot holders for this endpoint
+                if ab in self._slot_holders:
+                    del self._slot_holders[ab]
             if stale:
                 logger.info(f"[EndpointScheduler] Cleaned up {len(stale)} stale schedule(s)")
+
+    def get_slot_holders(self, slot_key: str = None) -> Dict[str, List[tuple]]:
+        """Get information about which instances are holding slots.
+        
+        SLOT_TIMEOUT FIX v2: Diagnostic method to identify slot holders for debugging.
+        
+        Args:
+            slot_key: Optional specific slot key to query. If None, returns all.
+            
+        Returns:
+            Dictionary mapping slot keys to lists of (instance_name, agent_class, acquired_at, acquisition_id) tuples.
+            Returns deep copies to prevent external modification of internal state (Issue #3).
+        """
+        import copy
+        with self._lock:
+            if slot_key:
+                holders = self._slot_holders.get(slot_key, [])
+                return {slot_key: copy.deepcopy(holders)}  # ISSUE #3 FIX: Return deep copy
+            return copy.deepcopy(self._slot_holders)  # ISSUE #3 FIX: Return deep copy
+
+    def detect_stuck_slots(self, threshold_seconds: float = 60.0) -> List[dict]:
+        """Detect slots that have been held for longer than the threshold.
+        
+        SLOT_TIMEOUT FIX v2: Diagnostic method to identify potentially stuck slots.
+        
+        Args:
+            threshold_seconds: Time in seconds after which a slot is considered "stuck"
+            
+        Returns:
+            List of dictionaries with information about stuck slots, including:
+            - slot_key: The slot identifier
+            - instance_name: Name of the holding instance
+            - agent_class: Class of the holding instance  
+            - held_duration: How long the slot has been held (seconds)
+            - acquired_at: Timestamp when slot was acquired
+        """
+        stuck_slots = []
+        current_time = time.monotonic()
+        
+        with self._lock:
+            for slot_key, holders in self._slot_holders.items():
+                # ISSUE #6 FIX: Cross-reference with _schedules to verify slot is still active
+                sched = self._schedules.get(slot_key)
+                if not sched or sched['active_count'] == 0:
+                    continue  # Skip if no schedule or no active agents
+                
+                # FIX CRITICAL BUG #1: Tuple has 4 elements (instance_name, agent_class, acquired_at, acquisition_id)
+                for instance_name, agent_class, acquired_at, _acquisition_id in holders:
+                    held_duration = current_time - acquired_at
+                    if held_duration > threshold_seconds:
+                        stuck_slots.append({
+                            'slot_key': slot_key,
+                            'instance_name': instance_name,
+                            'agent_class': agent_class,
+                            'held_duration': held_duration,
+                            'acquired_at': acquired_at
+                        })
+                        logger.warning(
+                            f"[SLOT_STUCK_DETECTION] Slot on '{slot_key}' held by '{instance_name}' "
+                            f"({agent_class}) for {held_duration:.1f}s (threshold: {threshold_seconds}s)"
+                        )
+        
+        return stuck_slots
 
 
 # ── API Router ───────────────────────────────────────────────────────────────

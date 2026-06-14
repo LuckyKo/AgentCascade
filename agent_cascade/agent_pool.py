@@ -1302,7 +1302,8 @@ class AgentPool:
             )
 
             # Acquire a slot on the endpoint scheduler (blocks if at capacity)
-            return router.scheduler.acquire(api_base, concurrency_limit)
+            # SLOT_TIMEOUT FIX v2: Pass instance_name and agent_class for tracking
+            return router.scheduler.acquire(api_base, concurrency_limit, instance_name, agent_class)
         except Exception as e:
             logger.error(f"Failed to acquire endpoint slot for {instance_name}: {e}")
             raise
