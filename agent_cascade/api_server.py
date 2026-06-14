@@ -1905,7 +1905,7 @@ def create_app(agents, agent_pool, config=None):
                                 app.active_security_checks_lock = threading.Lock()
                             if not hasattr(app, 'active_security_checks'):
                                 app.active_security_checks = set()
-                                
+                            
                             with app.active_security_checks_lock:
                                 if rid in app.active_security_checks:
                                     logger.warning(f"Security check already active for request {rid}, ignoring duplicate.")
@@ -2133,7 +2133,10 @@ def create_app(agents, agent_pool, config=None):
                                         )
 
                                     elif is_yes or is_no:
-                                        if auto_apply:
+                                        # Check if Auto-Ask is still enabled BEFORE auto-applying
+                                        auto_ask_still_on = getattr(app, 'current_auto_security', True)
+                                        
+                                        if auto_apply and auto_ask_still_on:
                                             if is_yes:
                                                 logger.info(f"[SECURITY] Automatic Approval for {rid} with justification: {justification[:50]}...")
                                                 agent_pool.operation_manager.user_approve(rid, reason=justification)
@@ -2152,7 +2155,7 @@ def create_app(agents, agent_pool, config=None):
                                                 loop
                                             )
                                         else:
-                                            # Valid format but auto_apply is off: Send to UI for manual confirmation
+                                            # Auto-Ask toggled off — send to UI for manual confirmation instead
                                             asyncio.run_coroutine_threadsafe(
                                                 send_queue.put({
                                                     'type': 'security_response', 
@@ -2205,8 +2208,14 @@ def create_app(agents, agent_pool, config=None):
                                     if hasattr(app, 'active_security_checks') and rid:
                                         with app.active_security_checks_lock:
                                             app.active_security_checks.discard(rid)
+                                        logger.debug(f"[SECURITY] Released active check for {rid}")
                             
                             threading.Thread(target=_security_check, daemon=True).start()
+
+                elif msg_type == 'set_auto_security':
+                    # User toggled Auto-Ask on/off — store current state for security checks to reference
+                    enabled = data.get('enabled', False)
+                    app.current_auto_security = enabled
 
                 elif msg_type == 'edit_message':
                     idx = data.get('index')

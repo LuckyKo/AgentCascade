@@ -827,9 +827,14 @@ if (autoSecurityToggle) {
   autoSecurityToggle.addEventListener('change', () => {
     state.autoSecurity = autoSecurityToggle.checked;
     saveSettings();
-    if (autoSecurityToggle.checked) {
-      renderApprovals();
+    // Notify backend of toggle change and re-render approvals
+    send({ type: 'set_auto_security', enabled: state.autoSecurity });
+    if (!state.autoSecurity) {
+      // Turning OFF: clear active checks and security responses to prevent stale data
+      state.activeSecurityChecks.clear();
+      state.securityResponses = {};
     }
+    renderApprovals();
   });
 }
 
@@ -2315,6 +2320,8 @@ function renderApprovals() {
   }
 
   if (!state.approvals || state.approvals.length === 0) {
+    // Approvals are empty: either (a) no pending approvals, or (b) all were auto-applied,
+    // or (c) user toggled Auto-Ask off after backend already processed the response
     bar.style.display = 'none';
     return;
   }
@@ -2326,7 +2333,8 @@ function renderApprovals() {
       state.activeSecurityChecks.add(ap.request_id);
       send({ type: 'ask_security', request_id: ap.request_id, auto_apply: true });
     });
-    state.approvals = [];
+    // Don't clear approvals immediately - keep them in case user toggles Auto-Ask off.
+    // They will be cleared by the backend when it broadcasts updated approvals after auto-applying.
     bar.style.display = 'none';
     return;
   }
