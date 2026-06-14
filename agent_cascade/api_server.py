@@ -1435,8 +1435,12 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'stop':
                     with session_lock:
                         session['stop_requested'] = True
+                        session['generating'] = False
+                        session['generation_id'] += 1
                     if agent_pool:
                         agent_pool.stopped = True
+                        agent_pool.reset()
+                    await broadcast({'type': 'done', **build_state()})
 
                 elif msg_type == 'resume':
                     # Resume a halted instance and restart its generation from where it left off
