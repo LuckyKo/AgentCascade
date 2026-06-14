@@ -383,6 +383,7 @@ def build_state_from_pool(
     instance_name: str,
     responses: Optional[List[Message]] = None,
     generating: bool = False,
+    streaming: bool = False,  # Controls tail optimization for large conversations
 ) -> Optional[Dict[str, Any]]:
     """Build a full state snapshot for the frontend directly from the pool.
 
@@ -397,13 +398,16 @@ def build_state_from_pool(
         instance_name: Name of the primary instance (main agent) for this state.
         responses: Optional current partial response messages to include.
         generating: Whether the agent is currently generating.
+        streaming: Controls tail optimization for large conversations. When False (default),
+            all messages are included including system message at index 0. When True, only
+            the last 10% of messages are sent if agent is RUNNING with >50 messages.
 
     Returns:
         Dictionary with full state snapshot, or None if instance not found.
 
     Example:
-        # Full state for initial broadcast
-        state = build_state_from_pool(pool, "Maine", generating=True)
+        # Full state for initial broadcast (includes all messages)
+        state = build_state_from_pool(pool, "Maine", generating=True, streaming=False)
         await websocket.send(json.dumps(state))
     """
     instance = pool.get_instance(instance_name)
@@ -446,8 +450,8 @@ def build_state_from_pool(
         # Read _streaming_responses under lock and pass to _serialize_instance
         with inst._compression_lock:
             inst_streaming = list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
-        # Full state includes messages; streaming=True to include streaming responses
-        all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=True, streaming_responses=inst_streaming)
+        # Full state includes messages; use streaming parameter to control tail optimization
+        all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=streaming, streaming_responses=inst_streaming)
 
     # Derive session name from root instance (M1/M4 fix)
     root_instances = [
