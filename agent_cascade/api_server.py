@@ -1376,16 +1376,8 @@ def create_app(agents, agent_pool, config=None):
                         # by Drain Point 2 (execution_engine.py) to avoid double-append issues.
                         # See Message Queue Simplification Plan for details.
                         
-                        # Get the instance's agent_class for proper logging (not 'User')
-                        inst = agent_pool.get_instance(instance_name)
-                        if not inst:
-                            logger.warning(
-                                f"Instance {instance_name} not found in pool at Drain Point 1, "
-                                f"defaulting to 'Orchestrator' for logging"
-                            )
-                        agent_cls = inst.agent_class if inst else 'Orchestrator'
-                        
-                        # Step 1: Drain user queue → append as USER message with JSONL logging
+                        # Step 1: Drain user queue → append as USER messages
+                        # Logging is handled by execution_engine._process_response() pre-existing sync
                         pending = agent_pool.drain_queue(instance_name)
                         if pending:
                             logger.debug(f"Draining {len(pending)} queued user messages for {instance_name} at Drain Point 1 (IDLE).")
@@ -1393,23 +1385,11 @@ def create_app(agents, agent_pool, config=None):
                                 if msg_text.strip():
                                     msg = Message(role=USER, content=msg_text)
                                     agent_pool.add_message(instance_name, msg)
-                                    # Log to JSONL immediately for persistence
-                                    # CRITICAL: Use instance.agent_class for logging, not 'User'
-                                    try:
-                                        log_inst = agent_pool.get_logger(instance_name, agent_cls)
-                                        log_inst.log_message(msg)
-                                    except Exception as e:
-                                        logger.debug(f"Logging queued user message to file failed for {instance_name} (non-critical): {e}")
                         
-                        # Step 2: Now add the current user message (instance guaranteed to exist) with JSONL logging
+                        # Step 2: Add the current user message
+                        # Logging is handled by execution_engine._process_response() pre-existing sync
                         user_msg = Message(role=USER, content=parsed_content)
                         agent_pool.add_message(instance_name, user_msg)
-                        try:
-                            # CRITICAL: Use instance.agent_class for logging, not 'User'
-                            log_inst = agent_pool.get_logger(instance_name, agent_cls)
-                            log_inst.log_message(user_msg)
-                        except Exception as e:
-                            logger.debug(f"Logging user message to file failed for {instance_name} (non-critical): {e}")
 
                     # Start agent generation
                     with session_lock:
