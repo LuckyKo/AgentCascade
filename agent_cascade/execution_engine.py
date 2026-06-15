@@ -1487,6 +1487,26 @@ class ExecutionEngine:
             if extra and extra.get('finish_reason') == 'length':
                 is_truncated = True
 
+        # ── Persist pre-existing messages to JSONL before appending turn_output ──
+        # This must happen BEFORE instance.conversation.extend(turn_output) so the initial
+        # sync only sees messages that existed before this LLM call (system + user).
+        # turn_output is logged separately below after it's been appended.
+        try:
+            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+            
+            already_logged_count = len(log_inst.data.get("history", []))
+            if already_logged_count == 0:
+                with instance._compression_lock:
+                    conv = instance.conversation
+                if conv:
+                    # First time logging — log all pre-existing messages (system + user).
+                    # turn_output has NOT been appended yet, so no risk of duplication.
+                    for msg in conv:
+                        if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
+                            log_inst.log_message(msg)
+        except Exception as e:
+            logger.debug(f"Initial log sync failed for {inst_name} (non-critical): {e}")
+
         # Append to all working sets
         response.extend(turn_output)
         messages.extend(turn_output)
@@ -1514,42 +1534,9 @@ class ExecutionEngine:
                         instance._last_actual_token_count = usage['total_tokens']
                     break  # Only need to extract from first message with usage info
 
-        # Persist messages to JSONL log file (P1: LoggerManager migration)
+        # Persist turn_output messages to JSONL log file (P1: LoggerManager migration)
         try:
             log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-            
-            # Log initial conversation messages if this is the first time logging for this instance
-            # Sub-agents do this explicitly at lines 2894-2905; orchestrator needs it too
-            with instance._compression_lock:
-                conv = instance.conversation
-                already_logged_count = len(log_inst.data.get("history", []))
-                if already_logged_count == 0 and conv:
-                    # First time logging — log all pre-existing messages (system + user)
-                    # Exclude turn_output messages to avoid duplication (they're logged below).
-                    # Build a set of turn_output message timestamps to skip during initial sync.
-                    turn_output_timestamps = set()
-                    for msg in turn_output:
-                        ts = None
-                        if hasattr(msg, 'timestamp') and msg.timestamp:
-                            ts = msg.timestamp
-                        elif isinstance(msg, dict) and msg.get('timestamp'):
-                            ts = msg['timestamp']
-                        if ts:
-                            turn_output_timestamps.add(ts)
-                    
-                    # Type guard: only log actual Message objects or dict messages with a role field
-                    # Prevents non-message items (bools, None, etc.) from corrupting the JSONL log
-                    for msg in conv:
-                        if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
-                            # Skip messages that are part of this turn's output to avoid duplication
-                            msg_ts = None
-                            if hasattr(msg, 'timestamp') and msg.timestamp:
-                                msg_ts = msg.timestamp
-                            elif isinstance(msg, dict) and msg.get('timestamp'):
-                                msg_ts = msg['timestamp']
-                            if msg_ts and msg_ts in turn_output_timestamps:
-                                continue  # This is a turn_output message, skip it
-                            log_inst.log_message(msg)
             
             # Log turn_output messages from this LLM call
             for msg in turn_output:
