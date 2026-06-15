@@ -20,9 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Timeout for acquiring endpoint scheduling slots (5 minutes)
-# Matches sleeping_timeout used elsewhere in the system
-ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = 300
+from agent_cascade.settings import ENDPOINT_SLOT_ACQUIRE_TIMEOUT
 
 # Canonical agent type mapping for case-insensitive normalization and idempotency
 # Maps lowercase agent types to their canonical PascalCase form

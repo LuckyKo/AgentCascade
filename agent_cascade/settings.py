@@ -44,3 +44,7 @@ DEFAULT_RAG_SEARCHERS: List[str] = ast.literal_eval(
 # Settings for compression (Feature 020)
 DEFAULT_COMPRESSION_COOLDOWN_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_DEFAULT_COMPRESSION_COOLDOWN_SECONDS', 2.0))  # Minimum seconds between forced compressions to prevent thrashing
+
+# Settings for endpoint scheduling
+ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv(
+    'QWEN_AGENT_ENDPOINT_SLOT_ACQUIRE_TIMEOUT', 30))  # Timeout in seconds for acquiring endpoint scheduling slots
