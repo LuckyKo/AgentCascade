@@ -59,7 +59,7 @@ class CompressContext(BaseTool):
         summary_text = params.get('summary_text')
         force = params.get('force', False)
 
-        # Legacy kwargs from /compress command path in orchestrator._run()
+        # Legacy kwargs from /compress command path in api_server.py WebSocket handler
         dry_run = kwargs.get('dry_run', False)
         precomputed_summary = kwargs.get('precomputed_summary')
 
@@ -72,7 +72,7 @@ class CompressContext(BaseTool):
             kwargs.get('agent_instance_name') or
             getattr(agent_obj, 'instance_name', None) or
             self.agent_name or
-            'orchestrator'
+            'Orchestrator'
         )
 
         # Before compressing, ensure the pool has the current state of the conversation.
@@ -80,7 +80,7 @@ class CompressContext(BaseTool):
         # messages from this turn that haven't been written back to the pool yet (pool is only
         # updated after the turn ends via conv.extend(final_resp)). Without this sync,
         # compress_context reads stale data from the pool and fails with "Not enough messages".
-        if 'messages' in kwargs and agent_name != 'orchestrator' and not dry_run:
+        if 'messages' in kwargs and agent_name != 'Orchestrator' and not dry_run:
             try:
                 # Resolve the correct key in instance_conversations (case-insensitive fallback)
                 pool_key = agent_name
@@ -124,9 +124,7 @@ class CompressContext(BaseTool):
                 logger.warning(f"Failed to sync messages to pool before compression for '{agent_name}': {e}")
 
         # Delegate to the unified compress_context function
-        # Note: orchestrator param not passed — agent-triggered compression uses
-        # the simpler direct run path (comp_agent.run()), which works fine.
-        # Forced compression from orchestrator passes orchestrator=self for full lifecycle.
+        # Note: All compression paths now use engine.run() via invoke_compression_agent().
         result = compress_context(
             agent_pool=self.agent_pool,
             target_agent_name=agent_name,

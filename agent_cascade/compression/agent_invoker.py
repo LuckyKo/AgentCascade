@@ -1,9 +1,7 @@
 """Compression Agent invocation wrapper.
 
-Uses the call_agent pattern (via _stream_sub_agent_call) when an orchestrator
-reference is available, providing session tracking, WebUI visibility, and
-consistent error handling. Falls back to direct comp_agent.run() when called
-outside the orchestrator context (e.g., from API server forced compression).
+Uses engine.run() to invoke the Compression Agent via _create_system_agent().
+This provides full AgentInstance lifecycle (state tracking, WebUI visibility, API points).
 """
 import logging
 import time as _time
@@ -66,24 +64,20 @@ def invoke_compression_agent(
     agent_pool,
     target_messages,
     existing_summary=None,
-    orchestrator=None,   # Optional: the orchestrator instance (for call_agent pattern)
-    caller_name=None,    # Optional: the caller instance name for slot management in fallback path
+    caller_name=None,    # Optional: the caller instance name for slot management
 ):
     """
     Invoke the Compression Agent to generate a summary of target messages.
 
-    When an orchestrator is provided and has _stream_sub_agent_call, uses the
-    call_agent pattern for session tracking, WebUI visibility, and consistent
-    error handling. When no orchestrator is available (e.g., forced compression
-    from API server), falls back to direct agent.run().
+    Uses engine.run() via _create_system_agent() for full AgentInstance lifecycle
+    (state tracking, WebUI visibility, API points).
 
     Args:
         agent_pool: The AgentPool instance (provides agent loading and state management).
         target_messages: List of messages to summarize.
         existing_summary: Optional previous summary text to compound onto.
-        orchestrator: Optional orchestrator instance for call_agent pattern.
         caller_name: Optional caller instance name for slot management. If not provided,
-                    attempts to infer from agent_pool (may fallback to 'Orchestrator').
+                     reads agent_pool.session_name (falls back to 'Orchestrator').
 
     Returns:
         The raw summary string (with thinking blocks stripped).
@@ -130,141 +124,88 @@ def invoke_compression_agent(
 
     summary = ""
     try:
-        if orchestrator is not None and hasattr(orchestrator, '_stream_sub_agent_call'):
-            # ── call_agent pattern via _stream_sub_agent_call ──
-            # Build tool_args matching what call_agent expects
-            tool_args = {
-                'instance_name': comp_state_key,
-                'agent_class': 'Compressor',
-                'task': summary_prompt,
-                'context': None,
-            }
-            # Use the orchestrator's _stream_sub_agent_call for full lifecycle management.
-            # Pass an empty current_response and manager_history since compression is a
-            # self-contained LLM call without tool use or async message injection needs.
-            current_response = []
-            manager_history = comp_history
+        # ── Use engine-based execution via _create_system_agent() ──
+        # This provides full AgentInstance lifecycle (state tracking, WebUI visibility, API points)
+        logger.info(
+            "Compression agent invoked via engine-based execution"
+        )
 
-            final_msgs = []
-            subagent_return_value = None  # Capture StopIteration.value as fallback
-            start_time = _time.monotonic()   # Monotonic clock — immune to NTP adjustments
-            max_poll_time = 300            # 5-minute timeout for large compression tasks
-            poll_count = 0
-
-            try:
-                gen = orchestrator._stream_sub_agent_call(
-                    'call_agent', tool_args, current_response, manager_history
-                )
-                # Iterate the generator synchronously (same pattern as yield from).
-                # Each LLM streaming chunk produces one yield through the chain:
-                #   _original_call_llm → hooked_call_llm → _run → run() → _stream_sub_agent_call
-                # For large compression tasks (60K+ tokens of input), 1000+ chunks are common.
-                # We use a time-based timeout instead of iteration count to handle any task size.
-                while True:
-                    yielded = next(gen)
-                    poll_count += 1
-
-                    # Time-based check — adapts to any streaming chunk rate
-                    elapsed = _time.monotonic() - start_time
-                    if elapsed > max_poll_time:
-                        raise RuntimeError(
-                            f"Compression agent timed out after {elapsed:.0f}s "
-                            f"({poll_count} iterations) — further processing may have been incomplete"
-                        )
-
-                    # The generator yields intermediate state for WebUI — capture final messages
-                    # Note: instance_state doesn't have 'messages' key, so we skip this check here.
-                    # Final messages will be captured from the return value or conversation in fallback path.
-            except StopIteration as e:
-                # Normal termination of the generator — capture return value as fallback
-                if hasattr(e, 'value') and e.value is not None:
-                    subagent_return_value = e.value
-
-        else:
-            # ── Fallback: Use engine-based execution via _create_system_agent() ──
-            # This provides full AgentInstance lifecycle (state tracking, WebUI visibility, API points)
-            logger.info(
-                "Compression agent invoked via engine-based execution — "
-                "no orchestrator reference for call_agent pattern"
+        # Get the caller name for parent tracking and slot management
+        # Use provided caller_name if available, otherwise fallback to agent_pool (may return 'Orchestrator')
+        if caller_name is None:
+            caller_name = getattr(agent_pool, 'session_name', 'Orchestrator')
+        
+        # Log warning if caller_name couldn't be resolved properly
+        if caller_name == 'Orchestrator' and not hasattr(agent_pool, 'session_name'):
+            logger.warning(
+                f"[COMPRESSION] Using fallback caller_name='Orchestrator' - "
+                f"slot management may not work correctly. Pass caller_name explicitly."
             )
+        
+        # Create proper AgentInstance via _create_system_agent() — handles all state setup
+        # The system message comes from Compressor_soul.md template, task contains the summary prompt
+        engine = ExecutionEngine(agent_pool)
+        comp_instance = engine._create_system_agent(
+            agent_class='Compressor',
+            instance_name=comp_state_key,
+            task=summary_prompt,  # Contains history_text and existing_summary context
+            caller=caller_name,
+        )
 
-            # Get the caller name for parent tracking and slot management
-            # Use provided caller_name if available, otherwise fallback to agent_pool (may return 'Orchestrator')
-            if caller_name is None:
-                caller_name = getattr(agent_pool, 'session_name', 'Orchestrator')
+        # Configure Compressor settings (similar to Security agent pattern)
+        NON_LLM_KEYS = (
+            'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
+            'max_turns', 'mcpServers', 'work_access_folders', 'seed',
+            'read_file_limit', 'grep_char_limit', 'grep_spillover', 'shell_char_limit', 'code_char_limit',
+            'disabled_tools',
+            'model', 'model_server', 'api_base', 'base_url', 'api_key', 'model_type'
+        )
+        if hasattr(agent_pool, 'operation_manager'):
+            session = getattr(agent_pool.operation_manager, '_current_session', None)
+            if session:
+                template = agent_pool.templates.get('Compressor')
+                if template and hasattr(template, 'llm'):
+                    cfg = (template.llm.generate_cfg or {}).copy()
+                    ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
+                    llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
+                    cfg.update(llm_safe_cfg)
+                    comp_instance._generate_cfg_override = cfg
+        
+        # Execute via engine.run() — handles LLM call, retries, streaming
+        final_msgs = []
+        start_time = _time.monotonic()
+        max_poll_time = 300  # 5-minute timeout for large compression tasks
+        
+        try:
+            # ── SLOT BYPASS FOR COMPRESSION ──
+            # When forced compression triggers during an agent's turn, the Compressor runs 
+            # on the SAME thread as the caller. The caller holds the shared sequential slot.
+            # This path skips acquisition entirely — the caller retains the slot.
             
-            # Log warning if caller_name couldn't be resolved properly
-            if caller_name == 'Orchestrator' and not hasattr(agent_pool, 'session_name'):
-                logger.warning(
-                    f"[COMPRESSION] Using fallback caller_name='Orchestrator' - "
-                    f"slot management may not work correctly. Pass caller_name explicitly."
-                )
+            # Get the caller instance from the pool (for logging/debugging)
+            caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
             
-            # Create proper AgentInstance via _create_system_agent() — handles all state setup
-            # The system message comes from Compressor_soul.md template, task contains the summary prompt
-            engine = ExecutionEngine(agent_pool)
-            comp_instance = engine._create_system_agent(
-                agent_class='Compressor',
-                instance_name=comp_state_key,
-                task=summary_prompt,  # Contains history_text and existing_summary context
-                caller=caller_name,
+            # Set skip flag so engine.run() bypasses slot acquisition
+            comp_instance._skip_slot_acquire = True
+            logger.debug(
+                f"[COMPRESSION_SLOT_BYPASS] Skipping slot acquire for Compressor - "
+                f"caller={caller_name}, caller_holds_slot={(getattr(caller_inst, '_slot_release', None) is not None) if caller_inst else False}"
             )
-
-            # Configure Compressor settings (similar to Security agent pattern)
-            NON_LLM_KEYS = (
-                'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
-                'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-                'read_file_limit', 'grep_char_limit', 'grep_spillover', 'shell_char_limit', 'code_char_limit',
-                'disabled_tools',
-                'model', 'model_server', 'api_base', 'base_url', 'api_key', 'model_type'
-            )
-            if hasattr(agent_pool, 'operation_manager'):
-                session = getattr(agent_pool.operation_manager, '_current_session', None)
-                if session:
-                    template = agent_pool.templates.get('Compressor')
-                    if template and hasattr(template, 'llm'):
-                        cfg = (template.llm.generate_cfg or {}).copy()
-                        ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
-                        llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
-                        cfg.update(llm_safe_cfg)
-                        comp_instance._generate_cfg_override = cfg
             
-            # Execute via engine.run() — handles LLM call, retries, streaming
-            final_msgs = []
-            start_time = _time.monotonic()
-            max_poll_time = 300  # 5-minute timeout for large compression tasks
+            for resp in engine.run(comp_instance):
+                elapsed = _time.monotonic() - start_time
+                if elapsed > max_poll_time:
+                    raise RuntimeError(
+                        f"Compression agent timed out after {elapsed:.0f}s — "
+                        f"further processing may have been incomplete"
+                    )
+                # Capture conversation for summary extraction (engine manages conversation state)
+                if comp_instance.conversation:
+                    final_msgs = list(comp_instance.conversation)
             
-            try:
-                # ── SLOT BYPASS FOR COMPRESSION (Path B — fallback only) ──
-                # When forced compression triggers during an agent's turn, the Compressor runs 
-                # on the SAME thread as the caller. The caller holds the shared sequential slot.
-                # Path A (call_agent via _stream_sub_agent_call) uses normal release/reacquire.
-                # Path B (this fallback) skips acquisition entirely — the caller retains the slot.
-                
-                # Get the caller instance from the pool (for logging/debugging)
-                caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
-                
-                # Set skip flag so engine.run() bypasses slot acquisition
-                comp_instance._skip_slot_acquire = True
-                logger.debug(
-                    f"[COMPRESSION_SLOT_BYPASS] Skipping slot acquire for Compressor - "
-                    f"caller={caller_name}, caller_holds_slot={(getattr(caller_inst, '_slot_release', None) is not None) if caller_inst else False}"
-                )
-                
-                for resp in engine.run(comp_instance):
-                    elapsed = _time.monotonic() - start_time
-                    if elapsed > max_poll_time:
-                        raise RuntimeError(
-                            f"Compression agent timed out after {elapsed:.0f}s — "
-                            f"further processing may have been incomplete"
-                        )
-                    # Capture conversation for summary extraction (engine manages conversation state)
-                    if comp_instance.conversation:
-                        final_msgs = list(comp_instance.conversation)
-                    
-            except Exception as e:
-                logger.error(f"Compression agent execution error: {e}")
-                raise
+        except Exception as e:
+            logger.error(f"Compression agent execution error: {e}")
+            raise
 
         # 2. Extract the summary from the last assistant message
         if final_msgs:
@@ -284,18 +225,6 @@ def invoke_compression_agent(
                     summary = summary.lstrip(':\n \t')
                     lower_summary = summary.lower()
 
-        # Fallback: if final_msgs was empty but we got a return value from the generator,
-        # try to extract the summary from that string. This handles edge cases where the
-        # instance_state wasn't populated with messages during streaming.
-        if not summary.strip() and subagent_return_value:
-            if isinstance(subagent_return_value, str):
-                logger.info("Using subagent return value as fallback for summary extraction")
-                rv = subagent_return_value
-                # Strip the "[instance_name's output]:\n" wrapper added by _stream_sub_agent_call
-                if ']:' in rv and '\n' in rv:
-                    rv = rv.split(']:\n', 1)[1]
-                summary = strip_thinking_blocks(rv)
-
         # Validate we got a usable summary
         if not summary.strip():
             raise RuntimeError("Compression Agent returned an empty summary")
@@ -312,7 +241,7 @@ def invoke_compression_agent(
         if comp_state_key in agent_pool.instance_state:
             with agent_pool._execution._state_lock:
                 agent_pool.instance_state[comp_state_key]['active'] = False
-            try:
-                agent_pool.active_stack_remove(comp_state_key)
-            except Exception:
-                pass  # Already removed or never existed - non-critical
+                try:
+                    agent_pool.active_stack_remove(comp_state_key)
+                except Exception:
+                    pass  # Already removed or never existed - non-critical

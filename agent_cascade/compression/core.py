@@ -1,6 +1,5 @@
 """Unified compress_context() function — the single entry point for all compression."""
 import logging
-from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.compression.result import CompressResult
 from agent_cascade.compression.helpers import (
     compute_discard_count,
@@ -19,9 +18,8 @@ def compress_context(
     mode: str = "auto",            # "auto" (LLM generates) or "manual" (summary provided)
     summary_text: str | None = None,  # Required when mode == "manual"
     force: bool = False,           # Bypass validation guards (forced compression at >95%)
-    orchestrator=None,             # Optional: orchestrator instance for call_agent pattern
     dry_run: bool = False,         # If True, generate summary but don't mutate pool
-    precomputed_summary: str | None = None,  # Pre-generated summary to skip LLM call
+    precomputed_summary: str | None = None,  # Pre-generated summary to skip LLM call in auto mode
 ) -> CompressResult:
     """
     Unified compression function. Handles ALL compression triggers:
@@ -30,8 +28,7 @@ def compress_context(
     - Agent-triggered (agent calls compress_context tool): normal mode
     - Manual (user provides summary text): mode="manual" with summary_text
 
-    Synchronous — uses generator iteration to invoke the Compression Agent
-    (matching the existing _stream_sub_agent_call pattern).
+    Synchronous — uses engine.run() to invoke the Compression Agent.
 
     Fail-safe: if compression fails at any point, pool is untouched.
 
@@ -42,7 +39,6 @@ def compress_context(
         mode: "auto" for LLM-generated summary, "manual" for provided summary.
         summary_text: Required when mode == "manual". Raw summary text.
         force: If True, bypass the "not enough messages" guard.
-        orchestrator: Optional orchestrator instance for call_agent pattern invocation.
         dry_run: If True, generate summary but don't mutate pool (for /compress command).
         precomputed_summary: Pre-generated summary to skip LLM call in auto mode.
 
@@ -205,7 +201,6 @@ def compress_context(
                 agent_pool=agent_pool,
                 target_messages=target_messages,
                 existing_summary=existing_summary,
-                orchestrator=orchestrator,
                 caller_name=target_agent_name,  # Pass actual instance name for slot management
             )
         except Exception as e:
@@ -257,8 +252,8 @@ def compress_context(
     # before running, so no concurrent pool mutations can occur during this block.
     
     try:
-        # NOTE: get_conversation returns the same list object as instance_conversations[].
-        # We build new_history as a new list and replace the reference on the next line.
+        # NOTE: get_conversation() returns a copy of inst.conversation (see agent_pool.py:1124).
+        # We replace via instance_conversations[name] = new_history which copies into inst.conversation.
         history = agent_pool.get_conversation(target_agent_name)
         insert_pos = active_start_idx + target_discard_count
 
