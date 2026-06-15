@@ -3958,6 +3958,20 @@ function renderApiEndpoints() {
               <input type="number" min="0" step="1000" class="ep-input-tokens" value="${ep.max_input_tokens || 0}" title="0 = Use General Settings. Caps context for this endpoint.">
             </label>
           </div>
+          <div style="display:flex;gap:8px;margin-top:6px;">
+            <label class="setting-field" style="flex:1;">
+              <span>Backoff Base (s)</span>
+              <input type="number" min="0.1" max="60" step="0.5" class="ep-input-base-delay" value="${ep.base_retry_delay || 1.0}" title="Base delay for exponential backoff on retry">
+            </label>
+            <label class="setting-field" style="flex:1;">
+              <span>Backoff Max (s)</span>
+              <input type="number" min="1" max="60" step="1" class="ep-input-max-delay" value="${ep.max_retry_delay || 30.0}" title="Maximum cap on retry delay">
+            </label>
+            <label class="setting-field" style="flex:1;">
+              <span>Rate Limit (rpm)</span>
+              <input type="number" min="0" step="1" class="ep-input-rate-limit" value="${ep.rate_limit_rpm || 0}" title="Requests per minute. 0 = unlimited">
+            </label>
+          </div>
           <button class="api-endpoint-delete">Delete Endpoint</button>
         </div>
       </div>
@@ -4061,12 +4075,19 @@ function handleApiEndpointBlur(e) {
   ep.max_retries = parseInt(card.querySelector('.ep-input-retries').value) || 0;
   ep.concurrency_limit = parseInt(card.querySelector('.ep-input-concurrency').value) || 0;
   ep.max_input_tokens = parseInt(card.querySelector('.ep-input-tokens').value) || 0;
+  // NEW: Read the new backoff and rate limit fields with NaN checks for robust defaults
+  const baseDelayVal = parseFloat(card.querySelector('.ep-input-base-delay').value);
+  ep.base_retry_delay = Number.isNaN(baseDelayVal) ? 1.0 : baseDelayVal;
+  const maxDelayVal = parseFloat(card.querySelector('.ep-input-max-delay').value);
+  ep.max_retry_delay = Number.isNaN(maxDelayVal) ? 30.0 : maxDelayVal;
+  const rpmVal = parseInt(card.querySelector('.ep-input-rate-limit').value, 10);
+  ep.rate_limit_rpm = Number.isNaN(rpmVal) ? 0 : rpmVal;
   sendApiRouterUpdate();
 }
 
 function handleApiEndpointKeydown(e) {
   if (e.key !== 'Enter') return;
-  const input = e.target.closest('input.ep-input-name, input.ep-input-base, input.ep-input-key, input.ep-input-model, input.ep-input-retries, input.ep-input-concurrency, input.ep-input-tokens');
+  const input = e.target.closest('input.ep-input-name, input.ep-input-base, input.ep-input-key, input.ep-input-model, input.ep-input-retries, input.ep-input-concurrency, input.ep-input-tokens, input.ep-input-base-delay, input.ep-input-max-delay, input.ep-input-rate-limit');
   if (input) input.blur();
 }
 
@@ -4230,7 +4251,7 @@ if (btnAddEndpoint) {
     if (!state.api_router) state.api_router = { endpoints: [], agent_priorities: {} };
     if (!state.api_router.endpoints) state.api_router.endpoints = [];
     
-    // Add a new blank endpoint
+    // Add a new blank endpoint with defaults matching backend dataclass
     state.api_router.endpoints.push({
       id: crypto.randomUUID(),
       name: 'New Endpoint',
@@ -4238,7 +4259,11 @@ if (btnAddEndpoint) {
       api_key: 'EMPTY',
       model: '',
       enabled: true,
-      max_retries: 2
+      max_retries: 2,
+      // NEW defaults matching the backend dataclass
+      base_retry_delay: 1.0,
+      max_retry_delay: 30.0,
+      rate_limit_rpm: 0
     });
     
     sendApiRouterUpdate();
