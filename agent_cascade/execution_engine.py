@@ -623,7 +623,20 @@ class ExecutionEngine:
                         continue
                     # FIX BOOL_LEAK: Validate message type before appending to prevent bool/list leak
                     if isinstance(msg, (Message, dict)):
-                        turn_output.append(msg)
+                        # Endpoint recovery: [RETRYING] messages are transient UI notifications only — don't add to conversation history
+                        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                        is_retrying_msg = isinstance(content, str) and content.startswith("[RETRYING]")
+                        
+                        # Yield for UI visibility (even transient messages)
+                        # Retry notifications show only the retry message; normal messages show with streaming state
+                        if is_retrying_msg:
+                            yield (response + turn_output + [msg], True)
+                        else:
+                            yield (response + turn_output + partial_msgs, True)
+                        
+                        # Only append to turn_output if it's a real message (not transient retry notification)
+                        if not is_retrying_msg:
+                            turn_output.append(msg)
                     else:
                         logger.warning(f"[MSG_VALIDATION] Skipping non-Message in LLM response for {instance.instance_name}: type={type(msg).__name__}, value={str(msg)[:100]}")
 
@@ -1191,6 +1204,7 @@ class ExecutionEngine:
 
         Makes the actual LLM API call via api_router, handling streaming.
         Checks for stop/halt mid-stream.
+        Implements endpoint recovery on mid-stream failure (retry with new endpoint).
         """
         inst_name = instance.instance_name
         template = self.pool.templates.get(instance.agent_class)
@@ -1202,49 +1216,141 @@ class ExecutionEngine:
         # Mirrors Agent._get_active_functions(): filter out disabled tools from function_map
         active_functions = _get_active_functions_from_template(template, instance)
 
+        # Endpoint recovery configuration from pool settings
+        max_retries = self.pool.settings.llm_max_retries
+        base_delay = self.pool.settings.llm_retry_base_delay
+        
+        last_output = None
+        retry_count = 0
+        error_already_yielded = False  # Track if we already yielded an error message
+        
         # Build the LLM call — with delta_stream=False each yielded item is a List[Message]
         # (the accumulated response so far). We iterate through all items (or until stop/halt),
         # keeping the latest accumulated result, then yield individual messages from it.
-        try:
-            last_output = None
-            # Streaming UI Content Update Fix: Track partial LLM content for UI updates every ~100ms (threshold 0.1)
-            last_streaming_update_time = time.monotonic()
-            
-            for output in self._execute_llm_call(instance, template, llm_messages, active_functions):
-                last_output = output  # keep latest accumulated response FIRST
+        # Wrapped in retry loop for endpoint recovery on mid-stream failure.
+        while retry_count <= max_retries:
+            try:
+                # Streaming UI Content Update Fix: Track partial LLM content for UI updates every ~100ms (threshold 0.1)
+                last_streaming_update_time = time.monotonic()
                 
-                # Update _streaming_responses every ~100ms with deep copy of partial content
-                current_time = time.monotonic()
-                if current_time - last_streaming_update_time >= 0.1:
-                    # Only deep-copy when content actually changed (performance optimization)
-                    with instance._compression_lock:
-                        self._update_streaming_responses(instance, last_output)
-                        last_streaming_update_time = current_time
-                    yield None  # Trigger UI refresh via engine.run() yielding to broadcast loop
+                for output in self._execute_llm_call(instance, template, llm_messages, active_functions):
+                    last_output = output  # keep latest accumulated response FIRST
+                    
+                    # Update _streaming_responses every ~100ms with deep copy of partial content
+                    current_time = time.monotonic()
+                    if current_time - last_streaming_update_time >= 0.1:
+                        # Only deep-copy when content actually changed (performance optimization)
+                        with instance._compression_lock:
+                            self._update_streaming_responses(instance, last_output)
+                            last_streaming_update_time = current_time
+                        yield None  # Trigger UI refresh via engine.run() yielding to broadcast loop
+                    
+                    # Check stop/halt mid-stream (after capturing the current result)
+                    if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
+                        # Clear streaming state on early exit to prevent stale data leak
+                        with instance._compression_lock:
+                            instance._streaming_responses = []
+                        break
                 
-                # Check stop/halt mid-stream (after capturing the current result)
-                if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
-                    # Clear streaming state on early exit to prevent stale data leak
-                    with instance._compression_lock:
-                        instance._streaming_responses = []
+                # If we got output, the stream completed successfully — break out of retry loop
+                # If last_output is still None, the for-loop broke early (stop/halt before any yield) 
+                # or the generator produced no output — in either case, retry may help
+                if last_output is not None:
                     break
-
-            # Final update before yielding results (under lock for thread safety)
-            if last_output is not None:
+                
+            except Exception as e:
+                # Clear streaming state on exception to prevent stale partial data from leaking
                 with instance._compression_lock:
-                    self._update_streaming_responses(instance, last_output)
-            
-            if not last_output or (isinstance(last_output, list) and len(last_output) == 0):
-                yield Message(role=ASSISTANT, content="[SYSTEM ERROR: Empty LLM response]")
-            else:
-                for msg in last_output:
-                    yield msg
-        except Exception as e:
-            # Clear streaming state on exception to prevent stale partial data from leaking
+                    instance._streaming_responses = []
+                
+                if retry_count >= max_retries:
+                    # All retries exhausted — yield error and give up
+                    # Extract clean error message without traceback for user-facing content
+                    error_msg = str(e).split('\n')[0] if e else "Unknown error"
+                    logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {max_retries} retries: {e}")
+                    yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed after {max_retries} retries — {error_msg}]")
+                    error_already_yielded = True
+                    break
+                
+                retry_count += 1
+                # Exponential backoff: 1s, 2s, 4s... capped at reasonable maximum
+                backoff = min(base_delay * (2 ** (retry_count - 1)), 5.0)
+                
+                # Only retry on network/streaming/transient errors, not config/logic/billing errors
+                # Keywords chosen to match common error message patterns from LLM SDKs
+                # Deliberately excludes 'HTTP' (matches URLs in error messages → false positives for 4xx errors)
+                retryable_errors = (
+                    'connection', 'timeout', 'timed out', 'ssl', 
+                    'broken pipe', 'disconnected', 'eof', 
+                    'reset by peer', 'refused',
+                    '503', '502', '504', '429',  # Server errors + rate limiting
+                    'network unreachable', 'dns', 'resolution failed',  # Network/DNS issues
+                    'temporary', 'overloaded', 'service unavailable'  # Transient server states
+                )
+                
+                # Explicitly non-retryable patterns (billing, auth, config)
+                # Note: 'authentication' may catch transient auth timeouts — kept for conservative error handling
+                non_retryable_errors = (
+                    'insufficient_quota', 'billing_error', 'account_not_active',
+                    'invalid_api_key', 'authentication', 'unauthorized',
+                    'forbidden', 'permission denied',
+                    'model_not_found', 'invalid_model',
+                    'invalid_request', 'validation'
+                )
+                
+                error_str = str(e).lower()
+                is_non_retryable = any(err in error_str for err in non_retryable_errors)
+                has_retryable_pattern = any(err in error_str for err in retryable_errors)
+                
+                # Retry if we have a retryable pattern and no non-retryable pattern
+                # If neither matches, allow full retries for unknown transient errors (will be caught by max_retries check)
+                if is_non_retryable:
+                    is_retryable = False
+                    logger.debug(f"[ENDPOINT_RETRY] Non-retryable error detected for {inst_name}: {str(e)[:100]}")
+                elif has_retryable_pattern:
+                    is_retryable = True
+                else:
+                    # Unknown error — allow retries (up to max_retries) to handle transient issues we haven't categorized
+                    # The retry_count >= max_retries check at line 1266 will properly limit attempts
+                    is_retryable = True
+                    logger.warning(
+                        f"[ENDPOINT_RETRY] Unrecognized error for {inst_name}, allowing retries: {str(e)[:100]}"
+                    )
+                
+                if not is_retryable:
+                    # Non-retryable error — yield immediately without more retries
+                    error_msg = str(e).split('\n')[0] if e else "Unknown error"
+                    logger.warning(
+                        f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable error: {e}"
+                    )
+                    yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {error_msg}]")
+                    error_already_yielded = True
+                    break
+                
+                logger.warning(
+                    f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{max_retries}. "
+                    f"Retrying in {backoff:.1f}s with new endpoint... Error: {e}"
+                )
+                
+                # Signal retry to UI before blocking on sleep (prevents 5s black hole)
+                yield Message(role=ASSISTANT, content=f"[RETRYING] Connection lost, retrying ({retry_count}/{max_retries}) in {backoff:.1f}s...")
+                time.sleep(backoff)
+                yield None  # Trigger UI refresh after wait, before next attempt
+                
+                # Loop continues — _execute_llm_call will select a new endpoint via call_with_fallback
+
+        # Final update before yielding results (under lock for thread safety)
+        if last_output is not None:
             with instance._compression_lock:
-                instance._streaming_responses = []
-            logger.error(f"LLM call failed for {inst_name}: {e}")
-            yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {e}]")
+                self._update_streaming_responses(instance, last_output)
+        
+        if not last_output or (isinstance(last_output, list) and len(last_output) == 0):
+            # Only yield empty response error if we didn't already yield an error message
+            if not error_already_yielded:
+                yield Message(role=ASSISTANT, content="[SYSTEM ERROR: Empty LLM response]")
+        else:
+            for msg in last_output:
+                yield msg
 
     def _execute_llm_call(self, instance: AgentInstance, template, messages: List[Message], active_functions) -> Iterator[List[Message]]:
         """Execute the actual LLM API call via api_router with failover.
