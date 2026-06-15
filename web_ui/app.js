@@ -1444,7 +1444,7 @@ function handleServerMessage(data) {
 
   // Trigger sounds based on state changes
   const newApprovalsCount = (state.approvals || []).length;
-  if (newApprovalsCount > prevApprovalsCount) {
+  if (newApprovalsCount > prevApprovalsCount && !state.autoSecurity) {
     playSound('intervention');
   } else if (wasGenerating && !state.generating) {
     // Only play "completed" sound when the ROOT agent transitions RUNNING → IDLE
