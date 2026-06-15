@@ -67,6 +67,7 @@ def invoke_compression_agent(
     target_messages,
     existing_summary=None,
     orchestrator=None,   # Optional: the orchestrator instance (for call_agent pattern)
+    caller_name=None,    # Optional: the caller instance name for slot management in fallback path
 ):
     """
     Invoke the Compression Agent to generate a summary of target messages.
@@ -81,6 +82,8 @@ def invoke_compression_agent(
         target_messages: List of messages to summarize.
         existing_summary: Optional previous summary text to compound onto.
         orchestrator: Optional orchestrator instance for call_agent pattern.
+        caller_name: Optional caller instance name for slot management. If not provided,
+                    attempts to infer from agent_pool (may fallback to 'Orchestrator').
 
     Returns:
         The raw summary string (with thinking blocks stripped).
@@ -187,8 +190,17 @@ def invoke_compression_agent(
                 "no orchestrator reference for call_agent pattern"
             )
 
-            # Get the caller name for parent tracking  
-            caller_name = getattr(agent_pool, 'session_name', 'Orchestrator')
+            # Get the caller name for parent tracking and slot management
+            # Use provided caller_name if available, otherwise fallback to agent_pool (may return 'Orchestrator')
+            if caller_name is None:
+                caller_name = getattr(agent_pool, 'session_name', 'Orchestrator')
+            
+            # Log warning if caller_name couldn't be resolved properly
+            if caller_name == 'Orchestrator' and not hasattr(agent_pool, 'session_name'):
+                logger.warning(
+                    f"[COMPRESSION] Using fallback caller_name='Orchestrator' - "
+                    f"slot management may not work correctly. Pass caller_name explicitly."
+                )
             
             # Create proper AgentInstance via _create_system_agent() — handles all state setup
             # The system message comes from Compressor_soul.md template, task contains the summary prompt
@@ -225,23 +237,50 @@ def invoke_compression_agent(
             max_poll_time = 300  # 5-minute timeout for large compression tasks
             
             try:
-                for resp in engine.run(comp_instance):
-                    elapsed = _time.monotonic() - start_time
-                    if elapsed > max_poll_time:
-                        raise RuntimeError(
-                            f"Compression agent timed out after {elapsed:.0f}s — "
-                            f"further processing may have been incomplete"
-                        )
-                    # Capture conversation for summary extraction (engine manages conversation state)
-                    if comp_instance.conversation:
-                        final_msgs = list(comp_instance.conversation)
+                # ── SLOT RELEASE FOR COMPRESSION ──
+                # The Compressor uses the same sequential slot as its caller. When forced 
+                # compression triggers during an agent's turn, the agent holds the shared 
+                # sequential slot `_shared_sequential_slot_` (concurrency=0). The Compressor 
+                # then tries to acquire the SAME slot via engine.run() → blocks forever.
+                # 
+                # Fix: Release the caller's slot before running the Compressor, then reacquire 
+                # after compression completes.
+                
+                # Get the caller instance from the pool to release its slot
+                caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
+                
+                if caller_inst and hasattr(caller_inst, '_slot_release') and caller_inst._slot_release:
+                    logger.info(f"[COMPRESSION_SLOT_RELEASE] Releasing caller slot for compression - instance={caller_name}")
+                    # Capture the callback, nullify immediately to prevent double-release from caller's finally block
+                    release_callback = caller_inst._slot_release
+                    caller_inst._slot_release = None
+                    try:
+                        release_callback()
+                    except Exception as e:
+                        logger.error(f"[COMPRESSION_SLOT_RELEASE_ERROR] Failed to release caller slot for {caller_name}: {e}")
+                
+                try:
+                    for resp in engine.run(comp_instance):
+                        elapsed = _time.monotonic() - start_time
+                        if elapsed > max_poll_time:
+                            raise RuntimeError(
+                                f"Compression agent timed out after {elapsed:.0f}s — "
+                                f"further processing may have been incomplete"
+                            )
+                        # Capture conversation for summary extraction (engine manages conversation state)
+                        if comp_instance.conversation:
+                            final_msgs = list(comp_instance.conversation)
+                finally:
+                    # ── SLOT REACQUIRE AFTER COMPRESSION ──
+                    # Reacquire the caller's slot after compression completes
+                    if caller_inst and hasattr(agent_pool, '_acquire_slot'):
+                        logger.info(f"[COMPRESSION_SLOT_REACQUIRE] Reacquired caller slot after compression - instance={caller_name}")
+                        # Reacquire the slot for the caller
+                        caller_inst._slot_release = agent_pool._acquire_slot(caller_inst.agent_class, caller_name)
                     
             except Exception as e:
                 logger.error(f"Compression agent execution error: {e}")
                 raise
-            finally:
-                # Cleanup handled by outer finally block — no need for duplicate removal
-                pass
 
         # 2. Extract the summary from the last assistant message
         if final_msgs:

@@ -1988,6 +1988,29 @@ def create_app(agents, agent_pool, config=None):
                                         sec_warning_timer.daemon = True
                                         sec_warning_timer.start()
 
+                                    # ── SLOT RELEASE FOR SECURITY ADVISOR ──
+                                    # The Security agent uses the same sequential slot as its caller. When the 
+                                    # security advisor triggers during an agent's turn, the caller holds the shared 
+                                    # sequential slot `_shared_sequential_slot_` (concurrency=0). The Security agent 
+                                    # then tries to acquire the SAME slot via engine.run() → blocks forever.
+                                    #
+                                    # Fix: Release the caller's slot before running the Security agent, then reacquire
+                                    # after security check completes.
+                                    
+                                    # Get caller name from session for slot management
+                                    caller_name_sec = session.get('session_name', 'Orchestrator')
+                                    caller_inst_sec = agent_pool.get_instance(caller_name_sec) if caller_name_sec else None
+                                    
+                                    # Release caller's slot if it exists — capture, nullify, then call
+                                    if caller_inst_sec and hasattr(caller_inst_sec, '_slot_release') and caller_inst_sec._slot_release:
+                                        logger.info(f"[SECURITY_SLOT_RELEASE] Releasing caller slot for security check - instance={caller_name_sec}")
+                                        sec_release_callback = caller_inst_sec._slot_release
+                                        caller_inst_sec._slot_release = None
+                                        try:
+                                            sec_release_callback()
+                                        except Exception as e:
+                                            logger.error(f"[SECURITY_SLOT_RELEASE_ERROR] Failed to release caller slot for {caller_name_sec}: {e}")
+
                                     try:
                                         # Execute via engine.run() — this handles LLM call, retries, and streaming
                                         for resp in engine.run(sec_instance):
@@ -2011,6 +2034,12 @@ def create_app(agents, agent_pool, config=None):
                                         logger.error(f"Security agent execution error: {e}")
                                         raise
                                     finally:
+                                        # ── SLOT REACQUIRE AFTER SECURITY CHECK ──
+                                        # Reacquire the caller's slot after security check completes
+                                        if caller_inst_sec and hasattr(agent_pool, '_acquire_slot'):
+                                            logger.info(f"[SECURITY_SLOT_REACQUIRE] Reacquired caller slot after security check - instance={caller_name_sec}")
+                                            caller_inst_sec._slot_release = agent_pool._acquire_slot(caller_inst_sec.agent_class, caller_name_sec)
+                                        
                                         sec_warning_timer.cancel()
 
                                         # Note: engine.run() handles IDLE state transition internally.

@@ -206,6 +206,7 @@ def compress_context(
                 target_messages=target_messages,
                 existing_summary=existing_summary,
                 orchestrator=orchestrator,
+                caller_name=target_agent_name,  # Pass actual instance name for slot management
             )
         except Exception as e:
             # Fail-safe: Compression Agent failed — pool is untouched
