@@ -199,10 +199,17 @@ def invoke_compression_agent(
                         f"Compression agent timed out after {elapsed:.0f}s — "
                         f"further processing may have been incomplete"
                     )
-                # Capture conversation for summary extraction (engine manages conversation state)
-                if comp_instance.conversation:
-                    final_msgs = list(comp_instance.conversation)
-            
+
+            # Read conversation one final time AFTER the generator completes.
+            # The assistant's response is added to instance.conversation in _process_response()
+            # (execution_engine.py:1543), which runs after the LLM call but may not trigger
+            # another yield if no tools are used. Reading here ensures we capture the complete
+            # conversation state including the assistant's final message.
+            with comp_instance._compression_lock:
+                final_msgs = list(comp_instance.conversation) if comp_instance.conversation else []
+
+            logger.debug(f"[COMPRESSION] final_msgs has {len(final_msgs)} messages, roles: {[m.get('role') if isinstance(m, dict) else getattr(m, 'role', '') for m in final_msgs]}")
+
         except Exception as e:
             logger.error(f"Compression agent execution error: {e}")
             raise
