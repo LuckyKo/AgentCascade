@@ -16,9 +16,6 @@ import threading
 from typing import Callable, Optional, Dict, List
 from concurrent.futures import ThreadPoolExecutor
 
-from agent_cascade.log import logger
-from agent_cascade.llm.schema import Message, USER
-
 
 @dataclass
 class BackgroundToolEntry:
@@ -134,9 +131,6 @@ class AsyncToolRegistry:
                         result_msg = f"[Background Tool Result]:\n{entry.result}"
                     try:
                         self.pool._async_results.put(entry.agent_instance_name, result_msg, function_id=entry.function_id)
-                        
-                        # Note: Message is appended to conversation at Drain Point 2 (execution_engine.py),
-                        # not here, to avoid double-append when agent is RUNNING.
                     except Exception as e:
                         # Log but don't propagate — we want to mark entry as completed even if put fails
                         # This prevents the tool from being stuck in pending state forever

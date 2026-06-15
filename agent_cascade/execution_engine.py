@@ -17,6 +17,8 @@ import json
 import os
 import re
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Iterator, List, Optional, Tuple
 
 from agent_cascade.llm.schema import (
@@ -396,8 +398,6 @@ class ExecutionEngine:
 
                     if async_results or self.pool.has_messages(inst_name):
                         # New data available — transition back to RUNNING and inject messages
-                        
-                        # Transition to RUNNING state FIRST (before injection)
                         with instance._state_lock:
                             # CHECK TERMINATED BEFORE TRANSITION — prevents resuming terminated agent
                             if instance.state == AgentState.TERMINATED:
@@ -414,15 +414,15 @@ class ExecutionEngine:
                                 f"async_results={len(async_results)}, has_user_messages={self.pool.has_messages(inst_name)}"
                             )
 
-                        # Inject async results using helper method (appends to all 4 message lists)
+                        # Inject async results as USER messages at wakeup using helper
                         self._inject_async_results(instance, async_results, messages, llm_messages, response)
                         
-                        # Inject user messages using helper method (appends to all 4 message lists)
+                        # Inject user messages using helper method
                         self._inject_pending_messages(
                             instance, messages, llm_messages, response, inst_name, 
                             log_level="debug", used_any_tool=False
                         )
-
+                        
                         # Re-acquire concurrency slot after waking from SLEEPING (async results + user messages)
                         # SLOT_BYPASS FIX: Only re-acquire if we're not in bypass mode
                         # Uses cached skip_slot_acquire from line 352
@@ -440,7 +440,7 @@ class ExecutionEngine:
                                 logger.error(f"[SLOT_ACQUIRE_FAILED] After wakeup (async+user) for {inst_name}: {e}")
                                 raise
                         
-                        # Continue to normal LLM processing below (in RUNNING state now, messages already injected)
+                        # Continue to normal LLM processing below (in RUNNING state now)
                         continue
 
                     elif self.pool.has_pending(inst_name):
@@ -480,7 +480,7 @@ class ExecutionEngine:
                                         raise
                                 
                                 continue  # Go process via LLM; async results will arrive later
-                        
+                                
                         # If no user messages, proceed with waiting logic
                         current_time = time.monotonic()
                         sleeping_duration = 0.0
@@ -503,14 +503,6 @@ class ExecutionEngine:
                                 logger.debug(f"Drained {len(final_results)} late-arriving results before timeout")
                                 # Inject the drained results to prevent data loss
                                 self._inject_async_results(instance, final_results, messages, llm_messages, response)
-                                # Continue to process these results instead of immediately completing
-                                with instance._state_lock:
-                                    instance._transition(AgentState.RUNNING)
-                                    instance.sleeping_since = None
-                                    instance._last_wakeup_log = time.monotonic()
-                                continue
-                        
-                            # Safe to transition to COMPLETING if no final results
                             with instance._state_lock:
                                 instance._transition(AgentState.COMPLETING)
                                 instance.sleeping_since = None  # Reset for consistency
@@ -536,8 +528,68 @@ class ExecutionEngine:
                         # No pending tools and no immediate results/user messages
                         # Change B (Bug 2): Stable-state drain before COMPLETING transition
                         
-                        # Async results were appended during SLEEPING→RUNNING transition or at Drain Point 2.
-                        # Safe to transition to COMPLETING.
+                        # Track whether we found any results
+                        results_found = False
+                        
+                        # Stable-state drain — keep draining until no more results arrive
+                        # Use a much higher cap since there's no real cost to draining 
+                        # (results are already in memory). 10,000 should handle cases where
+                        # many children complete simultaneously without silently dropping results.
+                        max_drain_iterations = 10000
+                        drain_count = 0
+                        while drain_count < max_drain_iterations:
+                            more_results = self.pool.drain_async_results(inst_name)
+                            if not more_results:
+                                break
+                            results_found = True
+                            # Use helper to inject async results
+                            self._inject_async_results(instance, more_results, messages, llm_messages, response)
+                            drain_count += 1
+                        
+                        if drain_count >= max_drain_iterations:
+                            logger.warning(
+                                f"[CALL_AGENT_DEBUG] Drain loop hit limit ({max_drain_iterations}) for {inst_name}, "
+                                f"may have missed some results"
+                            )
+                        
+                        # Final safety drain — catches results that arrived between last drain and here
+                        final_drain = self.pool.drain_async_results(inst_name)
+                        if final_drain:
+                            results_found = True
+                            # Use helper to inject async results
+                            self._inject_async_results(instance, final_drain, messages, llm_messages, response)
+                        
+                        # If any results were found, transition to RUNNING so LLM processes them
+                        if results_found:
+                            with instance._state_lock:
+                                if instance.state == AgentState.TERMINATED:
+                                    break
+                                instance._transition(AgentState.RUNNING)
+                                instance.sleeping_since = None
+                                instance._last_wakeup_log = time.monotonic()
+                            
+                            # Re-acquire concurrency slot after waking from SLEEPING due to async results
+                            # SLOT_BYPASS FIX: Only re-acquire if we're not in bypass mode
+                            # Uses cached skip_slot_acquire from line 352
+                            if not skip_slot_acquire and hasattr(self.pool, '_acquire_slot'):
+                                try:
+                                    logger.debug(
+                                        f"[SLOT_ACQUIRE] After wakeup (async results) - instance={instance.instance_name}"
+                                    )
+                                    instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
+                                    logger.debug(
+                                        f"[SLOT_ACQUIRED] After wakeup (async results) - instance={instance.instance_name}, "
+                                        f"has_callback={instance._slot_release is not None}"
+                                    )
+                                except Exception as e:
+                                    logger.error(f"[SLOT_ACQUIRE_FAILED] After wakeup (async results) for {inst_name}: {e}")
+                                    raise
+                            
+                            # Loop back; now in RUNNING state → LLM processes injected results
+                            yield []
+                            continue
+                        
+                        # No results found — safe to transition to COMPLETING
                         with instance._state_lock:
                             if instance.state == AgentState.TERMINATED:
                                 break
@@ -550,7 +602,7 @@ class ExecutionEngine:
                         break
 
                 # ── Phase 2: Pre-LLM Checks ────────────────────────────────
-                # Stop/halt checks, compression check/force, loop detection
+                # Stop/halt checks, async message injection, compression check/force, loop detection
                 if self._pre_llm_checks(instance, messages, llm_messages, response, turns_available):
                     yield response
                     continue
@@ -815,10 +867,10 @@ class ExecutionEngine:
         self, instance: AgentInstance, messages: List[Message],
         llm_messages: List[Message], response: List[Message], turns_available: int
     ) -> bool:
-        """Phase 2: Stop/halt checks, compression check, and loop detection.
+        """Phase 2: Stop/halt checks, async injection, compression check, loop detection.
 
         Returns True if processing should continue to next iteration (yield + continue).
-        Handles: stop/halt guard, forced compression with rebuild,
+        Handles: stop/halt guard, async message drain, forced compression with rebuild,
         and loop detection (raises LoopDetectedError if found).
         """
         inst_name = instance.instance_name
@@ -827,7 +879,23 @@ class ExecutionEngine:
         if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
             return True  # Skip LLM call, yield and continue loop
 
-        # Pre-LLM injection removed - user messages now drained at Drain Point 2 (after tool chain)
+        # ── Async message injection (drain queue) ────────────────────────────────
+        injected, _ = self._inject_pending_messages(
+            instance, messages, llm_messages, response, inst_name, 
+            log_level="debug", used_any_tool=False
+        )
+        
+        if injected:
+            # Feature 019: Invalidate LLM preprocessing cache after queue injection
+            template = self.pool.templates.get(instance.agent_class)
+            if template and hasattr(template, 'llm') and template.llm:
+                try:
+                    template.llm._clear_preprocess_cache()
+                except Exception as e:
+                    logger.debug(f"Failed to clear LLM preprocess cache for {inst_name}: {e}")
+
+            return True  # Yield and continue loop to process new messages
+                
         if self._handle_compress_command(instance, messages, llm_messages):
             return True  # Command handled — yield and continue
 
@@ -1417,11 +1485,12 @@ class ExecutionEngine:
             # Check for Gemma-style <|channel>thought tags
             content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
             if not msg.get('reasoning_content') and isinstance(content, str) and '<|channel>thought' in content.lower():
+                import re as _re
                 # Only strip if at very beginning to avoid matching tags inside file content
-                match = re.search(r'^\s*<\|channel>thought\n?([\s\S]*?)(?:\n?<channel\|>|$)', content, re.IGNORECASE)
+                match = _re.search(r'^\s*<\|channel>thought\n?([\s\S]*?)(?:\n?<channel\|>|$)', content, _re.IGNORECASE)
                 if match:
                     msg['reasoning_content'] = match.group(1).strip()
-                    msg['content'] = re.sub(r'^\s*<\|channel>thought\n?[\s\S]*?(?:\n?<channel\|>|$)', '', content, count=1, flags=re.IGNORECASE).strip()
+                    msg['content'] = _re.sub(r'^\s*<\|channel>thought\n?[\s\S]*?(?:\n?<channel\|>|$)', '', content, count=1, flags=_re.IGNORECASE).strip()
 
             # Strip thinking blocks from reasoning_content to prevent tag pollution in history
             if msg.get('reasoning_content'):
@@ -1680,33 +1749,16 @@ class ExecutionEngine:
             # Invalidate token count cache — conversation mutated
             _invalidate_token_cache(instance)
 
-        # ── Drain Point 2 (After Tool Chain) ──────────────────────────────
-        # Drain async results first, then user queue, append to all 4 lists.
-        # This is the SINGLE SOURCE OF TRUTH for async result messages - they are NOT
-        # appended at completion time (async_tools.py) to avoid double-append when agent is RUNNING.
-        # User messages sent while agent is IDLE are drained at Drain Point 1 (api_server.py).
-        # User messages sent while agent is RUNNING are drained here.
-        
-        anything_drained = False
-        
-        # First drain async results using helper method
-        async_results = self.pool.drain_async_results(inst_name)
-        if async_results:
-            self._inject_async_results(instance, async_results, messages, llm_messages, response)
-            anything_drained = True
-        
-        # Then drain user queue using helper method  
+        # ── Post-tool urgent injection ───────────────────────────────────
+        # Inject urgent messages AFTER all tools complete to avoid orphaned tool_call_id's
         injected, _ = self._inject_pending_messages(
-            instance, messages, llm_messages, response, inst_name,
-            log_level="debug", used_any_tool=False
+            instance, messages, llm_messages, response, inst_name, 
+            log_level="debug", used_any_tool=True
         )
+        
         if injected:
-            anything_drained = True
-        
-        # Helper methods already invalidate token cache internally
-        if anything_drained:
-            return True  # Continue loop to process drained messages
-        
+            return True  # Continue to next LLM call for urgent message processing
+
         return used_any_tool or is_truncated  # Continue loop if tool was used
 
     def _inject_pending_messages(
@@ -1718,9 +1770,6 @@ class ExecutionEngine:
         This is a shared helper used at multiple drain points for both code paths
         (no-real-content and real-content). It handles the common pattern of: draining the queue,
         creating USER messages, appending to all 4 message sets, and invalidating the token cache.
-        
-        CRITICAL: Uses instance.agent_class for logging (not message role) to ensure messages
-        are logged to the correct log file (e.g., orchestrator_Maine_*.jsonl).
         
         Args:
             instance: The agent instance receiving the messages.
@@ -1744,14 +1793,6 @@ class ExecutionEngine:
             logger.info(f"Draining {len(pending)} queued messages for {inst_name} after turn completion.")
         else:
             logger.debug(f"Draining {len(pending)} queued messages for {inst_name}.")
-        
-        # Get logger reference once before the loop (optimization)
-        agent_class = instance.agent_class
-        try:
-            log_inst = self.pool.get_logger(inst_name, agent_class)
-        except Exception as e:
-            logger.debug(f"Getting logger for {inst_name} failed: {e}")
-            log_inst = None
             
         for async_msg_text in pending:
             if not async_msg_text.strip():
@@ -1765,81 +1806,16 @@ class ExecutionEngine:
             
             # FIX LogAppendFixer: Log injected message immediately to ensure it's persisted
             # even if no subsequent LLM call triggers sync in _process_response()
-            # CRITICAL: Use instance.agent_class for logging, not the message role
-            if log_inst is not None:
-                try:
-                    log_inst.log_message(async_msg)
-                except Exception as e:
-                    logger.debug(f"Logging injected message to file failed for {inst_name} (non-critical): {e}")
+            try:
+                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                log_inst.log_message(async_msg)
+            except Exception as e:
+                logger.debug(f"Logging injected message to file failed for {inst_name} (non-critical): {e}")
         
         # Invalidate token cache after injecting all messages (once, not per-message)
         _invalidate_token_cache(instance)
         
         return (True, used_any_tool)  # Return tuple: (injected, used_any_tool_value)
-
-    def _inject_async_results(
-        self, 
-        instance: AgentInstance, 
-        results: List[tuple[str, Optional[str]]], 
-        messages: List[Message], 
-        llm_messages: List[Message], 
-        response: List[Message]
-    ) -> None:
-        """Inject async results as USER messages with function_id tracking.
-        
-        Consolidates duplicated code for unpacking (result, function_id) tuples and injecting
-        them as USER messages. Used in SLEEPING guard, Drain Point 2 (_process_response),
-        timeout final drain, and _post_turn_checks safety drain.
-        
-        CRITICAL: Uses instance.agent_class for logging (not message role) to ensure messages
-        are logged to the correct log file (e.g., orchestrator_Maine_*.jsonl).
-        
-        Args:
-            instance: The agent instance to update conversation for.
-            results: List of (result_string, function_id) tuples from drain_async_results.
-            messages: Current message list to append to.
-            llm_messages: LLM-formatted messages list to append to.
-            response: Response list to append to.
-            
-        Returns:
-            None
-        """
-        if not results:
-            return
-        
-        # Extract instance metadata once before the loop (not per-message)
-        # Align with _inject_pending_messages pattern: direct attribute access
-        inst_name = instance.instance_name
-        agent_class = instance.agent_class
-        
-        logger.debug(f"Injecting {len(results)} async result(s) for {inst_name}")
-        
-        for result_tuple in results:
-            # Unpack (result_string, function_id) tuple — contract: drain_async_results always returns tuples
-            result_content, function_id = result_tuple
-            
-            # Build prefix with optional function_id tracking
-            prefix = f"[BACKGROUND TOOL RESULT for {function_id}]" if function_id else "[BACKGROUND TOOL RESULT]"
-            
-            # Create and inject the result message
-            result_msg = Message(role=USER, content=f"{prefix}: {result_content}")
-            messages.append(result_msg)
-            llm_messages.append(result_msg)
-            response.append(result_msg)
-            with instance._compression_lock:
-                instance.conversation.append(result_msg)
-            
-            # FIX LogAppendFixer: Log async result message immediately to ensure it's persisted
-            # even if no subsequent LLM call triggers sync in _process_response()
-            # CRITICAL: Use instance.agent_class for logging, not the message role
-            try:
-                log_inst = self.pool.get_logger(inst_name, agent_class)
-                log_inst.log_message(result_msg)
-            except Exception as e:
-                logger.debug(f"Logging async result message to file failed for {inst_name} (non-critical): {e}")
-        
-        # Invalidate token cache after injection
-        _invalidate_token_cache(instance)
 
     def _post_turn_checks(
         self, 
@@ -1848,10 +1824,11 @@ class ExecutionEngine:
         llm_messages: List[Message],
         response: List[Message]
     ) -> bool:
-        """Phase 5: Check for final answer and wait for parallel agents.
+        """Phase 5: Check for final answer, wait for parallel agents, drain post-generation queue.
 
         Returns False when agent has truly completed (break from loop).
-        Handles: final answer detection, thinking-only detection, parallel agent wait.
+        Handles: final answer detection, thinking-only detection, parallel agent wait,
+        and post-generation message drain.
 
         Args:
             instance: The agent being executed.
@@ -1902,15 +1879,10 @@ class ExecutionEngine:
             self._transition_to_sleeping(instance)
             return True  # Continue loop → hits SLEEPING guard at top
 
-        # Post-generation queue drain - check for queued messages
+        # Post-generation queue drain
         if self.pool.has_messages(inst_name):
-            logger.info(f"Queued messages for {inst_name} after turn completion. Draining now.")
-            injected, _ = self._inject_pending_messages(
-                instance, messages, llm_messages, response, inst_name,
-                log_level="debug", used_any_tool=False
-            )
-            if injected:
-                return True  # Continue loop to process drained messages
+            logger.info(f"Queued messages for {inst_name} after turn completion. Looping back.")
+            return True  # Loop back to process injected messages
 
         # Agent has truly completed (no pending async, no queued messages)
         # Safety drain: catch any results from fast-completing children that completed
@@ -1931,6 +1903,51 @@ class ExecutionEngine:
             )
 
         return False
+
+    def _inject_async_results(self, instance, results, messages, llm_messages, response):
+        """Inject async results as USER messages with function_id tracking.
+        
+        Consolidates duplicated code for unpacking (result, function_id) tuples and injecting
+        them as USER messages. Used in SLEEPING guard injection, stable-state drain loop,
+        final safety drain, and _post_turn_checks safety drain.
+        
+        Args:
+            instance: The agent instance to update conversation for.
+            results: List of (result_string, function_id) tuples from drain_async_results.
+            messages: Current message list to append to.
+            llm_messages: LLM-formatted messages list to append to.
+            response: Response list to append to.
+        """
+        if not results:
+            return
+        
+        for result_tuple in results:
+            # Unpack (result_string, function_id) tuple — contract: drain_async_results always returns tuples
+            result_content, function_id = result_tuple
+            
+            # Build prefix with optional function_id tracking
+            prefix = f"[BACKGROUND TOOL RESULT for {function_id}]" if function_id else "[BACKGROUND TOOL RESULT]"
+            
+            # Create and inject the result message
+            result_msg = Message(role=USER, content=f"{prefix}: {result_content}")
+            messages.append(result_msg)
+            llm_messages.append(result_msg)
+            response.append(result_msg)
+            with instance._compression_lock:
+                instance.conversation.append(result_msg)
+            
+            # FIX LogAppendFixer: Log async result message immediately to ensure it's persisted
+            # even if no subsequent LLM call triggers sync in _process_response()
+            try:
+                inst_name = getattr(instance, 'instance_name', 'unknown')
+                agent_class = getattr(instance, 'agent_class', 'unknown')
+                log_inst = self.pool.get_logger(inst_name, agent_class)
+                log_inst.log_message(result_msg)
+            except Exception as e:
+                logger.debug(f"Logging async result message to file failed for {inst_name} (non-critical): {e}")
+        
+        # Invalidate token cache after injection
+        _invalidate_token_cache(instance)
 
     @staticmethod
     def _release_slot(slot_holder: Any, holder_name: str, context: str = "") -> None:

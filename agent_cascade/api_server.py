@@ -51,7 +51,7 @@ from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX
 from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_MARKER
 from agent_cascade.llm.base import _truncate_input_messages_roughly
-from agent_cascade.execution_engine import ExecutionEngine, _invalidate_token_cache
+from agent_cascade.execution_engine import ExecutionEngine
 
 # Timeout constants for security advisor checks
 from agent_cascade.operation_manager import SECURITY_ADVISOR_TIMEOUT_SECONDS, SECURITY_ADVISOR_WARNING_SECONDS
@@ -330,8 +330,8 @@ def serialize_message(msg, index=None):
     
     # UI Performance: Store in cache if the input is a persistent history dict.
     # CRITICAL: We DO NOT cache if it's the very last message in the list,
-    # as the orchestrator often mutates the latest turn's messages (merging reasoning,
-    # draining async results, etc.) and we don't want the UI to "hang" on a stale version.
+    # as the orchestrator often mutates the latest turn's messages (merging reasoning, 
+    # async injections, etc.) and we don't want the UI to "hang" on a stale version.
     if isinstance(msg, dict) and index is not None and index > 0:
         msg['_ui_cache'] = dict(d)
 
@@ -1371,45 +1371,9 @@ def create_app(agents, agent_pool, config=None):
                                     system_message_content=sys_content,
                                 )
                         
-                        # Drain Point 1 (IDLE State): Drain user queue BEFORE adding new message.
-                        # Note: Async results are NOT drained here - they stay in buffer and are handled
-                        # by Drain Point 2 (execution_engine.py) to avoid double-append issues.
-                        # See Message Queue Simplification Plan for details.
-                        
-                        # Get the instance's agent_class for proper logging (not 'User')
-                        inst = agent_pool.get_instance(instance_name)
-                        if not inst:
-                            logger.warning(
-                                f"Instance {instance_name} not found in pool at Drain Point 1, "
-                                f"defaulting to 'Orchestrator' for logging"
-                            )
-                        agent_cls = inst.agent_class if inst else 'Orchestrator'
-                        
-                        # Step 1: Drain user queue → append as USER message with JSONL logging
-                        pending = agent_pool.drain_queue(instance_name)
-                        if pending:
-                            logger.debug(f"Draining {len(pending)} queued user messages for {instance_name} at Drain Point 1 (IDLE).")
-                            for msg_text in pending:
-                                if msg_text.strip():
-                                    msg = Message(role=USER, content=msg_text)
-                                    agent_pool.add_message(instance_name, msg)
-                                    # Log to JSONL immediately for persistence
-                                    # CRITICAL: Use instance.agent_class for logging, not 'User'
-                                    try:
-                                        log_inst = agent_pool.get_logger(instance_name, agent_cls)
-                                        log_inst.log_message(msg)
-                                    except Exception as e:
-                                        logger.debug(f"Logging queued user message to file failed for {instance_name} (non-critical): {e}")
-                        
-                        # Step 2: Now add the current user message (instance guaranteed to exist) with JSONL logging
+                        # Now add the user message (instance guaranteed to exist)
                         user_msg = Message(role=USER, content=parsed_content)
                         agent_pool.add_message(instance_name, user_msg)
-                        try:
-                            # CRITICAL: Use instance.agent_class for logging, not 'User'
-                            log_inst = agent_pool.get_logger(instance_name, agent_cls)
-                            log_inst.log_message(user_msg)
-                        except Exception as e:
-                            logger.debug(f"Logging user message to file failed for {instance_name} (non-critical): {e}")
 
                     # Start agent generation
                     with session_lock:
@@ -1463,22 +1427,6 @@ def create_app(agents, agent_pool, config=None):
                     if inst is None:
                         await broadcast({'type': 'error', 'message': 'No agent instance found to continue'})
                         continue
-                    
-                    # Drain async results before deepcopying conversation (similar to Drain Point 1 pattern)
-                    # This ensures any completed background tools are included in the history
-                    async_results = agent_pool.drain_async_results(continue_instance_name)
-                    if async_results:
-                        logger.debug(f"Draining {len(async_results)} async result(s) for {continue_instance_name} before /continue.")
-                        # Inject directly into instance conversation (not via _inject_async_results which 
-                        # appends to 3 separate lists — here we only have one shared list)
-                        with inst._compression_lock:
-                            for result_tuple in async_results:
-                                result_content, function_id = result_tuple
-                                prefix = f"[BACKGROUND TOOL RESULT for {function_id}]" if function_id else "[BACKGROUND TOOL RESULT]"
-                                result_msg = Message(role=USER, content=f"{prefix}: {result_content}")
-                                inst.conversation.append(result_msg)
-                        _invalidate_token_cache(inst)  # Invalidate since conversation was mutated
-                    
                     history_copy = copy.deepcopy(inst.conversation)
 
                     thread = threading.Thread(
