@@ -405,7 +405,10 @@ class AgentPool:
                 logger.debug(f"Instance conversation cleanup key missing (expected): {e}")
         # Clean up logger entry for the instance
         with self._logger._lock:
-            log_inst = self._logger._loggers.pop(instance_name, None)
+            # Use composite key format (instance_name, agent_class.lower()) to match get_logger
+            agent_class = self.instance_classes.get(instance_name, '').lower()
+            key = (instance_name, agent_class)
+            log_inst = self._logger._loggers.pop(key, None)
 
         # Fix #3: Clean up stale instance_state entries
         if hasattr(self, 'instance_state'):
@@ -1080,12 +1083,8 @@ class AgentPool:
                 # Invalidate token count cache — conversation length changed
                 inst._last_token_count_conversation_length = -1
             self._mark_activity(instance_name)
-            # Persist message to JSONL log file
-            try:
-                log_inst = self.get_logger(instance_name, inst.agent_class)
-                log_inst.log_message(message)
-            except Exception as e:
-                            logger.debug(f"Log message write failed for {instance_name} (non-critical): {e}")
+            # Note: Logging to JSONL is now handled by execution_engine.run() as the single source of truth.
+            # This method only adds messages to the in-memory conversation (AgentInstance.conversation).
 
     # ── Compression module compatibility layer
     # The compress_context() API in core.py expects agent_pool.get_conversation() and
@@ -1488,9 +1487,12 @@ class AgentPool:
 
     # ── Logger delegation ──────────────────────────────────────────────────
 
-    def get_logger(self, instance_name: str, agent_class: str):
-        """Get or create a logger for an instance."""
-        return self._logger.get_logger(instance_name, agent_class)
+    def get_logger(self, instance_name: str, agent_class: str, base_metadata: Optional[Dict] = None):
+        """Get or create a logger for an instance.
+        
+        Passes base_metadata through to LoggerManager.get_logger for supervisor tracking.
+        """
+        return self._logger.get_logger(instance_name, agent_class, base_metadata=base_metadata)
 
     # ── Agent discovery (unchanged from existing implementation) ───────────
 
@@ -1551,39 +1553,54 @@ class LoggerManager:
         # Ensure log directory exists
         self.log_dir = self.workspace_dir / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self._loggers: Dict[str, Any] = {}  # instance_name → logger instance
+        self._loggers: Dict[Tuple[str, str], Any] = {}  # (instance_name, agent_class.lower()) → logger instance
         self._lock = threading.Lock()  # Protects _loggers dict access
 
-    def get_logger(self, instance_name: str, agent_class: str):
-        """Get or create a real AgentInstanceLogger for an instance."""
+    def get_logger(self, instance_name: str, agent_class: str, base_metadata: Optional[Dict] = None):
+        """Get or create a real AgentInstanceLogger for an instance.
+        
+        Uses composite key (instance_name, normalized agent_class) as defense-in-depth
+        against case sensitivity mismatches in caller code.
+        """
         with self._lock:
-            if instance_name not in self._loggers:
+            # Defensive handling for None/empty agent_class
+            normalized_agent_class = (agent_class or '').strip().lower()
+            key = (instance_name, normalized_agent_class)
+            if key not in self._loggers:
                 from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
-                self._loggers[instance_name] = AgentInstanceLogger(
+                self._loggers[key] = AgentInstanceLogger(
                     agent_class=agent_class,
                     instance_name=instance_name,
                     log_dir=str(self.log_dir),
+                    base_metadata=base_metadata,
                 )
-            return self._loggers[instance_name]
+            return self._loggers[key]
 
     def create_new_session(self, instance_name: str, agent_class: str) -> None:
         """Replace the logger for an instance with a fresh one (new timestamp = new JSONL file).
 
         Used by "New Session" to start writing to a new log file instead of appending.
         Closes the old logger's file handle before replacing it.
+        
+        Uses composite key (instance_name, normalized agent_class) for consistency.
         """
         with self._lock:
+            # Defensive handling for None/empty agent_class
+            normalized_agent_class = (agent_class or '').strip().lower()
+            key = (instance_name, normalized_agent_class)
             # Close old logger's file handle if present
-            if instance_name in self._loggers:
+            if key in self._loggers:
                 try:
-                    self._loggers[instance_name].close()
+                    self._loggers[key].close()
                 except Exception as e:
                     logger.debug(f"Logger close during reinit failed for {instance_name} (non-critical): {e}")
             from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
-            self._loggers[instance_name] = AgentInstanceLogger(
+            # Explicitly pass base_metadata=None to match get_logger signature (new session has no inherited metadata)
+            self._loggers[key] = AgentInstanceLogger(
                 agent_class=agent_class,
                 instance_name=instance_name,
                 log_dir=str(self.log_dir),
+                base_metadata=None,
             )
         return
 

@@ -138,9 +138,31 @@ class AgentInstanceLogger:
             self._file_handle = None  # Invalidate so _ensure_file reopens clean next time
 
     def _initial_save(self):
-        """Write metadata as the first line. Guard against duplicate calls."""
+        """Write metadata as the first line. Guard against duplicate calls,
+        and also check if file already has metadata from another logger instance.
+        
+        Thread-safety note: The primary protection against duplicate writes is the
+        LoggerManager._lock which protects get_logger() calls. This method provides
+        a secondary defense for edge cases where multiple instances might access the same file.
+        The file-read-then-write sequence is not atomic, but race conditions are unlikely
+        in practice since the composite key cache ensures only one logger instance per (instance_name, agent_class).
+        """
         if self._initialized:
             return
+        
+        # Defensive check: if file already exists with metadata on first line, skip writing
+        if os.path.exists(self.log_path):
+            try:
+                with open(self.log_path, 'r') as f:
+                    first_line = f.readline().strip()
+                    if first_line:
+                        first_data = json.loads(first_line)
+                        if "metadata" in first_data:
+                            self._initialized = True
+                            return
+            except Exception:
+                pass  # Continue with normal write
+        
         self._append_line({"metadata": self.data["metadata"]})
         self._initialized = True
 
