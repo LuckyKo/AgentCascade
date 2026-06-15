@@ -1020,7 +1020,7 @@ class AgentPool:
     def instance_loggers(self) -> Dict[str, Any]:
         """Return a snapshot of per-instance loggers (string-keyed by instance_name for backward compatibility)."""
         with self._logger._lock:
-            return {k[0]: v for k, v in self._loggers.items()}
+            return {k[0]: v for k, v in self._logger._loggers.items()}
 
     @property
     def agents(self) -> Dict[str, Assistant]:
@@ -1080,10 +1080,11 @@ class AgentPool:
         if inst:
             with inst._compression_lock:
                 inst.conversation.append(message)
-                # Invalidate token count cache — conversation length changed
+                # Full token cache invalidation — both token count and length tracking
+                inst._last_actual_token_count = 0
                 inst._last_token_count_conversation_length = -1
             self._mark_activity(instance_name)
-            # Note: Logging to JSONL is now handled by execution_engine.run() as the single source of truth.
+            # Note: Logging to JSONL is handled by callers (api_server.py Drain Point 1, execution_engine.py Drain Point 2).
             # This method only adds messages to the in-memory conversation (AgentInstance.conversation).
 
     # ── Compression module compatibility layer
