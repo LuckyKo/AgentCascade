@@ -1517,6 +1517,20 @@ class ExecutionEngine:
         # Persist messages to JSONL log file (P1: LoggerManager migration)
         try:
             log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+            
+            # Log initial conversation messages if this is the first time logging for this instance
+            # Sub-agents do this explicitly at lines 2894-2905; orchestrator needs it too
+            with instance._compression_lock:
+                conv = instance.conversation
+                already_logged_count = len(log_inst.data.get("history", []))
+                if already_logged_count == 0 and conv:
+                    # First time logging — log all pre-existing messages (system + user)
+                    for msg in conv:
+                        log_inst.log_message(msg)
+                    # Sync internal tracking to prevent drift if logger instance differs later
+                    log_inst.data["history"] = [log_inst._format_message(m) for m in conv]
+            
+            # Log turn_output messages from this LLM call
             for msg in turn_output:
                 log_inst.log_message(msg)
         except Exception as e:

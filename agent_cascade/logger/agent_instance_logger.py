@@ -56,6 +56,7 @@ class AgentInstanceLogger:
                 self.data["metadata"]["original_log_path"] = base_metadata["current_log_path"]
 
         self._file_handle = None  # Cached file handle to avoid open/write/close per message (Fix #1)
+        self._initialized = False  # Belt-and-suspenders guard against duplicate _initial_save() (get_logger lock is primary protection)
         self._initial_save()
 
     # ── File handle management ────────────────────────────────────────────
@@ -137,8 +138,11 @@ class AgentInstanceLogger:
             self._file_handle = None  # Invalidate so _ensure_file reopens clean next time
 
     def _initial_save(self):
-        """Write metadata as the first line."""
+        """Write metadata as the first line. Guard against duplicate calls."""
+        if self._initialized:
+            return
         self._append_line({"metadata": self.data["metadata"]})
+        self._initialized = True
 
     def update_timestamp(self):
         """Update the last_update metadata timestamp."""
