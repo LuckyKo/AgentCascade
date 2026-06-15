@@ -1525,10 +1525,30 @@ class ExecutionEngine:
                 already_logged_count = len(log_inst.data.get("history", []))
                 if already_logged_count == 0 and conv:
                     # First time logging — log all pre-existing messages (system + user)
+                    # Exclude turn_output messages to avoid duplication (they're logged below).
+                    # Build a set of turn_output message timestamps to skip during initial sync.
+                    turn_output_timestamps = set()
+                    for msg in turn_output:
+                        ts = None
+                        if hasattr(msg, 'timestamp') and msg.timestamp:
+                            ts = msg.timestamp
+                        elif isinstance(msg, dict) and msg.get('timestamp'):
+                            ts = msg['timestamp']
+                        if ts:
+                            turn_output_timestamps.add(ts)
+                    
                     # Type guard: only log actual Message objects or dict messages with a role field
                     # Prevents non-message items (bools, None, etc.) from corrupting the JSONL log
                     for msg in conv:
                         if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
+                            # Skip messages that are part of this turn's output to avoid duplication
+                            msg_ts = None
+                            if hasattr(msg, 'timestamp') and msg.timestamp:
+                                msg_ts = msg.timestamp
+                            elif isinstance(msg, dict) and msg.get('timestamp'):
+                                msg_ts = msg['timestamp']
+                            if msg_ts and msg_ts in turn_output_timestamps:
+                                continue  # This is a turn_output message, skip it
                             log_inst.log_message(msg)
             
             # Log turn_output messages from this LLM call
