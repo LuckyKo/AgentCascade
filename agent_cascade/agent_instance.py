@@ -223,6 +223,4 @@ class PoolSettings:
     sleeping_timeout: float = 300.0           # Max seconds to wait for background tools before timeout
     sleeping_wakeup_interval: float = 5.0     # Interval between wakeup log messages while SLEEPING
     
-    # LLM endpoint recovery settings (mid-stream failover)
-    llm_max_retries: int = 2                  # Max retries when LLM stream fails mid-generation
-    llm_retry_base_delay: float = 1.0         # Base delay for retry backoff (seconds)
+    

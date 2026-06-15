@@ -1216,9 +1216,14 @@ class ExecutionEngine:
         # Mirrors Agent._get_active_functions(): filter out disabled tools from function_map
         active_functions = _get_active_functions_from_template(template, instance)
 
-        # Endpoint recovery configuration from pool settings
-        max_retries = self.pool.settings.llm_max_retries
-        base_delay = self.pool.settings.llm_retry_base_delay
+        # Endpoint recovery: On mid-stream failure, retry once with a fresh endpoint chain.
+        # The first attempt already exhausts all endpoints via call_with_fallback (Tier 1→2→3)
+        # with per-endpoint retries from UI config. A second attempt gives us another shot at
+        # the chain — useful when a mid-stream disconnection occurred and the inner loop
+        # never got to try fallback endpoints. If both attempts fail, something is fundamentally
+        # wrong and more retries won't help.
+        MAX_RETRIES = 1
+        BASE_DELAY = 1.0
         
         last_output = None
         retry_count = 0
@@ -1228,7 +1233,7 @@ class ExecutionEngine:
         # (the accumulated response so far). We iterate through all items (or until stop/halt),
         # keeping the latest accumulated result, then yield individual messages from it.
         # Wrapped in retry loop for endpoint recovery on mid-stream failure.
-        while retry_count <= max_retries:
+        while retry_count <= MAX_RETRIES:
             try:
                 # Streaming UI Content Update Fix: Track partial LLM content for UI updates every ~100ms (threshold 0.1)
                 last_streaming_update_time = time.monotonic()
@@ -1263,18 +1268,18 @@ class ExecutionEngine:
                 with instance._compression_lock:
                     instance._streaming_responses = []
                 
-                if retry_count >= max_retries:
+                if retry_count >= MAX_RETRIES:
                     # All retries exhausted — yield error and give up
                     # Extract clean error message without traceback for user-facing content
                     error_msg = str(e).split('\n')[0] if e else "Unknown error"
-                    logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {max_retries} retries: {e}")
-                    yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed after {max_retries} retries — {error_msg}]")
+                    logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {MAX_RETRIES} retries: {e}")
+                    yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed after {MAX_RETRIES} retries — {error_msg}]")
                     error_already_yielded = True
                     break
                 
                 retry_count += 1
-                # Exponential backoff: 1s, 2s, 4s... capped at reasonable maximum
-                backoff = min(base_delay * (2 ** (retry_count - 1)), 5.0)
+                # Backoff delay before retrying with fresh endpoint chain
+                backoff = min(BASE_DELAY * (2 ** (retry_count - 1)), 5.0)
                 
                 # Only retry on network/streaming/transient errors, not config/logic/billing errors
                 # Keywords chosen to match common error message patterns from LLM SDKs
@@ -1303,18 +1308,18 @@ class ExecutionEngine:
                 has_retryable_pattern = any(err in error_str for err in retryable_errors)
                 
                 # Retry if we have a retryable pattern and no non-retryable pattern
-                # If neither matches, allow full retries for unknown transient errors (will be caught by max_retries check)
+                # If neither matches, allow retry for unknown transient errors (will be caught by MAX_RETRIES check)
                 if is_non_retryable:
                     is_retryable = False
                     logger.debug(f"[ENDPOINT_RETRY] Non-retryable error detected for {inst_name}: {str(e)[:100]}")
                 elif has_retryable_pattern:
                     is_retryable = True
                 else:
-                    # Unknown error — allow retries (up to max_retries) to handle transient issues we haven't categorized
-                    # The retry_count >= max_retries check at line 1266 will properly limit attempts
+                    # Unknown error — allow retry to handle transient issues we haven't categorized
+                    # The retry_count >= MAX_RETRIES check above will properly limit attempts
                     is_retryable = True
                     logger.warning(
-                        f"[ENDPOINT_RETRY] Unrecognized error for {inst_name}, allowing retries: {str(e)[:100]}"
+                        f"[ENDPOINT_RETRY] Unrecognized error for {inst_name}, allowing retry: {str(e)[:100]}"
                     )
                 
                 if not is_retryable:
@@ -1328,12 +1333,12 @@ class ExecutionEngine:
                     break
                 
                 logger.warning(
-                    f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{max_retries}. "
+                    f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{MAX_RETRIES}. "
                     f"Retrying in {backoff:.1f}s with new endpoint... Error: {e}"
                 )
                 
                 # Signal retry to UI before blocking on sleep (prevents 5s black hole)
-                yield Message(role=ASSISTANT, content=f"[RETRYING] Connection lost, retrying ({retry_count}/{max_retries}) in {backoff:.1f}s...")
+                yield Message(role=ASSISTANT, content=f"[RETRYING] Connection lost, retrying ({retry_count}/{MAX_RETRIES}) in {backoff:.1f}s...")
                 time.sleep(backoff)
                 yield None  # Trigger UI refresh after wait, before next attempt
                 
