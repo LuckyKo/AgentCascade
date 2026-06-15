@@ -124,6 +124,7 @@ class AgentInstance:
 
     # ── Concurrency Slot Management (Parent Slot Acquisition Fix) ───────────
     _slot_release: Optional[Callable[[], None]] = None  # Callback to release the endpoint concurrency slot when transitioning to SLEEPING or exiting
+    _skip_slot_acquire: bool = False  # When True, engine.run() skips slot acquisition (used for nested agents like Security/Compressor)
 
     def _transition(self, new_state: AgentState) -> None:
         """Transition to a new state with validation.

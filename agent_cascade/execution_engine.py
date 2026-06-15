@@ -343,22 +343,37 @@ class ExecutionEngine:
         # On sequential endpoints (concurrency_limit=0), only one agent should 
         # be making API calls at a time. The parent acquires the slot, then releases
         # it when transitioning to SLEEPING so children can proceed.
-        instance._slot_release = None  # Initialize for proper cleanup in finally block
-        if hasattr(self.pool, '_acquire_slot'):
-            try:
-                logger.debug(
-                    f"[SLOT_ACQUIRE] Before acquire - instance={instance.instance_name}, "
-                    f"class={instance.agent_class}"
-                )
-                instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
-                logger.debug(
-                    f"[SLOT_ACQUIRED] After acquire - instance={instance.instance_name}, "
-                    f"has_callback={instance._slot_release is not None}"
-                )
-            except Exception as e:
-                logger.error(f"Failed to acquire slot for {instance.instance_name}: {e}")
-                # Re-raise on initial acquisition failure — don't proceed without concurrency protection
-                raise
+        
+        # SLOT_BYPASS FIX: Skip slot acquisition if _skip_slot_acquire is set.
+        # This allows nested agents (Security, Compressor) to run without acquiring
+        # their own slot when invoked within an existing turn. The caller holds the
+        # slot throughout, preventing deadlock from release→nested→reacquire cycles.
+        # Cache this once at the top since it never changes during engine.run().
+        skip_slot_acquire = getattr(instance, '_skip_slot_acquire', False)
+        
+        if not skip_slot_acquire:
+            instance._slot_release = None  # Initialize for proper cleanup in finally block
+            
+            if hasattr(self.pool, '_acquire_slot'):
+                try:
+                    logger.debug(
+                        f"[SLOT_ACQUIRE] Before acquire - instance={instance.instance_name}, "
+                        f"class={instance.agent_class}"
+                    )
+                    instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
+                    logger.debug(
+                        f"[SLOT_ACQUIRED] After acquire - instance={instance.instance_name}, "
+                        f"has_callback={instance._slot_release is not None}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to acquire slot for {instance.instance_name}: {e}")
+                    raise
+        else:
+            # Bypass mode — nested agent (Security/Compressor) running within existing turn
+            logger.debug(
+                f"[SLOT_BYPASS] Skipping slot acquire - instance={instance.instance_name}, "
+                f"class={instance.agent_class} (nested invocation)"
+            )
         
         try:
             # ── Phase 1: Setup ─────────────────────────────────────────────
@@ -409,7 +424,9 @@ class ExecutionEngine:
                         )
                         
                         # Re-acquire concurrency slot after waking from SLEEPING (async results + user messages)
-                        if hasattr(self.pool, '_acquire_slot'):
+                        # SLOT_BYPASS FIX: Only re-acquire if we're not in bypass mode
+                        # Uses cached skip_slot_acquire from line 352
+                        if not skip_slot_acquire and hasattr(self.pool, '_acquire_slot'):
                             try:
                                 logger.debug(
                                     f"[SLOT_ACQUIRE] After wakeup (async+user) - instance={instance.instance_name}"
@@ -446,7 +463,9 @@ class ExecutionEngine:
                                     instance._last_wakeup_log = time.monotonic()
                                 
                                 # Re-acquire concurrency slot after waking from SLEEPING due to user messages
-                                if hasattr(self.pool, '_acquire_slot'):
+                                # SLOT_BYPASS FIX: Only re-acquire if we're not in bypass mode
+                                # Uses cached skip_slot_acquire from line 352
+                                if not skip_slot_acquire and hasattr(self.pool, '_acquire_slot'):
                                     try:
                                         logger.debug(
                                             f"[SLOT_ACQUIRE] After wakeup (user message) - instance={instance.instance_name}"
@@ -550,7 +569,9 @@ class ExecutionEngine:
                                 instance._last_wakeup_log = time.monotonic()
                             
                             # Re-acquire concurrency slot after waking from SLEEPING due to async results
-                            if hasattr(self.pool, '_acquire_slot'):
+                            # SLOT_BYPASS FIX: Only re-acquire if we're not in bypass mode
+                            # Uses cached skip_slot_acquire from line 352
+                            if not skip_slot_acquire and hasattr(self.pool, '_acquire_slot'):
                                 try:
                                     logger.debug(
                                         f"[SLOT_ACQUIRE] After wakeup (async results) - instance={instance.instance_name}"
@@ -1797,6 +1818,8 @@ class ExecutionEngine:
         Args:
             instance: The agent instance to transition.
         """
+        # Note: This is safe even when _skip_slot_acquire=True because _release_slot checks
+        # for None before releasing. No need to guard with skip_slot_acquire check.
         # Release concurrency slot when sleeping — allows children to proceed (using helper method FIX Mi3)
         self._release_slot(instance, instance.instance_name, "sleep transition")
         

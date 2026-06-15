@@ -363,6 +363,12 @@ def create_app(agents, agent_pool, config=None):
     config = config or {}
     app = FastAPI(title="AgentCascade API")
 
+    # Initialize concurrency control for Security advisor checks
+    # Security runs on a separate daemon thread (line 2245), so we need a semaphore
+    # to limit concurrent Security agent invocations to 1, preventing unlimited parallelism
+    if not hasattr(app, 'security_check_semaphore'):
+        app.security_check_semaphore = threading.Semaphore(1)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -1988,29 +1994,36 @@ def create_app(agents, agent_pool, config=None):
                                         sec_warning_timer.daemon = True
                                         sec_warning_timer.start()
 
-                                    # ── SLOT RELEASE FOR SECURITY ADVISOR ──
-                                    # The Security agent uses the same sequential slot as its caller. When the 
-                                    # security advisor triggers during an agent's turn, the caller holds the shared 
-                                    # sequential slot `_shared_sequential_slot_` (concurrency=0). The Security agent 
-                                    # then tries to acquire the SAME slot via engine.run() → blocks forever.
+                                    # ── SLOT BYPASS FOR SECURITY ADVISOR ──
+                                    # The Security agent runs on a separate daemon thread (line 2252).
+                                    # The caller's concurrency slot is bound to the caller's execution context
+                                    # and cannot be acquired from a different thread — attempting so would either
+                                    # bypass the intended serialization or deadlock.
                                     #
-                                    # Fix: Release the caller's slot before running the Security agent, then reacquire
-                                    # after security check completes.
+                                    # Fix: Set _skip_slot_acquire=True so engine.run() skips slot acquisition.
+                                    # Concurrency is controlled by app.security_check_semaphore (Semaphore(1)) instead,
+                                    # which is a standard cross-thread synchronization primitive.
                                     
-                                    # Get caller name from session for slot management
+                                    # Get caller name from session for logging/debugging
                                     caller_name_sec = session.get('session_name', 'Orchestrator')
                                     caller_inst_sec = agent_pool.get_instance(caller_name_sec) if caller_name_sec else None
                                     
-                                    # Release caller's slot if it exists — capture, nullify, then call
-                                    if caller_inst_sec and hasattr(caller_inst_sec, '_slot_release') and caller_inst_sec._slot_release:
-                                        logger.info(f"[SECURITY_SLOT_RELEASE] Releasing caller slot for security check - instance={caller_name_sec}")
-                                        sec_release_callback = caller_inst_sec._slot_release
-                                        caller_inst_sec._slot_release = None
-                                        try:
-                                            sec_release_callback()
-                                        except Exception as e:
-                                            logger.error(f"[SECURITY_SLOT_RELEASE_ERROR] Failed to release caller slot for {caller_name_sec}: {e}")
+                                    # Log warning if caller_name couldn't be resolved properly (consistent with Compressor pattern)
+                                    if caller_name_sec == 'Orchestrator' and not hasattr(agent_pool, 'session_name'):
+                                        logger.warning(
+                                            f"[SECURITY] Using fallback caller_name='Orchestrator' - "
+                                            f"slot management may not work correctly. Pass caller_name explicitly."
+                                        )
+                                    
+                                    # Set skip flag so engine.run() bypasses slot acquisition
+                                    sec_instance._skip_slot_acquire = True
+                                    logger.debug(
+                                        f"[SECURITY_SLOT_BYPASS] Skipping slot acquire for Security - "
+                                        f"caller={caller_name_sec}, caller_holds_slot={(getattr(caller_inst_sec, '_slot_release', None) is not None) if caller_inst_sec else False}"
+                                    )
 
+                                    # Acquire concurrency semaphore for Security checks (prevents unlimited parallelism)
+                                    app.security_check_semaphore.acquire()
                                     try:
                                         # Execute via engine.run() — this handles LLM call, retries, and streaming
                                         for resp in engine.run(sec_instance):
@@ -2034,12 +2047,10 @@ def create_app(agents, agent_pool, config=None):
                                         logger.error(f"Security agent execution error: {e}")
                                         raise
                                     finally:
-                                        # ── SLOT REACQUIRE AFTER SECURITY CHECK ──
-                                        # Reacquire the caller's slot after security check completes
-                                        if caller_inst_sec and hasattr(agent_pool, '_acquire_slot'):
-                                            logger.info(f"[SECURITY_SLOT_REACQUIRE] Reacquired caller slot after security check - instance={caller_name_sec}")
-                                            caller_inst_sec._slot_release = agent_pool._acquire_slot(caller_inst_sec.agent_class, caller_name_sec)
+                                        # Release concurrency semaphore for Security checks
+                                        app.security_check_semaphore.release()
                                         
+                                        # Cancel the warning timer (keep existing cleanup)
                                         sec_warning_timer.cancel()
 
                                         # Note: engine.run() handles IDLE state transition internally.

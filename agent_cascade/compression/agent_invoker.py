@@ -237,46 +237,32 @@ def invoke_compression_agent(
             max_poll_time = 300  # 5-minute timeout for large compression tasks
             
             try:
-                # ── SLOT RELEASE FOR COMPRESSION ──
-                # The Compressor uses the same sequential slot as its caller. When forced 
-                # compression triggers during an agent's turn, the agent holds the shared 
-                # sequential slot `_shared_sequential_slot_` (concurrency=0). The Compressor 
-                # then tries to acquire the SAME slot via engine.run() → blocks forever.
-                # 
-                # Fix: Release the caller's slot before running the Compressor, then reacquire 
-                # after compression completes.
+                # ── SLOT BYPASS FOR COMPRESSION (Path B — fallback only) ──
+                # When forced compression triggers during an agent's turn, the Compressor runs 
+                # on the SAME thread as the caller. The caller holds the shared sequential slot.
+                # Path A (call_agent via _stream_sub_agent_call) uses normal release/reacquire.
+                # Path B (this fallback) skips acquisition entirely — the caller retains the slot.
                 
-                # Get the caller instance from the pool to release its slot
+                # Get the caller instance from the pool (for logging/debugging)
                 caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
                 
-                if caller_inst and hasattr(caller_inst, '_slot_release') and caller_inst._slot_release:
-                    logger.info(f"[COMPRESSION_SLOT_RELEASE] Releasing caller slot for compression - instance={caller_name}")
-                    # Capture the callback, nullify immediately to prevent double-release from caller's finally block
-                    release_callback = caller_inst._slot_release
-                    caller_inst._slot_release = None
-                    try:
-                        release_callback()
-                    except Exception as e:
-                        logger.error(f"[COMPRESSION_SLOT_RELEASE_ERROR] Failed to release caller slot for {caller_name}: {e}")
+                # Set skip flag so engine.run() bypasses slot acquisition
+                comp_instance._skip_slot_acquire = True
+                logger.debug(
+                    f"[COMPRESSION_SLOT_BYPASS] Skipping slot acquire for Compressor - "
+                    f"caller={caller_name}, caller_holds_slot={(getattr(caller_inst, '_slot_release', None) is not None) if caller_inst else False}"
+                )
                 
-                try:
-                    for resp in engine.run(comp_instance):
-                        elapsed = _time.monotonic() - start_time
-                        if elapsed > max_poll_time:
-                            raise RuntimeError(
-                                f"Compression agent timed out after {elapsed:.0f}s — "
-                                f"further processing may have been incomplete"
-                            )
-                        # Capture conversation for summary extraction (engine manages conversation state)
-                        if comp_instance.conversation:
-                            final_msgs = list(comp_instance.conversation)
-                finally:
-                    # ── SLOT REACQUIRE AFTER COMPRESSION ──
-                    # Reacquire the caller's slot after compression completes
-                    if caller_inst and hasattr(agent_pool, '_acquire_slot'):
-                        logger.info(f"[COMPRESSION_SLOT_REACQUIRE] Reacquired caller slot after compression - instance={caller_name}")
-                        # Reacquire the slot for the caller
-                        caller_inst._slot_release = agent_pool._acquire_slot(caller_inst.agent_class, caller_name)
+                for resp in engine.run(comp_instance):
+                    elapsed = _time.monotonic() - start_time
+                    if elapsed > max_poll_time:
+                        raise RuntimeError(
+                            f"Compression agent timed out after {elapsed:.0f}s — "
+                            f"further processing may have been incomplete"
+                        )
+                    # Capture conversation for summary extraction (engine manages conversation state)
+                    if comp_instance.conversation:
+                        final_msgs = list(comp_instance.conversation)
                     
             except Exception as e:
                 logger.error(f"Compression agent execution error: {e}")
