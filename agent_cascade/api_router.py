@@ -8,15 +8,18 @@ The General Settings API (default_llm_cfg) is always the last-resort fallback.
 Persistence: workspace/config/api_endpoints.json
 """
 
+import collections
 import copy
 import json
 import logging
+import random
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,9 @@ class APIEndpoint:
     max_retries: int = 2               # Per-endpoint retry count before moving to next
     concurrency_limit: int = -1        # -1 = unlimited, 0 = sequential delegation, 1+ = max parallel requests
     max_input_tokens: int = 0          # 0 = unlimited/auto, 1+ = specific limit for this model
+    base_retry_delay: float = 1.0      # Base delay for retry backoff in seconds (exponential from here)
+    max_retry_delay: float = 30.0      # Maximum cap on retry delay in seconds
+    rate_limit_rpm: int = 0            # Rate limit in requests per minute (0 = unlimited)
 
     def __post_init__(self):
         if not self.id:
@@ -499,6 +505,10 @@ class APIRouter:
         # a validated fallback that previously succeeded (Tier 2 in fallback chain).
         self._last_successful_endpoint_cfg: Optional[Dict[str, Any]] = None
 
+        # Rate limiting: track call timestamps per endpoint for rate limit enforcement.
+        # api_base -> deque of timestamps (seconds since epoch) for efficient sliding window.
+        self._endpoint_call_history: Dict[str, Deque[float]] = {}
+
         # Persistence path
         if config_dir:
             self._config_dir = Path(config_dir)
@@ -527,7 +537,14 @@ class APIRouter:
         with self._lock:
             if endpoint_id not in self.endpoints:
                 return False
+            # Get the api_base before deleting to clean up related state
+            endpoint_api_base = self.endpoints[endpoint_id].api_base
             del self.endpoints[endpoint_id]
+            
+            # Clean up rate limit history for this endpoint's api_base
+            if endpoint_api_base in self._endpoint_call_history:
+                del self._endpoint_call_history[endpoint_api_base]
+            
             # Also clean up any agent_priorities referencing this endpoint
             for agent_type in list(self.agent_priorities.keys()):
                 self.agent_priorities[agent_type] = [
@@ -830,6 +847,9 @@ class APIRouter:
         for cfg_idx, llm_cfg in enumerate(chain):
             max_retries = 2
             concurrency_limit = 0
+            base_retry_delay = 1.0       # Default for exponential backoff
+            max_retry_delay = 30.0       # Default maximum delay cap
+            rate_limit_rpm = 0           # Default: unlimited
             is_default = (cfg_idx == len(chain) - 1)
             
             # Resolve endpoint-specific settings — always try to read from
@@ -842,6 +862,9 @@ class APIRouter:
                     if ep.api_base == endpoint_base:
                         max_retries = ep.max_retries
                         concurrency_limit = ep.concurrency_limit
+                        base_retry_delay = ep.base_retry_delay
+                        max_retry_delay = ep.max_retry_delay
+                        rate_limit_rpm = ep.rate_limit_rpm
                         break
             
             # ── CONCURRENCY CONTROL (Per-API-Call Semaphore, Layer 2) ──
@@ -924,6 +947,25 @@ class APIRouter:
                         (agent_type if agent_type else 'orchestrator')
                     )
                     
+                    # Rate limiting: check and enforce per-endpoint rate limit before each call attempt.
+                    # Each retry attempt counts against the rate limit.
+                    if rate_limit_rpm > 0:
+                        now = time.time()
+                        with self._lock:
+                            if endpoint_base not in self._endpoint_call_history:
+                                self._endpoint_call_history[endpoint_base] = collections.deque()
+                            # Remove entries older than 60 seconds (sliding window) using deque for efficiency
+                            history = self._endpoint_call_history[endpoint_base]
+                            while history and now - history[0] >= 60:
+                                history.popleft()
+                            # Check if we're over the limit
+                            if len(history) >= rate_limit_rpm:
+                                raise RuntimeError(
+                                    f"Rate limit exceeded for endpoint '{endpoint_name}' @ {endpoint_base} ({rate_limit_rpm} rpm)"
+                                )
+                            # Track this call atomically within the same lock to prevent race conditions
+                            history.append(now)
+                    
                     result = execute_with_sem(current_agent_name)
                     
                     # Track the last successful endpoint config for automatic recovery.
@@ -936,15 +978,26 @@ class APIRouter:
                     # Pass the generator through directly — no double-wrapping needed.
                     return result
                     
+                except RuntimeError as e:
+                    # Check if this is a rate limit error - if so, skip retries and move to next endpoint
+                    if "Rate limit exceeded" in str(e):
+                        logger.warning(f"[APIRouter] Rate limit hit for '{endpoint_name}' @ {endpoint_base}. Skipping to next endpoint.")
+                        all_errors.append(f"Rate limit exceeded for '{endpoint_name}' @ {endpoint_base}")
+                        break  # Immediately go to next endpoint, don't waste retries
+                    raise  # Re-raise other RuntimeErrors to be caught below
                 except Exception as e:
-                    import traceback
                     tb_str = traceback.format_exc()
                     error_msg = f"Endpoint '{endpoint_name}' @ {endpoint_base} attempt {attempt+1}/{max_retries+1}: {e}\nTraceback: {tb_str}"
                     logger.warning(f"[APIRouter] {error_msg}")
                     all_errors.append(error_msg)
 
                     if attempt < max_retries:
-                        time.sleep(min(2 ** attempt, 5))
+                        # Exponential backoff with jitter: base * 2^attempt + random_jitter
+                        # This prevents thundering herd when multiple agents retry simultaneously
+                        delay = min(base_retry_delay * (2 ** attempt), max_retry_delay)
+                        jitter = random.uniform(0, 0.1 * delay)  # Up to 10% jitter
+                        logger.info(f"[APIRouter] Backing off {delay+jitter:.1f}s before retry for endpoint '{endpoint_name}' @ {endpoint_base}")
+                        time.sleep(delay + jitter)
 
             logger.info(f"[APIRouter] Exhausted retries for endpoint '{endpoint_name}'. Moving to next...")
 
