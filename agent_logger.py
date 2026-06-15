@@ -45,9 +45,18 @@ class AgentInstanceLogger:
             for k, v in base_metadata.items():
                 # Allow overwriting defaults like working_dir or supervisor
                 self.data["metadata"][k] = v
-            # If we don't have an original_log_path yet and we are continuing, set it
+            
+            # CRITICAL FIX: If base_metadata has current_log_path, use it to maintain log file continuity!
+            # Without this, each session continuation creates a new log file with a new timestamp,
+            # causing compression markers and history to be written to abandoned old files.
+            if "current_log_path" in base_metadata:
+                self.log_path = base_metadata["current_log_path"]
+                self.data["metadata"]["current_log_path"] = self.log_path
+            
+            # Track original path for reference (preserves the very first log file path)
             if "original_log_path" not in self.data["metadata"] and "current_log_path" in base_metadata:
                 self.data["metadata"]["original_log_path"] = base_metadata["current_log_path"]
+        
         self._initial_save()
 
     def _format_message(self, message: Union[Dict, Any]) -> Dict:
