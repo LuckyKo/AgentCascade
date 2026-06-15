@@ -704,6 +704,30 @@ class ExecutionEngine:
                     f"slot_still_held={instance._slot_release is not None}"
                 )
             
+            # FIX LogAppendFixer: Final sync to ensure all messages in conversation are logged
+            # This catches any injected messages that weren't followed by an LLM call triggering _process_response() sync
+            try:
+                inst_name = instance.instance_name
+                agent_class = instance.agent_class
+                log_inst = self.pool.get_logger(inst_name, agent_class)
+                
+                already_logged_count = len(log_inst.data.get("history", []))
+                with instance._compression_lock:
+                    conv_len = len(instance.conversation)
+                
+                # Only sync if there's a mismatch (defensive check to avoid redundant logging)
+                if already_logged_count < conv_len:
+                    logger.debug(
+                        f"[FINAL_SYNC] {inst_name}: Catching up {conv_len - already_logged_count} unlogged messages "
+                        f"(logged={already_logged_count}, conversation={conv_len})"
+                    )
+                    with instance._compression_lock:
+                        for msg in instance.conversation[already_logged_count:]:
+                            if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
+                                log_inst.log_message(msg)
+            except Exception as e:
+                logger.debug(f"Final sync to JSONL failed for {getattr(instance, 'instance_name', 'unknown')} (non-critical): {e}")
+            
             with instance._state_lock:
                 current_state = instance.state
                 if current_state == AgentState.RUNNING:
@@ -1494,15 +1518,22 @@ class ExecutionEngine:
         log_inst = self.pool.get_logger(inst_name, instance.agent_class)
 
         already_logged_count = len(log_inst.data.get("history", []))
-        if already_logged_count == 0:
-            with instance._compression_lock:
-                conv = instance.conversation
-            if conv:
-                # First time logging — log all pre-existing messages (system + user).
-                # turn_output has NOT been appended yet, so no risk of duplication.
-                for msg in conv:
-                    if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
-                        log_inst.log_message(msg)
+        with instance._compression_lock:
+            conv = instance.conversation
+        
+        if already_logged_count == 0 and conv:
+            # First time logging — log all pre-existing messages (system + user).
+            # turn_output has NOT been appended yet, so no risk of duplication.
+            for msg in conv:
+                if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
+                    log_inst.log_message(msg)
+        elif already_logged_count < len(conv):
+            # Partial sync — log only messages added since last sync (e.g., user messages
+            # from add_message() on subsequent turns that weren't logged to JSONL).
+            # turn_output has NOT been appended yet, so no risk of duplicating it.
+            for msg in conv[already_logged_count:]:
+                if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
+                    log_inst.log_message(msg)
 
         # Append to all working sets
         response.extend(turn_output)
@@ -1772,6 +1803,14 @@ class ExecutionEngine:
             response.append(async_msg)
             with instance._compression_lock:
                 instance.conversation.append(async_msg)
+            
+            # FIX LogAppendFixer: Log injected message immediately to ensure it's persisted
+            # even if no subsequent LLM call triggers sync in _process_response()
+            try:
+                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                log_inst.log_message(async_msg)
+            except Exception as e:
+                logger.debug(f"Logging injected message to file failed for {inst_name} (non-critical): {e}")
         
         # Invalidate token cache after injecting all messages (once, not per-message)
         _invalidate_token_cache(instance)
@@ -1896,6 +1935,16 @@ class ExecutionEngine:
             response.append(result_msg)
             with instance._compression_lock:
                 instance.conversation.append(result_msg)
+            
+            # FIX LogAppendFixer: Log async result message immediately to ensure it's persisted
+            # even if no subsequent LLM call triggers sync in _process_response()
+            try:
+                inst_name = getattr(instance, 'instance_name', 'unknown')
+                agent_class = getattr(instance, 'agent_class', 'unknown')
+                log_inst = self.pool.get_logger(inst_name, agent_class)
+                log_inst.log_message(result_msg)
+            except Exception as e:
+                logger.debug(f"Logging async result message to file failed for {inst_name} (non-critical): {e}")
         
         # Invalidate token cache after injection
         _invalidate_token_cache(instance)
