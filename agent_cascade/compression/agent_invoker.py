@@ -173,10 +173,8 @@ def invoke_compression_agent(
                         )
 
                     # The generator yields intermediate state for WebUI — capture final messages
-                    if comp_state_key in agent_pool.sub_agent_state:
-                        msgs = agent_pool.sub_agent_state[comp_state_key].get('messages', [])
-                        if msgs:
-                            final_msgs = list(msgs)
+                    # Note: instance_state doesn't have 'messages' key, so we skip this check here.
+                    # Final messages will be captured from the return value or conversation in fallback path.
             except StopIteration as e:
                 # Normal termination of the generator — capture return value as fallback
                 if hasattr(e, 'value') and e.value is not None:
@@ -288,7 +286,7 @@ def invoke_compression_agent(
 
         # Fallback: if final_msgs was empty but we got a return value from the generator,
         # try to extract the summary from that string. This handles edge cases where the
-        # sub_agent_state wasn't populated during streaming.
+        # instance_state wasn't populated with messages during streaming.
         if not summary.strip() and subagent_return_value:
             if isinstance(subagent_return_value, str):
                 logger.info("Using subagent return value as fallback for summary extraction")
@@ -311,8 +309,9 @@ def invoke_compression_agent(
         raise RuntimeError(f"Exception occurred while generating summary: {e}") from e
     finally:
         # Always clean up compression agent state when done
-        if comp_state_key in agent_pool.sub_agent_state:
-            agent_pool.sub_agent_state[comp_state_key]['active'] = False
+        if comp_state_key in agent_pool.instance_state:
+            with agent_pool._execution._state_lock:
+                agent_pool.instance_state[comp_state_key]['active'] = False
             try:
                 agent_pool.active_stack_remove(comp_state_key)
             except Exception:
