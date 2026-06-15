@@ -1525,10 +1525,11 @@ class ExecutionEngine:
                 already_logged_count = len(log_inst.data.get("history", []))
                 if already_logged_count == 0 and conv:
                     # First time logging — log all pre-existing messages (system + user)
+                    # Type guard: only log actual Message objects or dict messages with a role field
+                    # Prevents non-message items (bools, None, etc.) from corrupting the JSONL log
                     for msg in conv:
-                        log_inst.log_message(msg)
-                    # Sync internal tracking to prevent drift if logger instance differs later
-                    log_inst.data["history"] = [log_inst._format_message(m) for m in conv]
+                        if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
+                            log_inst.log_message(msg)
             
             # Log turn_output messages from this LLM call
             for msg in turn_output:
@@ -2910,11 +2911,6 @@ class ExecutionEngine:
                     log_inst = self.pool.get_logger(instance_name, agent_class)
                     log_inst.log_message(sys_msg)
                     log_inst.log_message(task_msg)
-                    # Sync internal tracking to prevent drift if logger instance differs later
-                    log_inst.data["history"] = [
-                        log_inst._format_message(sys_msg),
-                        log_inst._format_message(task_msg),
-                    ]
                 except Exception as e:
                     logger.debug(f"Logging initial messages for {instance_name} failed (non-critical): {e}")
 
