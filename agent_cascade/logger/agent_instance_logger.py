@@ -161,7 +161,11 @@ class AgentInstanceLogger:
                             self._initialized = True
                             return
             except Exception:
-                pass  # Continue with normal write
+                # Corrupted file — remove it so we start fresh instead of appending to garbage
+                try:
+                    os.remove(self.log_path)
+                except OSError:
+                    pass
         
         self._append_line({"metadata": self.data["metadata"]})
         self._initialized = True

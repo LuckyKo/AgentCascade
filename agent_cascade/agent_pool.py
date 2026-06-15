@@ -1018,9 +1018,9 @@ class AgentPool:
 
     @property
     def instance_loggers(self) -> Dict[str, Any]:
-        """Return a snapshot of per-instance loggers (thread-safe copy under lock)."""
+        """Return a snapshot of per-instance loggers (string-keyed by instance_name for backward compatibility)."""
         with self._logger._lock:
-            return dict(self._logger._loggers)
+            return {k[0]: v for k, v in self._loggers.items()}
 
     @property
     def agents(self) -> Dict[str, Assistant]:
@@ -1595,12 +1595,12 @@ class LoggerManager:
                 except Exception as e:
                     logger.debug(f"Logger close during reinit failed for {instance_name} (non-critical): {e}")
             from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
-            # Explicitly pass base_metadata=None to match get_logger signature (new session has no inherited metadata)
+            # New session gets fresh metadata — no inheritance from previous session's state.
             self._loggers[key] = AgentInstanceLogger(
                 agent_class=agent_class,
                 instance_name=instance_name,
                 log_dir=str(self.log_dir),
-                base_metadata=None,
+                base_metadata=None,  # Fresh start, no inherited context
             )
         return
 

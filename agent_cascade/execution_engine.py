@@ -1491,21 +1491,18 @@ class ExecutionEngine:
         # This must happen BEFORE instance.conversation.extend(turn_output) so the initial
         # sync only sees messages that existed before this LLM call (system + user).
         # turn_output is logged separately below after it's been appended.
-        try:
-            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-            
-            already_logged_count = len(log_inst.data.get("history", []))
-            if already_logged_count == 0:
-                with instance._compression_lock:
-                    conv = instance.conversation
-                if conv:
-                    # First time logging — log all pre-existing messages (system + user).
-                    # turn_output has NOT been appended yet, so no risk of duplication.
-                    for msg in conv:
-                        if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
-                            log_inst.log_message(msg)
-        except Exception as e:
-            logger.debug(f"Initial log sync failed for {inst_name} (non-critical): {e}")
+        log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+
+        already_logged_count = len(log_inst.data.get("history", []))
+        if already_logged_count == 0:
+            with instance._compression_lock:
+                conv = instance.conversation
+            if conv:
+                # First time logging — log all pre-existing messages (system + user).
+                # turn_output has NOT been appended yet, so no risk of duplication.
+                for msg in conv:
+                    if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
+                        log_inst.log_message(msg)
 
         # Append to all working sets
         response.extend(turn_output)
@@ -1536,8 +1533,6 @@ class ExecutionEngine:
 
         # Persist turn_output messages to JSONL log file (P1: LoggerManager migration)
         try:
-            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-            
             # Log turn_output messages from this LLM call
             for msg in turn_output:
                 log_inst.log_message(msg)
