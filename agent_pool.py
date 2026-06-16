@@ -24,7 +24,7 @@ from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_logger import AgentInstanceLogger
 from telemetry import TelemetryCollector
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
-from agent_cascade.compression.helpers import get_role
+from agent_cascade.compression.helpers import get_role, get_content
 from api_router import APIRouter
 
 
@@ -614,6 +614,83 @@ rules:
                 return i
         return -1
 
+    def output_structured_marker_format(self, agent_name: str, history: List[Union[dict, Message]]) -> str:
+        """
+        Output a structured marker format showing the history structure after compression/session load.
+        
+        Outputs a verbose multi-line formatted string with indexes and content previews for each message,
+        identifying special message types:
+        - [SYSTEM]: The system message (typically at index 0)
+        - [USER_MSG_0]: The first user message after the system message (the anchor point)
+        - [SUMMARY_N]: Each compression marker numbered sequentially starting from 1
+        - [ROLE]: Regular messages shown with their role (USER, ASSISTANT, FUNCTION, etc.)
+        
+        Example output format:
+            History Structure for 'agent_name' (5 messages):
+              [0] [SYSTEM] - You are a helpful assistant.
+              [1] [USER_MSG_0] - Hello, how can you help me?
+              [2] [ASSISTANT] - I'd be happy to help!
+              [3] [SUMMARY_1] - @@COMPRESSION_SUMMARY (50% ...)
+              [4] [ASSISTANT] - Continuing after compression
+        
+        Args:
+            agent_name: The agent instance name for inclusion in output.
+            history: List of messages (dicts or Message objects).
+        
+        Returns:
+            Empty string "" if history is empty, otherwise a formatted multi-line string showing the 
+            structured history with message indexes, types, and content previews.
+        """
+        if not history:
+            return ""
+        
+        output_lines = []
+        output_lines.append(f"History Structure for '{agent_name}' ({len(history)} messages):")
+        
+        summary_counter = 0
+        system_found = False
+        first_user_after_system = False
+        
+        for idx, msg in enumerate(history):
+            role = get_role(msg)
+            content = get_content(msg)
+            
+            # Truncate content for display (first 60 chars)
+            # FIX: Convert to string once and handle non-string content types safely
+            try:
+                content_str = str(content) if content is not None else ""
+                # Strip newlines/whitespace to prevent multi-line previews from breaking output structure
+                content_str_flat = content_str.replace('\n', ' ').replace('\r', ' ')
+                content_preview = content_str_flat[:60]
+                if len(content_str_flat) > 60:
+                    content_preview += "..."
+            except Exception:
+                # Fallback for any unexpected content types
+                content_preview = "[CONTENT PREVIEW ERROR]"
+            
+            # Identify message type and format accordingly
+            # ORDER MATTERS: Check compression markers FIRST, then system, then first user
+            
+            # Check for compression marker first (MAJOR #3 - before checking "first user" status)
+            if role == USER and content is not None and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                # This is a compression summary marker (MINOR #4 - explicit null check)
+                summary_counter += 1
+                output_lines.append(f"  [{idx}] [SUMMARY_{summary_counter}] - {content_preview}")
+            elif idx == 0 and role == SYSTEM:
+                # System message at index 0
+                output_lines.append(f"  [{idx}] [SYSTEM] - {content_preview}")
+                system_found = True
+            elif role == USER and not first_user_after_system:
+                # CRITICAL #2: Semantic detection - find first user message after system (the anchor)
+                # This works whether or not there's a system message, and handles edge cases
+                output_lines.append(f"  [{idx}] [USER_MSG_0] - {content_preview}")
+                first_user_after_system = True
+            else:
+                # Regular message - show with role
+                output_lines.append(f"  [{idx}] [{role.upper()}] - {content_preview}")
+        
+        return "\n".join(output_lines)
+
     def slice_history_for_llm(self, history: List[Union[dict, Message]]) -> List[Union[dict, Message]]:
         """
         Extract the 'working set' from a full conversation history.
@@ -1038,6 +1115,15 @@ rules:
         # 1. Clean up the loaded history before syncing to the new log
         self._cleanup_history(instance_name)
         cleaned_messages = self.instance_conversations[instance_name]
+        
+        # Output structured marker format for debugging/visibility after session load
+        try:
+            structure_output = self.output_structured_marker_format(instance_name, cleaned_messages)
+            if structure_output:
+                logger.info(f"[SESSION LOAD STRUCTURE] {instance_name}:\n{structure_output}")
+        except Exception as e:
+            # Graceful degradation - structured marker output should never break session load
+            logger.warning(f"Structured marker format output failed for '{instance_name}': {e}")
         
         # Sync the loaded history to the NEW log file so it's persistent
         self.instance_loggers[instance_name].update_history(cleaned_messages)

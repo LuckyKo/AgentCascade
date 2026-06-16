@@ -50,8 +50,16 @@ from agent_cascade.utils.utils import (
 )
 
 from agent_cascade.compression import compress_context, rebuild_working_set
+from agent_cascade.compression.constants import (
+    FORCE_COMPRESSION_THRESHOLD,
+    FORCE_COMPRESSION_FRACTION,
+    MAX_COMPRESSION_RETRIES,
+    WARNING_COMPRESSION_THRESHOLD,
+)
+from agent_cascade.compression.helpers import get_role
 
 from agent_pool import AgentPool
+
 
 def _safe_get_role(msg):
     """Safely get the role from a message, handling both dict and Message objects."""
@@ -820,7 +828,7 @@ class OrchestratorAgent(Assistant):
             return False
 
         # ── Forced compression at >95% ──
-        if usage_pct > 95.0:
+        if usage_pct > FORCE_COMPRESSION_THRESHOLD:
             # Prevent double-compression in same turn (per-agent tracking)
             if self._compress_tracker.get(instance_name, False):
                 logger.debug(f"Skipping forceful compression for {instance_name} — already ran this cycle.")
@@ -828,7 +836,7 @@ class OrchestratorAgent(Assistant):
 
             # FIX 2: Check retry counter — if forced compression has failed 3+ times, skip it
             fail_count = self._compress_fail_count.get(instance_name, 0)
-            if fail_count >= 3:
+            if fail_count >= MAX_COMPRESSION_RETRIES:
                 logger.warning(
                     f"Forced compression for {instance_name} has failed {fail_count} times — "
                     f"skipping forced compression and letting LLM call through with warning."
@@ -861,13 +869,51 @@ class OrchestratorAgent(Assistant):
                         f"Syncing {len(messages)} working-set messages to pool "
                         f"(pool has {len(pool_conv)}) before forced compression for {instance_name}"
                     )
+                    
+                    # FIX 1: Preserve system message during sync (prevents pool corruption)
+                    # Check if existing pool has a system message that's not in the incoming messages
+                    pool_has_system = False
+                    system_message = None
+                    if pool_conv:
+                        first_role = get_role(pool_conv[0])
+                        if first_role == SYSTEM:
+                            pool_has_system = True
+                            system_message = pool_conv[0]
+                    
+                    messages_missing_system = False
+                    if messages:
+                        first_msg_role = get_role(messages[0])
+                        if first_msg_role != SYSTEM:
+                            messages_missing_system = True
+                        elif system_message is not None:
+                            # Messages have a system message — check if it differs from pool's
+                            # If different, treat as "missing" to preserve the pool's version
+                            incoming_content = messages[0].get('content', '') if isinstance(messages[0], dict) else getattr(messages[0], 'content', '')
+                            pool_content = system_message.get('content', '') if isinstance(system_message, dict) else getattr(system_message, 'content', '')
+                            if incoming_content != pool_content:
+                                messages_missing_system = True
+                                logger.debug(
+                                    f"[COMPRESSION DEBUG] Working set has different system message than pool for '{instance_name}' — "
+                                    f"preserving pool's version (final validation in apply_compression())"
+                                )
+                    
+                    # If pool has system but messages don't (or have a different one), prepend it before syncing
+                    if pool_has_system and messages_missing_system:
+                        logger.info(
+                            f"Preserving system message during sync for {instance_name} "
+                            f"(working set missing/different system, pool has it)"
+                        )
+                        sync_messages = copy.deepcopy([system_message] + messages)
+                    else:
+                        sync_messages = copy.deepcopy(messages)
+                    
                     pool_conv.clear()
-                    pool_conv.extend(copy.deepcopy(messages))
+                    pool_conv.extend(sync_messages)
 
                 result = compress_context(
                     agent_pool=self.agent_pool,
                     target_agent_name=instance_name,
-                    fraction=0.5,
+                    fraction=FORCE_COMPRESSION_FRACTION,
                     mode="auto",
                     force=True,               # Bypass guards — critical threshold
                     justification=f"CRITICAL THRESHOLD ({usage_pct:.1f}%)",
@@ -936,8 +982,8 @@ class OrchestratorAgent(Assistant):
                 # Only resume other agents in finally — tracker reset is handled per-branch above
                 self.agent_pool.resume_all_instances()
 
-        # ── Warning at >85% ──
-        if usage_pct > 85.0:
+        # ── Warning at >WARNING_COMPRESSION_THRESHOLD ──
+        if usage_pct > WARNING_COMPRESSION_THRESHOLD:
             warning_text = "[SYSTEM WARNING: Context window at"
             warning = (
                 f"{warning_text} {usage_pct:.1f}% capacity ({current_tokens}/{max_tokens} tokens). "
@@ -1302,15 +1348,16 @@ class OrchestratorAgent(Assistant):
                     llm_messages.clear()
                     llm_messages.extend(copy.deepcopy(sliced))
                     
-                    # CRITICAL: Sync the logger's internal data["history"] tracking to match the current
-                    # pool state. Without this, update_history() will treat pool messages not yet seen by
-                    # the logger as "new" and append them, causing duplication.
-                    try:
-                        logger_inst = self.agent_pool.get_logger(self.session_name, self.agent_type)
-                        logger_inst.update_history(compressed)
-                    except Exception as e:
-                        logger.error(f"Logger sync after forced compression FAILED for '{self.session_name}': {e}. "
-                                     f"Pool may desync — manual intervention required.")
+                    # CRITICAL FIX: Skip update_history() after forced compression.
+                    # apply_compression() already atomically updated both pool and log (FIX 2-4).
+                    # Calling update_history() here causes divergence because:
+                    # - Pool has compressed history (discarded messages removed)
+                    # - Log has preserved history (all original messages + marker inserted via tail-offset method)
+                    # These are CONSISTENT but not IDENTICAL structures. update_history() tries to match them
+                    # and performs surgical insertions at wrong positions, causing the log to be rewritten
+                    # multiple times with different message counts. The atomic update in apply_compression()
+                    # ensures both are synchronized without needing redundant sync.
+                    pass  # Logger sync handled by apply_compression()'s atomic update
                 yield response
                 # Reset flag so BUG-7 block below doesn't redundantly re-sync every iteration
                 # Note: This only executes on forced compression FAILURE (success returns False, skipping this block)

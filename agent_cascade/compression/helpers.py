@@ -8,6 +8,71 @@ from agent_cascade.prompts.dna import (
 from agent_cascade.llm.schema import USER, Message
 
 
+def get_role(msg) -> str:
+    """
+    Safely extract the role from a message, handling both dict and Message objects.
+
+    This is the single source of truth for role extraction across the compression system.
+
+    Args:
+        msg: A message (dict or Message object).
+
+    Returns:
+        The role string (e.g., 'system', 'user', 'assistant'), or empty string if not found.
+    """
+    if isinstance(msg, dict):
+        return msg.get('role', '')
+    else:
+        return getattr(msg, 'role', '')
+
+
+def get_content(msg) -> str:
+    """
+    Safely extract the content from a message, handling both dict and Message objects.
+
+    Args:
+        msg: A message (dict or Message object).
+
+    Returns:
+        The content string, or empty string if not found.
+    """
+    if isinstance(msg, dict):
+        return msg.get('content', '')
+    else:
+        return getattr(msg, 'content', '')
+
+
+def count_active_tokens(active_set) -> int:
+    """
+    Count total tokens in an active message set.
+
+    This extracts the inline token counting logic from compress_context()
+    to make it reusable and testable.
+
+    Args:
+        active_set: List of messages (dicts or Message objects).
+
+    Returns:
+        Total token count across all messages, or 0 if counting fails.
+    """
+    try:
+        from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+        from agent_cascade.utils.utils import extract_text_from_message
+
+        total_tokens = 0
+        for msg in active_set:
+            if isinstance(msg, dict):
+                wrapped = Message(**msg)
+            else:
+                wrapped = msg
+            content = extract_text_from_message(wrapped, add_upload_info=True)
+            total_tokens += qwen_count(content)
+        return total_tokens
+    except Exception:
+        # Token counting is advisory — if it fails, return 0
+        return 0
+
+
 def compute_discard_count(active_set, fraction, force):
     """
     Calculate how many messages to discard from the active set.

@@ -2625,7 +2625,9 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                         
                         if agent_pool:
                             logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
-                            logger_inst.reset_history(history, rewrite=True)
+                            success = logger_inst.reset_history(history, rewrite=True)
+                            if not success:
+                                logger.error(f"Failed to write edited history to log for '{target_name}'")
                             
                             # Sync sub_agent_state so build_state() sees the edit
                             # (sub_agent_state[name]['messages'] may be a separate reference and won't
@@ -2656,7 +2658,9 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                             history.pop(idx)
                     if agent_pool:
                         logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
-                        logger_inst.reset_history(history, rewrite=True)
+                        success = logger_inst.reset_history(history, rewrite=True)
+                        if not success:
+                            logger.error(f"Failed to write deleted history to log for '{target_name}'")
                         
                         # Sync sub_agent_state so build_state() sees the deletion
                         if target_name != session['session_name'] and target_name in agent_pool.sub_agent_state:

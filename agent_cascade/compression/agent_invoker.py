@@ -11,14 +11,13 @@ from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 from agent_cascade.llm.schema import SYSTEM, USER
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
 from agent_cascade.utils.utils import extract_text_from_message
+from agent_cascade.compression.helpers import get_role
+from agent_cascade.compression.constants import (
+    COMPRESSION_AGENT_TIMEOUT,
+    SUMMARY_PREFIXES_TO_STRIP,
+)
 
 logger = logging.getLogger(__name__)
-
-# Conversational filler prefixes to strip from summaries
-_SUMMARY_PREFIXES = [
-    "here is a summary", "here is the summary", "summary:",
-    "in summary,", "here's a summary", "**summary**:",
-]
 
 
 def _format_messages_for_summary(target_messages):
@@ -124,6 +123,10 @@ def invoke_compression_agent(
     ]
 
     summary = ""
+    # FIX 3: Initialize subagent_return_value BEFORE the if/else split so it's always defined
+    # This prevents UnboundLocalError if an exception occurs in the else branch and
+    # the code at line 244 references this variable
+    subagent_return_value = None
     try:
         if orchestrator is not None and hasattr(orchestrator, '_stream_sub_agent_call'):
             # ── call_agent pattern via _stream_sub_agent_call ──
@@ -141,9 +144,9 @@ def invoke_compression_agent(
             manager_history = comp_history
 
             final_msgs = []
-            subagent_return_value = None  # Capture StopIteration.value as fallback
+            # subagent_return_value already initialized above (FIX 3)
             start_time = _time.monotonic()   # Monotonic clock — immune to NTP adjustments
-            max_poll_time = 300            # 5-minute timeout for large compression tasks
+            max_poll_time = COMPRESSION_AGENT_TIMEOUT
             poll_count = 0
 
             try:
@@ -196,7 +199,7 @@ def invoke_compression_agent(
 
             final_msgs = []
             start_time = _time.monotonic()   # Monotonic clock for timeout (same as call_agent path)
-            max_poll_time = 300            # 5-minute timeout for large compression tasks
+            max_poll_time = COMPRESSION_AGENT_TIMEOUT
             poll_count = 0
 
             for partial in comp_agent.run(comp_history, agent_instance_name=comp_state_key):
@@ -223,8 +226,7 @@ def invoke_compression_agent(
         # 2. Extract the summary from the last assistant message
         if final_msgs:
             for msg_obj in reversed(final_msgs):
-                role = (msg_obj.get('role', '') if isinstance(msg_obj, dict)
-                        else getattr(msg_obj, 'role', ''))
+                role = get_role(msg_obj)
                 if role == 'assistant':
                     content = extract_text_from_message(msg_obj, add_upload_info=False)
                     summary = strip_thinking_blocks(content)
@@ -232,7 +234,7 @@ def invoke_compression_agent(
 
             # Strip conversational filler prefixes
             lower_summary = summary.lower()
-            for prefix in _SUMMARY_PREFIXES:
+            for prefix in SUMMARY_PREFIXES_TO_STRIP:
                 if lower_summary.startswith(prefix):
                     summary = summary[len(prefix):].strip()
                     summary = summary.lstrip(':\n \t')

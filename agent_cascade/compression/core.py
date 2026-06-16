@@ -170,6 +170,17 @@ def apply_compression(
             # POOL SECOND: Only update pool after log succeeded (both in same try block for atomicity)
             agent_pool.instance_conversations[target_agent_name] = new_history
             
+            # Output structured marker format for visibility after compression
+            if hasattr(agent_pool, 'output_structured_marker_format'):
+                try:
+                    history = agent_pool.get_conversation(target_agent_name)
+                    structure_output = agent_pool.output_structured_marker_format(target_agent_name, history)
+                    if structure_output:
+                        logger.info(f"[COMPRESSION STRUCTURE] {target_agent_name}:\n{structure_output}")
+                except Exception as e:
+                    # Graceful degradation - structured marker output should never break compression
+                    logger.warning(f"Structured marker format output failed for '{target_agent_name}': {e}")
+            
             return True
             
         except Exception as e:

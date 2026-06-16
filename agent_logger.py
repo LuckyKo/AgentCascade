@@ -140,48 +140,6 @@ class AgentInstanceLogger:
         self.data["history"].append(formatted_msg)
         self._append_line(formatted_msg)
 
-    def insert_compression_marker(self, summary_msg: Any, tail_count: int):
-        """Insert a compression summary marker into the cumulative log at the
-        correct position — calculated as an offset from the end of the log.
-        
-        This implements the tail-offset insertion method which preserves all existing
-        log entries while inserting the compression marker at the correct position.
-        The log mirrors what you'd see if you started from the last compression marker
-        and read forward: [MARKER][TAIL_MESSAGES] — perfectly mirroring the pool's
-        post-compression state.
-        
-        This approach is used by apply_compression() in core.py for atomic updates,
-        and this method provides a standalone interface for the same pattern.
-
-        Args:
-            summary_msg: The compression summary message (USER role with
-                         ``<context_summary>`` tags).
-            tail_count: Number of tail messages that should appear after the
-                        summary marker in both pool and log.
-        """
-        formatted = self._format_message(summary_msg)
-        log_history = self.data["history"]
-
-        # Derive insertion point from offset-from-end (tail-offset method)
-        insert_pos = len(log_history) - tail_count
-
-        # Safety: Never insert before the SYSTEM message (index 0)
-        if insert_pos == 0 and log_history and log_history[0].get('role') == 'system':
-            insert_pos = 1
-
-        # Clamp to valid range (both lower and upper bounds)
-        insert_pos = max(0, min(insert_pos, len(log_history)))
-
-        log_history.insert(insert_pos, formatted)
-
-        logger.info(
-            f"Logger [{self.instance_name}]: Inserted compression marker at "
-            f"index {insert_pos} (log_len={len(log_history)}, tail_count={tail_count})"
-        )
-
-        # Rewrite the entire file since we inserted in the middle
-        self.reset_history(log_history, rewrite=True)
-
     def update_history(self, history: List[Any]):
         """
         Additive sync for persistent logs (JSONL). 
@@ -195,8 +153,6 @@ class AgentInstanceLogger:
         This is intentional: timestamps are assigned at message creation time and persist
         across pool mutations. DO NOT change this matching logic without ensuring the logger
         sync after compression events also uses timestamp-based identity.
-        Note: insert_compression_marker() also depends on stable timestamps for correct
-        positional insertion of summary markers into the log.
         """
         self.update_timestamp()
         old_history = self.data["history"]
@@ -301,14 +257,21 @@ class AgentInstanceLogger:
         
         if needs_rewrite:
             # We had edits or insertions in the middle, rewrite the file with FULL cumulative history
-            self.reset_history(old_history, rewrite=True)
+            success = self.reset_history(old_history, rewrite=True)
+            if not success:
+                logger.error(f"Logger [{self.instance_name}]: Failed to sync history to log after surgical merge")
 
-    def reset_history(self, new_history: List[Any], rewrite: bool = False):
+    def reset_history(self, new_history: List[Any], rewrite: bool = False) -> bool:
         """
         Update internal tracking after a compression event or manual edit.
         
         If rewrite=True, the log file is truncated and rewritten from scratch.
         Otherwise, we append a compression baseline to the end of the log.
+        
+        Returns:
+            True if successful, False if file write failed (when rewrite=True).
+            Internal state is only updated if file write succeeds (when rewrite=True)
+            to prevent pool/log divergence.
         """
         import datetime as _dt
         
@@ -324,12 +287,14 @@ class AgentInstanceLogger:
                     f.writelines(lines)
                 
                 logger.info(f"Rewrote agent log {self.log_path} with {len(new_history)} messages.")
+                
+                # 3. Update internal tracking ONLY after successful file write
+                # This prevents divergence when file write fails but state is updated
+                self.data["history"] = [self._format_message(msg) for msg in new_history]
+                return True
             except Exception as e:
                 logger.error(f"Failed to rewrite agent log {self.log_path}: {e}")
-            
-            # Update internal tracking
-            self.data["history"] = [self._format_message(msg) for msg in new_history]
-            return
+                return False  # Signal failure to caller
 
         # Find the summary message in new_history
         summary_msg = None
@@ -341,27 +306,32 @@ class AgentInstanceLogger:
                 idx_in_new = i
                 break
                 
+        append_success = True
         if summary_msg and idx_in_new != -1:
             # We append the summary AND the remaining messages to the log file.
             # This ensures that on load, load_session_from_log finds the summary 
             # and takes all subsequent messages as the 'rest of log' working set.
             # The original messages are still preserved earlier in the log.
-            self._append_line({
-                "event": "COMPRESSION",
-                "timestamp": _dt.datetime.now().isoformat(),
-                "message": "Context was compressed. Re-asserting working set baseline."
-            })
-            
-            # 1. Append the summary message
-            self._append_line(summary_msg)
-            
-            # 2. Append all messages that follow the summary in the new working set
-            # (These were already in the log, but we re-append them so they are 
-            # found after the latest summary marker on load)
-            for i in range(idx_in_new + 1, len(new_history)):
-                self._append_line(self._format_message(new_history[i]))
+            try:
+                self._append_line({
+                    "event": "COMPRESSION",
+                    "timestamp": _dt.datetime.now().isoformat(),
+                    "message": "Context was compressed. Re-asserting working set baseline."
+                })
                 
-            logger.info(f"Appended summary baseline and {len(new_history)-1-idx_in_new} messages to agent log {self.log_path}.")
+                # 1. Append the summary message
+                self._append_line(summary_msg)
+                
+                # 2. Append all messages that follow the summary in the new working set
+                # (These were already in the log, but we re-append them so they are 
+                # found after the latest summary marker on load)
+                for i in range(idx_in_new + 1, len(new_history)):
+                    self._append_line(self._format_message(new_history[i]))
+                    
+                logger.info(f"Appended summary baseline and {len(new_history)-1-idx_in_new} messages to agent log {self.log_path}.")
+            except Exception as e:
+                logger.error(f"Failed to append compression baseline to agent log {self.log_path}: {e}")
+                append_success = False
         else:
             logger.warning(f"Could not find summary marker in new_history for {self.instance_name}. No baseline appended.")
         
@@ -370,16 +340,22 @@ class AgentInstanceLogger:
         # self.data["history"]. After compression the in-memory history changed,
         # so we must update our tracking to match, otherwise it will re-append
         # all the remaining messages as "new".
-        self.data["history"] = [self._format_message(msg) for msg in new_history]
+        if append_success:
+            self.data["history"] = [self._format_message(msg) for msg in new_history]
+        
+        return append_success
 
-    def rollback(self, count: int, soft: bool = False, reason: Optional[str] = None):
+    def rollback(self, count: int, soft: bool = False, reason: Optional[str] = None) -> bool:
         """
         Rollback the history by popping N messages.
         If soft=False, re-writes the log file (truncates).
         If soft=True, appends a ROLLBACK marker to the log and keeps the file intact.
+        
+        Returns:
+            True if successful, False if file write failed (when soft=False).
         """
         if count <= 0:
-            return
+            return True
         
         # 1. Update physical log file
         if soft:
@@ -391,6 +367,16 @@ class AgentInstanceLogger:
                 "rolled_back_count": count
             }
             self._append_line(marker)
+            
+            # Pop from internal history tracking (soft rollback always succeeds if append succeeds)
+            for _ in range(count):
+                if self.data["history"]:
+                    self.data["history"].pop()
+                else:
+                    break
+            
+            logger.info(f"Soft rollback of {count} messages for {self.instance_name} recorded in log.")
+            return True
         else:
             # Remove lines from the end of the physical log file
             try:
@@ -405,18 +391,18 @@ class AgentInstanceLogger:
                     
                 with open(self.log_path, 'w', encoding='utf-8') as f:
                     f.writelines(lines)
+                    
+                # 2. Pop from internal history tracking — ONLY after successful file write
+                for _ in range(count):
+                    if self.data["history"]:
+                        self.data["history"].pop()
+                    else:
+                        break
+                
+                return True
             except Exception as e:
                 logger.error(f"Failed to rollback agent log {self.log_path}: {e}")
-
-        # 2. Pop from internal history tracking
-        for _ in range(count):
-            if self.data["history"]:
-                self.data["history"].pop()
-            else:
-                break
-        
-        if soft:
-            logger.info(f"Soft rollback of {count} messages for {self.instance_name} recorded in log.")
+                return False  # Signal failure to caller
 
     def truncate_to(self, target_len: int, soft: bool = False, reason: Optional[str] = None):
         """Truncate the history to a specific target length."""
