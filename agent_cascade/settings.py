@@ -33,6 +33,10 @@ DEFAULT_TOOL_RESULT_MAX_CHARS: int = int(os.getenv('QWEN_AGENT_TOOL_RESULT_MAX_C
 DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('QWEN_AGENT_READ_FILE_MAX_LINES', 10000))
 DEFAULT_HEURISTIC_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_HEURISTIC_MATCH_THRESHOLD', 0.90))
 
+# Settings for forget_last tool
+DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS: int = int(os.getenv(
+    'QWEN_AGENT_FORGET_LAST_TRUNCATE_MAX_CHARS', 100))
+
 # Settings for RAG
 DEFAULT_MAX_REF_TOKEN: int = int(os.getenv('QWEN_AGENT_DEFAULT_REF_TOKEN',
                                            20000))  # The window size reserved for RAG materials

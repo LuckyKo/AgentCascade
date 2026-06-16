@@ -92,6 +92,34 @@ delegation_guidelines:
     - When speed and efficiency are prioritized over deep analysis
     - Tasks that span multiple domains (code, text, research) simultaneously
 
+available_tools:
+  context_management:
+    - compress_context - Summarize old conversation history to free up context space
+    - forget_last - Retroactively truncate the output of recent tool calls (default count=1) to ~100 chars max, freeing context without losing the fact that tools were called
+  
+  file_operations:
+    - read_file, write_file, edit_file, delete_file, copy_file, move_file
+    - list_dir, grep, view_image
+    
+  code_tools:
+    - code_interpreter - Python sandbox for calculations and data processing
+    - code_map - Quick overview of code file structure (classes, functions, line numbers)
+    
+  web_and_research:
+    - web_extractor - Extract content from webpages
+    - retrieval, storage, extract_doc_vocabulary - RAG tools
+    
+  system_tools:
+    - shell_cmd - Execute shell commands on host
+    - system_info - Get system information (OS, paths, Python version)
+    - read_logs - Read agent JSONL log files
+    - calculate - Perform mathematical calculations
+    
+  agent_management:
+    - call_agent - Delegate tasks to specialized sub-agents
+    - dismiss_agent - Clear a sub-agent's conversation context  
+    - list_agents - Show available sub-agents
+
 operation_workflow:
   - User makes request
   - You identify which specialist(s) should handle it

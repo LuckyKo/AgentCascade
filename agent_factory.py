@@ -16,6 +16,7 @@ from agent_cascade.tools.custom import (
     ReadLogs, Calculate, CodeMap,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
+from agent_cascade.tools.custom.forget_last_tool import ForgetLast
 from soul_loader import create_agent_from_soul
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
@@ -87,6 +88,12 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
     compress_tool.agent_pool = agent_pool
     compress_tool.agent_name = agent_name
     agent.function_map['compress_context'] = compress_tool
+
+    # ── ForgetLast tool (truncate recent tool outputs) ──
+    forget_last_tool = ForgetLast()
+    forget_last_tool.agent_pool = agent_pool
+    forget_last_tool.agent_name = agent_name
+    agent.function_map['forget_last'] = forget_last_tool
 
     # ── Shell execution ──
     shell_tool = ShellCmd()
