@@ -372,6 +372,17 @@ TOOL_METADATA = {
             'path': 'Path to the file to map, absolute or relative to workspace root.',
             'force_as': 'Optional. Force parsing as a specific language (e.g., "python", "javascript", "cpp", "java").'
         }
+    },
+    'forget_last': {
+        'description': (
+            'Retroactively truncate the output of the last N tool call responses in the active conversation history. '
+            'Each truncated response is shortened to ~100 characters max, with a marker indicating truncation. '
+            'This frees up context space without losing the fact that the tool was called. '
+            'Affects both the in-memory pool and the log file.'
+        ),
+        'parameters': {
+            'count': 'Number of recent tool call responses to truncate. Counts backwards from the most recent function result, skipping non-function messages. Default is 1.',
+        }
     }
 }
 
