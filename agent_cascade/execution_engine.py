@@ -400,10 +400,13 @@ class ExecutionEngine:
         with instance._state_lock:
             if instance.state == AgentState.IDLE:
                 instance._transition(AgentState.RUNNING)
-            elif instance.state != AgentState.RUNNING:
-                logger.warning(
-                    f"[STATE TRANSITION] instance={instance.instance_name} entering run() "
-                    f"from unexpected state {instance.state.name}"
+            else:
+                # Safety net: If we reach here, the L1 session_lock guard in api_server.py
+                # failed to prevent a race condition. Raise to surface the bug instead of
+                # silent return.
+                raise RuntimeError(
+                    f"[BUG] {instance.instance_name} entered engine.run() in state "
+                    f"{instance.state.name} — should be IDLE. L1 race guard failed!"
                 )
         self._current_instance = instance  # Fix #2: set for token count cache lookups
         

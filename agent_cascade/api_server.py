@@ -612,7 +612,12 @@ def create_app(agents, agent_pool, config=None):
         instead of session['history']. This is the unified single-source path.
         """
         instance_name = session['session_name']
-        gen = generating if generating is not None else session['generating']
+        # FIX B: Protect session['generating'] read with lock (consistent with Fix 1/4)
+        if generating is None:
+            with session_lock:
+                gen = session['generating']
+        else:
+            gen = generating
         
         result = build_state_from_pool(
             pool=agent_pool,
@@ -809,15 +814,21 @@ def create_app(agents, agent_pool, config=None):
         instance_name = target_instance_name or session['session_name']
         ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
 
-        # Delegate to the unified execution thread (handles everything internally)
-        run_agent_thread_unified(
-            pool=agent_pool,
-            instance_name=instance_name,
-            system_message_content=system_message_content,
-            ui_cfg=ui_cfg,
-            send_queue=send_queue,
-            loop=loop,
-        )
+        try:
+            # Delegate to the unified execution thread (handles everything internally)
+            run_agent_thread_unified(
+                pool=agent_pool,
+                instance_name=instance_name,
+                system_message_content=system_message_content,
+                ui_cfg=ui_cfg,
+                send_queue=send_queue,
+                loop=loop,
+            )
+        finally:
+            # FIX 2 (Cleanup): Reset session['generating'] when thread completes
+            # This ensures the flag is cleared automatically after execution finishes
+            with session_lock:
+                session['generating'] = False
 
 
     # ── Background tasks ──────────────────────────────────────────────────
@@ -965,13 +976,18 @@ def create_app(agents, agent_pool, config=None):
         """Returns the current state of the agents."""
         if not token or token not in api_sessions:
              return JSONResponse(status_code=401, content={"message": "Invalid session token"})
-             
+        
+        # FIX 1: Protect session reads with session_lock to prevent race condition
+        with session_lock:
+            gen = session['generating']
+            sess_name = session['session_name']
+            
         return {
-            "generating": session['generating'],
-            "active_agent": session['session_name'],
+            "generating": gen,
+            "active_agent": sess_name,
             "agents": agent_pool.list_agents() if agent_pool else [],
             "active_stack": get_active_stack(),
-            "instance_halted": agent_pool.is_halted(session.get('session_name', '')) if (agent_pool and hasattr(agent_pool, 'is_halted')) else False,
+            "instance_halted": agent_pool.is_halted(sess_name) if (agent_pool and hasattr(agent_pool, 'is_halted')) else False,
         }
 
     # ── REST endpoints ────────────────────────────────────────────────────
@@ -1269,7 +1285,14 @@ def create_app(agents, agent_pool, config=None):
                     if not text:
                         continue
 
-                    if session['generating']:
+                    # FIX 1 (Race Condition): Protect session['generating'] check with session_lock
+                    # to prevent two concurrent engine.run() calls for the same instance.
+                    # Without this lock, two WebSocket messages arriving nearly simultaneously
+                    # could both read generating=False and start separate runs.
+                    with session_lock:
+                        is_generating = session['generating']
+
+                    if is_generating:
                         # Async injection while agent is running — route to target agent
                         if agent_pool:
                             target = data.get('target_agent') or session.get('session_name', 'Maine')
@@ -1379,6 +1402,7 @@ def create_app(agents, agent_pool, config=None):
                     with session_lock:
                         session['stop_requested'] = False
                         session['generation_id'] += 1
+                        session['generating'] = True  # FIX 1b: Set flag so WebSocket handler can detect running state
                         gen_id = session['generation_id']
                     if agent_pool:
                         agent_pool.stopped = False
@@ -1398,6 +1422,14 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'continue':
                     # Continue generation WITHOUT inserting a new user message.
                     # Just send the existing conversation to the LLM so it can resume if it wants.
+                    
+                    # FIX 1d: Protect session['generating'] read with lock (consistent with Fix 1)
+                    # Continue DOES start threads - concurrent continue messages need the same guard.
+                    with session_lock:
+                        is_generating = session['generating']
+                    if is_generating:
+                        continue
+                    
                     # Update session config if provided
                     if 'agent_index' in data:
                         session['agent_index'] = int(data['agent_index'])
@@ -1416,6 +1448,7 @@ def create_app(agents, agent_pool, config=None):
                     with session_lock:
                         session['stop_requested'] = False
                         session['generation_id'] += 1
+                        session['generating'] = True  # FIX 1b-continue: Set flag for race protection
                         gen_id = session['generation_id']
                     if agent_pool:
                         agent_pool.stopped = False
@@ -1511,23 +1544,29 @@ def create_app(agents, agent_pool, config=None):
                         # Increment generation_id BEFORE starting new thread (Issue #1 fix)
                         # This ensures the old thread detects stale gen_id and exits before new thread starts
                         with session_lock:
-                            session['stop_requested'] = False
-                            session['generation_id'] += 1
-                            gen_id = session['generation_id']
-                        
-                        agent_runner = get_agent()
-                        loop = asyncio.get_event_loop()
+                            # FIX 1e: Re-check is_generating right before thread start
+                            # Another handler may have started between the initial check (line 1516) and here
+                            if session['generating']:
+                                pass  # Skip thread start - another run is already in progress
+                            else:
+                                session['stop_requested'] = False
+                                session['generation_id'] += 1
+                                session['generating'] = True  # FIX 1b-resume_all: Set flag for race protection
+                                gen_id = session['generation_id']
+                                
+                                agent_runner = get_agent()
+                                loop = asyncio.get_event_loop()
 
-                        thread = threading.Thread(
-                            target=run_agent_thread,
-                            args=(None, agent_runner, gen_id, loop, target_instance),
-                            daemon=True,
-                        )
-                        thread.start()
-                        
-                        # Set pool.stopped=False AFTER new thread starts (Issue #1 fix)
-                        if agent_pool:
-                            agent_pool.stopped = False
+                                thread = threading.Thread(
+                                    target=run_agent_thread,
+                                    args=(None, agent_runner, gen_id, loop, target_instance),
+                                    daemon=True,
+                                )
+                                thread.start()
+                                
+                                # Set pool.stopped=False AFTER new thread starts (Issue #1 fix)
+                                if agent_pool:
+                                    agent_pool.stopped = False
                                 
                     # Broadcast updated state so frontend reflects resumed status
                     try:
@@ -1651,19 +1690,25 @@ def create_app(agents, agent_pool, config=None):
                             
                             # Fix #3 (Feature 020): Wrap session state modifications with session_lock to prevent race condition
                             with session_lock:
-                                session['generation_id'] += 1
-                                gen_id = session['generation_id']
-                            
-                            agent_runner = get_agent()
-                            loop = asyncio.get_event_loop()
+                                # FIX 1f: Re-check is_generating right before thread start (consistency with other handlers)
+                                if session['generating']:
+                                    pass  # Skip thread start - another run is already in progress
+                                else:
+                                    session['generation_id'] += 1
+                                    session['generating'] = True  # FIX 1b-resume: Set flag for race protection
+                                    gen_id = session['generation_id']
+                                    
+                                    agent_runner = get_agent()
+                                    loop = asyncio.get_event_loop()
 
-                            thread = threading.Thread(
-                                target=run_agent_thread,
-                                args=(None, agent_runner, gen_id, loop, target_instance),
-                                daemon=True,
-                            )
-                            thread.start()
+                                    thread = threading.Thread(
+                                        target=run_agent_thread,
+                                        args=(None, agent_runner, gen_id, loop, target_instance),
+                                        daemon=True,
+                                    )
+                                    thread.start()
 
+                            # FIX 2: Move await broadcast outside session_lock to avoid holding lock during async I/O
                             await broadcast({'type': 'state', **build_state(generating=True)})
                         elif not is_generating:
                             # Not halted and not generating — just update UI state (no-op from user's perspective)
@@ -1683,7 +1728,11 @@ def create_app(agents, agent_pool, config=None):
                     # Dismissal callback triggers a state broadcast via the sender loop — no need for a direct one here
 
                 elif msg_type == 'retry':
-                    if session['generating']:
+                    # FIX 1c: Protect session['generating'] read with lock (consistent with Fix 1)
+                    # Retry DOES start threads - concurrent retry messages need the same guard.
+                    with session_lock:
+                        is_generating = session['generating']
+                    if is_generating:
                         continue
                     
                     instance_name = data.get('target_agent') or session['session_name']
@@ -1753,6 +1802,7 @@ def create_app(agents, agent_pool, config=None):
                     with session_lock:
                         session['stop_requested'] = False
                         session['generation_id'] += 1
+                        session['generating'] = True  # FIX 1b-edit_message: Set flag for race protection
                     if agent_pool:
                         agent_pool.stopped = False
                     gen_id = session['generation_id']
@@ -2272,8 +2322,10 @@ def create_app(agents, agent_pool, config=None):
                     
                     # Phase 6: No fallback to session['history'] — pool is the source of truth
                     
+                    # Note: session_lock check removed (2026-06-16 simplification).
+                    # Message edit doesn't start new threads, no race condition protection needed.
+                    
                     if (idx is not None
-                            and not session['generating']
                             and 0 <= idx < len(history)):
                         msg = history[idx]
                         
@@ -2329,8 +2381,9 @@ def create_app(agents, agent_pool, config=None):
                     await broadcast({'type': 'state', **build_state()})
                             
                 elif msg_type == 'delete_messages':
-                    if session['generating']:
-                        continue
+                    # Note: session_lock check removed (2026-06-16 simplification).
+                    # Message delete doesn't start new threads, no race condition protection needed.
+                    
                     target_name = data.get('instance_name') or session['session_name']
                     
                     # Get the conversation from pool instance (unified path)

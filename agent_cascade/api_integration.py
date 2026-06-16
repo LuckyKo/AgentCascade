@@ -285,6 +285,11 @@ def run_agent_in_pool(
     if instance is None:
         raise KeyError(f"Instance '{instance_name}' not found in pool")
 
+    # Note: Pre-check guard removed (2026-06-16 simplification).
+    # The session_lock protecting session['generating'] read in api_server.py (L1)
+    # is sufficient to prevent race conditions. This pre-check held _state_lock for
+    # minutes, blocking pause/resume/terminate operations.
+    
     engine = ExecutionEngine(pool)
     yield from engine.run(instance)
 
