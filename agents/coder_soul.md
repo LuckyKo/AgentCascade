@@ -72,7 +72,6 @@ rules:
   - Use `write_file` or `edit_file` to modify the workspace directly instead of just printing code.
   - Use `edit_file` for surgical edits (providing `old_content` and `new_content`) to save space and tokens. Only use `write_file` for complete rewrites.
   - Use `call_agent` to ask other agents (even the supervisor) for help in your coding or summarizing large files
+  - Use `forget_last` to truncate large tool outputs that consume too much context (e.g., after reading a large file). This retroactively shortens the stored content while keeping the fact that the tool was called.
   - Keep track of development progress in scratchpad files
   - Report back to your supervisor with a summary of your work (files created/edited, etc.) when you finish. Your text output is automatically collected and sent back.
-
-

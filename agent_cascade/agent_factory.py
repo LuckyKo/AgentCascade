@@ -12,7 +12,7 @@ from agent_cascade.tools.code_interpreter import CodeInterpreter
 from agent_cascade.tools.custom import (
     ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep,
     DeleteFile, CopyFile, MoveFile, DismissAgent, ListAgents, ShellCmd, SystemInfo,
-    ReadLogs, Calculate, CodeMap,
+    ReadLogs, Calculate, CodeMap, ForgetLast,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
 from agent_cascade.soul_loader import create_agent_from_soul
@@ -107,6 +107,12 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
     code_map_tool = CodeMap()
     code_map_tool.agent_pool = agent_pool
     agent.function_map['code_map'] = code_map_tool
+
+    # ── Context truncation (forget_last) ──
+    forget_last_tool = ForgetLast()
+    forget_last_tool.agent_pool = agent_pool
+    forget_last_tool.agent_name = agent_name
+    agent.function_map['forget_last'] = forget_last_tool
 
     # ── Code Interpreter (sandbox) ──
     try:

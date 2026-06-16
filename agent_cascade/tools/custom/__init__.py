@@ -9,6 +9,7 @@ from .system_info import SystemInfo
 from .read_logs import ReadLogs
 from .calculation import Calculate
 from .code_map import CodeMap
+from .forget_last_tool import ForgetLast
 
 __all__ = [
     'ReadFile',
@@ -28,4 +29,5 @@ __all__ = [
     'ReadLogs',
     'Calculate',
     'CodeMap',
+    'ForgetLast',
 ]

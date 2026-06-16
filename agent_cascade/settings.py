@@ -33,7 +33,7 @@ DEFAULT_HEURISTIC_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_HEURISTIC
 DEFAULT_MAX_REF_TOKEN: int = int(os.getenv('QWEN_AGENT_DEFAULT_MAX_REF_TOKEN',
                                            20000))  # The window size reserved for RAG materials
 DEFAULT_PARSER_PAGE_SIZE: int = int(os.getenv('QWEN_AGENT_DEFAULT_PARSER_PAGE_SIZE',
-                                              500))  # Max tokens per chunk when doing RAG
+                                               500))  # Max tokens per chunk when doing RAG
 DEFAULT_RAG_KEYGEN_STRATEGY: Literal['None', 'GenKeyword', 'SplitQueryThenGenKeyword', 'GenKeywordWithKnowledge',
                                      'SplitQueryThenGenKeywordWithKnowledge'] = os.getenv(
                                          'QWEN_AGENT_DEFAULT_RAG_KEYGEN_STRATEGY', 'GenKeyword')
@@ -44,6 +44,10 @@ DEFAULT_RAG_SEARCHERS: List[str] = ast.literal_eval(
 # Settings for compression (Feature 020)
 DEFAULT_COMPRESSION_COOLDOWN_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_DEFAULT_COMPRESSION_COOLDOWN_SECONDS', 2.0))  # Minimum seconds between forced compressions to prevent thrashing
+
+# Settings for forget_last tool (Feature 021)
+DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS: int = int(os.getenv(
+    'QWEN_AGENT_FORGET_LAST_TRUNCATE_MAX_CHARS', 100))  # Maximum characters to keep when truncating tool responses
 
 # Settings for endpoint scheduling
 ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv(
