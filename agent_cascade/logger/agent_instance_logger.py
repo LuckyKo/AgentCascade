@@ -363,10 +363,11 @@ class AgentInstanceLogger:
                 logger.info(f"Rewrote agent log {self.log_path} with {len(new_history)} messages.")
             except Exception as e:
                 logger.error(f"Failed to rewrite agent log {self.log_path}: {e}")
+                return False
 
             # Update internal tracking
             self.data["history"] = [self._format_message(msg) for msg in new_history]
-            return
+            return True
 
         # Find the summary message in new_history
         summary_msg = None
@@ -405,6 +406,7 @@ class AgentInstanceLogger:
 
         # Reset internal tracking to the compressed baseline.
         self.data["history"] = [self._format_message(msg) for msg in new_history]
+        return True
 
     # ── Rollback / truncation ─────────────────────────────────────────────
 

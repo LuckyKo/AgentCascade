@@ -1020,7 +1020,7 @@ class AgentPool:
     def instance_loggers(self) -> Dict[str, Any]:
         """Return a snapshot of per-instance loggers (string-keyed by instance_name for backward compatibility)."""
         with self._logger._lock:
-            return {k[0]: v for k, v in self._loggers.items()}
+            return {k[0]: v for k, v in self._logger._loggers.items()}
 
     @property
     def agents(self) -> Dict[str, Assistant]:
