@@ -24,6 +24,7 @@ from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_logger import AgentInstanceLogger
 from telemetry import TelemetryCollector
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
+from agent_cascade.compression.helpers import get_role
 from api_router import APIRouter
 
 
@@ -617,6 +618,10 @@ rules:
         """
         Extract the 'working set' from a full conversation history.
         Preserves the first SYSTEM message and slices from the latest compression marker onwards.
+        
+        OPTIMIZATION: Uses O(1) check for SYSTEM presence instead of O(n) scan.
+        Since markers are always inserted AFTER the system message (index 0),
+        if latest_summary_idx > 0, the system message is NOT in the slice.
         """
         if not history:
             return []
@@ -625,18 +630,26 @@ rules:
                 
         if latest_summary_idx == -1:
             return history
-            
-        system_msg = None
-        first_role = history[0].get(ROLE) if isinstance(history[0], dict) else getattr(history[0], ROLE, '')
-        if first_role == SYSTEM:
-            system_msg = history[0]
-            
+        
+        # O(1) check: System message is at index 0, markers inserted after it
+        # If latest_summary_idx == 0, marker IS the system message (corruption) or no system exists
+        # If latest_summary_idx > 0, system message is NOT in sliced result
+        has_system_in_slice = (latest_summary_idx == 0)
+        
+        # Check if history[0] is actually a SYSTEM message
+        first_role = get_role(history[0])
+        has_system_message = (first_role == SYSTEM)
+        
         sliced = history[latest_summary_idx:]
         
-        # Ensure system message is at the top
-        if system_msg and (sliced[0].get(ROLE) if isinstance(sliced[0], dict) else getattr(sliced[0], ROLE, '')) != SYSTEM:
-            return [system_msg] + list(sliced)
-            
+        # Prepend system message only if it exists and is not in the slice
+        if has_system_message and not has_system_in_slice:
+            logger.debug(
+                f"[slice_history_for_llm] Prepending system message "
+                f"(latest_summary_idx={latest_summary_idx}, len(history)={len(history)})"
+            )
+            return [history[0]] + list(sliced)
+        
         return list(sliced)
 
     def get_compression_target_set(self, agent_name: str) -> tuple[Optional[int], List[Union[dict, Message]], int]:
@@ -658,17 +671,33 @@ rules:
         # After multiple compressions the pool looks like: [SYS][USER_MSG_0][SUM1][SUM2]...[tail]
         start_idx = 0
         if history:
-            is_system = (history[0].get(ROLE) == SYSTEM if isinstance(history[0], dict) else getattr(history[0], ROLE, '') == SYSTEM)
-            if is_system:
+            first_role = get_role(history[0])
+            if first_role == SYSTEM:
                 start_idx = 1
                 # Also skip the first user message if present
-                if len(history) > 1 and (history[1].get(ROLE) == USER if isinstance(history[1], dict) else getattr(history[1], ROLE, '') == USER):
+                if len(history) > 1 and get_role(history[1]) == USER:
                     start_idx = 2
         
         # Find the latest compression marker using shared helper
         latest_summary_idx = self.find_last_marker(history)
         
         active_start_idx = latest_summary_idx + 1 if latest_summary_idx != -1 else start_idx
+        
+        # FIX 2: Insurance guard — if history[0] is SYSTEM but active_start_idx would be 0,
+        # force it to at least 1. This catches corruption scenarios where start_idx logic
+        # was bypassed (e.g., pool sync lost system message), ensuring compression formula
+        # doesn't produce empty prefix and lose the system message.
+        # Kept at WARNING level because this indicates actual pool corruption.
+        # Changed from "== 0" to "< 1" for a more defensive check (handles edge cases).
+        if history:
+            first_role = get_role(history[0])
+            if first_role == SYSTEM and active_start_idx < 1:
+                logger.warning(
+                    f"[COMPRESSION FIX] Forced active_start_idx from {active_start_idx} to 1 for '{agent_name}' "
+                    f"to preserve system message (pool may be partially corrupted)"
+                )
+                active_start_idx = 1
+        
         messages_to_compress = history[active_start_idx:]
         
         return active_start_idx, messages_to_compress, latest_summary_idx
