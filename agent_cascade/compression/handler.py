@@ -446,7 +446,7 @@ class CompressionHandler:
         inst_name = instance.instance_name
         
         # Get compress_context tool from template
-        template = self.pool.templates.get(instance.agent_class)
+        template = self.pool.get_template(instance.agent_class)
         if not template or 'compress_context' not in getattr(template, 'function_map', {}):
             logger.warning(f"/compress command but compress_context tool unavailable for {inst_name}")
             return (None, 'tool_unavailable')
@@ -680,7 +680,7 @@ class CompressionHandler:
             return True  # User rejected — continue loop without compression
         
         # Step 4: Apply compression
-        template = self.pool.templates.get(instance.agent_class)
+        template = self.pool.get_template(instance.agent_class)
         compress_tool = template.function_map['compress_context']
         
         return self.apply_approved_compression(instance, messages, llm_messages, fraction, summary, compress_tool)

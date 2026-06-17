@@ -435,17 +435,19 @@ Step 6: Release Lock
 **Cumulative Compression Timeline:**
 
 ```
-Initial state:       [SYS][U1][A1][U2][A2]
+Initial state:       [SYS][U0][U1][A1][U2][A2]
 
-After 1st compress:  Memory: [SYS][COMP1: "Summarized U1,A1"][U2][A2]
-                       JSONL:  [SYS][U1][A1][COMP1][U2][A2]
+After 1st compress:  Memory: [SYS][U0][COMP1: "Summarized U1,A1"][U2][A2]
+                       JSONL:  [SYS][U0][U1][A1][COMP1][U2][A2]
 
-More turns happen:   JSONL:  [SYS][U1][A1][COMP1][U2][A2][U3][A3]
+More turns happen:   JSONL:  [SYS][U0][U1][A1][COMP1][U2][A2][U3][A3]
 
-After 2nd compress:  Memory: [SYS][COMP1...][COMP2: "Summarized U2,A2"][U3][A3]
-                       JSONL:  [SYS][U1][A1][COMP1][U2][A2][COMP2][U3][A3]
+Feed to compressor: [COMP1][U2][A2]
 
-Working set feeds to LLM: [SYS][COMP1...][COMP2...][recent messages...]
+After 2nd compress:  Memory: [SYS][U0][COMP1...][COMP2: "Summarized U2,A2"][U3][A3]
+                       JSONL:  [SYS][U0][U1][A1][COMP1][U2][A2][COMP2][U3][A3]
+                       
+Working set feeds to LLM: [SYS][U0][COMP1...][COMP2...][recent messages...]
 ```
 
 **On Session Reload (crash recovery):** The system performs a single forward pass through the JSONL file, finds all compression markers, stacks them in order, and takes the tail after the last marker. This produces the same working set that would exist in memory — no backward scanning or complex reconstruction needed.

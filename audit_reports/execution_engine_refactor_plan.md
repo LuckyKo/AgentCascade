@@ -1,0 +1,2658 @@
+# Execution Engine Refactoring Plan
+
+**Target:** `agent_cascade/execution_engine.py` (3,727 lines → ~1,500 lines)  
+**Goal:** Extract into 5 focused classes with ZERO behavior changes via incremental migration  
+**Current State:** God Object doing orchestration, compression, lifecycle management, tool execution, and WebSocket streaming  
+
+---
+
+## 📋 Document Version: 3.1 Changelog
+
+**Document Version:** 3.1  
+**Updated:** 2026-06-17  
+**Changes from v3.0:** Added explicit nested _reacquire_slot() extraction in Phase 3.4 (rename to _reacquire_caller_slot()), added Phase 3.8 for _pre_llm_checks() extraction (~85 lines), added Phase 3.9 for _post_turn_checks() extraction (~82 lines), added _execute_tool() refactoring note in Phase 4.3, added module-level export preservation section in Phase 4.5, added deep copy preservation note in Phase 3.6.
+
+---
+
+## 📋 Reviewer Feedback Incorporated (Version 2.0)
+
+This plan has been updated based on comprehensive review feedback. Key changes from v1.0:
+
+### Critical Fixes
+1. **Circular Dependency Resolution:** Changed all handler classes to use lazy initialization pattern with `set_engine()` method called after `ExecutionEngine.__init__()` completes
+2. **CompressionHandler Tight Coupling:** Moved `_rebuild_working_set()` INTO `CompressionHandler` class instead of keeping it in `ExecutionEngine` and calling back
+3. **Token Cache Pattern:** Replaced awkward context manager pattern with explicit wrapper methods (`_append_to_conversation()`, etc.)
+
+### Major Improvements
+4. **Consolidated Helper Functions:** Reduced 5 proposed module-level helpers to 1 flexible `_msg_field()` function
+5. **Expanded Testing Strategy:** Added dedicated sections for:
+   - State machine transition tests (8+ state transitions)
+   - Concurrency and race condition tests
+   - WebSocket ordering tests
+   - Property-based tests for yield sequence verification
+6. **Added Missing Method Splitting:** Included `_call_llm_with_injection()` (~160 lines) in Phase 3.6
+
+### Timeline Updates
+7. **More Realistic Estimates:** 
+   - Phase 3: 6-8 hrs → **12-16 hrs** (2x for state machine complexity)
+   - Phase 4: 10-15 hrs → **18-24 hrs** (circular dependency resolution)
+   - Total: 31-44 hrs → **54-76 hrs** (~2 weeks full-time)
+
+---
+
+## Executive Summary
+
+This refactoring transforms the monolithic `ExecutionEngine` class (~3,727 lines) into 5 focused classes totaling ~1,500 lines. The strategy is **incremental extraction** — each phase maintains identical external behavior while reducing cyclomatic complexity from ~420-line methods to ~60-line focused units.
+
+### Target Architecture
+
+| Class | Responsibility | Lines (Before → After) | Files |
+|-------|----------------|------------------------|-------|
+| `ExecutionEngine` | Core turn loop, phase dispatch | 3,727 → ~600 | `execution_engine.py` |
+| `AgentLifecycleManager` | Instance creation, reuse, settings propagation | Extracted from `_create_and_run_agent()` (~510 lines) | `lifecycle_manager.py` |
+| `CompressionHandler` | All compression logic (force, command, tool) | Extracted from `_force_compression()` (~170 lines) + related | `compression_handler.py` |
+| `ToolDispatcher` | Tool execution, call_agent routing | Extracted from `_process_response()` (~290 lines), `_handle_call_agent()` (~250 lines) | `tool_dispatcher.py` |
+| `StreamPublisher` | WebSocket push, UI state updates | Extracted from ~18 scattered locations | `stream_publisher.py` |
+
+---
+
+## Phase Execution Order (MANDATORY)
+
+The following dependencies MUST be respected — violating them will cause code duplication or runtime errors:
+
+| Dependency | Reason |
+|-----------|--------|
+| **Phase 1.2 → Phase 3.1** | `_acquire_slot_with_logging()` must exist before SLEEPING extraction uses it |
+| **Phase 2.1 → Phases 3.2, 3.3** | Token cache context manager must exist before method extractions that mutate conversation |
+| **All Phase 3.x → Phase 4** | Method splitting must complete before class extraction |
+
+Within each phase, tasks can be done in any order unless otherwise noted.
+
+---
+
+## Phase 1: Quick Wins (No Behavior Change)
+
+**Estimated Time:** 2-3 hours  
+**Risk Level:** LOW  
+**Goal:** Clean up obvious issues before structural changes
+
+### 1.1 Remove Redundant Imports
+**Effort:** 15 min | **Risk:** Low
+
+- [ ] Remove `import re as _re` at L1522 (module already has `import re` at L18)
+- [ ] Remove `import re` at L3458 in `_strip_thinking_blocks()` (module-level import available)
+- [ ] Verify no other intra-function imports duplicate module-level ones
+
+**Files Modified:** `execution_engine.py`
+
+---
+
+### 1.2 Extract Slot Acquisition Helper (Fixes 3x Duplication)
+**Effort:** 45 min | **Risk:** Low
+
+The slot acquisition code is duplicated at L436, L513, and L608. Create a single helper:
+
+```python
+# NEW METHOD in ExecutionEngine (insert after __init__)
+def _acquire_slot_with_logging(self, instance: AgentInstance, context: str = "initial") -> None:
+    """Acquire concurrency slot with debug logging.
+    
+    Args:
+        instance: The agent instance acquiring the slot
+        context: Description of acquisition context ("initial", "after_async_wakeup", etc.)
+    """
+    if not hasattr(self.pool, '_acquire_slot'):
+        return
+        
+    try:
+        logger.debug(
+            f"[SLOT_ACQUIRE] {context} - instance={instance.instance_name}, "
+            f"class={instance.agent_class}"
+        )
+        instance._slot_release = self.pool._acquire_slot(
+            instance.agent_class, instance.instance_name
+        )
+        logger.debug(
+            f"[SLOT_ACQUIRED] {context} - instance={instance.instance_name}, "
+            f"has_callback={instance._slot_release is not None}"
+        )
+    except Exception as e:
+        logger.error(f"[SLOT_ACQUIRE_FAILED] {context} for {instance.instance_name}: {e}")
+        raise
+```
+
+Then replace the three duplicated blocks:
+- [ ] L436-449: Initial acquisition → `_acquire_slot_with_logging(instance, "initial")`
+- [ ] L513-525: After async wakeup → `_acquire_slot_with_logging(instance, "after_async_wakeup")`
+- [ ] L608-621: After stable-state drain → `_acquire_slot_with_logging(instance, "after_stable_drain")`
+
+**Files Modified:** `execution_engine.py`
+
+---
+
+### 1.3 Message Accessor Helpers (REMOVED - Merged into Phase 2.0)
+**Effort:** N/A | **Risk:** Low
+
+**REVIEWER UPDATE:** This section has been consolidated into Phase 2.0 which creates a single `_msg_field()` helper instead of 5 separate functions. See Phase 2.0 for the updated approach.
+
+**Files Modified:** None (moved to Phase 2)
+
+---
+
+### 1.4 Remove Dead "Bug3 Fix" Comments
+**Effort:** 15 min | **Risk:** Low
+
+Five identical "Bug3 fix" comments exist at L968, L1116, L1140, L2446, L2648. The bug is already fixed — these are now noise:
+
+- [ ] Remove comment at L968: `# ── Loop detection (with post-compression cooldown — Bug3 fix) ─────────────`
+- [ ] Remove comment at L1116: `# Bug3 fix: Set cooldown flag after successful recovery`
+- [ ] Remove comment at L1140: `# Bug3 fix: Set cooldown flag to suppress loop detection on next turn`
+- [ ] Remove comment at L2446: Same pattern in `_handle_compress_command()`
+- [ ] Remove comment at L2648: Same pattern in `_handle_compress_context()`
+
+**Files Modified:** `execution_engine.py`
+
+---
+
+### 1.5 Clean Up Debug Log Noise (47 Lines)
+**Effort:** 45 min | **Risk:** Low
+
+Many `[CALL_AGENT_DEBUG]` logs are verbose and redundant. Remove or downgrade:
+
+- [ ] L395-398: Entry debug log in `run()` → keep but reduce verbosity
+- [ ] L417-420, L439-446: Slot acquire logs → consolidate via helper (see 1.2)
+- [ ] L461-465: Early exit log → change to `logger.debug()` only
+- [ ] L488-495, L533-540, L571-574: SLEEPING state logs → reduce to essential info only
+- [ ] Systematic search for `[CALL_AGENT_DEBUG]` and evaluate each
+
+**Files Modified:** `execution_engine.py`
+
+---
+
+## Phase 2: Extract Helpers & Small Methods
+
+**Estimated Time:** 4-5 hours (updated from 3-4)  
+**Risk Level:** LOW-MEDIUM  
+**Goal:** Create reusable utilities before class extraction
+
+### 2.0 Message Field Accessor Helper (Replaces Section 1.3)
+**Effort:** 20 min | **Risk:** Low
+
+**REVIEWER UPDATE:** Consolidate the 5 proposed module-level helpers into a single flexible function to reduce global namespace pollution.
+
+Create ONE unified accessor instead of multiple specialized functions:
+
+```python
+# NEW MODULE-LEVEL FUNCTION (insert after line 42, before class definition)
+def _msg_field(msg, field: str, default=None):
+    """Unified field accessor for dict or Message objects.
+    
+    Args:
+        msg: Message object or dict with message fields
+        field: Field name to access ('role', 'content', 'extra', etc.)
+        default: Default value if field not found
+        
+    Returns:
+        Field value or default
+    """
+    return msg.get(field, default) if isinstance(msg, dict) else getattr(msg, field, default)
+
+# Usage examples:
+# _msg_field(msg, 'role')  # equivalent to _get_msg_role(msg)
+# _msg_field(msg, 'content', '')  # with default value
+# _msg_field(msg, 'extra')  # returns None if not present
+```
+
+Then systematically replace repetitive patterns where it genuinely helps (in loops, deeply nested code):
+- [ ] Keep specialized inline checks for simple cases: `if msg.get('role') == USER:`
+- [ ] Use `_msg_field()` in complex extraction logic (e.g., L1517-1542 normalization loop)
+- [ ] Document the dict/Message dual format with a comment at module level
+
+**Note:** Do NOT create separate `_get_msg_role()`, `_get_msg_content()`, etc. — one flexible helper is sufficient and reduces namespace pollution.
+
+**Files Modified:** `execution_engine.py`
+
+---
+
+### 2.1 Token Cache Invalidation Context Manager (REVIEWER UPDATE v3.0)
+**Effort:** 45 min | **Risk:** Low
+
+**REVIEWER FINDING #4:** The wrapper method approach was flawed — it forced compression locks around operations that don't need them, and `_clear_streaming_responses()` incorrectly invalidated tokens for uncommitted data. More importantly, mixing wrappers + scattered calls creates inconsistent patterns.
+
+Replace scattered `_invalidate_token_cache()` calls with a context manager that guarantees invalidation on any conversation mutation:
+
+```python
+# NEW MODULE-LEVEL FUNCTION (insert after line 100)
+
+from contextlib import contextmanager
+
+@contextmanager
+def token_cache_invalidated(instance: AgentInstance):
+    """Context manager that ensures token cache is invalidated after conversation mutation.
+    
+    Usage:
+        with token_cache_invalidated(instance):
+            instance.conversation.append(new_msg)
+            messages.append(new_msg)
+        # Token cache automatically invalidated here
+        
+    This replaces the pattern of manually calling _invalidate_token_cache() 
+    after every conversation mutation, which was error-prone and scattered across 16+ sites.
+    """
+    try:
+        yield
+    finally:
+        _invalidate_token_cache(instance)
+```
+
+Then replace scattered patterns:
+
+**BEFORE (L1573-1582):**
+```python
+# Append to all working sets
+response.extend(turn_output)
+messages.extend(turn_output)
+llm_messages.extend(turn_output)
+with instance._compression_lock:
+    instance.conversation.extend(turn_output)
+    instance._streaming_responses = []
+
+# Fix #2: Invalidate token count cache — conversation length changed
+_invalidate_token_cache(instance)
+```
+
+**AFTER:**
+```python
+response.extend(turn_output)
+messages.extend(turn_output)
+llm_messages.extend(turn_output)
+
+with token_cache_invalidated(instance):
+    with instance._compression_lock:
+        instance.conversation.extend(turn_output)
+        instance._streaming_responses = []
+# Token cache automatically invalidated — no manual call needed
+```
+
+**BEFORE (L1614-1619):**
+```python
+with instance._compression_lock:
+    instance.conversation.append(cont_msg)
+# Fix #2: Invalidate token count cache — conversation mutated
+_invalidate_token_cache(instance)
+```
+
+**AFTER:**
+```python
+with token_cache_invalidated(instance):
+    with instance._compression_lock:
+        instance.conversation.append(cont_msg)
+```
+
+Apply to all 16+ locations:
+- [ ] L366, L841, L1056, L1111 — Use `token_cache_invalidated()` context manager
+- [ ] L1210, L1582, L1619, L1734, L1784 — Same pattern
+- [ ] L2445, L2626, L2646, L2788, L2889, L3260 — Evaluate each for appropriate wrapping
+
+**Rationale:** The context manager guarantees invalidation even if an exception occurs mid-mutation. It's explicit about the scope of the mutation + invalidation boundary. Unlike wrapper methods, it doesn't force lock patterns or add semantic overhead — it simply wraps the mutation and ensures cleanup.
+
+**Note:** `_clear_streaming_responses()` is NOT wrapped with token cache invalidation because clearing streaming responses (uncommitted partial data) does not change the conversation content — no recount needed.
+
+**Files Modified:** `execution_engine.py`
+
+---
+
+### 2.2 Message Normalization Helpers
+**Effort:** 1 hour | **Risk:** Low-Medium
+
+Extract normalization logic from `_process_response()` (L1504-1796):
+
+```python
+# NEW MODULE-LEVEL FUNCTIONS
+
+def _normalize_gemma_thought_tags(msg: Message) -> None:
+    """Normalize Gemma <|channel>thought tags into reasoning_content.
+    
+    Modifies msg in-place to extract thought content into reasoning_content field.
+    
+    Args:
+        msg: Message dict or object with 'content' and 'reasoning_content' fields
+    """
+    content = _get_msg_content(msg)
+    if not _get_msg_function_call(msg) and isinstance(content, str) and '<|channel>thought' in content.lower():
+        match = re.search(r'^\s*<\|channel>thought\n?([\s\S]*?)(?:\n?<channel\|>|$)', content, re.IGNORECASE)
+        if match:
+            if isinstance(msg, dict):
+                msg['reasoning_content'] = match.group(1).strip()
+                msg['content'] = re.sub(r'^\s*<\|channel>thought\n?[\s\S]*?(?:\n?<channel\|>|$)', '', content, count=1, flags=re.IGNORECASE).strip()
+            else:
+                msg.reasoning_content = match.group(1).strip()
+                msg.content = re.sub(r'^\s*<\|channel>thought\n?[\s\S]*?(?:\n?<channel\|>|$)', '', content, count=1, flags=re.IGNORECASE).strip()
+
+def _normalize_thinking_blocks(text: str) -> str:
+    """Strip thinking blocks from text to prevent tag pollution.
+    
+    Args:
+        text: Raw text that may contain thinking tags
+        
+    Returns:
+        Cleaned text with thinking blocks removed
+    """
+    # Extract this logic from _strip_thinking_blocks() at L3456
+    ...
+
+def _normalize_tool_arguments(func_call: Any) -> None:
+    """Clean thinking blocks from function call arguments.
+    
+    Modifies func_call in-place.
+    
+    Args:
+        func_call: FunctionCall object or dict with 'arguments' field
+    """
+    if isinstance(func_call, dict) and func_call.get('arguments'):
+        func_call['arguments'] = _normalize_thinking_blocks(func_call['arguments'])
+    elif hasattr(func_call, 'arguments'):
+        func_call.arguments = _normalize_thinking_blocks(func_call.arguments)
+
+def _check_message_truncation(msg: Message) -> bool:
+    """Check if message was truncated (finish_reason == 'length').
+    
+    Args:
+        msg: Message to check
+        
+    Returns:
+        True if message indicates truncation
+    """
+    extra = _get_msg_extra(msg)
+    return extra is not None and extra.get('finish_reason') == 'length'
+```
+
+Then refactor `_process_response()` L1517-1542 to use these helpers.
+
+**Files Modified:** `execution_engine.py`
+
+---
+
+### 2.3 Extract Slot Release Helper
+**Effort:** 30 min | **Risk:** Low
+
+The slot release logic in `_release_slot()` (L1884) is already a method but is called inconsistently. Ensure uniform usage:
+
+```python
+# ENHANCE existing _release_slot() at L1884 with better logging and error handling
+def _release_slot(self, instance: AgentInstance, inst_name: str, context: str = "cleanup") -> None:
+    """Release concurrency slot if held.
+    
+    Args:
+        instance: The agent instance
+        inst_name: Instance name for logging
+        context: Release context ("sync_child", "wakeup", "cleanup", etc.)
+    """
+    if hasattr(instance, '_slot_release') and instance._slot_release is not None:
+        logger.debug(
+            f"[SLOT_RELEASE] {context} - instance={inst_name}, releasing slot"
+        )
+        try:
+            instance._slot_release()
+            instance._slot_release = None
+        except Exception as e:
+            logger.error(f"[SLOT_RELEASE_FAILED] {context} for {inst_name}: {e}")
+```
+
+Ensure all slot releases use this helper with appropriate context labels.
+
+**Files Modified:** `execution_engine.py`
+
+---
+
+### 2.4 Address Remaining Medium Audit Findings (M3, M6)
+**Effort:** 1 hour | **Risk:** Low
+
+#### M3: Move `validate_message_pool()` to Compression Module
+The function `validate_message_pool()` at L3663-3727 is called from compression code paths but lives in `execution_engine.py`. This creates tight coupling — the compression module should own its own validation.
+
+**Action:**
+- [ ] Move `validate_message_pool()` to `agent_cascade/compression/helpers.py`
+- [ ] Update imports in `execution_engine.py` to import from new location:
+  ```python
+  from agent_cascade.compression.helpers import validate_message_pool
+  ```
+- [ ] Update any other callers (api_integration.py, etc.)
+
+#### M6: Replace Feature Number Tags with Descriptive Comments
+Comments like `# Feature 006`, `# Feature 018`, `# Feature 019` reference opaque feature numbers. Replace with brief descriptions:
+
+**Action:** Search for each tag and replace:
+- [ ] `# Feature 006` → `# Ground-truth token counts from last LLM call (fixes force compression loop bug)`
+- [ ] `# Feature 018` → `# Compression cooldown and overfeeding detection`  
+- [ ] `# Feature 019` → `# Optimized rebuild with proper cache invalidation`
+- [ ] `# Feature 022` → Replace with appropriate description based on context
+
+If a feature tag is already well-explained by surrounding comments, it can be removed entirely rather than duplicated.
+
+**Files Modified:** `execution_engine.py`, `compression/helpers.py`
+
+---
+
+## Phase 3: Method Splitting
+
+**Estimated Time:** 6-8 hours  
+**Risk Level:** MEDIUM  
+**Goal:** Break down large methods into focused sub-methods
+
+### 3.1 Split `run()` (L382-796, ~420 lines)
+
+**Target:** Extract SLEEPING state logic (~167 lines L475-637)
+
+#### Add SleepAction Enum
+```python
+from enum import Enum, auto
+
+class SleepAction(Enum):
+    """Actions returned by _handle_sleeping_state() to control the main loop."""
+    CONTINUE_LOOP = auto()  # Re-enter while loop (with possible yield)
+    BREAK_LOOP = auto()     # Transitioned to COMPLETING/TERMINATED, exit while loop
+```
+
+#### Extract: `_handle_sleeping_state()`
+```python
+def _handle_sleeping_state(
+    self, 
+    instance: AgentInstance,
+    messages: List[Message],
+    llm_messages: List[Message],
+    response: List[Message]
+) -> Tuple[SleepAction, Optional[List[Message]]]:
+    """Handle SLEEPING state wakeup logic.
+    
+    Args:
+        instance: Current agent instance
+        messages, llm_messages, response: Working message sets
+        
+    Returns:
+        Tuple of (action, optional_yield_value)
+        - action = CONTINUE_LOOP means re-enter the while loop
+        - action = BREAK_LOOP means exit the while loop
+        - yield_value=None means no special yield needed before continuing/breaking
+        - yield_value=[] means yield empty list (signals waiting state)
+    """
+    inst_name = instance.instance_name
+    
+    # Drain async results
+    async_results = self.pool.drain_async_results(inst_name)
+    
+    if async_results:
+        # Wake up path
+        with instance._state_lock:
+            if instance.state == AgentState.TERMINATED:
+                return SleepAction.BREAK_LOOP, None  # Break loop
+            instance._transition(AgentState.RUNNING)
+            instance.sleeping_since = None
+            instance._last_wakeup_log = time.monotonic()
+        
+        # Inject async results + user messages
+        self._drain_and_inject(...)  # Keep existing logic
+        
+        # Re-acquire slot
+        self._acquire_slot_with_logging(instance, "after_async_wakeup")
+        
+        return SleepAction.CONTINUE_LOOP, None  # Continue loop
+    
+    elif self.pool.has_pending(inst_name):
+        # Still waiting path
+        if instance.state == AgentState.TERMINATED:
+            return SleepAction.BREAK_LOOP, None
+        
+        # Check timeout
+        sleeping_duration = ...  # Keep existing logic
+        if sleeping_duration >= sleeping_timeout:
+            # Timeout path
+            ...
+            return SleepAction.BREAK_LOOP, None  # Break after yield
+        
+        # Log wakeup message periodically
+        ...
+        
+        return SleepAction.CONTINUE_LOOP, []  # Yield empty list for waiting state
+    
+    else:
+        # No pending tools path
+        results_found = False
+        while self._drain_and_inject(...):
+            results_found = True
+        
+        if results_found:
+            # Transition to RUNNING
+            ...
+            return SleepAction.CONTINUE_LOOP, None  # Continue loop
+        
+        # Transition to COMPLETING
+        ...
+        return SleepAction.BREAK_LOOP, None  # Break after yield
+```
+
+Then `run()` becomes:
+```python
+while turns_available > 0:
+    if instance.state == AgentState.SLEEPING:
+        action, yield_value = self._handle_sleeping_state(...)
+        if yield_value is not None:
+            yield yield_value
+        if action == SleepAction.BREAK_LOOP:
+            break
+        # Otherwise CONTINUE_LOOP — continue to next iteration
+    
+    # Rest of loop continues...
+```
+
+**Steps:**
+- [ ] Extract `_handle_sleeping_state()` method
+- [ ] Refactor `run()` to call it
+- [ ] Test with existing test suite
+- [ ] Verify behavior unchanged
+
+---
+
+### 3.2 Split `_create_and_run_agent()` (L2675-3184, ~510 lines)
+
+**Target:** Extract into focused sub-methods
+
+#### Extract: `_find_or_create_instance()`
+```python
+def _find_or_create_instance(
+    self, 
+    agent_class: str, 
+    instance_name: str,
+    caller: str,
+    nest_depth: int,
+    force_fresh: bool = False
+) -> Tuple[AgentInstance, bool]:
+    """Find existing inactive instance or create new one.
+    
+    Args:
+        agent_class: Template class name
+        instance_name: Unique instance identifier
+        caller: Parent instance name
+        nest_depth: Depth in call chain
+        force_fresh: If True, always create new instance
+        
+    Returns:
+        Tuple of (instance, is_reuse)
+    """
+    # Extract logic from L2699-2751
+    ...
+```
+
+#### Extract: `_build_system_message()`
+```python
+def _build_system_message(
+    self, 
+    agent_class: str, 
+    instance_name: str
+) -> Message:
+    """Build system message for new agent.
+    
+    Args:
+        agent_class: Template class name
+        instance_name: Instance name to inject into template
+        
+    Returns:
+        System Message object
+    """
+    # Extract logic from L2753-2774
+    ...
+```
+
+#### Extract: `_build_task_message()`
+```python
+def _build_task_message(
+    self, 
+    args: dict, 
+    caller: str
+) -> Message:
+    """Build task message with multimodal image propagation.
+    
+    Args:
+        args: Tool arguments (task, context)
+        caller: Parent instance name to scan for images
+        
+    Returns:
+        Task Message object (possibly with multimodal content)
+    """
+    # Extract logic from L2808-2867 including image scanning
+    ...
+```
+
+#### Extract: `_initialize_instance_conversation()`
+```python
+def _initialize_instance_conversation(
+    self,
+    instance: AgentInstance,
+    sys_msg: Message,
+    task_msg: Message,
+    is_reuse: bool
+) -> List[Message]:
+    """Initialize or extend instance conversation.
+    
+    Args:
+        instance: AgentInstance to initialize
+        sys_msg: System message
+        task_msg: Task message
+        is_reuse: Whether reusing existing instance
+        
+    Returns:
+        Conversation list
+    """
+    # Extract logic from L2870-2897
+    ...
+```
+
+#### Extract: `_propagate_settings()`
+```python
+def _propagate_settings(
+    self,
+    instance: AgentInstance,
+    caller: str,
+    agent_class: str
+) -> None:
+    """Propagate settings from caller to child instance.
+    
+    Propagates max_turns, max_input_tokens, and disabled_tools.
+    
+    Args:
+        instance: Child instance to configure
+        caller: Parent instance name
+        agent_class: Child's agent class
+    """
+    # Extract logic from L2899-2962
+    ...
+```
+
+#### Extract: `_push_subagent_stream_update()`
+```python
+def _push_subagent_stream_update(
+    self,
+    pool: AgentPool,
+    caller: str
+) -> None:
+    """Push stream update to WebSocket for sub-agent visibility.
+    
+    Args:
+        pool: AgentPool with WebSocket queue
+        caller: Root instance name for header stats
+    """
+    # Extract logic from L2993-3007, reuse throughout method
+    ...
+```
+
+Then `_create_and_run_agent()` becomes a coordinator:
+```python
+def _create_and_run_agent(...):
+    # 1. Find or create instance
+    inst, is_reuse = self._find_or_create_instance(...)
+    
+    # 2. Build messages
+    sys_msg = self._build_system_message(...)
+    task_msg = self._build_task_message(...)
+    
+    # 3. Initialize conversation
+    conv = self._initialize_instance_conversation(...)
+    
+    # 4. Propagate settings
+    self._propagate_settings(...)
+    
+    # 5. Track in active stack
+    ...
+    
+    # 6. Push initial stream update
+    self._push_subagent_stream_update(...)
+    
+    # 7. Execute loop with periodic updates
+    for resp in self.run(inst):
+        ...
+        if should_push_update:
+            self._push_subagent_stream_update(...)
+    
+    # 8. Cleanup
+    ...
+```
+
+**Steps:**
+- [ ] Extract each sub-method one at a time
+- [ ] Refactor `_create_and_run_agent()` incrementally
+- [ ] Test after each extraction
+- [ ] Verify no behavior changes
+
+---
+
+### 3.3 Split `_process_response()` (L1504-1796, ~290 lines)
+
+**Target:** Extract normalization and tool execution logic
+
+#### Extract: `_normalize_turn_output()`
+```python
+def _normalize_turn_output(self, turn_output: List[Message]) -> None:
+    """Normalize messages in-place (Gemma tags, thinking blocks).
+    
+    Args:
+        turn_output: List of messages to normalize (modified in-place)
+    """
+    # Extract logic from L1517-1542
+    for msg in turn_output:
+        _normalize_gemma_thought_tags(msg)
+        if msg.get('reasoning_content'):
+            ...
+        _normalize_tool_arguments(...)
+```
+
+#### Extract: `_log_messages_to_jsonl()`
+```python
+def _log_messages_to_jsonl(
+    self,
+    instance: AgentInstance,
+    messages_to_log: List[Message],
+    conv: List[Message]
+) -> None:
+    """Persist messages to JSONL log file.
+    
+    Args:
+        instance: Agent instance for logger lookup
+        messages_to_log: Messages to log
+        conv: Full conversation for already_logged_count calculation
+    """
+    # Extract logic from L1548-1570
+    ...
+```
+
+#### Extract: `_check_and_handle_truncation()`
+```python
+def _check_and_handle_truncation(
+    self,
+    turn_output: List[Message],
+    instance: AgentInstance,
+    messages: List[Message],
+    llm_messages: List[Message]
+) -> bool:
+    """Check for truncation and inject continue message if needed.
+    
+    Args:
+        turn_output: Messages from LLM
+        instance, messages, llm_messages: Working sets
+        
+    Returns:
+        True if truncation detected and continue message injected
+    """
+    # Extract logic from L1607-1620
+    for msg in turn_output:
+        if _check_message_truncation(msg):
+            ...
+            return True
+    return False
+```
+
+#### Extract: `_execute_detected_tools()`
+```python
+def _execute_detected_tools(
+    self,
+    instance: AgentInstance,
+    turn_output: List[Message],
+    llm_messages: List[Message]
+) -> bool:
+    """Execute tools detected in turn output.
+    
+    Args:
+        instance: Calling agent instance
+        turn_output: Messages to scan for tool calls
+        llm_messages: Working set for tool result injection
+        
+    Returns:
+        True if any tools were executed
+    """
+    # Extract logic from L1622-1795 (tool detection + execution loop)
+    ...
+```
+
+**Steps:**
+- [ ] Extract each helper method
+- [ ] Refactor `_process_response()` to use helpers
+- [ ] Test tool execution paths thoroughly
+
+---
+
+### 3.4 Split `_handle_call_agent()` (L2120-2370, ~250 lines)
+
+**Target:** Extract nested function and sync/async branching logic
+
+#### Extract: `_validate_call_agent_args()`
+```python
+def _validate_call_agent_args(
+    self,
+    args: Any,
+    caller_name: str
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Validate call_agent tool arguments.
+    
+    Args:
+        args: Tool arguments
+        caller_name: Caller instance name for error messages
+        
+    Returns:
+        Tuple of (instance_name, agent_class, error_message)
+        error_message is None if validation passed
+    """
+    # Extract validation logic from L2140-2153
+    ...
+```
+
+#### Extract: `_check_nesting_depth()`
+```python
+def _check_nesting_depth(
+    self,
+    caller_name: str,
+    child_depth: int
+) -> Optional[str]:
+    """Check if nesting depth limit exceeded.
+    
+    Args:
+        caller_name: Caller instance name
+        child_depth: Proposed depth for child
+        
+    Returns:
+        Error message if depth exceeded, None otherwise
+    """
+    # Extract logic from L2181-2198
+    ...
+```
+
+#### Extract: `_run_child_sync()`
+```python
+def _run_child_sync(
+    self,
+    agent_class: str,
+    instance_name: str,
+    args: dict,
+    caller: AgentInstance,
+    child_depth: int
+) -> str:
+    """Run child agent synchronously (caller holds slot).
+    
+    This method:
+    1. Releases caller's slot
+    2. Runs _create_and_run_agent()
+    3. Re-acquires caller's slot
+    4. Extracts and returns result
+    
+    Args:
+        agent_class, instance_name, args, caller, child_depth
+        
+    Returns:
+        Result string from child agent
+    """
+    # Extract SYNC path logic from L2217-2340
+    # Including the _reacquire_slot() nested function
+    ...
+```
+
+#### Extract: `_run_child_async()`
+```python
+def _run_child_async(
+    self,
+    caller_name: str,
+    function_id: Optional[str],
+    agent_class: str,
+    instance_name: str,
+    args: dict,
+    caller: str,
+    nest_depth: int
+) -> str:
+    """Run child agent asynchronously via register_async_call.
+    
+    Args:
+        caller_name, function_id, agent_class, instance_name, args, caller, nest_depth
+        
+    Returns:
+        Async confirmation message
+    """
+    # Extract ASYNC path logic from L2341-2369
+    ...
+```
+
+#### Extract: `_reacquire_caller_slot()`
+The actual code has a **nested function** `_reacquire_slot()` defined inside `_handle_call_agent()` at L2230-2266. This must be lifted to method level:
+- Rename to `_reacquire_caller_slot()` for clarity (avoid confusion with existing `_release_slot()`)
+- Move to method level in ExecutionEngine
+- Update calls at L2298, L2331 to use the new method
+- The nested function has closure over `self.pool` which becomes explicit as a method parameter
+
+```python
+def _reacquire_caller_slot(
+    self,
+    slot_holder: AgentInstance,
+    slot_holder_name: str,
+    context_label: str
+) -> bool:
+    """Retry acquiring caller's released slot after sync child completes.
+    
+    Args:
+        slot_holder: The instance that held the original slot
+        slot_holder_name: Name for logging
+        context_label: Context description for logging
+        
+    Returns:
+        True if slot re-acquired, False if timeout exceeded.
+    """
+    # Extract nested function logic from L2230-2266
+    # This was a nested function with closure over self.pool
+    # Now becomes a proper method with explicit parameters
+    ...
+```
+
+Then `_handle_call_agent()` becomes:
+```python
+def _handle_call_agent(...):
+    # Validate args
+    instance_name, agent_class, error = self._validate_call_agent_args(...)
+    if error:
+        return error
+    
+    # Check nesting depth
+    depth_error = self._check_nesting_depth(...)
+    if depth_error:
+        return depth_error
+    
+    # Check slot collision
+    caller_holds_slot = ...
+    
+    if caller_holds_slot:
+        return self._run_child_sync(...)
+    else:
+        return self._run_child_async(...)
+```
+
+**Steps:**
+- [ ] Extract validation methods
+- [ ] Extract sync/async path methods
+- [ ] Lift nested `_reacquire_slot()` to method level as `_reacquire_caller_slot()`
+- [ ] Update all call sites within the extracted methods
+- [ ] Refactor `_handle_call_agent()` to coordinator pattern
+- [ ] Test slot reacquisition path with mock pool
+- [ ] Test both sync and async paths
+
+---
+
+### 3.5 Split `_force_compression()` (L986-1159, ~170 lines)
+
+**Target:** Extract recovery logic
+
+---
+
+### 3.6 Split `_call_llm_with_injection()` (L1258-1417, ~160 lines) — REVIEWER ADDITION
+
+**REVIEWER FINDING #10:** The audit flagged this method as high-priority but the plan missed it entirely.
+
+**Target:** Extract retry logic and error classification
+
+#### Extract: `_execute_llm_call_with_retry()`
+```python
+def _execute_llm_call_with_retry(
+    self,
+    instance: AgentInstance,
+    llm_messages: List[Message]
+) -> Iterator[Optional[Message]]:
+    """Execute LLM call with retry logic and streaming injection.
+    
+    Extracts from _call_llm_with_injection() L1258-1417:
+    - Retry loop with exponential backoff
+    - Error classification (timeout, network, API error)
+    - Streaming response handling
+    - [RETRYING] message injection for UI
+    
+    Args:
+        instance: Agent instance making the call
+        llm_messages: Messages to send to LLM
+        
+    Yields:
+        Optional[Message]: Streaming updates or None for progress
+    """
+    max_retries = 3
+    base_delay = 1.0
+    
+    for attempt in range(max_retries):
+        try:
+            # Execute LLM call
+            response = self._execute_llm_call(instance, llm_messages)
+            
+            # Stream the response with injection points
+            for chunk in self._stream_response(response, instance):
+                yield chunk
+            
+            return  # Success, exit retry loop
+            
+        except TimeoutError as e:
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)  # Exponential backoff
+                logger.warning(f"LLM call timeout for {instance.instance_name}, retrying in {delay}s...")
+                yield self._make_retrying_message(instance, attempt + 1, delay)
+                time.sleep(delay)
+            else:
+                logger.error(f"LLM call failed after {max_retries} attempts: {e}")
+                yield self._make_error_message(instance, str(e))
+        
+        except Exception as e:
+            # Classify error type
+            error_type = self._classify_llm_error(e)
+            if error_type == 'retryable' and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                yield self._make_retrying_message(instance, attempt + 1, delay)
+                time.sleep(delay)
+            else:
+                logger.error(f"LLM call failed for {instance.instance_name}: {e}")
+                yield self._make_error_message(instance, str(e))
+```
+
+#### Extract: `_classify_llm_error()`
+```python
+def _classify_llm_error(self, error: Exception) -> str:
+    """Classify LLM error as 'retryable', 'fatal', or 'unknown'.
+    
+    Args:
+        error: The exception that occurred
+        
+    Returns:
+        Error classification string
+    """
+    error_msg = str(error).lower()
+    
+    # Retryable errors (transient)
+    retryable_indicators = [
+        'timeout', '502', '503', '504', 'connection reset',
+        'temporary', 'rate limit', 'try again'
+    ]
+    if any(ind in error_msg for ind in retryable_indicators):
+        return 'retryable'
+    
+    # Fatal errors (won't fix with retry)
+    fatal_indicators = [
+        '401', '403', '404', 'invalid token', 'auth',
+        'invalid request', 'malformed'
+    ]
+    if any(ind in error_msg for ind in fatal_indicators):
+        return 'fatal'
+    
+    return 'unknown'  # Default to retryable
+```
+
+#### Extract: `_make_retrying_message()`
+```python
+def _make_retrying_message(
+    self,
+    instance: AgentInstance,
+    attempt: int,
+    delay: float
+) -> Message:
+    """Create [RETRYING] notification message for UI.
+    
+    Args:
+        instance: Agent instance
+        attempt: Current retry attempt number
+        delay: Seconds until next retry
+        
+    Returns:
+        Transient Message object (not added to conversation history)
+    """
+    return Message(
+        role=ASSISTANT,
+        content=f"[RETRYING {instance.instance_name}: Attempt {attempt}, retrying in {delay:.1f}s...]"
+    )
+```
+
+Then `_call_llm_with_injection()` becomes:
+```python
+def _call_llm_with_injection(
+    self,
+    instance: AgentInstance,
+    llm_messages: List[Message]
+) -> Iterator[Optional[Message]]:
+    """Delegate to retry logic — now ~30 lines."""
+    yield from self._execute_llm_call_with_retry(instance, llm_messages)
+```
+
+**Steps:**
+- [ ] Extract `_execute_llm_call_with_retry()` with full retry loop
+- [ ] Extract `_classify_llm_error()` helper
+- [ ] Extract `_make_retrying_message()` and `_make_error_message()` helpers
+- [ ] Refactor `_call_llm_with_injection()` to delegate
+- [ ] Test retry paths (timeout, network error, API error)
+
+**⚠️ Important:** Preserve `copy.deepcopy(last_output)` at L1256 when updating `_streaming_responses`. This snapshot pattern prevents UI from seeing mutated partial data during streaming. Do NOT optimize this away — it's a correctness guarantee, not a performance concern.
+
+---
+
+#### Extract: `_check_compression_cooldown()`
+```python
+def _check_compression_cooldown(
+    self,
+    instance: AgentInstance,
+    llm_messages: List[Message],
+    usage_pct: float
+) -> bool:
+    """Check if compression cooldown is active.
+    
+    Args:
+        instance: Agent instance
+        llm_messages: Working set for warning injection
+        usage_pct: Current token usage percentage
+        
+    Returns:
+        True if cooldown active (skip compression this cycle)
+    """
+    # Extract logic from L993-1009
+    ...
+```
+
+#### Extract: `_check_overfeeding()`
+```python
+def _check_overfeeding(
+    self,
+    instance: AgentInstance,
+    llm_messages: List[Message]
+) -> bool:
+    """Check if overfeeding threshold exceeded.
+    
+    Args:
+        instance: Agent instance
+        llm_messages: Working set for notification injection
+        
+    Returns:
+        True if overfeeding detected (terminate agent)
+    """
+    # Extract logic from L1015-1029
+    ...
+```
+
+#### Extract: `_execute_force_compression()`
+```python
+def _execute_force_compression(
+    self,
+    instance: AgentInstance,
+    messages: List[Message],
+    llm_messages: List[Message],
+    usage_pct: float
+) -> bool:
+    """Execute forced compression and rebuild working set.
+    
+    Args:
+        instance, messages, llm_messages, usage_pct
+        
+    Returns:
+        True if compression successful
+    """
+    # Extract core compression logic from L1037-1158
+    # Including _rebuild_working_set() call and notification injection
+    ...
+```
+
+**Steps:**
+- [ ] Extract cooldown check
+- [ ] Extract overfeeding detection
+- [ ] Extract core compression execution
+- [ ] Refactor `_force_compression()` to sequential checks
+
+---
+
+### 3.7 Split `_handle_compress_command()` (L2468-2673, ~205 lines)
+
+**Target:** Extract command processing logic into focused sub-methods
+
+This method handles the `/compress` user command with a multi-step workflow: detect → parse → preview → approve → apply. Each step should be independently testable.
+
+#### Extract: `_detect_and_parse_compress_command()`
+```python
+def _detect_and_parse_compress_command(
+    self,
+    instance: AgentInstance,
+    messages: List[Message]
+) -> Optional[float]:
+    """Detect /compress command and parse fraction parameter.
+    
+    Scans the last user message for /compress command pattern.
+    
+    Args:
+        instance: Current agent instance
+        messages: Working message list
+        
+    Returns:
+        Fraction value (0.1-0.9) if command detected, None otherwise.
+    """
+```
+
+#### Extract: `_generate_compression_preview()`
+```python
+def _generate_compression_preview(
+    self,
+    instance: AgentInstance,
+    fraction: float
+) -> Optional[str]:
+    """Generate compression preview in dry_run mode.
+    
+    Args:
+        instance: Current agent instance
+        fraction: Compression fraction
+        
+    Returns:
+        Preview text string if successful, None on failure.
+    """
+```
+
+#### Extract: `_request_user_approval()`
+```python
+def _request_user_approval(
+    self,
+    preview_text: str,
+    inst_name: str
+) -> bool:
+    """Request user approval for compression via UI.
+    
+    Args:
+        preview_text: The compression preview to show
+        inst_name: Instance name for logging
+        
+    Returns:
+        True if approved, False if rejected.
+    """
+```
+
+#### Extract: `_apply_approved_compression()`
+```python
+def _apply_approved_compression(
+    self,
+    instance: AgentInstance,
+    messages: List[Message],
+    llm_messages: List[Message],
+    fraction: float,
+    inst_name: str
+) -> bool:
+    """Apply compression with validation and recovery.
+    
+    Executes actual compression, validates message pool, attempts recovery if needed,
+    syncs logger history, and sets loop detection cooldown flag.
+    
+    Args:
+        instance: Current agent instance
+        messages, llm_messages: Working message sets
+        fraction: Compression fraction
+        inst_name: Instance name for logging
+        
+    Returns:
+        True if compression succeeded (continue loop), False otherwise.
+    """
+```
+
+Then `_handle_compress_command()` becomes a coordinator:
+```python
+def _handle_compress_command(self, instance, messages, llm_messages):
+    # 1. Detect and parse command
+    fraction = self._detect_and_parse_compress_command(instance, messages)
+    if fraction is None:
+        return False
+    
+    # 2. Generate preview
+    preview = self._generate_compression_preview(instance, fraction)
+    if not preview:
+        return False
+    
+    # 3. Request approval
+    if not self._request_user_approval(preview, inst_name):
+        return True  # User rejected — continue loop without compression
+    
+    # 4. Apply compression
+    return self._apply_approved_compression(instance, messages, llm_messages, fraction, inst_name)
+```
+
+**Steps:**
+- [ ] Extract `_detect_and_parse_compress_command()` method
+- [ ] Extract `_generate_compression_preview()` method
+- [ ] Extract `_request_user_approval()` method
+- [ ] Extract `_apply_approved_compression()` method (includes pool validation + recovery logic from L2587-2664)
+- [ ] Refactor `_handle_compress_command()` to call the extracted methods
+- [ ] Test with existing test suite
+
+**Estimated Effort:** 3-4 hours  
+**Risk Level:** Medium — approval flow involves UI integration which is hard to mock
+
+---
+
+### 3.8 Split `_pre_llm_checks()` (L901-986, ~85 lines)
+
+**Target:** Extract into focused check methods
+
+This method handles stop/halt checks, async message injection, compression trigger, and loop detection — each with independent return paths.
+
+#### Extract: `_check_stop_conditions()`
+```python
+def _check_stop_conditions(self, instance: AgentInstance) -> bool:
+    """Check for pool stopped, instance halted, or terminated states.
+    
+    Args:
+        instance: Current agent instance
+        
+    Returns:
+        True if any stop condition met (skip LLM call), False otherwise.
+    """
+    # Extract logic from L901-920
+    ...
+```
+
+#### Extract: `_inject_async_messages()`
+```python
+def _inject_async_messages(
+    self,
+    instance: AgentInstance,
+    messages: List[Message],
+    llm_messages: List[Message],
+    response: List[Message]
+) -> bool:
+    """Drain and inject async results that arrived during LLM call.
+    
+    Args:
+        instance: Current agent instance
+        messages, llm_messages, response: Working message sets
+        
+    Returns:
+        True if any messages were injected (need to re-process), False otherwise.
+    """
+    # Extract logic from L921-945
+    ...
+```
+
+#### Extract: `_check_and_trigger_compression()`
+```python
+def _check_and_trigger_compression(
+    self,
+    instance: AgentInstance,
+    messages: List[Message],
+    llm_messages: List[Message]
+) -> bool:
+    """Calculate usage percentage and trigger force compression if needed.
+    
+    Also injects warning at lower thresholds.
+    
+    Args:
+        instance: Current agent instance
+        messages, llm_messages: Working message sets
+        
+    Returns:
+        True if compression was triggered (skip LLM call), False otherwise.
+    """
+    # Extract logic from L946-980
+    ...
+```
+
+Then `_pre_llm_checks()` becomes a ~20-line coordinator:
+```python
+def _pre_llm_checks(self, instance, messages, llm_messages, response, turns_available) -> bool:
+    # 1. Stop/halt checks
+    if self._check_stop_conditions(instance):
+        return True
+    
+    # 2. Async message injection
+    if self._inject_async_messages(instance, messages, llm_messages, response):
+        return True
+    
+    # 3. Compress command check
+    if self._handle_compress_command(instance, messages, llm_messages):
+        return True
+    
+    # 4. Compression trigger
+    if self._check_and_trigger_compression(instance, messages, llm_messages):
+        return True
+    
+    # 5. Loop detection
+    if not getattr(instance, '_suppress_loop_detection_next_turn', False):
+        loop_info = self._detect_loop(messages)
+        if loop_info:
+            reason, pop_count = loop_info
+            raise LoopDetectedError(reason=reason, pop_count=pop_count)
+        instance._suppress_loop_detection_next_turn = False
+    
+    return False  # Continue to LLM call normally
+```
+
+**Steps:**
+- [ ] Extract `_check_stop_conditions()` method
+- [ ] Extract `_inject_async_messages()` method
+- [ ] Extract `_check_and_trigger_compression()` method
+- [ ] Refactor `_pre_llm_checks()` to coordinator pattern
+- [ ] Test each check independently with mock instances
+
+**Estimated Effort:** 2-3 hours  
+**Risk Level:** Low — each check is self-contained with clear boolean returns
+
+---
+
+### 3.9 Split `_post_turn_checks()` (L1798-1880, ~82 lines)
+
+**Target:** Extract completion detection and state transition logic
+
+This method handles final answer detection, thinking-only detection, SLEEPING transitions, and post-generation message drain — each with complex internal logic.
+
+#### Extract: `_check_for_tool_calls_in_output()`
+```python
+def _check_for_tool_calls_in_output(
+    self,
+    instance: AgentInstance,
+    response: List[Message]
+) -> bool:
+    """Scan last assistant messages for unexecuted tool calls.
+    
+    If tool calls found, they will be executed in the next turn loop iteration.
+    
+    Args:
+        instance: Current agent instance
+        response: Accumulated response messages
+        
+    Returns:
+        True if tool calls were found (continue looping), False if no more tools to execute.
+    """
+    # Extract logic from L1802-1820
+    ...
+```
+
+#### Extract: `_detect_pure_thinking_turn()`
+```python
+def _detect_pure_thinking_turn(
+    self,
+    instance: AgentInstance,
+    response: List[Message]
+) -> bool:
+    """Check if last turn was reasoning-only without real content.
+    
+    Detects when the LLM produces only thinking blocks with no substantive output,
+    which indicates a stalled agent that should be interrupted.
+    
+    Args:
+        instance: Current agent instance
+        response: Accumulated response messages
+        
+    Returns:
+        True if pure thinking detected (should break), False otherwise.
+    """
+    # Extract logic from L1821-1845
+    ...
+```
+
+#### Extract: `_transition_to_sleeping_if_pending()`
+```python
+def _transition_to_sleeping_if_pending(
+    self,
+    instance: AgentInstance,
+    inst_name: str
+) -> bool:
+    """Handle SLEEPING state transition when async tools are pending.
+    
+    If there are pending background tools and no more tool calls to execute,
+    transition the agent to SLEEPING state while waiting for results.
+    
+    Args:
+        instance: Current agent instance
+        inst_name: Instance name for logging
+        
+    Returns:
+        True if transitioned (continue looping), False if not sleeping.
+    """
+    # Extract logic from L1846-1865
+    ...
+```
+
+#### Extract: `_drain_post_generation_messages()`
+```python
+def _drain_post_generation_messages(
+    self,
+    instance: AgentInstance,
+    inst_name: str,
+    messages: List[Message],
+    llm_messages: List[Message],
+    response: List[Message]
+) -> bool:
+    """Drain queued messages that arrived after turn completion.
+    
+    Also performs safety drain for race conditions.
+    
+    Args:
+        instance: Current agent instance
+        inst_name: Instance name for logging
+        messages, llm_messages, response: Working message sets
+        
+    Returns:
+        True if any messages were drained (continue looping), False otherwise.
+    """
+    # Extract logic from L1866-1880
+    ...
+```
+
+Then `_post_turn_checks()` becomes a ~25-line coordinator:
+```python
+def _post_turn_checks(
+    self,
+    instance: AgentInstance,
+    inst_name: str,
+    response: List[Message],
+    messages: List[Message],
+    llm_messages: List[Message]
+) -> bool:
+    """Post-turn checks: completion detection and state transitions.
+    
+    Returns:
+        True if should continue looping, False if should break (complete).
+    """
+    # 1. Check for unexecuted tool calls
+    if self._check_for_tool_calls_in_output(instance, response):
+        return True
+    
+    # 2. Detect pure thinking turn (stalled agent)
+    if self._detect_pure_thinking_turn(instance, response):
+        return False  # Break out of loop
+    
+    # 3. Transition to SLEEPING if async tools pending
+    if self._transition_to_sleeping_if_pending(instance, inst_name):
+        return True
+    
+    # 4. Drain post-generation messages (safety drain)
+    if self._drain_post_generation_messages(
+        instance, inst_name, messages, llm_messages, response
+    ):
+        return True
+    
+    return False  # No more work, break loop
+```
+
+**Steps:**
+- [ ] Extract `_check_for_tool_calls_in_output()` method
+- [ ] Extract `_detect_pure_thinking_turn()` method
+- [ ] Extract `_transition_to_sleeping_if_pending()` method
+- [ ] Extract `_drain_post_generation_messages()` method
+- [ ] Refactor `_post_turn_checks()` to coordinator pattern
+- [ ] Test SLEEPING state transition logic with mock async tools
+
+**Estimated Effort:** 2-3 hours  
+**Risk Level:** Medium — SLEEPING transition logic involves state changes that must be preserved exactly
+
+---
+
+## Phase 4: Class Extraction
+
+**Estimated Time:** 10-15 hours  
+**Risk Level:** HIGH  
+**Goal:** Split God Object into 5 focused classes
+
+### 4.1 Extract `AgentLifecycleManager`
+
+**Responsibility:** Instance creation, reuse logic, settings propagation  
+**Source:** `_create_and_run_agent()` sub-methods from Phase 3.2  
+**Target File:** `agent_cascade/lifecycle_manager.py`
+
+**REVIEWER FINDING #1 & #7:** Use lazy initialization pattern to avoid circular dependencies. All handler classes should have consistent constructor signatures.
+
+```python
+# NEW FILE: agent_cascade/lifecycle_manager.py
+
+from typing import Tuple, Optional, TYPE_CHECKING
+from agent_cascade.agent_instance import AgentInstance
+from agent_cascade.llm.schema import Message
+
+if TYPE_CHECKING:
+    from agent_cascade.execution_engine import ExecutionEngine
+
+
+class AgentLifecycleManager:
+    """Manages agent instance lifecycle: creation, reuse, and configuration.
+    
+    This class handles:
+    - Finding or creating instances (with reuse logic)
+    - Building system and task messages
+    - Propagating settings from parent to child
+    - Initializing conversations and logger state
+    
+    Usage:
+        manager = AgentLifecycleManager(pool)
+        inst, is_reuse = manager.find_or_create_instance(...)
+        sys_msg = manager.build_system_message(...)
+        manager.propagate_settings(inst, caller_name, agent_class)
+    """
+    
+    def __init__(self, pool):
+        """Initialize with reference to AgentPool.
+        
+        Args:
+            pool: AgentPool instance for template lookup and state management
+        """
+        self.pool = pool
+        self._engine = None  # Lazy initialization
+    
+    @property
+    def engine(self) -> 'ExecutionEngine':
+        """Get engine reference (raises if not set)."""
+        if self._engine is None:
+            raise RuntimeError("AgentLifecycleManager._engine not set. Call ExecutionEngine.initialize().")
+        return self._engine
+    
+    def set_engine(self, engine: 'ExecutionEngine') -> None:
+        """Set engine reference after ExecutionEngine construction completes.
+        
+        This breaks the circular dependency during __init__.
+        
+        Args:
+            engine: ExecutionEngine instance for cross-reference
+        """
+        self._engine = engine
+    
+    def find_or_create_instance(
+        self,
+        agent_class: str,
+        instance_name: str,
+        caller: str,
+        nest_depth: int,
+        force_fresh: bool = False
+    ) -> Tuple[AgentInstance, bool]:
+        """Find existing inactive instance or create new one.
+        
+        [Implementation from Phase 3.2]
+        """
+        ...
+    
+    def build_system_message(
+        self,
+        agent_class: str,
+        instance_name: str
+    ) -> Message:
+        """Build system message for agent.
+        
+        [Implementation from Phase 3.2]
+        """
+        ...
+    
+    def build_task_message(
+        self,
+        args: dict,
+        caller: str
+    ) -> Message:
+        """Build task message with multimodal propagation.
+        
+        [Implementation from Phase 3.2]
+        """
+        ...
+    
+    def initialize_conversation(
+        self,
+        instance: AgentInstance,
+        sys_msg: Message,
+        task_msg: Message,
+        is_reuse: bool
+    ) -> list:
+        """Initialize or extend conversation.
+        
+        [Implementation from Phase 3.2]
+        """
+        ...
+    
+    def propagate_settings(
+        self,
+        instance: AgentInstance,
+        caller: str,
+        agent_class: str
+    ) -> None:
+        """Propagate settings from caller to child.
+        
+        [Implementation from Phase 3.2]
+        """
+        ...
+```
+
+**Migration Steps:**
+1. [ ] Create `lifecycle_manager.py` with empty class
+2. [ ] Copy extracted methods from Phase 3.2 into class
+3. [ ] Update imports in both files
+4. [ ] Modify `ExecutionEngine._create_and_run_agent()` to use `AgentLifecycleManager`
+5. [ ] Test thoroughly with all agent types
+6. [ ] Remove original code from `execution_engine.py`
+
+---
+
+### 4.2 Extract `CompressionHandler`
+
+**Responsibility:** All compression logic (force, command, tool)  
+**Source:** `_force_compression()`, `_handle_compress_command()`, `_handle_compress_context()`  
+**Target File:** `agent_cascade/compression/handler.py`
+
+**REVIEWER FINDING #1 & #2:** Use lazy initialization AND move `_rebuild_working_set()` into this class to avoid tight coupling.
+
+```python
+# NEW FILE: agent_cascade/compression/handler.py
+
+from typing import Optional, TYPE_CHECKING
+from agent_cascade.agent_instance import AgentInstance
+
+if TYPE_CHECKING:
+    from agent_cascade.execution_engine import ExecutionEngine
+
+
+class CompressionHandler:
+    """Handles all compression operations for agents.
+    
+    This class consolidates:
+    - Forced compression (token threshold exceeded)
+    - Command-based compression (user/agent triggered)
+    - Tool-based compression (compress_context tool)
+    - Cooldown and overfeeding detection
+    - Working set rebuilding AFTER compression
+    
+    **REVIEWER UPDATE:** Moved _rebuild_working_set() INTO this class to reduce tight coupling.
+    Previously, CompressionHandler called back into ExecutionEngine._rebuild_working_set() for every
+    compression operation — making it a thin wrapper with no real independence. Now it owns the logic.
+    
+    Usage:
+        handler = CompressionHandler(pool)
+        engine.initialize_handler(handler)  # Set engine reference after construction
+        should_skip = handler.check_cooldown(instance, usage_pct)
+        if not should_skip:
+            success = handler.execute_force_compression(instance, ...)
+    """
+    
+    def __init__(self, pool):
+        """Initialize with pool reference only.
+        
+        Args:
+            pool: AgentPool for state management
+        """
+        self.pool = pool
+        self._engine = None  # Lazy initialization (see REVIEWER FINDING #1)
+    
+    @property
+    def engine(self) -> 'ExecutionEngine':
+        """Get engine reference (raises if not set)."""
+        if self._engine is None:
+            raise RuntimeError("CompressionHandler._engine not set. Call ExecutionEngine.initialize().")
+        return self._engine
+    
+    def set_engine(self, engine: 'ExecutionEngine') -> None:
+        """Set engine reference after ExecutionEngine construction completes."""
+        self._engine = engine
+    
+    def check_cooldown(
+        self,
+        instance: AgentInstance,
+        llm_messages: list,
+        usage_pct: float
+    ) -> bool:
+        """Check if compression cooldown is active.
+        
+        [Implementation from Phase 3.5]
+        """
+        ...
+    
+    def check_overfeeding(
+        self,
+        instance: AgentInstance,
+        llm_messages: list
+    ) -> bool:
+        """Check if overfeeding threshold exceeded.
+        
+        [Implementation from Phase 3.5]
+        """
+        ...
+    
+    def execute_force_compression(
+        self,
+        instance: AgentInstance,
+        messages: list,
+        llm_messages: list,
+        usage_pct: float
+    ) -> bool:
+        """Execute forced compression.
+        
+        [Implementation from Phase 3.5]
+        """
+        ...
+    
+    def handle_compress_command(
+        self,
+        args: any,
+        instance: AgentInstance,
+        messages: list,
+        llm_messages: list,
+        response: list
+    ) -> str:
+        """Handle compress_context command/tool.
+        
+        Extracts from _handle_compress_command() L2468
+        """
+        ...
+    
+    def handle_compress_tool(
+        self,
+        args: any,
+        instance: AgentInstance,
+        messages: list,
+        llm_messages: list,
+        response: list
+    ) -> str:
+        """Handle compress_context tool call.
+        
+        Extracts from _handle_compress_context() L2402
+        """
+        ...
+```
+
+**Migration Steps:**
+1. [ ] Create `compression/handler.py` (new file in compression package)
+2. [ ] Copy extracted methods into class
+3. [ ] Update `_force_compression()` to delegate to `CompressionHandler`
+4. [ ] Update `_handle_compress_command()` and `_handle_compress_context()` similarly
+5. [ ] Test all compression paths
+6. [ ] Remove original code
+
+---
+
+### 4.3 Extract `ToolDispatcher`
+
+**Responsibility:** Tool execution, call_agent routing  
+**Source:** `_execute_tool()`, `_handle_call_agent()`, `_handle_dismiss_agent()`  
+**Target File:** `agent_cascade/tool_dispatcher.py`
+
+```python
+# NEW FILE: agent_cascade/tool_dispatcher.py
+
+from typing import Any, Optional
+
+
+class ToolDispatcher:
+    """Dispatches tool calls to appropriate handlers.
+    
+    This class handles:
+    - Tool execution routing
+    - call_agent sync/async paths
+    - dismiss_agent logic
+    - Tool result truncation
+    
+    Usage:
+        dispatcher = ToolDispatcher(pool)
+        engine.set_handler_reference(dispatcher)  # Two-phase init
+        result = dispatcher.execute_tool(instance, tool_name, args, ...)
+    """
+    
+    def __init__(self, pool):
+        """Initialize with pool reference only (lazy engine initialization).
+        
+        Args:
+            pool: AgentPool for template lookup
+        """
+        self.pool = pool
+        self._engine = None
+    
+    @property
+    def engine(self) -> 'ExecutionEngine':
+        """Get engine reference, raising RuntimeError if not set."""
+        if self._engine is None:
+            raise RuntimeError("ToolDispatcher._engine not set — call set_engine() first")
+        return self._engine
+    
+    def set_engine(self, engine: 'ExecutionEngine') -> None:
+        """Set engine reference after all handlers constructed (two-phase init)."""
+        self._engine = engine
+    
+    def execute_tool(
+        self,
+        instance: 'AgentInstance',
+        tool_name: str,
+        tool_args: Any,
+        llm_messages: list,
+        function_id: Optional[str] = None
+    ) -> Any:
+        """Execute a tool by name.
+        
+        Extracts from _execute_tool() L2048
+        """
+        ...
+    
+    def handle_call_agent(
+        self,
+        args: Any,
+        messages: list,
+        instance: 'AgentInstance',
+        function_id: Optional[str] = None
+    ) -> str:
+        """Handle call_agent tool call.
+        
+        Extracts from _handle_call_agent() L2120
+        Uses ToolDispatcher.run_child_sync() and run_child_async()
+        """
+        ...
+    
+    def handle_dismiss_agent(
+        self,
+        args: Any,
+        instance: 'AgentInstance'
+    ) -> str:
+        """Handle dismiss_agent tool call.
+        
+        Extracts from _handle_dismiss_agent() L2371
+        """
+        ...
+    
+    def truncate_tool_result(
+        self,
+        result: str,
+        tool_name: str,
+        llm_messages: list,
+        inst_name: str
+    ) -> str:
+        """Truncate tool result if needed.
+        
+        Extracts from _truncate_tool_result() L3494
+        """
+        ...
+```
+
+#### Refactor `_execute_tool()` into ToolDispatcher Delegate
+
+After extracting handlers, `_execute_tool()` (L2048-2120, ~72 lines) should become a simple dispatcher that delegates to ToolDispatcher:
+
+**BEFORE:** ~72 lines of routing logic in ExecutionEngine  
+**AFTER:** ~15 lines delegating to ToolDispatcher
+
+```python
+def _execute_tool(
+    self, instance, tool_name, tool_args, llm_messages, function_id
+):
+    """Delegate to ToolDispatcher — now ~15 lines."""
+    return self.tool_dispatcher.execute_tool(
+        instance=instance,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        llm_messages=llm_messages,
+        function_id=function_id,
+    )
+```
+
+ToolDispatcher's `execute_tool()` method handles all routing internally:
+- `call_agent` → `_handle_call_agent()`
+- `dismiss_agent` → `_handle_dismiss_agent()`
+- `compress_context` → `_handle_compress_context()`
+- Generic tools → direct execution via template._call_tool()
+
+**Migration Steps:**
+1. [ ] Create `tool_dispatcher.py`
+2. [ ] Copy tool execution methods
+3. [ ] Update `_execute_tool()` to delegate to `ToolDispatcher`
+4. [ ] Update `_handle_call_agent()` and `_handle_dismiss_agent()` similarly
+5. [ ] Test all tool paths (call_agent sync/async, dismiss, etc.)
+6. [ ] Remove original code
+
+---
+
+### 4.4 Extract `StreamPublisher`
+
+**Responsibility:** WebSocket push, UI state updates  
+**Source:** Scattered stream update logic throughout the file  
+**Target File:** `agent_cascade/stream_publisher.py`
+
+```python
+# NEW FILE: agent_cascade/stream_publisher.py
+
+import asyncio
+from typing import Optional
+
+
+class StreamPublisher:
+    """Consolidates all WebSocket push logic for sub-agent visibility.
+    
+    Responsibilities:
+    - Sub-agent tab initialization
+    - Periodic state updates during execution (throttled, error-tolerant)
+    - Final state updates on completion
+    - Error counting and stream disabling per sub-agent
+    
+    State management:
+    - _error_count: Tracks consecutive WebSocket push failures per sub-agent
+    - _pushing_disabled: Disables pushes after max_errors consecutive failures
+    
+    This covers ALL 4 push locations (L2987-3007, L3076-3115, L3146-3165, L3294).
+    """
+    
+    def __init__(self, pool):
+        self.pool = pool
+        self._error_count: int = 0
+        self._pushing_disabled: bool = False
+    
+    @property
+    def max_errors(self) -> int:
+        return getattr(self.pool.settings, 'subagent_ws_max_errors', 3)
+    
+    def push_initial_state(
+        self,
+        instance: 'AgentInstance',
+        caller: str
+    ) -> None:
+        """Push initial state for new sub-agent (tab appears in UI).
+        
+        Extracts from _create_and_run_agent() L2987-3007.
+        """
+        if self._pushing_disabled:
+            return
+        
+        try:
+            from agent_cascade.api_integration import (
+                build_stream_update_from_pool, _put_stream_update
+            )
+            # ... existing logic ...
+            self._error_count = 0  # Reset on success
+            
+        except Exception as e:
+            self._error_count += 1
+            logger.debug(f"WebSocket push failed for {instance.instance_name}: {e}")
+            if self._error_count >= self.max_errors:
+                self._pushing_disabled = True
+    
+    def push_periodic_update(
+        self,
+        caller: str,
+        turn_output: List[Message],
+        final_resp: List[Message]
+    ) -> None:
+        """Push periodic stream update during execution (throttled).
+        
+        Extracts from _create_and_run_agent() L3076-3115.
+        Error counting and disable-after-failures logic included.
+        
+        Args:
+            caller: Root instance name for header stats
+            turn_output: Current turn output messages
+            final_resp: Final response accumulator
+        """
+        if self._pushing_disabled:
+            return
+        
+        try:
+            from agent_cascade.api_integration import (
+                build_stream_update_from_pool, _put_stream_update
+            )
+            # ... existing logic with throttling ...
+            self._error_count = 0  # Reset on success
+            
+        except Exception as e:
+            self._error_count += 1
+            logger.debug(f"Periodic WebSocket push failed: {e}")
+            if self._error_count >= self.max_errors:
+                self._pushing_disabled = True
+    
+    def push_final_state(
+        self,
+        instance: 'AgentInstance',
+        caller: str,
+        final_resp: List[Message]
+    ) -> None:
+        """Push final state after sub-agent completes.
+        
+        Extracts from _create_and_run_agent() L3146-3165 and L3294.
+        Covers the 4th push location (L3294) outside _create_and_run_agent().
+        """
+        if self._pushing_disabled:
+            return
+        
+        try:
+            from agent_cascade.api_integration import (
+                build_stream_update_from_pool, _put_stream_update
+            )
+            # ... existing logic ...
+            
+        except Exception as e:
+            logger.debug(f"Final WebSocket push failed for {instance.instance_name}: {e}")
+    
+    def build_state_dict(
+        self,
+        instance: 'AgentInstance',
+        conv: list,
+        final_resp: list
+    ) -> dict:
+        """Build state dictionary for WebSocket update.
+        
+        Helper to create lightweight state snapshots.
+        Extracts repeated logic from multiple locations.
+        """
+        ...
+```
+
+**Migration Steps:**
+1. [ ] Create `stream_publisher.py`
+2. [ ] Identify all stream update locations (grep for `_ws_send_queue`)
+3. [ ] Extract common patterns into `StreamPublisher` methods
+4. [ ] Update calling code to use publisher
+5. [ ] Test WebSocket updates in UI
+6. [ ] Remove original scattered code
+
+---
+
+### 4.5 Refactor `ExecutionEngine` to Coordinator
+
+**Responsibility:** Core turn loop, phase dispatch  
+**Target:** Reduce from ~3,727 lines to ~600 lines
+
+**REVIEWER FINDING #1:** Use two-phase initialization to break circular dependencies.
+
+After extracting the four classes above, `ExecutionEngine` becomes a coordinator:
+
+```python
+# REFACTORED: agent_cascade/execution_engine.py (core class only)
+
+from .lifecycle_manager import AgentLifecycleManager
+from .compression.handler import CompressionHandler
+from .tool_dispatcher import ToolDispatcher
+from .stream_publisher import StreamPublisher
+
+
+class ExecutionEngine:
+    """Core execution coordinator — delegates to specialized handlers.
+    
+    Responsibilities:
+    - Main turn loop orchestration
+    - Phase dispatch (setup → pre-check → LLM → process → post-check)
+    - State machine transitions
+    - Delegation to LifecycleManager, CompressionHandler, ToolDispatcher, StreamPublisher
+    
+    Reduced from ~3,727 lines to ~600 lines after extraction.
+    
+    **REVIEWER UPDATE:** Uses two-phase initialization:
+    1. __init__() creates handlers with pool only (no engine reference)
+    2. initialize() sets cross-references after all objects constructed
+    """
+    
+    def __init__(self, pool):
+        self.pool = pool
+        
+        # Phase 1: Create handlers WITHOUT engine reference
+        self.lifecycle_mgr = AgentLifecycleManager(pool)
+        self.compression_handler = CompressionHandler(pool)
+        self.tool_dispatcher = ToolDispatcher(pool)
+        self.stream_publisher = StreamPublisher(pool)
+        
+        # Phase 2: Set cross-references after all objects exist
+        self.initialize()
+    
+    def initialize(self) -> None:
+        """Set engine references in handlers that need them.
+        
+        Called from __init__ after all handlers are constructed.
+        This breaks the circular dependency during construction.
+        """
+        self.lifecycle_mgr.set_engine(self)
+        self.compression_handler.set_engine(self)
+        self.tool_dispatcher.set_engine(self)
+        # stream_publisher doesn't need engine reference
+    
+    def run(self, instance: AgentInstance):
+        """Main execution loop — now ~150 lines after extraction."""
+        # Transition to RUNNING
+        ...
+        
+        # Setup phase
+        messages, llm_messages, response = self._setup_turn(instance)
+        ...
+        
+        while turns_available > 0:
+            # SLEEPING state handling (extracted method, ~60 lines)
+            if instance.state == AgentState.SLEEPING:
+                self._handle_sleeping_state(...)
+                continue
+            
+            # Pre-LLM checks (compression, loop detection)
+            if self._pre_llm_checks(...):
+                continue
+            
+            # LLM call with injection
+            for msg in self._call_llm_with_injection(...):
+                ...
+            
+            # Response processing (delegates to ToolDispatcher)
+            if self._process_response(...):
+                continue
+            
+            # Post-turn checks
+            if not self._post_turn_checks(...):
+                break
+        
+        # Cleanup in finally block
+        ...
+    
+    def _create_and_run_agent(self, ...):
+        """Delegate to LifecycleManager — now ~80 lines."""
+        inst, is_reuse = self.lifecycle_mgr.find_or_create_instance(...)
+        sys_msg = self.lifecycle_mgr.build_system_message(...)
+        task_msg = self.lifecycle_mgr.build_task_message(...)
+        ...
+        
+        # Execute with stream publishing
+        for resp in self.run(inst):
+            ...
+            self.stream_publisher.push_periodic_update(...)
+        
+        ...
+    
+    def _force_compression(self, ...):
+        """Delegate to CompressionHandler — now ~30 lines."""
+        if self.compression_handler.check_cooldown(...):
+            return True
+        
+        if self.compression_handler.check_overfeeding(...):
+            return True
+        
+        return self.compression_handler.execute_force_compression(...)
+    
+    def _handle_call_agent(self, ...):
+        """Delegate to ToolDispatcher — now ~20 lines."""
+        return self.tool_dispatcher.handle_call_agent(...)
+```
+
+#### Module-Level Export Preservation
+
+After extraction, these functions must remain importable from `execution_engine.py` for backward compatibility:
+
+| Function | Used By | Action |
+|----------|---------|--------|
+| `_get_active_functions_from_template()` | tests/test_nested_agent_calls.py | Keep as module-level function |
+| `_build_resources_block()` | api_integration.py, tests | Keep as module-level function |
+| `_replace_resources_block()` | api_integration.py | Keep as module-level function |
+| `_build_session_metadata()` | api_integration.py, tests | Keep as module-level function |
+| `_replace_section()` | api_integration.py | Keep as module-level function |
+| `validate_message_pool()` | api_server.py, tests | Re-export from compression.helpers |
+
+**Action:** All helper functions remain as module-level functions in execution_engine.py. For `validate_message_pool()`, add a re-export at the bottom of execution_engine.py:
+```python
+# Re-export for backward compatibility (moved to compression.helpers)
+from agent_cascade.compression.helpers import validate_message_pool
+```
+
+**Migration Steps:**
+1. [ ] Complete Phases 1-3 first (method splitting)
+2. [ ] Extract all four handler classes (4.1-4.4)
+3. [ ] Refactor `ExecutionEngine` to use handlers
+4. [ ] Verify line count reduction (~600 lines target)
+5. [ ] Comprehensive testing across all paths
+6. [ ] Update imports and dependencies
+
+---
+
+## Testing Strategy (REVIEWER UPDATED)
+
+**REVIEWER FINDING #6:** Original testing strategy had significant gaps. Added dedicated sections for state machine, concurrency, and WebSocket ordering tests.
+
+### Unit Tests (Per Phase)
+
+**Phase 1:** Existing tests should pass without modification
+- Run: `pytest tests/test_execution_engine.py -v`
+- Verify: All green, no behavior changes
+
+**Phase 2:** Test helper functions in isolation
+```python
+# tests/test_helpers.py
+def test_msg_field_with_dict():
+    assert _msg_field({'role': 'user', 'content': 'hi'}, 'role') == 'user'
+
+def test_msg_field_with_message():
+    msg = Message(role='assistant', content='hello')
+    assert _msg_field(msg, 'role') == 'assistant'
+
+def test_append_to_conversation_invalidates_cache():
+    inst = create_test_instance()
+    initial_count = inst._cached_token_count
+    _append_to_conversation(inst, [Message(role=USER, content="test")])
+    assert inst._cached_token_count == 0  # Cache invalidated
+```
+
+**Phase 3:** Test extracted methods match original behavior
+```python
+# tests/test_method_extractions.py
+def test_handle_sleeping_state_with_async_results():
+    # Create mock instance in SLEEPING state
+    # Mock pool.drain_async_results() to return results
+    # Call _handle_sleeping_state()
+    # Assert: instance transitions to RUNNING, slot re-acquired
+    ...
+
+def test_create_and_run_agent_reuse_logic():
+    # Test instance reuse when IDLE
+    # Test new creation when RUNNING
+    # Test force_fresh=True always creates new
+    ...
+
+def test_execute_llm_call_with_retry_on_timeout():
+    # Mock LLM call to raise TimeoutError twice, then succeed
+    # Call _execute_llm_call_with_retry()
+    # Assert: Retried with exponential backoff, yielded [RETRYING] messages
+    ...
+
+def test_classify_llm_error_retryable_vs_fatal():
+    # Test timeout errors classified as 'retryable'
+    # Test 401/403 errors classified as 'fatal'
+    # Test unknown errors default to 'unknown'
+    ...
+```
+
+---
+
+### State Machine Tests (REVIEWER ADDITION)
+
+**REVIEWER FINDING #6(a):** No state machine transition tests. Added dedicated test suite.
+
+```python
+# tests/test_state_machine.py
+import pytest
+from agent_cascade.agent_instance import AgentState, InvalidStateTransition
+
+def test_idle_to_running_transition():
+    """Test IDLE → RUNNING transition in engine.run()."""
+    inst = create_test_instance(state=AgentState.IDLE)
+    list(engine.run(inst))  # Execute one turn
+    assert inst.state == AgentState.IDLE  # Should return to IDLE after completion
+
+def test_running_to_sleeping_transition():
+    """Test RUNNING → SLEEPING transition when async tool called."""
+    inst = create_test_instance(state=AgentState.IDLE)
+    # Mock _handle_call_agent() to register async call
+    # Run engine until SLEEPING state reached
+    assert inst.state == AgentState.SLEEPING
+    assert inst.sleeping_since is not None
+
+def test_sleeping_to_running_on_async_result():
+    """Test SLEEPING → RUNNING transition when async result arrives."""
+    inst = create_test_instance(state=AgentState.SLEEPING)
+    # Mock pool.drain_async_results() to return results
+    action, _ = engine._handle_sleeping_state(inst, ...)
+    assert action == SleepAction.CONTINUE_LOOP
+    assert inst.state == AgentState.RUNNING
+
+def test_sleeping_to_completing_on_timeout():
+    """Test SLEEPING → COMPLETING transition on timeout."""
+    inst = create_test_instance(state=AgentState.SLEEPING)
+    inst.sleeping_since = time.monotonic() - 310  # 310 seconds ago
+    # Mock pool.drain_async_results() to return empty
+    action, _ = engine._handle_sleeping_state(inst, ...)
+    assert action == SleepAction.BREAK_LOOP
+    assert inst.state == AgentState.COMPLETING
+
+def test_terminated_guard_prevents_resume():
+    """Test TERMINATED state prevents resuming from SLEEPING."""
+    inst = create_test_instance(state=AgentState.SLEEPING)
+    # Simulate terminate during sleep
+    with inst._state_lock:
+        inst._transition(AgentState.TERMINATED)
+    action, _ = engine._handle_sleeping_state(inst, ...)
+    assert action == SleepAction.BREAK_LOOP  # Should break loop
+
+def test_invalid_transition_raises():
+    """Test invalid state transitions raise InvalidStateTransition."""
+    inst = create_test_instance(state=AgentState.IDLE)
+    with pytest.raises(InvalidStateTransition):
+        with inst._state_lock:
+            inst._transition(AgentState.SLEEPING)  # IDLE → SLEEPING is invalid
+
+def test_compression_failure_no_loop_cooldown():
+    """Failed compression should NOT set _suppress_loop_detection_next_turn."""
+    inst = create_test_instance()
+    # Mock forced compression to fail
+    # Verify: _suppress_loop_detection_next_turn remains False
+    # This prevents false-positive loop detection on corrupted conversations
+    ...
+
+def test_compression_success_sets_loop_cooldown():
+    """Successful compression SHOULD set _suppress_loop_detection_next_turn."""
+    inst = create_test_instance()
+    # Mock forced compression to succeed
+    # Verify: _suppress_loop_detection_next_turn is True
+    ...
+```
+
+---
+
+### Concurrency & Race Condition Tests (REVIEWER ADDITION)
+
+**REVIEWER FINDING #6(b):** No concurrency/race-condition tests. Added dedicated suite.
+
+```python
+# tests/test_concurrency.py
+import threading
+import time
+
+def test_slot_acquisition_prevents_parallel_calls():
+    """Test that slot acquisition prevents parallel endpoint calls."""
+    pool = create_test_pool()
+    engine1 = ExecutionEngine(pool)
+    engine2 = ExecutionEngine(pool)
+    
+    inst1 = create_test_instance(instance_name="Agent1")
+    inst2 = create_test_instance(instance_name="Agent2")
+    
+    # Both try to acquire slot simultaneously
+    results = []
+    
+    def run_agent1():
+        engine1.run(inst1)
+        results.append(1)
+    
+    def run_agent2():
+        engine2.run(inst2)
+        results.append(2)
+    
+    t1 = threading.Thread(target=run_agent1)
+    t2 = threading.Thread(target=run_agent2)
+    
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    
+    # Results should be sequential, not interleaved
+    assert len(results) == 2
+
+def test_slot_release_on_sleeping_transition():
+    """Test slot is released when transitioning to SLEEPING."""
+    inst = create_test_instance()
+    # Mock engine.run() to enter SLEEPING state
+    # Assert: inst._slot_release becomes None after transition
+    ...
+
+def test_slot_reacquire_after_wakeup():
+    """Test slot is re-acquired after waking from SLEEPING."""
+    inst = create_test_instance(state=AgentState.SLEEPING)
+    # Simulate async result arrival
+    # Assert: Slot is re-acquired before LLM call
+    ...
+
+def test_compression_lock_prevents_race():
+    """Test _compression_lock prevents race during compression."""
+    inst = create_test_instance()
+    # Thread 1: modifies conversation
+    # Thread 2: reads conversation for compression
+    # Assert: No race condition, lock protects both
+    ...
+
+def test_sync_async_path_equivalence():
+    """Both SYNC and ASYNC paths in _handle_call_agent() must produce identical tool results."""
+    # Call _handle_call_agent() with same arguments in both SYNC and ASYNC mode
+    # Verify: Same conversation state, same message content, same number of messages
+    # This is the core correctness property — async execution should not change semantics
+    ...
+```
+
+---
+
+### WebSocket Ordering Tests (REVIEWER ADDITION)
+
+**REVIEWER FINDING #6(c):** No WebSocket ordering tests. Added to verify UI correctness.
+
+```python
+# tests/test_websocket_ordering.py
+def test_subagent_stream_update_order():
+    """Test WebSocket messages arrive in correct order for sub-agent."""
+    pool = create_test_pool_with_mocked_ws()
+    engine = ExecutionEngine(pool)
+    
+    # Trigger call_agent tool
+    # Capture all WebSocket messages
+    messages = pool.ws_queue.get_all_messages()
+    
+    # Verify order:
+    # 1. Initial state (tab appears)
+    # 2. Periodic updates (every 5 turns)
+    # 3. Final state (completion)
+    assert messages[0]['type'] == 'stream_update'
+    assert messages[0]['payload']['instance_state'][...]['agent_state'] == 'RUNNING'
+    assert messages[-1]['payload']['instance_state'][...]['agent_state'] == 'IDLE'
+
+def test_streaming_responses_cleared_after_commit():
+    """Test _streaming_responses cleared after Phase 4 commits messages."""
+    inst = create_test_instance()
+    # Simulate LLM streaming → Phase 4 commit
+    # Assert: _streaming_responses is empty after commit
+    ...
+
+def test_retry_messages_not_added_to_history():
+    """Test [RETRYING] messages shown in UI but not added to conversation."""
+    inst = create_test_instance()
+    # Mock LLM call to retry twice
+    # Run engine
+    # Assert: Conversation has no [RETRYING] messages
+    # Assert: WebSocket did receive [RETRYING] for UI display
+    ...
+```
+
+---
+
+### Integration Tests
+
+**Full Stack Test:**
+```bash
+# Run full agent execution through refactored code
+pytest tests/integration/test_full_agent_flow.py -v
+```
+
+**Regression Test:**
+```bash
+# Compare output before/after refactoring for key scenarios
+python scripts/compare_outputs.py --scenario call_agent_sync --scenario compression_force --scenario tool_execution
+```
+
+---
+
+## Risk Mitigation
+
+### Low Risk (Phase 1-2)
+- **Rollback:** Simple git revert of single file
+- **Testing:** Existing tests cover most paths
+- **Isolation:** Changes are localized, no cross-file dependencies
+
+### Medium Risk (Phase 3)
+- **Rollback:** Revert method extractions one at a time
+- **Testing:** Need targeted tests for extracted methods
+- **Strategy:** Extract one method, test, commit before next
+
+### High Risk (Phase 4)
+- **Rollback:** Tag git before each class extraction
+- **Testing:** Need comprehensive integration tests
+- **Strategy:** 
+  1. Extract class to new file alongside original
+  2. Update callers to use new class
+  3. Test thoroughly
+  4. Remove old code
+  5. Commit before next extraction
+
+---
+
+## Success Criteria
+
+### Quantitative
+- [ ] `execution_engine.py` reduced from 3,727 to ~600 lines
+- [ ] Total lines across 5 classes: ~1,500 (60% reduction)
+- [ ] Method complexity: Max method length < 100 lines (currently ~510)
+- [ ] Cyclomatic complexity reduced by >50% (measure with `radon` or similar)
+
+### Qualitative
+- [ ] Each class has single, clear responsibility
+- [ ] No behavior changes (all tests pass)
+- [ ] Code is easier to navigate and modify
+- [ ] New developers can understand each class in <30 minutes
+
+### Performance
+- [ ] No measurable performance regression
+- [ ] Token cache invalidation still works correctly (16+ call sites)
+- [ ] WebSocket streaming still updates UI in real-time
+- [ ] Slot acquisition/release still prevents race conditions
+
+---
+
+## Timeline Estimate (REVIEWER UPDATED v3.0)
+
+**REVIEWER FINDING #7:** Effort estimates were too low. Updated with more realistic estimates (+40%).
+
+| Phase | Tasks | Original Estimate | Revised Estimate | Days | Rationale |
+|-------|-------|------------------|------------------|------|-----------|
+| **Phase 1: Quick Wins** | 5 tasks | 2-3 hrs | 2-3 hrs | 0.5 | No change — straightforward cleanups |
+| **Phase 2: Helpers** | 4 tasks (added M3/M6) | 3-4 hrs | **5-6 hrs** | **1** | Added M3/M6 work from audit findings |
+| **Phase 3: Method Splitting** | 7 major methods (was 5, added 3.7) | 6-8 hrs | **26-35 hrs** | **4-5** | Added Phase 3.7 (_handle_compress_command); underestimated complexity |
+| **Phase 4: Class Extraction** | 4 classes + refactor | 10-15 hrs | **22-30 hrs** | **4-5** | WebSocket extraction complexity (4 locations, error handling) |
+| **Testing & Validation** | Throughout (expanded) | 4-6 hrs | **10-15 hrs** | **2-3** | Added compression edge cases, SYNC/ASYNC equivalence tests |
+| **Buffer (25%)** | Unforeseen issues | 6-8 hrs | **18-25 hrs** | **4-5** | Increased buffer for complexity |
+| **Total** | | **31-44 hrs** | **83-124 hrs** | **~2.5-3 weeks** | ~90% increase for realism |
+
+**Note:** At 8 hours/day productive work, this is approximately **2.5-3 weeks** of focused refactoring work. If working part-time (4 hours/day), expect **4-6 weeks**.
+
+---
+
+## Appendices
+
+### A. File Structure After Refactoring
+
+```
+agent_cascade/
+├── execution_engine.py          # ~600 lines (core coordinator)
+├── lifecycle_manager.py         # ~400 lines (NEW)
+├── tool_dispatcher.py           # ~450 lines (NEW)
+├── stream_publisher.py          # ~200 lines (NEW)
+└── compression/
+    ├── __init__.py
+    ├── core.py                  # Existing
+    ├── helpers.py               # Existing
+    └── handler.py               # ~500 lines (NEW)
+```
+
+### B. Key Patterns Used
+
+1. **Coordinator Pattern:** `ExecutionEngine` delegates to specialized handlers
+2. **Extractor Pattern:** Phase 3 extracts methods before Phase 4 extracts classes
+3. **Context Manager Pattern:** Token cache invalidation wrapped in RAII-style context
+4. **Helper Function Pattern:** Message accessors eliminate repeated isinstance checks
+
+### C. Glossary
+
+- **God Object:** A class that does too much (ExecutionEngine before refactoring)
+- **Cyclomatic Complexity:** Measure of independent paths through code
+- **Incremental Migration:** Changes that maintain behavior while restructuring
+- **Slot Acquisition:** Concurrency control for LLM endpoint calls
+- **SLEEPING State:** Agent waiting for async tool results
+
+---
+
+## Next Steps
+
+1. **Start Phase 1:** Begin with quick wins (redundant imports, slot acquisition helper)
+2. **Create Branch:** `git checkout -b refactor/execution-engine`
+3. **Run Baseline Tests:** Capture current test results for comparison
+4. **Execute Phases Sequentially:** Complete each phase before moving to next
+5. **Commit Frequently:** Small, reversible commits enable easy rollback
+6. **Update This Document:** Track actual vs. estimated effort per phase
+
+---
+
+**Document Version:** 1.0  
+**Created:** 2024-01-XX  
+**Author:** RefactorPlanner2 (Agent Cascade Team)  
+**Review Status:** Pending Reviewer approval

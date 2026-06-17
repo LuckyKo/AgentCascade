@@ -1992,13 +1992,17 @@ def create_app(agents, agent_pool, config=None):
                                             workspace_info=workspace_info
                                         )
 
-                                        # Create proper AgentInstance via _create_system_agent() — this handles all state setup
-                                        sec_state_key = 'Security'
+                                        # FIX 1: Use unique instance name per request_id to prevent state corruption
+                                        # This ensures concurrent security checks don't overwrite each other's state
+                                        sec_state_key = f'Security_{rid}'  # e.g., 'Security_op_091f048b'
+                                        
+                                        # FIX 2: Create engine and instance INSIDE the lock to prevent race conditions
+                                        # Previously, instances were created before semaphore acquire, causing lifecycle_manager collisions
                                         engine = ExecutionEngine(agent_pool)
                                         # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
                                         sec_instance = engine._create_system_agent(
-                                            agent_class='Security',
-                                            instance_name=sec_state_key,
+                                            agent_class='Security',  # Agent CLASS name (NOT instance name — that's sec_state_key)
+                                            instance_name=sec_state_key,  # Use unique name from FIX 1
                                             task=prompt,
                                             caller=session.get('session_name', 'Orchestrator')
                                         )
@@ -2015,7 +2019,7 @@ def create_app(agents, agent_pool, config=None):
                                         ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
                                         llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
                                     
-                                        template = agent_pool.templates.get('Security')
+                                        template = agent_pool.get_template('Security')  # Template lookup by CLASS name (NOT instance name)
                                         if template and hasattr(template, 'llm'):
                                             cfg = (template.llm.generate_cfg or {}).copy()
                                             cfg.update(llm_safe_cfg)
@@ -2030,8 +2034,9 @@ def create_app(agents, agent_pool, config=None):
                                         # Schedule warning timer (keep existing _sec_warning_injector logic)
                                         def _sec_warning_injector():
                                             try:
+                                                # FIX 1 continuation: Use unique sec_state_key for message routing
                                                 agent_pool.enqueue_message(
-                                                    'Security',
+                                                    sec_state_key,
                                                     "[SYSTEM WARNING] Your analysis is taking longer than expected. "
                                                     "Please provide a verdict as soon as possible — the approval request may timeout soon."
                                                 )
@@ -2184,7 +2189,9 @@ def create_app(agents, agent_pool, config=None):
                                         # Halt the security advisor instance to stop it cleanly.
                                         # Note: This is best-effort — only works between turns, not during active LLM calls.
                                         # The actual timeout enforcement happens inside the for loop via `break` + generator.close().
-                                        agent_pool.halt_instance('Security')
+                                        # FIX 1: Use unique sec_state_key instead of hardcoded 'Security'
+                                        if sec_state_key:
+                                            agent_pool.halt_instance(sec_state_key)
                                         
                                         # Common timeout handling for BOTH modes: reject and notify UI
                                         reject_msg = (

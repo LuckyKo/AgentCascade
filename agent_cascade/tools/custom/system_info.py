@@ -114,7 +114,7 @@ class SystemInfo(BaseTool):
                     inst = self.agent_pool.get_instance(agent_name)
                     if inst:
                         agent_class = getattr(inst, 'agent_class', 'orchestrator')
-                        template = self.agent_pool.templates.get(agent_class)
+                        template = self.agent_pool.get_template(agent_class)
                 except Exception as e:
                     logger.debug(f"Failed to get template for {agent_name}: {e}")
             
