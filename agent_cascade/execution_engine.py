@@ -45,6 +45,7 @@ from .utils.pool_validation import validate_message_pool
 
 from .agent_instance import AgentInstance, LoopDetectedError, AgentState
 from .lifecycle_manager import AgentLifecycleManager
+from .compression.handler import CompressionHandler
 
 
 # ── SleepAction Enum (Phase 3.1) ───────────────────────────────────────────────
@@ -441,14 +442,17 @@ class ExecutionEngine:
         self.pool = pool
         # Phase 4.1: Initialize lifecycle manager with lazy engine reference
         self.lifecycle = AgentLifecycleManager(pool)
+        # Phase 4.2: Initialize compression handler with lazy engine reference
+        self.compression_handler = CompressionHandler(pool)
     
     def initialize(self) -> None:
         """Complete initialization after __init__.
         
-        Sets the engine reference on lifecycle manager to break circular dependency.
+        Sets the engine reference on lifecycle manager and compression handler to break circular dependencies.
         This should be called after ExecutionEngine construction completes.
         """
         self.lifecycle.set_engine(self)
+        self.compression_handler.set_engine(self)
 
     # ── Slot acquisition helper (fixes 3x duplication) ─────────────────────
 
@@ -998,8 +1002,8 @@ class ExecutionEngine:
         if self._inject_async_messages(instance, messages, llm_messages, response):
             return True  # Yield and continue loop to process new messages
         
-        # 3. Compress command check
-        if self._handle_compress_command(instance, messages, llm_messages):
+        # 3. Compress command check (Phase 4.2: delegated to compression_handler)
+        if self.compression_handler.handle_compress_command(instance, messages, llm_messages):
             return True  # Command handled — yield and continue
         
         # 4. Compression trigger
@@ -1024,230 +1028,6 @@ class ExecutionEngine:
 
         return False  # Continue to LLM call normally
 
-    def _check_compression_cooldown(
-        self,
-        instance: AgentInstance,
-        llm_messages: List[Message],
-        usage_pct: float
-    ) -> bool:
-        """Check if compression cooldown is active.
-        
-        Extracted from _force_compression() - Phase 3.5
-        
-        Args:
-            instance: Agent instance
-            llm_messages: Working set for warning injection
-            usage_pct: Current token usage percentage
-            
-        Returns:
-            True if cooldown active (skip compression this cycle)
-        """
-        inst_name = instance.instance_name
-        
-        with instance._compression_lock:
-            now = time.monotonic()
-            cooldown = getattr(self.pool.settings, 'compression_force_cooldown', 2.0)
-            elapsed = now - instance._last_force_compress_time
-            
-            if elapsed < cooldown:
-                logger.warning(
-                    f"Forced compression cooldown active for {inst_name}: "
-                    f"{elapsed:.1f}s / {cooldown:.1f}s — skipping this cycle"
-                )
-                current_tokens = self._count_history_tokens(instance.conversation, instance)
-                max_tokens = self._get_max_tokens(instance)
-                self._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens)
-                return True
-            
-            # Mark this compression attempt (under lock for thread safety)
-            instance._last_force_compress_time = now
-            instance._force_compress_count += 1
-        
-        return False
-
-    def _check_overfeeding(
-        self,
-        instance: AgentInstance,
-        llm_messages: List[Message]
-    ) -> bool:
-        """Check if overfeeding threshold exceeded.
-        
-        Extracted from _force_compression() - Phase 3.5
-        
-        Args:
-            instance: Agent instance
-            llm_messages: Working set for notification injection
-            
-        Returns:
-            True if overfeeding detected (terminate agent)
-        """
-        inst_name = instance.instance_name
-        max_attempts = getattr(self.pool.settings, 'compression_max_attempts', 3)
-        
-        if instance._force_compress_count >= max_attempts:
-            logger.error(
-                f"Overfeeding detected for {inst_name}: "
-                f"{instance._force_compress_count} forced compressions exceeded limit of {max_attempts}. "
-                f"Context keeps filling faster than compression can reduce it. Terminating agent."
-            )
-            notification = (
-                f"[SYSTEM NOTIFICATION: Overfeeding — {instance._force_compress_count} compressions without relief. Terminating.]"
-            )
-            self._append_system_notification(llm_messages, "[SYSTEM NOTIFICATION: Overfeeding", notification)
-            self.pool.halt_instance(inst_name)
-            return True
-        
-        return False
-
-    def _execute_force_compression(
-        self,
-        instance: AgentInstance,
-        messages: List[Message],
-        llm_messages: List[Message],
-        usage_pct: float
-    ) -> bool:
-        """Execute forced compression and rebuild working set.
-        
-        Extracted from _force_compression() - Phase 3.5
-        
-        Args:
-            instance: Agent instance
-            messages, llm_messages: Working message sets
-            usage_pct: Current token usage percentage
-            
-        Returns:
-            True if compression successful (continue loop)
-        """
-        inst_name = instance.instance_name
-        
-        # Halt other agents (exempt target, Compressor, and root agent)
-        exempt = [inst_name, 'Compressor']
-        if instance.parent_instance:
-            exempt.append(instance.parent_instance)
-        self.pool.halt_all_instances(except_instances=exempt)
-        
-        try:
-            logger.info(
-                f"Context usage at {usage_pct:.1f}% for {inst_name} — "
-                f"forcing compression (attempt #{instance._force_compress_count})."
-            )
-
-            from agent_cascade.compression.core import compress_context as _compress
-            result = _compress(
-                agent_pool=self.pool,
-                target_agent_name=inst_name,
-                fraction=0.5,
-                mode='auto',
-                force=True,
-            )
-
-            if result.success:
-                # Rebuild working set from compressed pool state (includes token cache invalidation)
-                self._rebuild_working_set(messages, llm_messages, inst_name)
-                # Use summary_text directly from CompressResult (P2 fix — no fragile tag parsing)
-                instance.compression_summary = result.summary_text
-                # Update latest_marker_index to point to the new marker in the conversation (P2 fix)
-                conv = self.pool.get_conversation(inst_name)
-                if conv:
-                    for idx, msg in enumerate(conv):
-                        role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-                        c = msg.get('content') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                        if isinstance(c, str) and '<context_summary>' in c:
-                            instance.latest_marker_index = idx
-
-                    # Inject system notification as a USER message into the pool so the agent sees it.
-                    # This ensures the notification persists across turn loop iterations and is visible
-                    # to the LLM on the next call (not just appended to local llm_messages which gets lost).
-                    notification_text = (
-                        f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%. "
-                        f"Forced compression applied. Continue your work — context has been preserved.]"
-                    )
-                    
-                    # ── Dedup Guard: Prevent duplicate forced compression notifications ────────────────
-                    # When forced compression runs multiple times (e.g., after consecutive turns hitting the threshold),
-                    # the same "Forced compression triggered" notification message gets appended to the conversation 
-                    # multiple times. This creates duplicate system messages that pollute the conversation history.
-                    # Check if notification already exists before appending — ENTIRE check+append under lock (TOCTOU fix).
-                    with instance._compression_lock:
-                        notification_exists = any(
-                            m.role == USER and isinstance(m.content, str) and notification_text == m.content
-                            for m in instance.conversation
-                        )
-                        
-                        if not notification_exists:
-                            # FIX Issue #4: Wrap notification append in token_cache_invalidated context manager
-                            with token_cache_invalidated(instance):
-                                # Only append and log if notification doesn't exist
-                                notification_msg = Message(role=USER, content=notification_text)
-                                instance.conversation.append(notification_msg)
-                                messages.append(notification_msg)
-                                llm_messages.append(notification_msg)
-                            logger.info(f"Compression notification injected into conversation pool for '{inst_name}'")
-                        else:
-                            logger.debug(f"Compression notification already exists in conversation for '{inst_name}' — skipping. Conv length: {len(instance.conversation)}")
-
-                    # Re-fetch conv after notification append so validation includes the notification message
-                    conv = self.pool.get_conversation(inst_name)
-
-                    # Item 10: Validate message pool after forced compression (now includes notification)
-                    if not validate_message_pool(conv, inst_name):
-                        logger.error(f"[MSG POOL VALIDATION] Pool invalid after forced compression for '{inst_name}'. Attempting recovery from log...")
-                        # Recovery: reload from the logger's history (which is unaffected)
-                        try:
-                            recov = self.pool.get_logger(inst_name, instance.agent_class).data.get('history', [])
-                            if recov and validate_message_pool(recov, inst_name):
-                                # Phase 3: Write directly to instance.conversation instead of via bridge
-                                with token_cache_invalidated(instance):
-                                    with instance._compression_lock:  # Thread-safe recovery write
-                                        instance.conversation = list(recov)
-                                logger.info(f"Recovered message pool from log for '{inst_name}' ({len(recov)} messages)")
-                                conv = recov
-                                # Rebuild working sets from recovered data (internal invalidation at L1276)
-                                self._rebuild_working_set(messages, llm_messages, inst_name)
-                                # Set cooldown flag after successful recovery (compression occurred)
-                                instance._suppress_loop_detection_next_turn = True
-                            else:
-                                logger.error("Recovery from log also failed — message pool may be corrupted")
-                                self._append_system_notification(
-                                    llm_messages, "[SYSTEM NOTIFICATION: Compression corrupted pool",
-                                    f"Forced compression and recovery both failed for {inst_name}. Agent halted to prevent corruption."
-                                )
-                                # Halt this instance to prevent further execution with corrupted state
-                                self.pool.halt_instance(inst_name)
-                        except Exception as e:
-                            logger.error(f"Recovery attempt failed for '{inst_name}': {e}")
-
-                    # Item 11: Sync the logger's internal data["history"] to match pool state
-                    # Without this, update_history() will treat pool messages not yet seen by
-                    # the logger as "new" and append them, causing duplication.
-                    try:
-                        log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                        log_inst.update_history(conv)
-                    except Exception as e:
-                        logger.error(f"Logger sync after forced compression FAILED for '{inst_name}': {e}. "
-                                                          f"Pool may desync — manual intervention required. "
-                                                          f"Note: Compression notification was injected into instance.conversation "
-                                                          f"but not synced to logger history.")
-                    # Set cooldown flag to suppress loop detection on next turn after compression
-                    instance._suppress_loop_detection_next_turn = True
-            
-            else:  # Compression failed or returned error
-                logger.error(f"Forced compression failed for {inst_name}: {result.error}")
-                notification = (
-                    f"Context exceeded {usage_pct:.1f}%, "
-                    f"but automatic compression failed."
-                )
-                self._append_system_notification(llm_messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
-
-            return True  # Continue loop — don't make LLM call this turn
-
-        except Exception as e:
-            logger.error(f"Forced compression raised exception for {inst_name}: {e}")
-            return True
-
-        finally:
-            self.pool.resume_all_instances()
-
     def _force_compression(
         self, instance: AgentInstance, messages: List[Message],
         llm_messages: List[Message], usage_pct: float
@@ -1255,16 +1035,14 @@ class ExecutionEngine:
         """Force compress when token usage exceeds critical threshold. Returns True (continue loop)."""
         inst_name = instance.instance_name
         
-        # Extracted to _check_compression_cooldown() - Phase 3.5
-        if self._check_compression_cooldown(instance, llm_messages, usage_pct):
+        # Phase 4.2: Delegate to compression_handler
+        if self.compression_handler.check_cooldown(instance, llm_messages, usage_pct):
             return True
         
-        # Extracted to _check_overfeeding() - Phase 3.5
-        if self._check_overfeeding(instance, llm_messages):
+        if self.compression_handler.check_overfeeding(instance, llm_messages):
             return True
         
-        # Core compression logic extracted to _execute_force_compression() - Phase 3.5
-        return self._execute_force_compression(instance, messages, llm_messages, usage_pct)
+        return self.compression_handler.execute_force_compression(instance, messages, llm_messages, usage_pct)
 
     def _inject_compression_warning(
         self, llm_messages: List[Message], usage_pct: float,
@@ -2579,7 +2357,7 @@ class ExecutionEngine:
             return result
         elif tool_name == 'compress_context':
             resolved = self._resolve_placeholders(tool_args, instance.instance_name, tool_name)
-            result = self._handle_compress_context(resolved, messages, instance.instance_name)
+            result = self.compression_handler.handle_compress_tool(resolved, instance, instance.instance_name)
             self._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
         else:
@@ -2914,371 +2692,6 @@ class ExecutionEngine:
 
         self.pool.dismiss_instance(target_name)
         return f"[Agent '{target_name}' dismissed successfully.]"
-
-    # ═══════════════════════════════════════════════════════════════════════
-    #  compress_context tool handler
-    # ═══════════════════════════════════════════════════════════════════════
-
-    def _handle_compress_context(
-        self, args: Any, messages: List[Message], target_agent_name: str
-    ) -> str:
-        """Handle compress_context tool call — delegates to compression module.
-
-        Args:
-            args: Compression arguments (fraction, mode).
-            messages: Messages to compress.
-            target_agent_name: Name of the agent whose context should be compressed.
-
-        Returns:
-            Result string with compression outcome.
-        """
-        if args is None:
-            # JSON parsing failed in _resolve_placeholders — return error
-            return 'Error: Invalid JSON arguments.'
-
-        # Fix #7: Validate fraction to prevent extreme values
-        fraction = max(0.1, min(0.9, args.get('fraction', 0.5)))
-        mode = args.get('mode', 'auto')
-        summary_text = args.get('summary_text')
-        force = args.get('force', False)
-
-        # Acquire per-agent lock for thread safety
-        inst = self.pool.get_instance(target_agent_name)
-        if not inst:
-            return f"Error: Agent '{target_agent_name}' not found."
-
-        # NOTE: Do NOT wrap compress_context in _compression_lock — it internally
-        # calls agent_pool.get_conversation() which acquires the same lock.
-        # Holding the outer lock + inner lock = deadlock (non-reentrant Lock).
-        from agent_cascade.compression.core import compress_context as _compress
-        result = _compress(
-            agent_pool=self.pool,
-            target_agent_name=target_agent_name,
-            fraction=fraction,
-            mode=mode,
-            summary_text=summary_text,
-            force=force,
-        )
-
-        if result.success:
-            with token_cache_invalidated(inst):
-                pass  # Context manager handles invalidation on exit (Phase 2 fix)
-            # Set cooldown flag to suppress loop detection on next turn after compression
-            inst._suppress_loop_detection_next_turn = True
-
-            # Sync logger's internal data["history"] to match pool state (Item 11)
-            # Without this, update_history() will treat pool messages not yet seen by
-            # the logger as "new" and append them, causing duplication.
-            try:
-                conv = self.pool.get_conversation(target_agent_name)
-                log_inst = self.pool.get_logger(target_agent_name, inst.agent_class)
-                log_inst.update_history(conv)
-            except Exception as e:
-                logger.error(f"Logger sync after compress_context tool FAILED for '{target_agent_name}': {e}")
-
-            return (f"Compression successful. Discarded {result.messages_discarded} messages. "
-                    f"Tail count: {result.tail_count}.")
-        else:
-            return f"Compression failed: {result.error}"
-
-    # ═══════════════════════════════════════════════════════════════════════
-    #  Item 7: /compress manual command handling
-    # ═══════════════════════════════════════════════════════════════════════
-
-    def _detect_and_parse_compress_command(
-        self,
-        instance: AgentInstance,
-        messages: List[Message]
-    ) -> Optional[float]:
-        """Detect /compress command and parse fraction parameter.
-        
-        Extracted from _handle_compress_command() - Phase 3.7
-        
-        Scans the last user message for /compress command pattern.
-        
-        Args:
-            instance: Current agent instance
-            messages: Working message list
-            
-        Returns:
-            Fraction value (0.1-0.9) if command detected, None otherwise.
-        """
-        inst_name = instance.instance_name
-        
-        # Find the last USER message
-        last_user = None
-        for msg in reversed(messages):
-            role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-            if role == USER:
-                last_user = msg
-                break
-        
-        if last_user is None:
-            return None
-        
-        content = last_user.get('content', '') if isinstance(last_user, dict) else getattr(last_user, 'content', '')
-        if not isinstance(content, str):
-            return None
-        
-        if not content.strip().startswith('/compress'):
-            return None
-        
-        # Fix #1 & #2: Clear the /compress command immediately to prevent infinite re-detection loop
-        if isinstance(last_user, dict):
-            last_user['content'] = "\u00a0"  # Non-breaking space — valid for all major LLM APIs
-        else:
-            last_user.content = "\u00a0"
-        
-        # Parse fraction from command (default 0.5)
-        parts = content.strip().split()
-        fraction = 0.5
-        if len(parts) > 1:
-            try:
-                fraction = float(parts[1])
-            except ValueError as e:
-                logger.warning(f"Invalid fraction in /compress command for {inst_name}: {e}")
-        
-        # Clamp fraction to valid range
-        fraction = max(0.1, min(0.9, fraction))
-        
-        return fraction
-
-    def _generate_compression_preview(
-        self,
-        instance: AgentInstance,
-        messages: List[Message],
-        fraction: float
-    ) -> Optional[str]:
-        """Generate compression preview in dry_run mode.
-        
-        Extracted from _handle_compress_command() - Phase 3.7
-        
-        Args:
-            instance: Current agent instance
-            messages: Working message list
-            fraction: Compression fraction
-            
-        Returns:
-            Preview text string if successful, None on failure.
-        """
-        inst_name = instance.instance_name
-        
-        # Get compress_context tool from template
-        template = self.pool.templates.get(instance.agent_class)
-        if not template or 'compress_context' not in getattr(template, 'function_map', {}):
-            logger.warning(f"/compress command but compress_context tool unavailable for {inst_name}")
-            return None
-        
-        compress_tool = template.function_map['compress_context']
-        
-        # Generate preview summary (dry_run)
-        try:
-            preview_params = json.dumps({
-                'fraction': fraction,
-                'mode': 'auto',
-            })
-            summary = compress_tool.call(
-                preview_params,
-                messages=messages,
-                agent_instance_name=inst_name,
-                agent_obj=instance,  # Pass instance so tool can resolve agent_pool via template
-                dry_run=True,  # Don't mutate pool yet
-            )
-        except Exception as e:
-            logger.error(f"Preview compression failed for {inst_name}: {e}")
-            return None
-        
-        if not summary or str(summary).startswith("ERROR"):
-            logger.warning(f"/compress preview failed for {inst_name}: {summary}")
-            return None
-        
-        return summary
-
-    def _request_user_approval(
-        self,
-        messages: List[Message],
-        inst_name: str,
-        fraction: float,
-        summary: str
-    ) -> bool:
-        """Request user approval for compression via UI.
-        
-        Extracted from _handle_compress_command() - Phase 3.7
-        
-        Args:
-            messages: Working message list for notifications
-            inst_name: Instance name for logging
-            fraction: Compression fraction
-            summary: Preview summary text
-            
-        Returns:
-            True if approved, False if rejected.
-        """
-        if self.pool.operation_manager:
-            try:
-                approved, rejection_reason = self.pool.operation_manager.request_user_approval(
-                    agent_name=inst_name,
-                    tool_name='compress_context',
-                    tool_args={'fraction': fraction, 'summary': summary},
-                    description=f"Proposed Compression Summary ({int(fraction*100)}% of history)",
-                )
-            except Exception as e:
-                logger.error(f"User approval request failed for {inst_name}: {e}")
-                self._append_system_notification(
-                    messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                    f"/compress approval request failed: {e}"
-                )
-                return False
-        else:
-            # No operation_manager — auto-approve (standalone mode)
-            approved = True
-        
-        if not approved:
-            logger.info(f"/compress rejected by user for {inst_name}: {rejection_reason}")
-            self._append_system_notification(
-                messages, "[SYSTEM NOTIFICATION: Compression cancelled",
-                f"/compress cancelled by user. Reason: {rejection_reason}"
-            )
-        
-        return approved  # FIX Bug #2: Return actual approval status
-
-    def _apply_approved_compression(
-        self,
-        instance: AgentInstance,
-        messages: List[Message],
-        llm_messages: List[Message],
-        fraction: float,
-        summary: str,
-        compress_tool
-    ) -> bool:
-        """Apply compression with validation and recovery.
-        
-        Extracted from _handle_compress_command() - Phase 3.7
-        
-        Executes actual compression, validates message pool, attempts recovery if needed,
-        syncs logger history, and sets loop detection cooldown flag.
-        
-        Args:
-            instance: Current agent instance
-            messages, llm_messages: Working message sets
-            fraction: Compression fraction
-            summary: Precomputed preview summary
-            
-        Returns:
-            True if compression succeeded (continue loop), False otherwise.
-        """
-        inst_name = instance.instance_name
-        
-        try:
-            apply_params = json.dumps({
-                'fraction': fraction,
-                'mode': 'auto',
-            })
-            result = compress_tool.call(
-                apply_params,
-                messages=messages,
-                agent_instance_name=inst_name,
-                agent_obj=instance,  # Pass instance for proper pool resolution
-                precomputed_summary=summary,  # Skip LLM summary generation
-            )
-            logger.info(f"/compress applied for {inst_name}: {result}")
-            
-            # Check if compression succeeded (tool returns string, not CompressResult)
-            result_str = str(result) if result else ""
-            if result_str.startswith("Compression failed"):
-                logger.warning(f"/compress silently failed for {inst_name}: {result}")
-                self._append_system_notification(
-                    messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                    f"/compress failed for {inst_name}: {result}"
-                )
-                return True
-            
-            # Validate message pool after compression (Item 10)
-            conv = self.pool.get_conversation(inst_name)
-            working_set_rebuilt = False
-            if conv and not validate_message_pool(conv, inst_name):
-                logger.error(f"[MSG POOL VALIDATION] Pool invalid after /compress for '{inst_name}'. Attempting recovery...")
-                try:
-                    recov = self.pool.get_logger(inst_name, instance.agent_class).data.get('history', [])
-                    if recov and validate_message_pool(recov, inst_name):
-                        with token_cache_invalidated(instance):
-                            with instance._compression_lock:
-                                instance.conversation = list(recov)
-                        logger.info(f"Recovered message pool after /compress for '{inst_name}' ({len(recov)} messages)")
-                        self._rebuild_working_set(messages, llm_messages, inst_name)
-                        working_set_rebuilt = True
-                    else:
-                        self._append_system_notification(
-                            messages, "[SYSTEM NOTIFICATION: Compression corrupted pool",
-                            f"/compress applied but message pool validation failed and recovery unsuccessful."
-                        )
-                except Exception as e:
-                    logger.error(f"Recovery after /compress failed for '{inst_name}': {e}")
-            
-            # Rebuild working set after successful compression (if not already rebuilt in recovery path)
-            conv = self.pool.get_conversation(inst_name)
-            if conv and validate_message_pool(conv, inst_name) and not working_set_rebuilt:
-                self._rebuild_working_set(messages, llm_messages, inst_name)
-            
-            # Set cooldown flag to suppress loop detection on next turn after compression
-            instance._suppress_loop_detection_next_turn = True
-            
-            # Sync logger's internal data["history"] to match pool state (Item 11)
-            try:
-                conv = self.pool.get_conversation(inst_name)
-                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                log_inst.update_history(conv)
-            except Exception as e:
-                logger.error(f"Logger sync after /compress FAILED for '{inst_name}': {e}")
-            
-            self._append_system_notification(
-                messages, "[SYSTEM NOTIFICATION: Compression applied",
-                f"/compress applied successfully for {inst_name}."
-            )
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"/compress apply failed for {inst_name}: {e}")
-            self._append_system_notification(
-                messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                f"/compress apply failed for {inst_name}: {e}"
-            )
-            return True
-
-    def _handle_compress_command(self, instance: AgentInstance, messages: List[Message], llm_messages: List[Message]) -> bool:
-        """Detect and handle /compress [fraction] user command.
-
-        Extracted sub-methods - Phase 3.7
-        
-        Returns True if the command was handled (whether approved or not).
-        """
-        inst_name = instance.instance_name
-        
-        # Step 1: Detect and parse command
-        fraction = self._detect_and_parse_compress_command(instance, messages)
-        if fraction is None:
-            return False
-        
-        # Step 2: Generate preview
-        summary = self._generate_compression_preview(instance, messages, fraction)
-        if not summary:
-            # Add system notification when compress_context is unavailable
-            self._append_system_notification(
-                messages, "[SYSTEM NOTIFICATION: Compression tool unavailable",
-                f"/compress command issued but compress_context tool is unavailable for {inst_name}."
-            )
-            return True
-        
-        # Step 3: Request user approval
-        if not self._request_user_approval(messages, inst_name, fraction, summary):
-            return True  # User rejected — continue loop without compression
-        
-        # Step 4: Apply compression
-        template = self.pool.templates.get(instance.agent_class)
-        compress_tool = template.function_map['compress_context']
-        
-        return self._apply_approved_compression(instance, messages, llm_messages, fraction, summary, compress_tool)
 
     def _push_subagent_stream_update(self, caller: str) -> None:
         """Push stream update to WebSocket for sub-agent visibility.
