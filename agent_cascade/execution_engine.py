@@ -944,18 +944,29 @@ class ExecutionEngine:
 
         return False  # Continue to LLM call normally
 
-    def _force_compression(
-        self, instance: AgentInstance, messages: List[Message],
-        llm_messages: List[Message], usage_pct: float
+    def _check_compression_cooldown(
+        self,
+        instance: AgentInstance,
+        llm_messages: List[Message],
+        usage_pct: float
     ) -> bool:
-        """Force compress when token usage exceeds critical threshold. Returns True (continue loop)."""
+        """Check if compression cooldown is active.
+        
+        Extracted from _force_compression() - Phase 3.5
+        
+        Args:
+            instance: Agent instance
+            llm_messages: Working set for warning injection
+            usage_pct: Current token usage percentage
+            
+        Returns:
+            True if cooldown active (skip compression this cycle)
+        """
         inst_name = instance.instance_name
-
-        # ── Loop Cooldown Check (Compression cooldown and overfeeding detection) ─────────────────────────────────
-        # Thread-safe: acquire lock before reading/writing compression tracking fields
+        
         with instance._compression_lock:
             now = time.monotonic()
-            cooldown = getattr(self.pool.settings, 'compression_force_cooldown', 2.0)  # Default 2.0 seconds
+            cooldown = getattr(self.pool.settings, 'compression_force_cooldown', 2.0)
             elapsed = now - instance._last_force_compress_time
             
             if elapsed < cooldown:
@@ -963,18 +974,36 @@ class ExecutionEngine:
                     f"Forced compression cooldown active for {inst_name}: "
                     f"{elapsed:.1f}s / {cooldown:.1f}s — skipping this cycle"
                 )
-                # Inject a warning so the agent knows context is still tight
-                current_tokens = self._count_history_tokens(messages, instance)
+                current_tokens = self._count_history_tokens(instance.conversation, instance)
                 max_tokens = self._get_max_tokens(instance)
                 self._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens)
-                return True  # Continue loop without compressing
+                return True
             
             # Mark this compression attempt (under lock for thread safety)
             instance._last_force_compress_time = now
             instance._force_compress_count += 1
+        
+        return False
 
-        # ── Overfeeding Detection (Compression cooldown and overfeeding detection) ───────────────────────────────
+    def _check_overfeeding(
+        self,
+        instance: AgentInstance,
+        llm_messages: List[Message]
+    ) -> bool:
+        """Check if overfeeding threshold exceeded.
+        
+        Extracted from _force_compression() - Phase 3.5
+        
+        Args:
+            instance: Agent instance
+            llm_messages: Working set for notification injection
+            
+        Returns:
+            True if overfeeding detected (terminate agent)
+        """
+        inst_name = instance.instance_name
         max_attempts = getattr(self.pool.settings, 'compression_max_attempts', 3)
+        
         if instance._force_compress_count >= max_attempts:
             logger.error(
                 f"Overfeeding detected for {inst_name}: "
@@ -985,16 +1014,38 @@ class ExecutionEngine:
                 f"[SYSTEM NOTIFICATION: Overfeeding — {instance._force_compress_count} compressions without relief. Terminating.]"
             )
             self._append_system_notification(llm_messages, "[SYSTEM NOTIFICATION: Overfeeding", notification)
-            # Halt this instance to prevent further execution with growing context
             self.pool.halt_instance(inst_name)
-            return True  # Continue loop so halt takes effect
+            return True
+        
+        return False
 
+    def _execute_force_compression(
+        self,
+        instance: AgentInstance,
+        messages: List[Message],
+        llm_messages: List[Message],
+        usage_pct: float
+    ) -> bool:
+        """Execute forced compression and rebuild working set.
+        
+        Extracted from _force_compression() - Phase 3.5
+        
+        Args:
+            instance: Agent instance
+            messages, llm_messages: Working message sets
+            usage_pct: Current token usage percentage
+            
+        Returns:
+            True if compression successful (continue loop)
+        """
+        inst_name = instance.instance_name
+        
         # Halt other agents (exempt target, Compressor, and root agent)
         exempt = [inst_name, 'Compressor']
         if instance.parent_instance:
             exempt.append(instance.parent_instance)
         self.pool.halt_all_instances(except_instances=exempt)
-
+        
         try:
             logger.info(
                 f"Context usage at {usage_pct:.1f}% for {inst_name} — "
@@ -1044,11 +1095,13 @@ class ExecutionEngine:
                         )
                         
                         if not notification_exists:
-                            # Only append and log if notification doesn't exist
-                            notification_msg = Message(role=USER, content=notification_text)
-                            instance.conversation.append(notification_msg)
-                            messages.append(notification_msg)
-                            llm_messages.append(notification_msg)
+                            # FIX Issue #4: Wrap notification append in token_cache_invalidated context manager
+                            with token_cache_invalidated(instance):
+                                # Only append and log if notification doesn't exist
+                                notification_msg = Message(role=USER, content=notification_text)
+                                instance.conversation.append(notification_msg)
+                                messages.append(notification_msg)
+                                llm_messages.append(notification_msg)
                             logger.info(f"Compression notification injected into conversation pool for '{inst_name}'")
                         else:
                             logger.debug(f"Compression notification already exists in conversation for '{inst_name}' — skipping. Conv length: {len(instance.conversation)}")
@@ -1114,6 +1167,24 @@ class ExecutionEngine:
 
         finally:
             self.pool.resume_all_instances()
+
+    def _force_compression(
+        self, instance: AgentInstance, messages: List[Message],
+        llm_messages: List[Message], usage_pct: float
+    ) -> bool:
+        """Force compress when token usage exceeds critical threshold. Returns True (continue loop)."""
+        inst_name = instance.instance_name
+        
+        # Extracted to _check_compression_cooldown() - Phase 3.5
+        if self._check_compression_cooldown(instance, llm_messages, usage_pct):
+            return True
+        
+        # Extracted to _check_overfeeding() - Phase 3.5
+        if self._check_overfeeding(instance, llm_messages):
+            return True
+        
+        # Core compression logic extracted to _execute_force_compression() - Phase 3.5
+        return self._execute_force_compression(instance, messages, llm_messages, usage_pct)
 
     def _inject_compression_warning(
         self, llm_messages: List[Message], usage_pct: float,
@@ -1213,80 +1284,155 @@ class ExecutionEngine:
         if needs_update:
             instance._streaming_responses = copy.deepcopy(last_output)
 
-    def _call_llm_with_injection(
-        self, instance: AgentInstance, llm_messages: List[Message]
-    ) -> Iterator[Message]:
-        """Phase 3: LLM call with active function injection.
+    def _classify_llm_error(self, error: Exception) -> str:
+        """Classify LLM error as 'retryable', 'fatal', or 'unknown'.
+        
+        Extracted from _call_llm_with_injection() - Phase 3.6
+        
+        Args:
+            error: The exception that occurred
+            
+        Returns:
+            Error classification string
+        """
+        error_str = str(error).lower()
+        
+        # Retryable errors (transient)
+        retryable_errors = (
+            'connection', 'timeout', 'timed out', 'ssl', 
+            'broken pipe', 'disconnected', 'eof', 
+            'reset by peer', 'refused',
+            '503', '502', '504', '429',  # Server errors + rate limiting
+            'network unreachable', 'dns', 'resolution failed',  # Network/DNS issues
+            'temporary', 'overloaded', 'service unavailable'  # Transient server states
+        )
+        
+        # Explicitly non-retryable patterns (billing, auth, config)
+        non_retryable_errors = (
+            'insufficient_quota', 'billing_error', 'account_not_active',
+            'invalid_api_key', 'authentication', 'unauthorized',
+            'forbidden', 'permission denied',
+            'model_not_found', 'invalid_model',
+            'invalid_request', 'validation'
+        )
+        
+        is_non_retryable = any(err in error_str for err in non_retryable_errors)
+        has_retryable_pattern = any(err in error_str for err in retryable_errors)
+        
+        if is_non_retryable:
+            return 'fatal'
+        elif has_retryable_pattern:
+            return 'retryable'
+        else:
+            # Unknown error — default to retryable for transient issues we haven't categorized
+            return 'unknown'
 
-        Makes the actual LLM API call via api_router, handling streaming.
-        Checks for stop/halt mid-stream.
-        Implements endpoint recovery on mid-stream failure (retry with new endpoint).
+    def _make_retrying_message(
+        self,
+        instance: AgentInstance,
+        attempt: int,
+        max_retries: int,
+        delay: float
+    ) -> Message:
+        """Create [RETRYING] notification message for UI.
+        
+        Extracted from _call_llm_with_injection() - Phase 3.6
+        
+        Args:
+            instance: Agent instance
+            attempt: Current retry attempt number
+            max_retries: Maximum retries allowed
+            delay: Seconds until next retry
+            
+        Returns:
+            Transient Message object (not added to conversation history)
+        """
+        return Message(
+            role=ASSISTANT,
+            content=f"[RETRYING] Connection lost, retrying ({attempt}/{max_retries}) in {delay:.1f}s..."
+        )
+
+    def _make_error_message(self, instance: AgentInstance, error_msg: str) -> Message:
+        """Create [ERROR] notification message for UI.
+        
+        Extracted from _call_llm_with_injection() - Phase 3.6
+        
+        Args:
+            instance: Agent instance
+            error_msg: Error message to display
+            
+        Returns:
+            Transient Message object (not added to conversation history)
+        """
+        return Message(
+            role=ASSISTANT,
+            content=f"[ERROR {instance.instance_name}: {error_msg}]"
+        )
+
+    def _execute_llm_call_with_retry(
+        self,
+        instance: AgentInstance,
+        llm_messages: List[Message],
+        template,
+        active_functions
+    ) -> Iterator[Message]:
+        """Execute LLM call with retry logic and streaming injection.
+        
+        Extracted from _call_llm_with_injection() - Phase 3.6
+        
+        This method handles:
+        - Retry loop with exponential backoff
+        - Error classification (timeout, network, API error)
+        - Streaming response handling
+        - [RETRYING] message injection for UI
+        
+        Args:
+            instance: Agent instance making the call
+            llm_messages: Messages to send to LLM
+            template: Template with LLM configuration
+            active_functions: Active tool schemas
+            
+        Yields:
+            Message objects or None for progress updates
         """
         inst_name = instance.instance_name
-        template = self.pool.templates.get(instance.agent_class)
-        if not template:
-            yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: No template for {instance.agent_class}]")
-            return
-
-        # Get active functions (tool schemas) from template
-        # Mirrors Agent._get_active_functions(): filter out disabled tools from function_map
-        active_functions = _get_active_functions_from_template(template, instance)
-
-        # Endpoint recovery: On mid-stream failure, retry once with a fresh endpoint chain.
-        # The first attempt already exhausts all endpoints via call_with_fallback (Tier 1→2→3)
-        # with per-endpoint retries from UI config. A second attempt gives us another shot at
-        # the chain — useful when a mid-stream disconnection occurred and the inner loop
-        # never got to try fallback endpoints. If both attempts fail, something is fundamentally
-        # wrong and more retries won't help.
         MAX_RETRIES = 1
         BASE_DELAY = 1.0
         
         last_output = None
         retry_count = 0
-        error_already_yielded = False  # Track if we already yielded an error message
+        error_already_yielded = False
         
-        # Build the LLM call — with delta_stream=False each yielded item is a List[Message]
-        # (the accumulated response so far). We iterate through all items (or until stop/halt),
-        # keeping the latest accumulated result, then yield individual messages from it.
-        # Wrapped in retry loop for endpoint recovery on mid-stream failure.
         while retry_count <= MAX_RETRIES:
             try:
-                # Streaming UI Content Update Fix: Track partial LLM content for UI updates every ~100ms (threshold 0.1)
+                # Streaming UI Content Update Fix: Track partial LLM content for UI updates every ~100ms
                 last_streaming_update_time = time.monotonic()
                 
                 for output in self._execute_llm_call(instance, template, llm_messages, active_functions):
-                    last_output = output  # keep latest accumulated response FIRST
+                    last_output = output
                     
                     # Update _streaming_responses every ~100ms with deep copy of partial content
                     current_time = time.monotonic()
                     if current_time - last_streaming_update_time >= 0.1:
-                        # Only deep-copy when content actually changed (performance optimization)
                         with instance._compression_lock:
                             self._update_streaming_responses(instance, last_output)
                             last_streaming_update_time = current_time
-                        yield None  # Trigger UI refresh via engine.run() yielding to broadcast loop
+                        yield None
                     
-                    # Check stop/halt mid-stream (after capturing the current result)
+                    # Check stop/halt mid-stream
                     if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
-                        # Clear streaming state on early exit to prevent stale data leak
                         with instance._compression_lock:
                             instance._streaming_responses = []
                         break
                 
-                # If we got output, the stream completed successfully — break out of retry loop
-                # If last_output is still None, the for-loop broke early (stop/halt before any yield) 
-                # or the generator produced no output — in either case, retry may help
                 if last_output is not None:
                     break
                 
             except Exception as e:
-                # Clear streaming state on exception to prevent stale partial data from leaking
                 with instance._compression_lock:
                     instance._streaming_responses = []
                 
                 if retry_count >= MAX_RETRIES:
-                    # All retries exhausted — yield error and give up
-                    # Extract clean error message without traceback for user-facing content
                     error_msg = str(e).split('\n')[0] if e else "Unknown error"
                     logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {MAX_RETRIES} retries: {e}")
                     yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed after {MAX_RETRIES} retries — {error_msg}]")
@@ -1294,56 +1440,14 @@ class ExecutionEngine:
                     break
                 
                 retry_count += 1
-                # Backoff delay before retrying with fresh endpoint chain
                 backoff = min(BASE_DELAY * (2 ** (retry_count - 1)), 5.0)
                 
-                # Only retry on network/streaming/transient errors, not config/logic/billing errors
-                # Keywords chosen to match common error message patterns from LLM SDKs
-                # Deliberately excludes 'HTTP' (matches URLs in error messages → false positives for 4xx errors)
-                retryable_errors = (
-                    'connection', 'timeout', 'timed out', 'ssl', 
-                    'broken pipe', 'disconnected', 'eof', 
-                    'reset by peer', 'refused',
-                    '503', '502', '504', '429',  # Server errors + rate limiting
-                    'network unreachable', 'dns', 'resolution failed',  # Network/DNS issues
-                    'temporary', 'overloaded', 'service unavailable'  # Transient server states
-                )
+                # Classify error type
+                error_type = self._classify_llm_error(e)
                 
-                # Explicitly non-retryable patterns (billing, auth, config)
-                # Note: 'authentication' may catch transient auth timeouts — kept for conservative error handling
-                non_retryable_errors = (
-                    'insufficient_quota', 'billing_error', 'account_not_active',
-                    'invalid_api_key', 'authentication', 'unauthorized',
-                    'forbidden', 'permission denied',
-                    'model_not_found', 'invalid_model',
-                    'invalid_request', 'validation'
-                )
-                
-                error_str = str(e).lower()
-                is_non_retryable = any(err in error_str for err in non_retryable_errors)
-                has_retryable_pattern = any(err in error_str for err in retryable_errors)
-                
-                # Retry if we have a retryable pattern and no non-retryable pattern
-                # If neither matches, allow retry for unknown transient errors (will be caught by MAX_RETRIES check)
-                if is_non_retryable:
-                    is_retryable = False
-                    logger.debug(f"[ENDPOINT_RETRY] Non-retryable error detected for {inst_name}: {str(e)[:100]}")
-                elif has_retryable_pattern:
-                    is_retryable = True
-                else:
-                    # Unknown error — allow retry to handle transient issues we haven't categorized
-                    # The retry_count >= MAX_RETRIES check above will properly limit attempts
-                    is_retryable = True
-                    logger.warning(
-                        f"[ENDPOINT_RETRY] Unrecognized error for {inst_name}, allowing retry: {str(e)[:100]}"
-                    )
-                
-                if not is_retryable:
-                    # Non-retryable error — yield immediately without more retries
+                if error_type == 'fatal':
                     error_msg = str(e).split('\n')[0] if e else "Unknown error"
-                    logger.warning(
-                        f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable error: {e}"
-                    )
+                    logger.warning(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable error: {e}")
                     yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {error_msg}]")
                     error_already_yielded = True
                     break
@@ -1353,25 +1457,48 @@ class ExecutionEngine:
                     f"Retrying in {backoff:.1f}s with new endpoint... Error: {e}"
                 )
                 
-                # Signal retry to UI before blocking on sleep (prevents 5s black hole)
-                yield Message(role=ASSISTANT, content=f"[RETRYING] Connection lost, retrying ({retry_count}/{MAX_RETRIES}) in {backoff:.1f}s...")
+                # Signal retry to UI before blocking on sleep
+                yield self._make_retrying_message(instance, retry_count, MAX_RETRIES, backoff)
                 time.sleep(backoff)
-                yield None  # Trigger UI refresh after wait, before next attempt
-                
-                # Loop continues — _execute_llm_call will select a new endpoint via call_with_fallback
-
-        # Final update before yielding results (under lock for thread safety)
+                yield None
+        
+        # Final update before yielding results
         if last_output is not None:
             with instance._compression_lock:
                 self._update_streaming_responses(instance, last_output)
         
         if not last_output or (isinstance(last_output, list) and len(last_output) == 0):
-            # Only yield empty response error if we didn't already yield an error message
             if not error_already_yielded:
                 yield Message(role=ASSISTANT, content="[SYSTEM ERROR: Empty LLM response]")
         else:
             for msg in last_output:
                 yield msg
+
+    def _call_llm_with_injection(
+        self, instance: AgentInstance, llm_messages: List[Message]
+    ) -> Iterator[Message]:
+        """Delegate to retry logic — now ~15 lines.
+        
+        Extracted core logic to _execute_llm_call_with_retry() - Phase 3.6
+        
+        Args:
+            instance: Agent instance making the call
+            llm_messages: Messages to send to LLM
+            
+        Yields:
+            Message objects from LLM response
+        """
+        inst_name = instance.instance_name
+        template = self.pool.templates.get(instance.agent_class)
+        if not template:
+            yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: No template for {instance.agent_class}]")
+            return
+
+        # Get active functions (tool schemas) from template
+        active_functions = _get_active_functions_from_template(template, instance)
+        
+        # Delegate to extracted method - Phase 3.6
+        yield from self._execute_llm_call_with_retry(instance, llm_messages, template, active_functions)
 
     def _execute_llm_call(self, instance: AgentInstance, template, messages: List[Message], active_functions) -> Iterator[List[Message]]:
         """Execute the actual LLM API call via api_router with failover.
@@ -2677,20 +2804,26 @@ class ExecutionEngine:
     #  Item 7: /compress manual command handling
     # ═══════════════════════════════════════════════════════════════════════
 
-    def _handle_compress_command(self, instance: AgentInstance, messages: List[Message], llm_messages: List[Message]) -> bool:
-        """Detect and handle /compress [fraction] user command.
-
-        Checks the last USER message for a /compress command. If found:
-          1. Parse the fraction (default 0.5)
-          2. Generate a preview summary via dry_run compression
-          3. Request user approval via operation_manager
-          4. Apply compression if approved
-          5. Rebuild llm_messages working set after compression (Fix #4)
-
-        Returns True if the command was handled (whether approved or not).
+    def _detect_and_parse_compress_command(
+        self,
+        instance: AgentInstance,
+        messages: List[Message]
+    ) -> Optional[float]:
+        """Detect /compress command and parse fraction parameter.
+        
+        Extracted from _handle_compress_command() - Phase 3.7
+        
+        Scans the last user message for /compress command pattern.
+        
+        Args:
+            instance: Current agent instance
+            messages: Working message list
+            
+        Returns:
+            Fraction value (0.1-0.9) if command detected, None otherwise.
         """
         inst_name = instance.instance_name
-
+        
         # Find the last USER message
         last_user = None
         for msg in reversed(messages):
@@ -2698,24 +2831,23 @@ class ExecutionEngine:
             if role == USER:
                 last_user = msg
                 break
-
+        
         if last_user is None:
-            return False
-
+            return None
+        
         content = last_user.get('content', '') if isinstance(last_user, dict) else getattr(last_user, 'content', '')
         if not isinstance(content, str):
-            return False
-
+            return None
+        
         if not content.strip().startswith('/compress'):
-            return False
-
+            return None
+        
         # Fix #1 & #2: Clear the /compress command immediately to prevent infinite re-detection loop
-        # Replace with non-breaking space (U+00A0) for LLM API compatibility
         if isinstance(last_user, dict):
             last_user['content'] = "\u00a0"  # Non-breaking space — valid for all major LLM APIs
         else:
             last_user.content = "\u00a0"
-
+        
         # Parse fraction from command (default 0.5)
         parts = content.strip().split()
         fraction = 0.5
@@ -2724,24 +2856,41 @@ class ExecutionEngine:
                 fraction = float(parts[1])
             except ValueError as e:
                 logger.warning(f"Invalid fraction in /compress command for {inst_name}: {e}")
-
+        
         # Clamp fraction to valid range
         fraction = max(0.1, min(0.9, fraction))
+        
+        return fraction
 
+    def _generate_compression_preview(
+        self,
+        instance: AgentInstance,
+        messages: List[Message],
+        fraction: float
+    ) -> Optional[str]:
+        """Generate compression preview in dry_run mode.
+        
+        Extracted from _handle_compress_command() - Phase 3.7
+        
+        Args:
+            instance: Current agent instance
+            messages: Working message list
+            fraction: Compression fraction
+            
+        Returns:
+            Preview text string if successful, None on failure.
+        """
+        inst_name = instance.instance_name
+        
         # Get compress_context tool from template
         template = self.pool.templates.get(instance.agent_class)
         if not template or 'compress_context' not in getattr(template, 'function_map', {}):
             logger.warning(f"/compress command but compress_context tool unavailable for {inst_name}")
-            # Fix #3: Add system notification when compress_context is unavailable
-            self._append_system_notification(
-                messages, "[SYSTEM NOTIFICATION: Compression tool unavailable",
-                f"/compress command issued but compress_context tool is unavailable for {inst_name}."
-            )
-            return True
-
+            return None
+        
         compress_tool = template.function_map['compress_context']
-
-        # Step 1: Generate preview summary (dry_run)
+        
+        # Generate preview summary (dry_run)
         try:
             preview_params = json.dumps({
                 'fraction': fraction,
@@ -2756,19 +2905,34 @@ class ExecutionEngine:
             )
         except Exception as e:
             logger.error(f"Preview compression failed for {inst_name}: {e}")
-            summary = None
-
+            return None
+        
         if not summary or str(summary).startswith("ERROR"):
             logger.warning(f"/compress preview failed for {inst_name}: {summary}")
-            self._append_system_notification(
-                messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                f"/compress preview failed for {inst_name}. Cannot compress."
-            )
-            return True
+            return None
+        
+        return summary
 
-        # Step 2: Request user approval via operation_manager
-        approved = False
-        rejection_reason = ""
+    def _request_user_approval(
+        self,
+        messages: List[Message],
+        inst_name: str,
+        fraction: float,
+        summary: str
+    ) -> bool:
+        """Request user approval for compression via UI.
+        
+        Extracted from _handle_compress_command() - Phase 3.7
+        
+        Args:
+            messages: Working message list for notifications
+            inst_name: Instance name for logging
+            fraction: Compression fraction
+            summary: Preview summary text
+            
+        Returns:
+            True if approved, False if rejected.
+        """
         if self.pool.operation_manager:
             try:
                 approved, rejection_reason = self.pool.operation_manager.request_user_approval(
@@ -2783,20 +2947,47 @@ class ExecutionEngine:
                     messages, "[SYSTEM NOTIFICATION: Compression command failed",
                     f"/compress approval request failed: {e}"
                 )
-                return True
+                return False
         else:
             # No operation_manager — auto-approve (standalone mode)
             approved = True
-
+        
         if not approved:
             logger.info(f"/compress rejected by user for {inst_name}: {rejection_reason}")
             self._append_system_notification(
                 messages, "[SYSTEM NOTIFICATION: Compression cancelled",
                 f"/compress cancelled by user. Reason: {rejection_reason}"
             )
-            return True
+        
+        return approved  # FIX Bug #2: Return actual approval status
 
-        # Step 3: Apply the compression with precomputed summary
+    def _apply_approved_compression(
+        self,
+        instance: AgentInstance,
+        messages: List[Message],
+        llm_messages: List[Message],
+        fraction: float,
+        summary: str,
+        compress_tool
+    ) -> bool:
+        """Apply compression with validation and recovery.
+        
+        Extracted from _handle_compress_command() - Phase 3.7
+        
+        Executes actual compression, validates message pool, attempts recovery if needed,
+        syncs logger history, and sets loop detection cooldown flag.
+        
+        Args:
+            instance: Current agent instance
+            messages, llm_messages: Working message sets
+            fraction: Compression fraction
+            summary: Precomputed preview summary
+            
+        Returns:
+            True if compression succeeded (continue loop), False otherwise.
+        """
+        inst_name = instance.instance_name
+        
         try:
             apply_params = json.dumps({
                 'fraction': fraction,
@@ -2815,7 +3006,6 @@ class ExecutionEngine:
             result_str = str(result) if result else ""
             if result_str.startswith("Compression failed"):
                 logger.warning(f"/compress silently failed for {inst_name}: {result}")
-                # Do NOT proceed with success logic — compression didn't happen
                 self._append_system_notification(
                     messages, "[SYSTEM NOTIFICATION: Compression command failed",
                     f"/compress failed for {inst_name}: {result}"
@@ -2824,61 +3014,90 @@ class ExecutionEngine:
             
             # Validate message pool after compression (Item 10)
             conv = self.pool.get_conversation(inst_name)
-            working_set_rebuilt = False  # Fix #4: Track whether rebuild already happened
+            working_set_rebuilt = False
             if conv and not validate_message_pool(conv, inst_name):
                 logger.error(f"[MSG POOL VALIDATION] Pool invalid after /compress for '{inst_name}'. Attempting recovery...")
-                # Recovery: reload from logger history (same as forced compression path)
                 try:
                     recov = self.pool.get_logger(inst_name, instance.agent_class).data.get('history', [])
                     if recov and validate_message_pool(recov, inst_name):
-                        # Phase 3: Write directly to instance.conversation instead of via bridge
                         with token_cache_invalidated(instance):
                             with instance._compression_lock:
                                 instance.conversation = list(recov)
                         logger.info(f"Recovered message pool after /compress for '{inst_name}' ({len(recov)} messages)")
-                        # Rebuild working sets from recovered data (matches forced compression path)
                         self._rebuild_working_set(messages, llm_messages, inst_name)
-                        working_set_rebuilt = True  # Fix #4: Mark as rebuilt
+                        working_set_rebuilt = True
                     else:
                         self._append_system_notification(
                             messages, "[SYSTEM NOTIFICATION: Compression corrupted pool",
-                            f"/compress applied but message pool validation failed and recovery unsuccessful. Agent may behave unexpectedly."
+                            f"/compress applied but message pool validation failed and recovery unsuccessful."
                         )
                 except Exception as e:
                     logger.error(f"Recovery after /compress failed for '{inst_name}': {e}")
-
-            # Fix #4: Rebuild working set after successful compression (if not already rebuilt in recovery path)
-            # This ensures llm_messages is synced to the compressed pool state
+            
+            # Rebuild working set after successful compression (if not already rebuilt in recovery path)
             conv = self.pool.get_conversation(inst_name)
             if conv and validate_message_pool(conv, inst_name) and not working_set_rebuilt:
-                self._rebuild_working_set(messages, llm_messages, inst_name)  # Includes token cache invalidation
+                self._rebuild_working_set(messages, llm_messages, inst_name)
             
             # Set cooldown flag to suppress loop detection on next turn after compression
             instance._suppress_loop_detection_next_turn = True
-
+            
             # Sync logger's internal data["history"] to match pool state (Item 11)
-            # Without this, update_history() will treat pool messages not yet seen by
-            # the logger as "new" and append them, causing duplication.
             try:
                 conv = self.pool.get_conversation(inst_name)
                 log_inst = self.pool.get_logger(inst_name, instance.agent_class)
                 log_inst.update_history(conv)
             except Exception as e:
                 logger.error(f"Logger sync after /compress FAILED for '{inst_name}': {e}")
-
+            
             self._append_system_notification(
                 messages, "[SYSTEM NOTIFICATION: Compression applied",
                 f"/compress applied successfully for {inst_name}."
             )
-
+            
+            return True
+            
         except Exception as e:
             logger.error(f"/compress apply failed for {inst_name}: {e}")
             self._append_system_notification(
                 messages, "[SYSTEM NOTIFICATION: Compression command failed",
                 f"/compress apply failed for {inst_name}: {e}"
             )
+            return True
 
-        return True
+    def _handle_compress_command(self, instance: AgentInstance, messages: List[Message], llm_messages: List[Message]) -> bool:
+        """Detect and handle /compress [fraction] user command.
+
+        Extracted sub-methods - Phase 3.7
+        
+        Returns True if the command was handled (whether approved or not).
+        """
+        inst_name = instance.instance_name
+        
+        # Step 1: Detect and parse command
+        fraction = self._detect_and_parse_compress_command(instance, messages)
+        if fraction is None:
+            return False
+        
+        # Step 2: Generate preview
+        summary = self._generate_compression_preview(instance, messages, fraction)
+        if not summary:
+            # Add system notification when compress_context is unavailable
+            self._append_system_notification(
+                messages, "[SYSTEM NOTIFICATION: Compression tool unavailable",
+                f"/compress command issued but compress_context tool is unavailable for {inst_name}."
+            )
+            return True
+        
+        # Step 3: Request user approval
+        if not self._request_user_approval(messages, inst_name, fraction, summary):
+            return True  # User rejected — continue loop without compression
+        
+        # Step 4: Apply compression
+        template = self.pool.templates.get(instance.agent_class)
+        compress_tool = template.function_map['compress_context']
+        
+        return self._apply_approved_compression(instance, messages, llm_messages, fraction, summary, compress_tool)
 
     def _find_or_create_instance(
         self,
