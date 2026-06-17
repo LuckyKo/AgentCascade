@@ -1342,6 +1342,7 @@ class AgentPool:
                 from agent_cascade.compression.helpers import extract_instance_output
 
                 engine = ExecutionEngine(self)
+                engine.initialize()  # Phase 4.1: Set lifecycle manager engine reference
                 inst, child_conv = engine._create_and_run_agent(agent_class, child_instance_name, args, caller, nest_depth)
 
                 if inst is None or child_conv is None:

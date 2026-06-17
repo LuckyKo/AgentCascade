@@ -1995,6 +1995,7 @@ def create_app(agents, agent_pool, config=None):
                                         # Create proper AgentInstance via _create_system_agent() — this handles all state setup
                                         sec_state_key = 'Security'
                                         engine = ExecutionEngine(agent_pool)
+                                        engine.initialize()  # Phase 4.1: Set lifecycle manager engine reference
                                         sec_instance = engine._create_system_agent(
                                             agent_class='Security',
                                             instance_name=sec_state_key,
