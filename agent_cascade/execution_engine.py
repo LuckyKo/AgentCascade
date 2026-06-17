@@ -859,23 +859,44 @@ class ExecutionEngine:
 
         return conv, llm_messages, response
 
-    def _pre_llm_checks(
-        self, instance: AgentInstance, messages: List[Message],
-        llm_messages: List[Message], response: List[Message], turns_available: int
-    ) -> bool:
-        """Phase 2: Stop/halt checks, async injection, compression check, loop detection.
-
-        Returns True if processing should continue to next iteration (yield + continue).
-        Handles: stop/halt guard, async message drain, forced compression with rebuild,
-        and loop detection (raises LoopDetectedError if found).
+    def _check_stop_conditions(self, instance: AgentInstance) -> bool:
+        """Check for pool stopped, instance halted, or terminated states.
+        
+        Extracted from _pre_llm_checks() - Phase 3.8
+        
+        Args:
+            instance: Current agent instance
+            
+        Returns:
+            True if any stop condition met (skip LLM call), False otherwise.
         """
         inst_name = instance.instance_name
+        return (self.pool.stopped or 
+                self.pool.is_instance_halted(inst_name) or 
+                self.pool.is_instance_terminated(inst_name))
 
-        # ── Stop/halt guard ────────────────────────────────────────────────
-        if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
-            return True  # Skip LLM call, yield and continue loop
-
-        # ── Async message injection (drain queue) ────────────────────────────────
+    def _inject_async_messages(
+        self,
+        instance: AgentInstance,
+        messages: List[Message],
+        llm_messages: List[Message],
+        response: List[Message]
+    ) -> bool:
+        """Drain and inject async results that arrived during LLM call.
+        
+        Extracted from _pre_llm_checks() - Phase 3.8
+        
+        Also invalidates LLM preprocessing cache after queue injection for fresh processing.
+        
+        Args:
+            instance: Current agent instance
+            messages, llm_messages, response: Working message sets
+            
+        Returns:
+            True if any messages were injected (need to re-process), False otherwise.
+        """
+        inst_name = instance.instance_name
+        
         if self._drain_and_inject(
             instance, inst_name, messages, llm_messages, response,
             drain_fn=self.pool.drain_queue,
@@ -889,12 +910,30 @@ class ExecutionEngine:
                 except Exception as e:
                     logger.debug(f"Failed to clear LLM preprocess cache for {inst_name}: {e}")
 
-            return True  # Yield and continue loop to process new messages
-                
-        if self._handle_compress_command(instance, messages, llm_messages):
-            return True  # Command handled — yield and continue
+            return True
+        
+        return False
 
-        # ── COMPRESSION CHECK (critical for long-running agents) ────────────
+    def _check_and_trigger_compression(
+        self,
+        instance: AgentInstance,
+        messages: List[Message],
+        llm_messages: List[Message]
+    ) -> bool:
+        """Calculate usage percentage and trigger force compression if needed.
+        
+        Extracted from _pre_llm_checks() - Phase 3.8
+        
+        Also injects warning at lower thresholds. Uses ground-truth token counts
+        from last LLM call when available for accurate compression triggering.
+        
+        Args:
+            instance: Current agent instance
+            messages, llm_messages: Working message sets
+            
+        Returns:
+            True if compression was triggered (skip LLM call), False otherwise.
+        """
         max_tokens = self._get_max_tokens(instance)
         
         # Ground-truth token counts from last LLM call (fixes force compression loop bug)
@@ -925,8 +964,38 @@ class ExecutionEngine:
         # Warning injection at >85%
         if usage_pct > self.pool.settings.compression_warning_threshold:
             self._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens_for_check)
+            
+        return False
 
-        # ── Loop detection (with post-compression cooldown) ───────────────────
+    def _pre_llm_checks(
+        self, instance: AgentInstance, messages: List[Message],
+        llm_messages: List[Message], response: List[Message], turns_available: int
+    ) -> bool:
+        """Phase 2: Stop/halt checks, async injection, compression check, loop detection.
+
+        Returns True if processing should continue to next iteration (yield + continue).
+        Handles: stop/halt guard, async message drain, forced compression with rebuild,
+        and loop detection (raises LoopDetectedError if found).
+        """
+        inst_name = instance.instance_name
+        
+        # 1. Stop/halt checks
+        if self._check_stop_conditions(instance):
+            return True  # Skip LLM call, yield and continue loop
+        
+        # 2. Async message injection
+        if self._inject_async_messages(instance, messages, llm_messages, response):
+            return True  # Yield and continue loop to process new messages
+        
+        # 3. Compress command check
+        if self._handle_compress_command(instance, messages, llm_messages):
+            return True  # Command handled — yield and continue
+        
+        # 4. Compression trigger
+        if self._check_and_trigger_compression(instance, messages, llm_messages):
+            return True  # Compression triggered — yield and continue
+        
+        # 5. Loop detection (with post-compression cooldown) ───────────────────
         # After compression, the conversation state has concentrated patterns that
         # can trigger false-positive loop detection. Skip detection on the turn
         # immediately following compression via _suppress_loop_detection_next_turn flag.
@@ -1969,6 +2038,145 @@ class ExecutionEngine:
         return used_any_tool
 
 
+    def _check_for_tool_calls_in_output(
+        self,
+        instance: AgentInstance,
+        response: List[Message]
+    ) -> bool:
+        """Scan last assistant messages for unexecuted tool calls.
+        
+        Extracted from _post_turn_checks() - Phase 3.9
+        
+        If tool calls found, they will be executed in the next turn loop iteration.
+        
+        Args:
+            instance: Current agent instance
+            response: Accumulated response messages
+            
+        Returns:
+            True if tool calls were found (continue looping), False if no more tools to execute.
+        """
+        # Check if last assistant message had a tool call (still working)
+        has_tool_call = False
+        for msg in reversed(response):
+            role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+            if role == ASSISTANT:
+                fc = msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None)
+                has_tool_call = fc is not None
+                break
+        
+        return has_tool_call
+
+    def _detect_pure_thinking_turn(
+        self,
+        instance: AgentInstance,
+        response: List[Message]
+    ) -> bool:
+        """Check if last turn was reasoning-only without real content.
+        
+        Extracted from _post_turn_checks() - Phase 3.9
+        
+        Detects when the LLM produces only thinking blocks with no substantive output,
+        which indicates a stalled agent that should be interrupted.
+        
+        Args:
+            instance: Current agent instance
+            response: Accumulated response messages
+            
+        Returns:
+            True if pure thinking detected (should break), False otherwise.
+        """
+        inst_name = instance.instance_name
+        
+        # Check for real content vs pure thinking
+        last_msgs = [m for m in response[-3:] if m.get('role') != FUNCTION]
+        has_real_content = any(
+            extract_text_from_message(m, add_upload_info=False).strip()
+            for m in last_msgs
+            if (m.get('role') == ASSISTANT or getattr(m, 'role', '') == ASSISTANT)
+        )
+
+        has_thinking = any(
+            m.get('thought') or m.get('reasoning_content')
+            for m in response[-3:]
+        )
+
+        # Pure thinking turn — continue to next turn
+        if not has_real_content and has_thinking:
+            logger.info(f"Pure reasoning turn detected for {inst_name}. Continuing.")
+            return True
+        
+        return False
+
+    def _transition_to_sleeping_if_pending(
+        self,
+        instance: AgentInstance,
+        inst_name: str
+    ) -> bool:
+        """Handle SLEEPING state transition when async tools are pending.
+        
+        Extracted from _post_turn_checks() - Phase 3.9
+        
+        If there are pending background tools and no more tool calls to execute,
+        transition the agent to SLEEPING state while waiting for results.
+        
+        Args:
+            instance: Current agent instance
+            inst_name: Instance name for logging
+            
+        Returns:
+            True if transitioned (continue looping), False if not sleeping.
+        """
+        # Check for pending async tool calls (including call_agent) before completing
+        # This applies regardless of whether agent has real content or not
+        if self.pool.has_pending(inst_name):
+            logger.debug(f"Pending async tools for {inst_name}. Transitioning to SLEEPING.")
+            self._transition_to_sleeping(instance)
+            return True  # Continue loop → hits SLEEPING guard at top
+        
+        return False
+
+    def _drain_post_generation_messages(
+        self,
+        instance: AgentInstance,
+        inst_name: str,
+        messages: List[Message],
+        llm_messages: List[Message],
+        response: List[Message]
+    ) -> bool:
+        """Drain queued messages that arrived after turn completion.
+        
+        Extracted from _post_turn_checks() - Phase 3.9
+        
+        Also performs safety drain for race conditions.
+        
+        Args:
+            instance: Current agent instance
+            inst_name: Instance name for logging
+            messages, llm_messages, response: Working message sets
+            
+        Returns:
+            True if any messages were drained (continue looping), False otherwise.
+        """
+        # Post-generation queue drain
+        if self.pool.has_messages(inst_name):
+            logger.info(f"Queued messages for {inst_name} after turn completion. Looping back.")
+            return True  # Loop back to process injected messages
+        
+        # Safety drain: catch any results from fast-completing children that completed
+        # between register_async_call() and the has_pending() check above
+        try:
+            if self._drain_and_inject(
+                instance, inst_name, messages, llm_messages, response,
+                drain_fn=self.pool.drain_async_results,
+                factory=self._make_async_result_message,
+            ):
+                return True  # Continue loop to process drained results
+        except Exception as e:
+            logger.error("Safety drain failed for %s: %s", inst_name, e)
+        
+        return False
+
     def _post_turn_checks(
         self, 
         instance: AgentInstance, 
@@ -1992,64 +2200,26 @@ class ExecutionEngine:
             True to continue the turn loop, False to break (agent complete).
         """
         inst_name = instance.instance_name
-
-        # Check if last assistant message had a tool call (still working)
-        has_tool_call = False
-        for msg in reversed(messages):
-            role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-            if role == ASSISTANT:
-                fc = msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None)
-                has_tool_call = fc is not None
-                break
-
-        # If tool was called — continue the loop (tool result will be in next turn)
-        if has_tool_call:
-            return True
-
-        # Check for real content vs pure thinking
-        last_msgs = [m for m in messages[-3:] if m.get('role') != FUNCTION]
-        has_real_content = any(
-            extract_text_from_message(m, add_upload_info=False).strip()
-            for m in last_msgs
-            if (m.get('role') == ASSISTANT or getattr(m, 'role', '') == ASSISTANT)
-        )
-
-        has_thinking = any(
-            m.get('thought') or m.get('reasoning_content')
-            for m in messages[-3:]
-        )
-
-        # Pure thinking turn — continue to next turn
-        if not has_real_content and has_thinking:
-            logger.info(f"Pure reasoning turn detected for {inst_name}. Continuing.")
-            return True
-
-        # Check for pending async tool calls (including call_agent) before completing
-        # This applies regardless of whether agent has real content or not
-        if self.pool.has_pending(inst_name):
-            logger.debug(f"Pending async tools for {inst_name} (has_real_content={has_real_content}). Transitioning to SLEEPING.")
-            self._transition_to_sleeping(instance)
+        
+        # 1. Check for unexecuted tool calls
+        if self._check_for_tool_calls_in_output(instance, response):
+            return True  # Tool was called — continue the loop (tool result will be in next turn)
+        
+        # 2. Detect pure thinking turn (stalled agent)
+        if self._detect_pure_thinking_turn(instance, response):
+            return False  # Pure reasoning detected — break out of loop (agent stalled)
+        
+        # 3. Transition to SLEEPING if async tools pending
+        if self._transition_to_sleeping_if_pending(instance, inst_name):
             return True  # Continue loop → hits SLEEPING guard at top
-
-        # Post-generation queue drain
-        if self.pool.has_messages(inst_name):
-            logger.info(f"Queued messages for {inst_name} after turn completion. Looping back.")
-            return True  # Loop back to process injected messages
-
-        # Agent has truly completed (no pending async, no queued messages)
-        # Safety drain: catch any results from fast-completing children that completed
-        # between register_async_call() and the has_pending() check above
-        try:
-            if self._drain_and_inject(
-                instance, inst_name, messages, llm_messages, response,
-                drain_fn=self.pool.drain_async_results,
-                factory=self._make_async_result_message,
-            ):
-                return True  # Continue loop to process drained results
-        except Exception as e:
-            logger.error("safety drain failed for %s: %s", inst_name, e)
-
-        return False
+        
+        # 4. Drain post-generation messages (safety drain)
+        if self._drain_post_generation_messages(
+            instance, inst_name, messages, llm_messages, response
+        ):
+            return True  # Messages drained — continue looping
+        
+        return False  # Agent has truly completed
 
 
     @staticmethod
