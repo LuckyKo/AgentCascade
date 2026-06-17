@@ -1,14 +1,16 @@
 """
-Execution Engine — Phase 1 of the AgentCascade Architecture Rewrite.
+Execution Engine — Orchestration coordinator for the AgentCascade Architecture.
 
-Stateless execution coordinator that drives ALL agent instances through a single
-unified loop. Replaces both api_server.run_agent_thread() and the old sub-agent
-execution path — eliminating the structural duality.
+Coordinates execution of ALL agent instances through a single unified loop.
+Replaces both api_server.run_agent_thread() and the old sub-agent execution path,
+eliminating the structural duality. Delegates lifecycle, compression, tool dispatch,
+and streaming to specialized handler classes.
 
 See DESIGN_REWRITE.md §3.1 for design rationale.
 
-Key design principle: Engine is stateless. It receives AgentInstance as a parameter
-and orchestrates phases. Each phase method (~20-60 lines) is independently testable.
+Key design principle: Engine coordinates execution flow and delegates domain logic
+to specialized handlers (LifecycleManager, CompressionHandler, ToolDispatcher, 
+StreamPublisher). Each phase method (~20-60 lines) is independently testable.
 """
 
 import asyncio
@@ -423,20 +425,31 @@ def _replace_resources_block(m0_content: str, new_block: str) -> str:
 
 
 class ExecutionEngine:
-    """
-    Coordinates execution of an AgentInstance through its turn loop.
-
-    Stateless in terms of turn-level state — receives AgentInstance as parameter.
-    Holds a pool reference for coordination (halt checks, tool delegation) but
-    tracks no per-turn variables between calls. This makes testing straightforward:
-    create an instance, set up state, call run(), inspect yields.
-
+    """Core execution coordinator — delegates to specialized handlers.
+    
+    Responsibilities:
+    - Main turn loop orchestration
+    - Phase dispatch (setup → pre-check → LLM → process → post-check)
+    - State machine transitions
+    - Delegation to LifecycleManager, CompressionHandler, ToolDispatcher, StreamPublisher
+    
+    After Phase 4 refactoring: ExecutionEngine class is ~2,400 lines (down from original ~3,727).
+    Total file size: ~2,800 lines (includes module-level helper functions and delegation wrappers).
+    
+    Uses two-phase initialization:
+    1. __init__() creates handlers with pool only (no engine reference)
+    2. initialize() sets cross-references after all objects constructed
+    
     Every agent (including the root/top-level agent) goes through this same engine.
     There is no separate execution path for any agent type.
     """
 
     def __init__(self, pool):
         """Initialize with a reference to the AgentPool.
+
+        Two-phase initialization:
+        1. Creates all handlers with pool reference
+        2. Calls initialize() to set engine references (breaks circular dependencies)
 
         Args:
             pool: The AgentPool instance that manages all agent state.
@@ -450,17 +463,22 @@ class ExecutionEngine:
         self.tool_dispatcher = ToolDispatcher(pool)
         # Phase 4.4: Initialize stream publisher with lazy engine reference
         self.stream_publisher = StreamPublisher(pool)
+        
+        # Two-phase initialization: set engine references after all handlers created
+        self.initialize()
     
     def initialize(self) -> None:
         """Complete initialization after __init__.
         
-        Sets the engine reference on lifecycle manager, compression handler, tool dispatcher, and stream publisher to break circular dependencies.
-        This should be called after ExecutionEngine construction completes.
+        Sets the engine reference on handlers that need it (lifecycle, compression, tool dispatcher)
+        to break circular dependencies. StreamPublisher does not require an engine reference.
+        
+        Called automatically from __init__ for transparent two-phase initialization.
         """
         self.lifecycle.set_engine(self)
         self.compression_handler.set_engine(self)
         self.tool_dispatcher.set_engine(self)
-        self.stream_publisher.set_engine(self)
+        # stream_publisher doesn't need engine reference (per refactor plan line 2190)
 
     # ── Slot acquisition helper (fixes 3x duplication) ─────────────────────
 
@@ -564,6 +582,10 @@ class ExecutionEngine:
         result_content, function_id = tuple_data
         prefix = f"[BACKGROUND TOOL RESULT for {function_id}]" if function_id else "[BACKGROUND TOOL RESULT]"
         return Message(role=USER, content=f"{prefix}: {result_content}")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  Main Execution Loop — Core turn loop orchestration and phase dispatch
+    # ═══════════════════════════════════════════════════════════════════════
 
     def run(self, instance: AgentInstance) -> Iterator[List[Message]]:
         """Execute the agent's turn loop as a generator yielding state updates.
@@ -990,6 +1012,10 @@ class ExecutionEngine:
             
         return False
 
+    # ═══════════════════════════════════════════════════════════════════════
+    #  Compression Checks — Pre-LLM and Post-Turn compression handling
+    # ═══════════════════════════════════════════════════════════════════════
+
     def _pre_llm_checks(
         self, instance: AgentInstance, messages: List[Message],
         llm_messages: List[Message], response: List[Message], turns_available: int
@@ -1339,6 +1365,10 @@ class ExecutionEngine:
         else:
             for msg in last_output:
                 yield msg
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  LLM Calling — Core LLM call with retry logic and error handling
+    # ═══════════════════════════════════════════════════════════════════════
 
     def _call_llm_with_injection(
         self, instance: AgentInstance, llm_messages: List[Message]
@@ -2335,66 +2365,6 @@ class ExecutionEngine:
 
         return resolved_args
 
-    def _execute_tool(
-        self, instance: AgentInstance, tool_name: str,
-        tool_args, messages: List[Message], function_id: Optional[str] = None
-    ) -> str:
-        """Execute any tool by delegating to ToolDispatcher.
-
-        Phase 4.3: Simplified delegate method that forwards all tool execution
-        to the ToolDispatcher class for centralized routing and handling.
-
-        Args:
-            instance: The agent calling the tool.
-            tool_name: Name of the tool to execute.
-            tool_args: Arguments for the tool (str or dict).
-            messages: Current conversation messages.
-            function_id: The LLM's tool_call_id for this tool call (optional).
-
-        Returns:
-            Tool execution result as a string.
-        """
-        # Phase 4.3: Delegate to ToolDispatcher for all tool execution logic
-        return self.tool_dispatcher.execute_tool(
-            instance=instance,
-            tool_name=tool_name,
-            tool_args=tool_args,
-            llm_messages=messages,
-            function_id=function_id,
-        )
-
-    def _handle_call_agent(self, args: Any, messages: List[Message], instance: AgentInstance, function_id: Optional[str] = None) -> str:
-        """Handle call_agent tool call by delegating to ToolDispatcher.
-
-        Phase 4.3: Delegates all call_agent logic to ToolDispatcher.handle_call_agent().
-
-        Args:
-            args: Tool arguments (instance_name, agent_class, task).
-            messages: Caller's conversation messages.
-            instance: The calling agent instance.
-            function_id: The LLM's tool_call_id for this async call (optional).
-
-        Returns:
-            Result string from the called agent.
-        """
-        # Phase 4.3: Delegate to ToolDispatcher
-        return self.tool_dispatcher.handle_call_agent(args, messages, instance, function_id=function_id)
-
-    def _handle_dismiss_agent(self, args: Any, instance: AgentInstance) -> str:
-        """Handle dismiss_agent tool call by delegating to ToolDispatcher.
-
-        Phase 4.3: Delegates all dismiss_agent logic to ToolDispatcher.handle_dismiss_agent().
-
-        Args:
-            args: Tool arguments (instance_name).
-            instance: The calling agent instance.
-
-        Returns:
-            Result string confirming dismissal.
-        """
-        # Phase 4.3: Delegate to ToolDispatcher
-        return self.tool_dispatcher.handle_dismiss_agent(args, instance)
-
     def _create_and_run_agent(
         self, agent_class: str, instance_name: str,
         args: dict, caller: str, nest_depth: int = 0, force_fresh: bool = False
@@ -2834,24 +2804,5 @@ class ExecutionEngine:
             if not has_notification:
                 content.append({'type': 'text', 'text': notification_text})
 
-    def _truncate_tool_result(
-        self, tool_result: str, tool_name: str,
-        messages: List[Message], instance_name: str
-    ) -> str:
-        """Truncate a tool result by delegating to ToolDispatcher.
-
-        Phase 4.3: Delegates all truncation logic to ToolDispatcher.truncate_tool_result().
-
-        Args:
-            tool_result: The tool result string to potentially truncate
-            tool_name: Name of the tool that produced this result
-            messages: Current conversation messages for token counting
-            instance_name: Name of the agent instance
-
-        Returns:
-            Truncated result string or original if no truncation needed
-        """
-        # Phase 4.3: Delegate to ToolDispatcher
-        return self.tool_dispatcher.truncate_tool_result(
-            tool_result, tool_name, messages, instance_name
-        )
+    # Note: _truncate_tool_result removed in Phase 4.5 cleanup.
+    # Callers should use self.tool_dispatcher.truncate_tool_result() directly.
