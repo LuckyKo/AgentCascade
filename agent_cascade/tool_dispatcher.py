@@ -128,7 +128,7 @@ class ToolDispatcher:
             return result
         else:
             # Standard tool execution via template's function_map
-            template = self.pool.templates.get(instance.agent_class)
+            template = self.pool.get_template(instance.agent_class)
             if not template:
                 raise ValueError(f"No template for agent class {instance.agent_class}")
 

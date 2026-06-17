@@ -474,7 +474,7 @@ def build_state_from_pool(
 
     # Get current model from template's LLM (for frontend display)
     current_model = 'Unknown'
-    template = pool.templates.get(instance.agent_class)
+    template = pool.get_template(instance.agent_class)
     if template and hasattr(template, 'llm') and template.llm:
         current_model = getattr(template.llm, 'model', 'Unknown')
 
@@ -675,7 +675,7 @@ def build_stream_update_from_pool(
                 _last_stream_versions[name] = current_version
 
     # Get current model from template's LLM (for frontend display)
-    template = pool.templates.get(instance.agent_class)
+    template = pool.get_template(instance.agent_class)
     current_model = 'Unknown'
     if template and hasattr(template, 'llm') and template.llm:
         current_model = getattr(template.llm, 'model', 'Unknown')
@@ -832,7 +832,7 @@ def _resolve_max_tokens(pool, instance=None):
     # ── Step 3: Runtime-detected LLM limit (OAI detection writes here directly) ──
     llm_limit = 0
     if instance and hasattr(pool, 'templates'):
-        template = pool.templates.get(instance.agent_class)
+        template = pool.get_template(instance.agent_class)
         if template and hasattr(template, 'llm'):
             llm = template.llm
             # OAI detection in oai.py writes to self.generate_cfg['max_input_tokens'] directly
@@ -843,7 +843,7 @@ def _resolve_max_tokens(pool, instance=None):
     # ── Step 4: Template LLM config (static from settings, via llm.cfg dict) ──
     static_llm_limit = 0
     if instance and hasattr(pool, 'templates'):
-        template = pool.templates.get(instance.agent_class)
+        template = pool.get_template(instance.agent_class)
         if template and hasattr(template, 'llm'):
             llm = template.llm
             cfg = getattr(llm, 'cfg', {})
@@ -1236,7 +1236,7 @@ def _apply_ui_config(
     if instance is None:
         return
 
-    template = pool.templates.get(instance.agent_class)
+    template = pool.get_template(instance.agent_class)
     if not template or not hasattr(template, 'llm') or not template.llm:
         return
 

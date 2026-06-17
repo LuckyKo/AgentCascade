@@ -307,6 +307,35 @@ class AgentPool:
         self.agents_dir = Path(agents_dir)
         self._discover_agents(agents_dir)
 
+    def get_template(self, name: str) -> Optional[Assistant]:
+        """Get template by name with case-insensitive fallback.
+        
+        This method provides robustness against case mismatches between the agent_class
+        specified during instance creation and how templates are registered in the pool.
+        Fallback chain: exact → lowercase → titlecase.
+        For example, if 'Security' is passed but template is registered as 'security',
+        or vice versa (e.g. tool_dispatcher lowercases to 'security' but key is 'Security'),
+        this will still find it.
+        
+        Args:
+            name: Template name to look up (e.g., 'Security', 'coder', etc.)
+            
+        Returns:
+            The Assistant template if found, None otherwise.
+            
+        Example:
+            >>> template = pool.get_template('Security')  # Works even if registered as 'security'
+        """
+        if not name or not isinstance(name, str):
+            return None
+            
+        template = self.templates.get(name)
+        if template is None:
+            template = self.templates.get(name.lower())
+        if template is None:
+            template = self.templates.get(name.title())
+        return template
+
     def start(self):
         """Start background services (idle checker, etc.). Call after pool initialization."""
         self._idle.start()
@@ -570,7 +599,7 @@ class AgentPool:
         Used by list_agents tool and the default prompt builder.
         Returns None if the template is not found.
         """
-        template = self.templates.get(name)
+        template = self.get_template(name)
         if template is None:
             return None
 
@@ -1031,14 +1060,15 @@ class AgentPool:
 
     def get_agent(self, name: str):
         """Get an agent template by name. Returns None if not found."""
-        return self.templates.get(name)
+        return self.get_template(name)
 
     def load_agent(self, name: str):
         """Load a single agent template by name (if not already loaded)."""
         from agent_cascade.agent_factory import load_agent_template
 
-        if name in self.templates:
-            return self.templates[name]
+        cached = self.get_template(name)
+        if cached is not None:
+            return cached
 
         llm_cfg = (getattr(self.api_router, 'default_llm_cfg', {})
                    if self.api_router else {})

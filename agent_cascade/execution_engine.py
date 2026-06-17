@@ -828,7 +828,7 @@ class ExecutionEngine:
             return None, None, None
 
         # Load template to get system message if needed
-        template = self.pool.templates.get(instance.agent_class)
+        template = self.pool.get_template(instance.agent_class)
 
         # P7: System prompt injection for ALL agents (not just root)
         # Inject identity, session metadata, available resources, and argument reuse instructions
@@ -870,7 +870,7 @@ class ExecutionEngine:
                     
                     # 3. Inject/update available resources (enabled tools always; agent types only if call_agent is available)
                     # Always rebuild this block each turn so that changes to disabled_tools are reflected immediately
-                    template = self.pool.templates.get(instance.agent_class)
+                    # Note: Using already-resolved template from line 831, no need for re-lookup
                     new_block = _build_resources_block(self.pool, template, instance)
                     if new_block:
                         if '--- CURRENT AVAILABLE RESOURCES' in m0_content:
@@ -946,7 +946,7 @@ class ExecutionEngine:
             factory=self._make_user_message,
         ):
             # Invalidate LLM preprocessing cache after queue injection for fresh processing
-            template = self.pool.templates.get(instance.agent_class)
+            template = self.pool.get_template(instance.agent_class)
             if template and hasattr(template, 'llm') and template.llm:
                 try:
                     template.llm._clear_preprocess_cache()
@@ -1130,7 +1130,7 @@ class ExecutionEngine:
             _invalidate_token_cache(inst)  # Critical: invalidates ALL cache fields including _last_actual_token_count
         
         # Invalidate LLM preprocessing cache for this instance's template
-        template = self.pool.templates.get(inst.agent_class) if inst else None
+        template = self.pool.get_template(inst.agent_class) if inst else None
         if template and hasattr(template, 'llm') and template.llm:
             try:
                 template.llm._clear_preprocess_cache()
@@ -1383,7 +1383,7 @@ class ExecutionEngine:
             Message objects from LLM response
         """
         inst_name = instance.instance_name
-        template = self.pool.templates.get(instance.agent_class)
+        template = self.pool.get_template(instance.agent_class)
         if not template:
             yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: No template for {instance.agent_class}]")
             return

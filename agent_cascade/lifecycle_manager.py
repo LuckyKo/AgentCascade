@@ -172,7 +172,7 @@ class AgentLifecycleManager:
         Raises:
             ValueError: If no template found for agent_class
         """
-        template = self.pool.templates.get(agent_class)
+        template = self.pool.get_template(agent_class)
         if not template:
             logger.error("NO TEMPLATE for %s/%s", agent_class, instance_name)
             raise ValueError(f"No template for agent class {agent_class}")
@@ -382,7 +382,7 @@ class AgentLifecycleManager:
             if not caller_inst:
                 return
                 
-            caller_template = self.pool.templates.get(caller_inst.agent_class)
+            caller_template = self.pool.get_template(caller_inst.agent_class)
             if not caller_template or not hasattr(caller_template, 'llm'):
                 return
                 
@@ -398,7 +398,7 @@ class AgentLifecycleManager:
                 caller_max_turns = 50  # DEFAULT_MAX_TURNS fallback
             instance.max_turns = caller_max_turns
 
-            target_template = self.pool.templates.get(agent_class)
+            target_template = self.pool.get_template(agent_class)
             if not target_template or not getattr(target_template, 'llm', None):
                 # Target template has no LLM — skip settings propagation but continue execution
                 logger.warning(

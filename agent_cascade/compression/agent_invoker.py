@@ -164,7 +164,7 @@ def invoke_compression_agent(
         if hasattr(agent_pool, 'operation_manager'):
             session = getattr(agent_pool.operation_manager, '_current_session', None)
             if session:
-                template = agent_pool.templates.get('Compressor')
+                template = agent_pool.get_template('Compressor')
                 if template and hasattr(template, 'llm'):
                     cfg = (template.llm.generate_cfg or {}).copy()
                     ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
