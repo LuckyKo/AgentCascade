@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, List, Optional, Tuple
+from enum import Enum, auto
 
 from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
@@ -43,6 +44,13 @@ from agent_cascade.utils.utils import extract_text_from_message
 from .utils.pool_validation import validate_message_pool
 
 from .agent_instance import AgentInstance, LoopDetectedError, AgentState
+
+
+# ── SleepAction Enum (Phase 3.1) ───────────────────────────────────────────────
+class SleepAction(Enum):
+    """Actions returned by _handle_sleeping_state() to control the main loop."""
+    CONTINUE_LOOP = auto()  # Re-enter while loop (with possible yield)
+    BREAK_LOOP = auto()     # Transitioned to COMPLETING/TERMINATED, exit while loop
 
 
 # ── Message Field Accessor Helper (Phase 2 Task 2.0) ────────────────────────────
@@ -608,129 +616,17 @@ class ExecutionEngine:
                 # Agents wake ONLY for async tool results, NOT user messages alone.
                 # User messages accumulate in queue and are drained alongside async results.
                 if instance.state == AgentState.SLEEPING:
-                    # Drain async tool results ONLY — user messages do NOT wake sleeping agents
-                    async_results = self.pool.drain_async_results(inst_name)
-
-                    if async_results:
-                        # Async results arrived — wake up and inject
-                        with instance._state_lock:
-                            # CHECK TERMINATED BEFORE TRANSITION — prevents resuming terminated agent
-                            if instance.state == AgentState.TERMINATED:
-                                logger.debug("TERMINATED while SLEEPING for %s - breaking", inst_name)
-                                break
-                            instance._transition(AgentState.RUNNING)
-                            instance.sleeping_since = None
-                            instance._last_wakeup_log = time.monotonic()
-                            logger.debug("RESUMED from SLEEPING - %s async results, user msgs=%s", 
-                                         len(async_results), self.pool.has_messages(inst_name))
-
-                        # Inject async results FIRST (items mode — already drained)
-                        self._drain_and_inject(
-                            instance, inst_name, messages, llm_messages, response,
-                            items=async_results,
-                            factory=self._make_async_result_message,
-                        )
-                        
-                        # THEN drain any queued user messages (they were waiting while agent was sleeping)
-                        self._drain_and_inject(
-                            instance, inst_name, messages, llm_messages, response,
-                            drain_fn=self.pool.drain_queue,
-                            factory=self._make_user_message,
-                        )
-
-                        # Re-acquire concurrency slot after waking from SLEEPING
-                        if not skip_slot_acquire:
-                            self._acquire_slot_with_logging(instance, "after_async_wakeup")
-
-                        # Continue to normal LLM processing below (in RUNNING state now)
-                        continue
-
-                    elif self.pool.has_pending(inst_name):
-                        # Still waiting for background tools — NO user wakeup (preserves tool_call → tool_response flow)
-                        # User messages stay in queue until async results arrive
-                        if instance.state == AgentState.TERMINATED:
-                            break
-                        
-                        current_time = time.monotonic()
-                        sleeping_duration = 0.0
-                        if instance.sleeping_since is not None:
-                            sleeping_duration = current_time - instance.sleeping_since
-                        
-                        # Get settings with defaults
-                        wakeup_interval = getattr(self.pool.settings, 'sleeping_wakeup_interval', 5.0)
-                        sleeping_timeout = getattr(self.pool.settings, 'sleeping_timeout', 300.0)
-                        
-                        # Check for timeout first
-                        if sleeping_duration >= sleeping_timeout:
-                            logger.warning("SLEEPING TIMEOUT - %s waited %.1fs (timeout=%ss)", 
-                                            inst_name, sleeping_duration, sleeping_timeout)
-                            # Final drain before giving up — prevents data loss of late-arriving results
-                            final_results = self.pool.drain_async_results(inst_name)
-                            self._drain_and_inject(
-                                instance, inst_name, messages, llm_messages, response,
-                                items=final_results,
-                                factory=self._make_async_result_message,
-                            )
-                            with instance._state_lock:
-                                instance._transition(AgentState.COMPLETING)
-                                instance.sleeping_since = None
-                            break
-                        
-                        # Log wakeup message periodically
-                        if (current_time - instance._last_wakeup_log) >= wakeup_interval:
-                            logger.info("SLEEPING - %s waiting %.1fs for background tools", 
-                                        inst_name, sleeping_duration)
-                            instance._last_wakeup_log = current_time
-                        
-                        logger.debug("WAITING for background tools - %s (%.1fs)", inst_name, sleeping_duration)
-                        yield []  # Empty yield signals waiting state without consuming turn
-                        time.sleep(0.1)  # Prevent tight loop when no results available yet
-                        continue
-
-                    else:
-                        # No pending tools and no immediate results
-                        # Stable-state drain — keep draining until no more results arrive
-                        results_found = False
-                        while self._drain_and_inject(
-                            instance, inst_name, messages, llm_messages, response,
-                            drain_fn=self.pool.drain_async_results,
-                            factory=self._make_async_result_message,
-                        ):
-                            results_found = True
-                        
-                        # Final safety drain — catches race conditions
-                        if self._drain_and_inject(
-                            instance, inst_name, messages, llm_messages, response,
-                            drain_fn=self.pool.drain_async_results,
-                            factory=self._make_async_result_message,
-                        ):
-                            results_found = True
-                        
-                        # If any results were found, transition to RUNNING so LLM processes them
-                        if results_found:
-                            with instance._state_lock:
-                                if instance.state == AgentState.TERMINATED:
-                                    break
-                                instance._transition(AgentState.RUNNING)
-                                instance.sleeping_since = None
-                                instance._last_wakeup_log = time.monotonic()
-
-                            # Re-acquire concurrency slot after waking from SLEEPING
-                            if not skip_slot_acquire:
-                                self._acquire_slot_with_logging(instance, "after_stable_drain")
-
-                            # Loop back; now in RUNNING state → LLM processes injected results
-                            yield []
+                    action, yield_value = self._handle_sleeping_state(
+                        instance, messages, llm_messages, response, skip_slot_acquire
+                    )
+                    if yield_value is not None:
+                        yield yield_value
+                        if action == SleepAction.CONTINUE_LOOP:
+                            time.sleep(0.1)  # Prevent tight loop when no results available yet
                             continue
-                        
-                        # No results found — safe to transition to COMPLETING
-                        with instance._state_lock:
-                            if instance.state == AgentState.TERMINATED:
-                                break
-                            instance._transition(AgentState.COMPLETING)
-                            instance.sleeping_since = None
-                        logger.debug("COMPLETING - %s (no pending tools)", inst_name)
+                    if action == SleepAction.BREAK_LOOP:
                         break
+                    # Otherwise CONTINUE_LOOP — continue to next iteration
 
                 # ── Phase 2: Pre-LLM Checks ────────────────────────────────
                 # Stop/halt checks, async message injection, compression check/force, loop detection
@@ -1562,19 +1458,21 @@ class ExecutionEngine:
                 extra_generate_cfg=merged_cfg,
             )
 
-    def _process_response(
-        self, instance: AgentInstance, turn_output: List[Message],
-        messages: List[Message], llm_messages: List[Message],
-        response: List[Message]
-    ) -> bool:
-        """Phase 4: Normalize response, handle auto-continue on truncation, execute tools.
-
-        Returns True if processing should continue to next iteration (tool was used or truncated).
+    def _normalize_turn_output(self, turn_output: List[Message]) -> None:
+        """Normalize messages in-place (Gemma tags, thinking blocks).
+        
+        Normalizes each message in turn_output by:
+        - Removing Gemma thought tags
+        - Stripping thinking blocks from reasoning_content
+        - Cleaning thinking blocks from function call arguments
+        
+        Args:
+            turn_output: List of messages to normalize (modified in-place)
+            
+        Note:
+            This method only normalizes. Truncation detection is now handled
+            separately by _check_message_truncation() called before normalization.
         """
-        inst_name = instance.instance_name
-
-        # ── Normalize and update history ────────────────────────────────────
-        is_truncated = False
         for msg in turn_output:
             # P4: Gemma thought tag normalization — prevent history pollution
             _normalize_gemma_thought_tags(msg)
@@ -1592,14 +1490,24 @@ class ExecutionEngine:
             if func_call:
                 _normalize_tool_arguments(func_call)
 
-            # Check for truncation (finish_reason == 'length')
-            if _check_message_truncation(msg):
-                is_truncated = True
-
-        # ── Persist pre-existing messages to JSONL before appending turn_output ──
-        # This must happen BEFORE instance.conversation.extend(turn_output) so the initial
-        # sync only sees messages that existed before this LLM call (system + user).
-        # turn_output is logged separately below after it's been appended.
+    def _log_messages_to_jsonl(
+        self,
+        instance: AgentInstance,
+        inst_name: str,
+        turn_output: List[Message]
+    ) -> None:
+        """Persist messages to JSONL log file.
+        
+        Logs pre-existing messages that weren't logged yet, then logs turn_output messages.
+        This must happen BEFORE instance.conversation.extend(turn_output) so the initial
+        sync only sees messages that existed before this LLM call (system + user).
+        
+        Args:
+            instance: AgentInstance for logger lookup and conversation access
+            inst_name: Instance name for logging
+            turn_output: Messages from LLM to log
+        """
+        # Persist pre-existing messages to JSONL before appending turn_output
         log_inst = self.pool.get_logger(inst_name, instance.agent_class)
 
         already_logged_count = len(log_inst.data.get("history", []))
@@ -1620,31 +1528,6 @@ class ExecutionEngine:
                 if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
                     log_inst.log_message(msg)
 
-        # Append to all working sets
-        response.extend(turn_output)
-        messages.extend(turn_output)
-        llm_messages.extend(turn_output)
-        with token_cache_invalidated(instance):
-            with instance._compression_lock:
-                instance.conversation.extend(turn_output)
-                # Streaming UI Content Update Fix: Clear _streaming_responses after Phase 4 commits messages
-                instance._streaming_responses = []
-        
-        # Extract ground-truth usage info from LLM response (ground-truth token tracking)
-        # This replaces manual token counting with actual API-reported values
-        for msg in turn_output:
-            extra = msg.get('extra') if isinstance(msg, dict) else getattr(msg, 'extra', None)
-            if extra and isinstance(extra, dict) and 'usage' in extra:
-                usage = extra['usage']
-                if isinstance(usage, dict):
-                    # Update ground-truth token counts from LLM API response
-                    if 'prompt_tokens' in usage:
-                        instance._last_actual_token_count = usage['prompt_tokens']
-                    if 'total_tokens' in usage and 'prompt_tokens' not in usage:
-                        # Some APIs only return total_tokens
-                        instance._last_actual_token_count = usage['total_tokens']
-                    break  # Only need to extract from first message with usage info
-
         # Persist turn_output messages to JSONL log file (P1: LoggerManager migration)
         try:
             # Log turn_output messages from this LLM call
@@ -1653,8 +1536,42 @@ class ExecutionEngine:
         except Exception as e:
             logger.debug(f"Logging message to file failed for {inst_name} (non-critical): {e}")
 
-        # ── Auto-continue on truncation (only if user has enabled the setting) ──
-        if is_truncated and not self.pool.stopped and not self.pool.is_instance_halted(inst_name) and not self.pool.is_instance_terminated(inst_name) and self.pool.settings.auto_continue:
+    def _check_and_handle_truncation(
+        self,
+        is_truncated: bool,
+        turn_output: List[Message],
+        instance: AgentInstance,
+        inst_name: str,
+        messages: List[Message],
+        llm_messages: List[Message]
+    ) -> bool:
+        """Inject continue message if truncation detected and auto_continue enabled.
+        
+        If any message in turn_output is truncated (finish_reason == 'length') and
+        auto_continue setting is enabled, injects a continue message to all working sets
+        and returns True to continue to next LLM call.
+        
+        Args:
+            is_truncated: Pre-computed truncation flag from caller (FIX #2: avoid double-check)
+            turn_output: Messages from LLM (for logging context only)
+            instance: AgentInstance for conversation access and token cache
+            inst_name: Instance name for logging and halt checks
+            messages: Full message set to append continue message
+            llm_messages: LLM-formatted message set to append continue message
+            
+        Returns:
+            True if truncation detected and continue message injected, False otherwise
+            
+        Note:
+            is_truncated is pre-computed by caller to avoid checking truncation twice
+            (once in normalization, once here). This method only handles the injection logic.
+        """
+        # Auto-continue on truncation (only if user has enabled the setting)
+        # FIX #2: Use pre-computed is_truncated from caller instead of re-checking
+        if (is_truncated and not self.pool.stopped and 
+            not self.pool.is_instance_halted(inst_name) and 
+            not self.pool.is_instance_terminated(inst_name) and 
+            self.pool.settings.auto_continue):
             logger.info(f"Detected message truncation for {inst_name}. Auto-continuing.")
             cont_msg = Message(
                 role=USER,
@@ -1665,11 +1582,39 @@ class ExecutionEngine:
             with token_cache_invalidated(instance):
                 with instance._compression_lock:
                     instance.conversation.append(cont_msg)
-            return True  # Continue to next LLM call
+            return True
+        
+        return False
 
-        # ── Tool detection and execution ────────────────────────────────────
+    def _execute_detected_tools(
+        self,
+        instance: AgentInstance,
+        inst_name: str,
+        turn_output: List[Message],
+        messages: List[Message],
+        llm_messages: List[Message],
+        response: List[Message]
+    ) -> bool:
+        """Execute tools detected in turn output.
+        
+        Scans turn_output for tool calls, executes them with telemetry tracking,
+        handles truncation and error detection, adds FUNCTION result messages to
+        all working sets, and handles orphaned tool calls from early breaks.
+        
+        Args:
+            instance: AgentInstance for execution context
+            inst_name: Instance name for logging and halt checks
+            turn_output: Messages to scan for tool calls
+            messages: Full message set to append FUNCTION results
+            llm_messages: LLM-formatted message set to append FUNCTION results
+            response: Response list for streaming to UI
+            
+        Returns:
+            True if any tools were executed, False otherwise
+        """
         used_any_tool = False
         executed_tools = []  # Track which tools were actually executed (for orphan handling)
+        
         for out in turn_output:
             use_tool, tool_name, tool_args, _ = self._detect_tool(out)
             if not use_tool:
@@ -1797,37 +1742,91 @@ class ExecutionEngine:
             executed_set = set(executed_tools)  # Convert to set for O(1) lookup
             tools_processed = 0
             with token_cache_invalidated(instance):
-                for out in turn_output:
-                    use_tool, tool_name, tool_args, _ = self._detect_tool(out)
-                    if not use_tool:
-                        continue
-                    
-                    # Only add placeholder for tools that were NOT executed
-                    if tool_name in executed_set:
-                        continue
-                    
-                    # Extract function_id from the assistant message that had the tool call
-                    extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
-                    
-                    # Add placeholder FUNCTION result for unexecuted tool
-                    fn_msg = Message(
-                        role=FUNCTION,
-                        name=tool_name,
-                        content=f"Tool execution skipped: instance {inst_name} was halted/stopped",
-                        extra={
-                            'function_id': extra_data.get('function_id', '1'),
-                            'tool_success': False,
-                        },
-                    )
-                    messages.append(fn_msg)
-                    llm_messages.append(fn_msg)
-                    response.append(fn_msg)  # Stream to UI
-                    with instance._compression_lock:
-                        instance.conversation.append(fn_msg)
-                    tools_processed += 1
+                with instance._compression_lock:  # FIX #1: Batch lock acquisition for all placeholder appends
+                    for out in turn_output:
+                        use_tool, tool_name, tool_args, _ = self._detect_tool(out)
+                        if not use_tool:
+                            continue
+                        
+                        # Only add placeholder for tools that were NOT executed
+                        if tool_name in executed_set:
+                            continue
+                        
+                        # Extract function_id from the assistant message that had the tool call
+                        extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
+                        
+                        # Add placeholder FUNCTION result for unexecuted tool
+                        fn_msg = Message(
+                            role=FUNCTION,
+                            name=tool_name,
+                            content=f"Tool execution skipped: instance {inst_name} was halted/stopped",
+                            extra={
+                                'function_id': extra_data.get('function_id', '1'),
+                                'tool_success': False,
+                            },
+                        )
+                        messages.append(fn_msg)
+                        llm_messages.append(fn_msg)
+                        response.append(fn_msg)  # Stream to UI
+                        instance.conversation.append(fn_msg)  # FIX #1: Moved inside batch lock
+                        tools_processed += 1
                 
                 if tools_processed > 0:
                     logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
+
+        return used_any_tool
+
+    def _process_response(
+        self, instance: AgentInstance, turn_output: List[Message],
+        messages: List[Message], llm_messages: List[Message],
+        response: List[Message]
+    ) -> bool:
+        """Phase 4: Normalize response, handle auto-continue on truncation, execute tools.
+
+        Returns True if processing should continue to next iteration (tool was used or truncated).
+        """
+        inst_name = instance.instance_name
+
+        # FIX #2 & #3: Compute truncation flag BEFORE normalization to avoid double-check
+        is_truncated = any(_check_message_truncation(msg) for msg in turn_output)
+        
+        # Extracted to _normalize_turn_output() - Phase 3.3 (FIX #3: now only normalizes)
+        self._normalize_turn_output(turn_output)
+
+        # Extracted to _log_messages_to_jsonl() - Phase 3.3
+        self._log_messages_to_jsonl(instance, inst_name, turn_output)
+
+        # Append to all working sets  
+        response.extend(turn_output)
+        messages.extend(turn_output)
+        llm_messages.extend(turn_output)
+        with token_cache_invalidated(instance):
+            with instance._compression_lock:
+                instance.conversation.extend(turn_output)
+                # Streaming UI Content Update Fix: Clear _streaming_responses after Phase 4 commits messages
+                instance._streaming_responses = []
+        
+        # Extract ground-truth usage info from LLM response (ground-truth token tracking)
+        # This replaces manual token counting with actual API-reported values
+        for msg in turn_output:
+            extra = msg.get('extra') if isinstance(msg, dict) else getattr(msg, 'extra', None)
+            if extra and isinstance(extra, dict) and 'usage' in extra:
+                usage = extra['usage']
+                if isinstance(usage, dict):
+                    # Update ground-truth token counts from LLM API response
+                    if 'prompt_tokens' in usage:
+                        instance._last_actual_token_count = usage['prompt_tokens']
+                    if 'total_tokens' in usage and 'prompt_tokens' not in usage:
+                        # Some APIs only return total_tokens
+                        instance._last_actual_token_count = usage['total_tokens']
+                    break  # Only need to extract from first message with usage info
+
+        # Extracted to _check_and_handle_truncation() - Phase 3.3
+        if self._check_and_handle_truncation(is_truncated, turn_output, instance, inst_name, messages, llm_messages):
+            return True  # Continue to next LLM call
+
+        # Extracted to _execute_detected_tools() - Phase 3.3
+        used_any_tool = self._execute_detected_tools(instance, inst_name, turn_output, messages, llm_messages, response)
 
         # ── Post-tool urgent injection ───────────────────────────────────
         # Inject urgent messages AFTER all tools complete to avoid orphaned tool_call_id's
@@ -1838,7 +1837,9 @@ class ExecutionEngine:
         ):
             return True  # Continue to next LLM call for urgent message processing
 
-        return used_any_tool or is_truncated  # Continue loop if tool was used
+        # FIX #4: Only loop if tool was used. If truncation detected but auto_continue disabled,
+        # the turn is complete (no continue message injected), so return False to avoid infinite loop.
+        return used_any_tool
 
 
     def _post_turn_checks(
@@ -1991,6 +1992,162 @@ class ExecutionEngine:
                 )
 
     # ═══════════════════════════════════════════════════════════════════════
+    #  State Handling — SLEEPING state extraction (Phase 3.1)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _handle_sleeping_state(
+        self,
+        instance: 'AgentInstance',
+        messages: List[Message],
+        llm_messages: List[Message],
+        response: List[Message],
+        skip_slot_acquire: bool
+    ) -> Tuple[SleepAction, Optional[List[Message]]]:
+        """Handle SLEEPING state wakeup logic.
+
+        Extracted from run() as part of Phase 3.1 refactoring to reduce method size
+        and improve testability. This method handles all the branching logic for
+        waking a sleeping agent based on async tool results, user messages, and timeouts.
+
+        Args:
+            instance: Current agent instance in SLEEPING state.
+            messages: Working list of all messages (user + assistant).
+            llm_messages: Messages formatted for LLM consumption.
+            response: Response messages being built for this turn.
+            skip_slot_acquire: Whether to skip slot re-acquisition (for nested agents).
+
+        Returns:
+            Tuple of (action, optional_yield_value):
+            - action = CONTINUE_LOOP means re-enter the while loop
+            - action = BREAK_LOOP means exit the while loop
+            - yield_value=None means no special yield needed before continuing/breaking
+            - yield_value=[] means yield empty list (signals waiting state)
+        """
+        inst_name = instance.instance_name
+
+        # Drain async tool results ONLY — user messages do NOT wake sleeping agents
+        async_results = self.pool.drain_async_results(inst_name)
+
+        if async_results:
+            # Async results arrived — wake up and inject
+            with instance._state_lock:
+                # CHECK TERMINATED BEFORE TRANSITION — prevents resuming terminated agent
+                if instance.state == AgentState.TERMINATED:
+                    logger.debug("TERMINATED while SLEEPING for %s - breaking", inst_name)
+                    return SleepAction.BREAK_LOOP, None
+                instance._transition(AgentState.RUNNING)
+                instance.sleeping_since = None
+                instance._last_wakeup_log = time.monotonic()
+                logger.debug("RESUMED from SLEEPING - %s async results, user msgs=%s", 
+                             len(async_results), self.pool.has_messages(inst_name))
+
+            # Inject async results FIRST (items mode — already drained)
+            self._drain_and_inject(
+                instance, inst_name, messages, llm_messages, response,
+                items=async_results,
+                factory=self._make_async_result_message,
+            )
+            
+            # THEN drain any queued user messages (they were waiting while agent was sleeping)
+            self._drain_and_inject(
+                instance, inst_name, messages, llm_messages, response,
+                drain_fn=self.pool.drain_queue,
+                factory=self._make_user_message,
+            )
+
+            # Re-acquire concurrency slot after waking from SLEEPING
+            if not skip_slot_acquire:
+                self._acquire_slot_with_logging(instance, "after_async_wakeup")
+
+            # Continue to normal LLM processing below (in RUNNING state now)
+            return SleepAction.CONTINUE_LOOP, None
+
+        elif self.pool.has_pending(inst_name):
+            # Still waiting for background tools — NO user wakeup (preserves tool_call → tool_response flow)
+            # User messages stay in queue until async results arrive
+            if instance.state == AgentState.TERMINATED:
+                return SleepAction.BREAK_LOOP, None
+            
+            current_time = time.monotonic()
+            sleeping_duration = 0.0
+            if instance.sleeping_since is not None:
+                sleeping_duration = current_time - instance.sleeping_since
+            
+            # Get settings with defaults
+            wakeup_interval = getattr(self.pool.settings, 'sleeping_wakeup_interval', 5.0)
+            sleeping_timeout = getattr(self.pool.settings, 'sleeping_timeout', 300.0)
+            
+            # Check for timeout first
+            if sleeping_duration >= sleeping_timeout:
+                logger.warning("SLEEPING TIMEOUT - %s waited %.1fs (timeout=%ss)", 
+                                inst_name, sleeping_duration, sleeping_timeout)
+                # Final drain before giving up — prevents data loss of late-arriving results
+                final_results = self.pool.drain_async_results(inst_name)
+                self._drain_and_inject(
+                    instance, inst_name, messages, llm_messages, response,
+                    items=final_results,
+                    factory=self._make_async_result_message,
+                )
+                with instance._state_lock:
+                    instance._transition(AgentState.COMPLETING)
+                    instance.sleeping_since = None
+                return SleepAction.BREAK_LOOP, None
+            
+            # Log wakeup message periodically
+            if (current_time - instance._last_wakeup_log) >= wakeup_interval:
+                logger.info("SLEEPING - %s waiting %.1fs for background tools", 
+                            inst_name, sleeping_duration)
+                instance._last_wakeup_log = current_time
+            
+            logger.debug("WAITING for background tools - %s (%.1fs)", inst_name, sleeping_duration)
+            # Yield empty list signals waiting state without consuming turn
+            return SleepAction.CONTINUE_LOOP, []
+
+        else:
+            # No pending tools and no immediate results
+            # Stable-state drain — keep draining until no more results arrive
+            results_found = False
+            while self._drain_and_inject(
+                instance, inst_name, messages, llm_messages, response,
+                drain_fn=self.pool.drain_async_results,
+                factory=self._make_async_result_message,
+            ):
+                results_found = True
+            
+            # Final safety drain — catches race conditions
+            if self._drain_and_inject(
+                instance, inst_name, messages, llm_messages, response,
+                drain_fn=self.pool.drain_async_results,
+                factory=self._make_async_result_message,
+            ):
+                results_found = True
+            
+            # If any results were found, transition to RUNNING so LLM processes them
+            if results_found:
+                with instance._state_lock:
+                    if instance.state == AgentState.TERMINATED:
+                        return SleepAction.BREAK_LOOP, None
+                    instance._transition(AgentState.RUNNING)
+                    instance.sleeping_since = None
+                    instance._last_wakeup_log = time.monotonic()
+
+                # Re-acquire concurrency slot after waking from SLEEPING
+                if not skip_slot_acquire:
+                    self._acquire_slot_with_logging(instance, "after_stable_drain")
+
+                # Loop back; now in RUNNING state → LLM processes injected results
+                return SleepAction.CONTINUE_LOOP, []  # Bridge signal for UI update before LLM processing
+            
+            # No results found — safe to transition to COMPLETING
+            with instance._state_lock:
+                if instance.state == AgentState.TERMINATED:
+                    return SleepAction.BREAK_LOOP, None
+                instance._transition(AgentState.COMPLETING)
+                instance.sleeping_since = None
+            logger.debug("COMPLETING - %s (no pending tools)", inst_name)
+            return SleepAction.BREAK_LOOP, None
+
+    # ═══════════════════════════════════════════════════════════════════════
     #  Tool Execution — unified path for ALL tools including call_agent
     # ═══════════════════════════════════════════════════════════════════════
 
@@ -2136,6 +2293,223 @@ class ExecutionEngine:
             self._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
 
+    def _run_child_sync(
+        self,
+        agent_class: str,
+        instance_name: str,
+        args: Any,  # FIX #6: Changed from dict to Any for type consistency
+        caller_slot_holder: AgentInstance,
+        caller_name: str,
+        child_depth: int
+    ) -> str:
+        """Run child agent synchronously (caller holds slot).
+        
+        Extracted from _handle_call_agent() - Phase 3.4
+        
+        This method:
+        1. Releases caller's slot
+        2. Runs _create_and_run_agent()
+        3. Re-acquires caller's slot via _reacquire_caller_slot()
+        4. Extracts and returns result
+        
+        Args:
+            agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth
+            
+        Returns:
+            Result string from child agent
+        """
+        # FIX #4: Local import remains here to match pattern in agent_pool.py:1287
+        from agent_cascade.compression.helpers import extract_instance_output
+        
+        sync_path_start = time.monotonic()
+        
+        # Release caller's slot so the child can acquire it inside engine.run()
+        if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release is not None:
+            logger.debug(
+                f"[SLOT_SYNC_RELEASE] Releasing slot for '{caller_name}' before running sync child '{instance_name}'"
+            )
+            self._release_slot(caller_slot_holder, caller_name, "sync child")
+            logger.debug(
+                f"[SLOT_SYNC_RELEASE] Slot released for '{caller_name}', active agents can now acquire"
+            )
+        
+        try:
+            # Run child synchronously via _create_and_run_agent
+            force_fresh = agent_class in ('security', 'compressor')  # FIX #2: Lowercase comparison
+            logger.debug(
+                f"[SLOT_SYNC_CHILD_START] Starting sync child '{instance_name}' ({agent_class}) for caller '{caller_name}'"
+            )
+            inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller_name, child_depth, force_fresh=force_fresh)
+            logger.debug(
+                f"[SLOT_SYNC_CHILD_COMPLETE] Sync child '{instance_name}' completed in {time.monotonic() - sync_path_start:.2f}s"  # FIX #1: time_module → time
+            )
+            
+            # Re-acquire caller's slot so it can continue its turn
+            logger.debug(
+                f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child completed"
+            )
+            if not self._reacquire_caller_slot(caller_slot_holder, caller_name, "sync child"):
+                logger.warning(
+                    f"[SLOT_SYNC_REACQUIRE_FAILED] Failed to re-acquire slot for '{caller_name}' after sync child. "
+                    f"Original release callback preserved for proper cleanup. Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s"  # FIX #1
+                )
+            else:
+                logger.debug(
+                    f"[SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for '{caller_name}'. "
+                    f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s"  # FIX #1
+                )
+            
+            # Consolidated null/empty check
+            if inst is None or not conv:
+                logger.warning("SYNC path FAILED - %s creation returned inst=%s", instance_name, inst)
+                return f"Error: Agent '{instance_name}' execution failed with no output."
+
+            # Extract and format result
+            result = extract_instance_output(conv, instance_name)
+            return f"[Agent '{instance_name}' Completed]:\n{result}"
+
+        except Exception as e:
+            # FIX #3: Removed dead 'pass' — just call the method directly
+            self._reacquire_caller_slot(caller_slot_holder, caller_name, "sync child error")
+            logger.error("SYNC path EXCEPTION - %s/%s: %s: %s", 
+                        caller_name, instance_name, type(e).__name__, str(e)[:200])
+            return f"[Agent '{instance_name}' Failed]:\n{str(e)}"
+
+    def _run_child_async(
+        self,
+        caller_name: str,
+        function_id: Optional[str],
+        agent_class: str,
+        instance_name: str,
+        args: dict,
+        child_depth: int
+    ) -> str:
+        """Run child agent asynchronously via register_async_call.
+        
+        Extracted from _handle_call_agent() - Phase 3.4
+        
+        Args:
+            caller_name, function_id, agent_class, instance_name, args, child_depth
+            
+        Returns:
+            Async confirmation message
+        """
+        logger.debug("Taking ASYNC path - %s calls %s/%s at depth %d", 
+                    caller_name, instance_name, agent_class, child_depth)
+        
+        # Register and launch agent asynchronously via AsyncToolRegistry.
+        self.pool.register_async_call(
+            instance_name=caller_name,
+            function_id=function_id,
+            agent_class=agent_class,
+            child_instance_name=instance_name,
+            args=args,
+            caller=caller_name,
+            nest_depth=child_depth,
+        )
+
+        logger.debug("ASYNC - %s launched by %s", instance_name, caller_name)
+        return f"Agent '{instance_name}' launched asynchronously. Waiting for result."
+
+    def _reacquire_caller_slot(
+        self,
+        slot_holder: AgentInstance,
+        slot_holder_name: str,
+        context_label: str
+    ) -> bool:
+        """Re-acquire caller's slot with retry logic.
+        
+        Lifted from nested function in _handle_call_agent() - Phase 3.4
+        
+        Args:
+            slot_holder: Instance holding the slot (has .agent_class attr)
+            slot_holder_name: Name of the instance for logging
+            context_label: Description of context for warning messages
+            
+        Returns:
+            True if successfully re-acquired, False otherwise.
+            
+        Note:
+            On failure, _slot_release is NOT set to None — it retains whatever 
+            value it had before (or remains unchanged). The caller's outer context 
+            handles cleanup via its own finally block.
+        """
+        if not slot_holder:
+            return False
+            
+        for attempt in range(2):
+            try:
+                slot_holder._slot_release = self.pool._acquire_slot(
+                    slot_holder.agent_class, slot_holder_name
+                )
+                return True
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning(f"First attempt failed to re-acquire caller slot after {context_label}: {e}. Retrying...")
+                    time.sleep(0.1)  # Brief pause before retry
+                else:
+                    logger.warning(f"Failed to re-acquire caller slot after {context_label} (all attempts exhausted): {e}. Subsequent calls will use ASYNC path.")
+        
+        return False
+
+    def _validate_call_agent_args(
+        self,
+        args: Any,
+        caller_name: str
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Validate call_agent tool arguments.
+        
+        Extracted from _handle_call_agent() - Phase 3.4
+        
+        Args:
+            args: Tool arguments dictionary
+            caller_name: Caller instance name for error messages
+            
+        Returns:
+            Tuple of (instance_name, agent_class, error_message)
+            error_message is None if validation passed
+        """
+        if args is None:
+            logger.warning("call_agent early exit - %s (args is None)", caller_name)
+            return None, None, 'Error: Invalid JSON arguments.'
+
+        instance_name = args.get('instance_name', '')
+        agent_class = (args.get('agent_class') or '').strip().lower()
+
+        if not instance_name or not agent_class:
+            logger.warning("call_agent early exit - %s missing instance_name='%s' or agent_class='%s'", 
+                          caller_name, instance_name, agent_class)
+            return instance_name, agent_class, "Error: call_agent requires instance_name and agent_class."
+
+        return instance_name, agent_class, None
+
+    def _check_nesting_depth(
+        self,
+        instance: AgentInstance,
+        child_depth: int
+    ) -> Optional[str]:
+        """Check if nesting depth limit exceeded.
+        
+        Extracted from _handle_call_agent() - Phase 3.4
+        
+        Args:
+            instance: Caller agent instance
+            child_depth: Proposed depth for child
+            
+        Returns:
+            Error message if depth exceeded, None otherwise
+        """
+        max_depth = self.pool.settings.max_nesting_depth if hasattr(self.pool, 'settings') else 10
+        caller_name = instance.instance_name
+        logger.debug("call_agent nesting - %s depth=%d/%d", caller_name, child_depth, max_depth)
+        if child_depth > max_depth:
+            logger.warning("call_agent depth exceeded - %s at depth %d (max=%d)", 
+                          caller_name, child_depth, max_depth)
+            return (f"Error: Nesting depth limit ({max_depth}) exceeded. "
+                    f"The caller '{instance.instance_name}' is at depth {child_depth - 1}. "
+                    f"Cannot create agent at depth {child_depth}.")
+        return None
+
     def _handle_call_agent(self, args: Any, messages: List[Message], instance: AgentInstance, function_id: Optional[str] = None) -> str:
         """Handle call_agent tool call — the unified path replacing the old sub-agent execution.
 
@@ -2151,19 +2525,11 @@ class ExecutionEngine:
             Result string from the called agent.
         """
         caller_name = instance.instance_name
-
-        if args is None:
-            # JSON parsing failed in _resolve_placeholders — return error
-            logger.warning("call_agent early exit - %s (args is None)", caller_name)
-            return 'Error: Invalid JSON arguments.'
-
-        instance_name = args.get('instance_name', '')
-        agent_class = (args.get('agent_class') or '').strip().lower()
-
-        if not instance_name or not agent_class:
-            logger.warning("call_agent early exit - %s missing instance_name='%s' or agent_class='%s'", 
-                          caller_name, instance_name, agent_class)
-            return "Error: call_agent requires instance_name and agent_class."
+        
+        # Extracted to _validate_call_agent_args() - Phase 3.4
+        instance_name, agent_class, error = self._validate_call_agent_args(args, caller_name)
+        if error:
+            return error
 
         # P2: Recursive self-call cloning — prevent state corruption on self-delegation
         with self.pool._execution._state_lock:
@@ -2181,19 +2547,15 @@ class ExecutionEngine:
             return (f"Error: Agent '{instance_name}' already exists as '{existing_class}'. "
                     f"Cannot create as '{agent_class}'. Use a different instance name.")
 
-        # Nesting depth check — prevent infinite agent chains
+        # Extracted to _check_nesting_depth() - Phase 3.4
         caller_depth = 0
         if caller_inst := self.pool.get_instance(instance.instance_name):
             caller_depth = getattr(caller_inst, '_nest_depth', 0)
         child_depth = caller_depth + 1
-        max_depth = self.pool.settings.max_nesting_depth if hasattr(self.pool, 'settings') else 10
-        logger.debug("call_agent nesting - %s depth=%d/%d", caller_name, child_depth, max_depth)
-        if child_depth > max_depth:
-            logger.warning("call_agent depth exceeded - %s at depth %d (max=%d)", 
-                          caller_name, child_depth, max_depth)
-            return (f"Error: Nesting depth limit ({max_depth}) exceeded. "
-                    f"The caller '{instance.instance_name}' is at depth {caller_depth}. "
-                    f"Cannot create agent '{instance_name}' at depth {child_depth}.")
+        
+        depth_error = self._check_nesting_depth(instance, child_depth)
+        if depth_error:
+            return depth_error
 
         # ── Slot Collision Detection: Fake Sync Mode ───────────────────────────────
         # When the caller holds a concurrency slot, using ASYNC path causes deadlock:
@@ -2206,142 +2568,17 @@ class ExecutionEngine:
         # and return actual result. This avoids deadlock and ensures child can make progress.
         
         # Check if caller currently holds the concurrency slot
-        # Use different variable name to avoid shadowing caller_inst from line 1960 (nesting depth check)
         caller_slot_holder = self.pool.get_instance(caller_name)
         caller_holds_slot = False
         if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release is not None:
             caller_holds_slot = True
         
         if caller_holds_slot:
-            # Fake sync mode: run child directly, return actual result.
-            # IMPORTANT: Before running the child, we must release the caller's slot.
-            # The child's engine.run() tries to acquire the same slot at line 348.
-            # If we don't release first, same-thread Semaphore(1) deadlock occurs.
-            logger.debug("Taking SYNC path - %s calls %s/%s at depth %d", 
-                        caller_name, instance_name, agent_class, child_depth)
-            
-            # Import here to match pattern in agent_pool.py:1287
-            from agent_cascade.compression.helpers import extract_instance_output
-            
-            def _reacquire_slot(slot_holder, slot_holder_name, context_label):
-                """Re-acquire caller's slot with retry logic.
-                
-                Args:
-                    slot_holder: Instance holding the slot (has .agent_class attr)
-                    slot_holder_name: Name of the instance for logging
-                    context_label: Description of context for warning messages
-                    
-                Returns True if successfully re-acquired, False otherwise.
-                
-                FIX SLOT_TIMEOUT: On failure, we no longer set _slot_release = None.
-                The finally block at line 624 will release whatever slot is currently held.
-                If reacquire succeeds, it overwrites with a new callback. If it fails,
-                the old callback remains (if any) and the closure's _released flag prevents double-release.
-                """
-                if not slot_holder:
-                    return False
-                    
-                for attempt in range(2):
-                    try:
-                        slot_holder._slot_release = self.pool._acquire_slot(
-                            slot_holder.agent_class, slot_holder_name
-                        )
-                        return True
-                    except Exception as e:
-                        if attempt == 0:
-                            logger.warning(f"First attempt failed to re-acquire caller slot after {context_label}: {e}. Retrying...")
-                            time.sleep(0.1)  # Brief pause before retry
-                        else:
-                            logger.warning(f"Failed to re-acquire caller slot after {context_label} (all attempts exhausted): {e}. Subsequent calls will use ASYNC path.")
-                
-                # FIX SLOT_TIMEOUT: Removed 'slot_holder._slot_release = None' here.
-                # The finally block handles cleanup via _release_slot, which checks for None.
-                # If reacquire failed, the original callback (if any) remains and will be released properly.
-                return False
-            
-            # SLOT_TIMEOUT FIX v2: Enhanced logging for SYNC path slot management
-            sync_path_start = time.monotonic()
-            
-            # Release caller's slot so the child can acquire it inside engine.run() (using helper method FIX Mi3)
-            if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release is not None:
-                logger.debug(
-                    f"[SLOT_SYNC_RELEASE] Releasing slot for '{caller_name}' before running sync child '{instance_name}'"
-                )
-                self._release_slot(caller_slot_holder, caller_name, "sync child")
-                logger.debug(
-                    f"[SLOT_SYNC_RELEASE] Slot released for '{caller_name}', active agents can now acquire"
-                )
-            
-            try:
-                # Run child synchronously via _create_and_run_agent
-                # Pass force_fresh=True for system agents (Security, Compressor) to ensure fresh instances
-                force_fresh = agent_class in ('Security', 'Compressor')
-                logger.debug(
-                    f"[SLOT_SYNC_CHILD_START] Starting sync child '{instance_name}' ({agent_class}) for caller '{caller_name}'"
-                )
-                inst, conv = self._create_and_run_agent(agent_class, instance_name, args, caller_name, child_depth, force_fresh=force_fresh)
-                logger.debug(
-                    f"[SLOT_SYNC_CHILD_COMPLETE] Sync child '{instance_name}' completed in {time_module.monotonic() - sync_path_start:.2f}s"
-                )
-                
-                # Re-acquire caller's slot so it can continue its turn
-                logger.debug(
-                    f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child completed"
-                )
-                if not _reacquire_slot(caller_slot_holder, caller_name, "sync child"):
-                    # FIX MAJOR BUG #3: On reacquire failure, DO NOT nullify _slot_release callback.
-                    # The finally block at line ~664 uses _release_slot which relies on this callback to release the semaphore permit.
-                    # Setting it to None destroys the original release callback → SEMAPHORE PERMIT LEAK.
-                    # The closure's _released flag prevents double-release, so let the finally block handle cleanup via _release_slot.
-                    logger.warning(
-                        f"[SLOT_SYNC_REACQUIRE_FAILED] Failed to re-acquire slot for '{caller_name}' after sync child. "
-                        f"Original release callback preserved for proper cleanup. Total SYNC path elapsed: {time_module.monotonic() - sync_path_start:.2f}s"
-                    )
-                else:
-                    logger.debug(
-                        f"[SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for '{caller_name}'. "
-                        f"Total SYNC path elapsed: {time_module.monotonic() - sync_path_start:.2f}s"
-                    )
-                
-                # Consolidated null/empty check for cleaner logic
-                if inst is None or not conv:
-                    logger.warning("SYNC path FAILED - %s creation returned inst=%s", instance_name, inst)
-                    return f"Error: Agent '{instance_name}' execution failed with no output."
-
-                # Extract and format result
-                result = extract_instance_output(conv, instance_name)
-                return f"[Agent '{instance_name}' Completed]:\n{result}"
-
-            except Exception as e:
-                # Re-acquire caller's slot before returning error
-                if not _reacquire_slot(caller_slot_holder, caller_name, "sync child error"):
-                    pass
-
-                logger.error("SYNC path EXCEPTION - %s/%s: %s: %s", 
-                            caller_name, instance_name, type(e).__name__, str(e)[:200])
-                return f"[Agent '{instance_name}' Failed]:\n{str(e)}"
+            # Extracted to _run_child_sync() - Phase 3.4
+            return self._run_child_sync(agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth)
         else:
-            # Async path: caller doesn't hold slot, use normal async path via register_async_call
-            logger.debug("Taking ASYNC path - %s calls %s/%s at depth %d", 
-                        caller_name, instance_name, agent_class, child_depth)
-            
-            # Register and launch agent asynchronously via AsyncToolRegistry.
-            # The callable inside register_async_call handles:
-            # - Endpoint slot acquisition
-            # - ExecutionEngine creation and agent execution
-            # - Result extraction and injection into async results buffer
-            self.pool.register_async_call(
-                instance_name=caller_name,
-                function_id=function_id,
-                agent_class=agent_class,
-                child_instance_name=instance_name,
-                args=args,
-                caller=caller_name,
-                nest_depth=child_depth,
-            )
-
-            logger.debug("ASYNC - %s launched by %s", instance_name, caller_name)
-            return f"Agent '{instance_name}' launched asynchronously. Waiting for result."
+            # Extracted to _run_child_async() - Phase 3.4
+            return self._run_child_async(caller_name, function_id, agent_class, instance_name, args, child_depth)
 
     def _handle_dismiss_agent(self, args: Any, instance: AgentInstance) -> str:
         """Handle dismiss_agent tool call — removes another agent from pool.
@@ -2643,28 +2880,29 @@ class ExecutionEngine:
 
         return True
 
-    def _create_and_run_agent(
-        self, agent_class: str, instance_name: str,
-        args: dict, caller: str, nest_depth: int = 0, force_fresh: bool = False
-    ) -> tuple:
-        """Create an AgentInstance and run it through the unified loop.
-
-        Shared helper used by both sync and parallel call_agent paths.
-        Creates the instance, builds system + task messages, logs them,
-        tracks in active_stack, and runs engine.run(inst).
-
-        Returns:
-            Tuple of (AgentInstance, conversation history).
-
+    def _find_or_create_instance(
+        self,
+        agent_class: str,
+        instance_name: str,
+        caller: str,
+        nest_depth: int,
+        force_fresh: bool = False
+    ) -> Tuple[AgentInstance, bool]:
+        """Find existing inactive instance or create new one.
+        
+        Checks for an existing inactive (IDLE/TERMINATED) instance that can be reused.
+        If no reusable instance exists, creates a new AgentInstance.
+        
         Args:
-            nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
-            force_fresh: If True, always create new instance even if inactive one exists.
-                        Used for Security/Compressor agents that should start fresh each time.
+            agent_class: Template class name
+            instance_name: Unique instance identifier
+            caller: Parent instance name
+            nest_depth: Depth in call chain
+            force_fresh: If True, always create new instance (for Security/Compressor)
+            
+        Returns:
+            Tuple of (instance, is_reuse) where is_reuse indicates if existing was reused
         """
-        self._create_completed = False  # Reset for this execution cycle
-
-        # FIX #1: Check for existing inactive instance before creating new one
-        # This allows conversation history to be preserved when reusing agent instances
         now = time.monotonic()
         existing = self.pool.instances.get(instance_name)
         is_reuse = False
@@ -2715,12 +2953,36 @@ class ExecutionEngine:
         # FIX #7: Only assign new instances to pool (reused instances already exist)
         if not is_reuse:
             self.pool.instances[instance_name] = inst
-            logger.debug("registered new instance - %s", instance_name)
+            logger.debug(
+                "[CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for %s",
+                instance_name
+            )
+        
+        return inst, is_reuse
 
-        # Build system message for new agent
+    def _build_system_message(
+        self,
+        agent_class: str,
+        instance_name: str
+    ) -> Message:
+        """Build system message for new agent.
+        
+        Retrieves template and constructs system message with injected instance name.
+        Session metadata injection is handled by P7 in _setup_turn for all agents uniformly.
+        
+        Args:
+            agent_class: Template class name
+            instance_name: Instance name to inject into template
+            
+        Returns:
+            System Message object
+            
+        Raises:
+            ValueError: If no template found for agent_class
+        """
         template = self.pool.templates.get(agent_class)
         if not template:
-            logger.error("NO TEMPLATE for %s/%s (caller=%s)", agent_class, instance_name, caller)
+            logger.error("NO TEMPLATE for %s/%s", agent_class, instance_name)
             raise ValueError(f"No template for agent class {agent_class}")
 
         sys_content = getattr(template, 'base_system_message',
@@ -2731,44 +2993,25 @@ class ExecutionEngine:
         if lines and f" {instance_name}" not in lines[0]:
             lines[0] = f"You are {instance_name}."
 
-        # Session metadata injection is handled by P7 in _setup_turn for all agents uniformly.
-        # Do NOT pre-inject here — it would cause P7's idempotency guard to skip full metadata
-        # (Working Dir, Log Path, Extra Paths) for sub-agents.
+        return Message(role=SYSTEM, content="\n".join(lines))
 
-        sys_msg = Message(role=SYSTEM, content="\n".join(lines))
-
-        # FIX #2, #3, #4, #5: For reused instances, preserve conversation and reset stale state
-        if is_reuse:
-            # Thread-safe update of instance state for reuse
-            with inst._compression_lock:
-                # FIX #3: Reset stale state fields to prepare for new task
-                inst.compression_summary = None
-                inst.latest_marker_index = -1
-                inst._generate_cfg_override = None
-                inst.max_turns = None
-                
-                # FIX #4: Clear is_terminated flag and invalidate token cache
-                inst.is_terminated = False
-                inst._cached_token_count = 0
-                
-                # SLOT_TIMEOUT FIX: Clear _slot_release to prevent stale callback issues
-                # The reused instance will acquire a fresh slot in engine.run() at line 349
-                # This ensures no leftover release callback from previous execution interferes
-                inst._slot_release = None
-                
-                # FIX #2: Preserve & extend conversation
-                # Update system message in-place (first message is always system)
-                if inst.conversation and len(inst.conversation) > 0:
-                    # Update the existing system message with new template content
-                    inst.conversation[0] = sys_msg
-                else:
-                    # Fallback: prepend system message if conversation is empty
-                    inst.conversation.insert(0, sys_msg)
-                
-                # Get the preserved conversation (will be extended with task below)
-                conv = inst.conversation
+    def _build_task_message(
+        self,
+        args: dict,
+        caller: str
+    ) -> Message:
+        """Build task message with multimodal image propagation.
         
-        # Build task message
+        Scans caller's conversation for images and includes them as multimodal content
+        if referenced in the task text or present in the last user message.
+        
+        Args:
+            args: Tool arguments (task, context)
+            caller: Parent instance name to scan for images
+            
+        Returns:
+            Task Message object (possibly with multimodal content)
+        """
         task_text = args.get('task', '')
         context_text = args.get('context', '')
         if context_text:
@@ -2825,19 +3068,75 @@ class ExecutionEngine:
 
         # Use multimodal content list if images found, otherwise plain text
         if len(agent_msg_content) > 1:
-            task_msg = Message(role=USER, content=agent_msg_content)
+            return Message(role=USER, content=agent_msg_content)
         else:
-            task_msg = Message(role=USER, content=task_text)
+            return Message(role=USER, content=task_text)
 
-        # Build conversation: [system, task] for new instances, or append task for reused
+    def _initialize_instance_conversation(
+        self,
+        instance: AgentInstance,
+        sys_msg: Message,
+        task_msg: Message,
+        is_reuse: bool,
+        instance_name: str,
+        agent_class: str
+    ) -> List[Message]:
+        """Initialize or extend instance conversation.
+        
+        For reused instances: resets stale state, updates system message in-place,
+        appends task message to preserved conversation, and syncs logger.
+        
+        For new instances: builds fresh [system, task] conversation, assigns to instance,
+        and logs initial messages.
+        
+        Args:
+            instance: AgentInstance to initialize
+            sys_msg: System message
+            task_msg: Task message
+            is_reuse: Whether reusing existing instance
+            instance_name: Instance name for logger access
+            agent_class: Agent class for logger access
+            
+        Returns:
+            Conversation list (either preserved or newly created)
+        """
         if is_reuse:
+            # Thread-safe update of instance state for reuse
+            with token_cache_invalidated(instance):  # FIX: Invalidate token cache for reused instances
+                with instance._compression_lock:
+                    # FIX #3: Reset stale state fields to prepare for new task
+                    instance.compression_summary = None
+                    instance.latest_marker_index = -1
+                    instance._generate_cfg_override = None
+                    instance.max_turns = None
+                    
+                    # FIX #4: Clear is_terminated flag (token cache invalidated by outer context manager)
+                    instance.is_terminated = False
+                    
+                    # SLOT_TIMEOUT FIX: Clear _slot_release to prevent stale callback issues
+                    # The reused instance will acquire a fresh slot in engine.run() at line 349
+                    # This ensures no leftover release callback from previous execution interferes
+                    instance._slot_release = None
+                    
+                    # FIX #2: Preserve & extend conversation
+                    # Update system message in-place (first message is always system)
+                    if instance.conversation and len(instance.conversation) > 0:
+                        # Update the existing system message with new template content
+                        instance.conversation[0] = sys_msg
+                    else:
+                        # Fallback: prepend system message if conversation is empty
+                        instance.conversation.insert(0, sys_msg)
+                    
+                    # Get the preserved conversation (will be extended with task below)
+                    conv = instance.conversation
+            
             # FIX #2: For reused instances, append task message to preserved conversation
             # (conv already set above with system message updated in-place)
             conv.append(task_msg)
             
             # FIX #6: Use update_history() for logger synchronization on reused instances
             # This prevents duplicate log_message(task_msg) calls and properly syncs the logger
-            with inst._compression_lock:
+            with instance._compression_lock:
                 try:
                     log_inst = self.pool.get_logger(instance_name, agent_class)
                     log_inst.update_history(conv)
@@ -2846,9 +3145,9 @@ class ExecutionEngine:
         else:
             # Build conversation: [system, task] for new instances
             conv = [sys_msg, task_msg]
-            with token_cache_invalidated(inst):
-                with inst._compression_lock:
-                    inst.conversation = conv
+            with token_cache_invalidated(instance):
+                with instance._compression_lock:
+                    instance.conversation = conv
 
                 # Log initial messages to agent's JSONL file (P1 continuation)
                 try:
@@ -2857,71 +3156,176 @@ class ExecutionEngine:
                     log_inst.log_message(task_msg)
                 except Exception as e:
                     logger.debug(f"Logging initial messages for {instance_name} failed (non-critical): {e}")
+        
+        return conv
 
-        # P6+P3: Settings propagation from caller agent — merged under single lock scope
-        # to prevent a race window where another thread reads partial state.
-        # Propagates max_turns, max_input_tokens, and disabled_tools.
-        if hasattr(self.pool, 'api_router') and self.pool.api_router:
-            try:
-                caller_inst = self.pool.get_instance(caller)
-                if caller_inst:
-                    caller_template = self.pool.templates.get(caller_inst.agent_class)
-                    if caller_template and hasattr(caller_template, 'llm'):
-                        # Use caller instance's override first (has user's UI settings),
-                        # fall back to template's generate_cfg
-                        llm_cfg = getattr(caller_inst, '_generate_cfg_override', None) or getattr(caller_template.llm, 'generate_cfg', {})
+    def _propagate_settings(
+        self,
+        instance: AgentInstance,
+        caller: str,
+        agent_class: str
+    ) -> None:
+        """Propagate settings from caller to child instance.
+        
+        Propagates max_turns, max_input_tokens, and disabled_tools from the caller
+        agent's configuration to the child instance. Uses single lock scope to prevent
+        race conditions where another thread reads partial state.
+        
+        Args:
+            instance: Child instance to configure
+            caller: Parent instance name
+            agent_class: Child's agent class
+            
+        Note:
+            If target template has no LLM config, max_turns is still set but
+            max_input_tokens and disabled_tools propagation is skipped.
+        """
+        if not hasattr(self.pool, 'api_router') or not self.pool.api_router:
+            return
+            
+        try:
+            caller_inst = self.pool.get_instance(caller)
+            if not caller_inst:
+                return
+                
+            caller_template = self.pool.templates.get(caller_inst.agent_class)
+            if not caller_template or not hasattr(caller_template, 'llm'):
+                return
+                
+            # Use caller instance's override first (has user's UI settings),
+            # fall back to template's generate_cfg
+            llm_cfg = getattr(caller_inst, '_generate_cfg_override', None) or getattr(caller_template.llm, 'generate_cfg', {})
 
-                        # Propagate max_turns from caller's instance directly.
-                        # Do NOT read from llm_cfg — it was stripped out of _generate_cfg_override
-                        # because 'max_turns' is in NON_LLM_KEYS and must not leak to the LLM API.
-                        caller_max_turns = getattr(caller_inst, 'max_turns', None)
-                        if not caller_max_turns:
-                            caller_max_turns = 50  # DEFAULT_MAX_TURNS fallback
-                        inst.max_turns = caller_max_turns
+            # Propagate max_turns from caller's instance directly.
+            # Do NOT read from llm_cfg — it was stripped out of _generate_cfg_override
+            # because 'max_turns' is in NON_LLM_KEYS and must not leak to the LLM API.
+            caller_max_turns = getattr(caller_inst, 'max_turns', None)
+            if not caller_max_turns:
+                caller_max_turns = 50  # DEFAULT_MAX_TURNS fallback
+            instance.max_turns = caller_max_turns
 
-                        target_template = self.pool.templates.get(agent_class)
-                        if not target_template or not getattr(target_template, 'llm', None):
-                            # Target template has no LLM — skip settings propagation but continue execution
-                            logger.warning(
-                                f"Target agent '{instance_name}' ({agent_class}) template has no LLM config — "
-                                f"skipping settings propagation (max_input_tokens and disabled_tools)"
-                            )
-                        else:
-                            # Query router BEFORE acquiring _state_lock to reduce lock contention
-                            propagated_max = llm_cfg.get('max_input_tokens')
-                            # Fallback: if caller's config doesn't have max_input_tokens (e.g., because 
-                            # initial_llm_cfg was missing it), query the API router for the target agent type's 
-                            # effective limit. This ensures sub-agents get proper limits even when the 
-                            # caller has no specific endpoint configured.
-                            if not propagated_max and self.pool.api_router:
-                                try:
-                                    propagated_max = self.pool.api_router.get_effective_max_tokens(
-                                        agent_class.lower()
-                                    )
-                                except Exception:
-                                    pass
-                            
-                            with self.pool._execution._state_lock:
-                                # Propagate max_input_tokens from caller's config (context window limit) — store on instance, NOT template
-                                if propagated_max:
-                                    cfg = (target_template.llm.generate_cfg or {}).copy()
-                                    cfg['max_input_tokens'] = propagated_max
-                                    inst._generate_cfg_override = cfg
+            target_template = self.pool.templates.get(agent_class)
+            if not target_template or not getattr(target_template, 'llm', None):
+                # Target template has no LLM — skip settings propagation but continue execution
+                logger.warning(
+                    f"Target agent instance ({agent_class}) template has no LLM config — "
+                    f"skipping settings propagation (max_input_tokens and disabled_tools)"
+                )
+                return
+            
+            # Query router BEFORE acquiring _state_lock to reduce lock contention
+            propagated_max = llm_cfg.get('max_input_tokens')
+            # Fallback: if caller's config doesn't have max_input_tokens (e.g., because 
+            # initial_llm_cfg was missing it), query the API router for the target agent type's 
+            # effective limit. This ensures sub-agents get proper limits even when the 
+            # caller has no specific endpoint configured.
+            if not propagated_max and self.pool.api_router:
+                try:
+                    propagated_max = self.pool.api_router.get_effective_max_tokens(
+                        agent_class.lower()
+                    )
+                except Exception:
+                    pass
+            
+            with self.pool._execution._state_lock:
+                # Propagate max_input_tokens from caller's config (context window limit) — store on instance, NOT template
+                if propagated_max:
+                    cfg = (target_template.llm.generate_cfg or {}).copy()
+                    cfg['max_input_tokens'] = propagated_max
+                    instance._generate_cfg_override = cfg
 
-                                # Propagate disabled_tools — merge with any existing instance override (not overwrite)
-                                caller_disabled_tools = llm_cfg.get('disabled_tools')
-                                if caller_disabled_tools:
-                                    cfg = dict(inst._generate_cfg_override or {}) if inst._generate_cfg_override else (target_template.llm.generate_cfg or {}).copy()
-                                    existing_disabled = cfg.get('disabled_tools', [])
-                                    if isinstance(existing_disabled, list):
-                                        # Merge: combine existing with caller's disabled tools (deduplicated)
-                                        cfg['disabled_tools'] = list(set(existing_disabled + list(caller_disabled_tools)))
-                                    else:
-                                        cfg['disabled_tools'] = list(caller_disabled_tools)
-                                    inst._generate_cfg_override = cfg
-                                    # logger.debug(f"Propagated disabled_tools to agent '{instance_name}': {caller_disabled_tools}")
-            except Exception as e:
-                logger.debug(f"Settings propagation from {caller} to {instance_name} failed (non-critical): {e}")
+                # Propagate disabled_tools — merge with any existing instance override (not overwrite)
+                caller_disabled_tools = llm_cfg.get('disabled_tools')
+                if caller_disabled_tools:
+                    cfg = dict(instance._generate_cfg_override or {}) if instance._generate_cfg_override else (target_template.llm.generate_cfg or {}).copy()
+                    existing_disabled = cfg.get('disabled_tools', [])
+                    if isinstance(existing_disabled, list):
+                        # Merge: combine existing with caller's disabled tools (deduplicated)
+                        cfg['disabled_tools'] = list(set(existing_disabled + list(caller_disabled_tools)))
+                    else:
+                        cfg['disabled_tools'] = list(caller_disabled_tools)
+                    instance._generate_cfg_override = cfg
+        except Exception as e:
+            logger.debug(f"Settings propagation from {caller} to instance failed (non-critical): {e}")
+
+    def _push_subagent_stream_update(self, caller: str) -> None:
+        """Push stream update to WebSocket for sub-agent visibility.
+        
+        Builds and pushes a stream_update event to the frontend's WebSocket queue
+        so that sub-agent tabs appear and update in real-time during execution.
+        
+        Args:
+            caller: Root instance name for header stats
+            
+        Note:
+            All exceptions are caught and logged at debug level to prevent
+            WebSocket errors from crashing agent creation.
+        """
+        try:
+            ws_queue = getattr(self.pool, '_ws_send_queue', None)
+            ws_loop = getattr(self.pool, '_ws_loop', None)
+            if not (ws_queue and ws_loop and not ws_loop.is_closed()):
+                return
+            
+            from agent_cascade.api_integration import build_stream_update_from_pool, _put_stream_update
+            su = build_stream_update_from_pool(
+                pool=self.pool,
+                instance_name=caller,  # Root instance for header stats
+                responses=None,        # Reads full conversations from pool
+            )
+            if su is not None:
+                # Use shared _put_stream_update helper to safely handle QueueFull
+                asyncio.run_coroutine_threadsafe(
+                    _put_stream_update(ws_queue, {'type': 'stream_update', **su}),
+                    ws_loop,
+                )
+        except Exception as e:
+            logger.debug(f"Sub-agent stream_update push failed (non-critical): {e}")
+
+    def _create_and_run_agent(
+        self, agent_class: str, instance_name: str,
+        args: dict, caller: str, nest_depth: int = 0, force_fresh: bool = False
+    ) -> tuple:
+        """Create an AgentInstance and run it through the unified loop.
+
+        Shared helper used by both sync and parallel call_agent paths.
+        Creates the instance, builds system + task messages, logs them,
+        tracks in active_stack, and runs engine.run(inst).
+
+        Returns:
+            Tuple of (AgentInstance, conversation history).
+
+        Args:
+            nest_depth: Depth in the agent call chain (0 = root). Used to enforce max_nesting_depth.
+            force_fresh: If True, always create new instance even if inactive one exists.
+                        Used for Security/Compressor agents that should start fresh each time.
+        """
+        self._create_completed = False  # Reset for this execution cycle
+        
+        logger.debug(
+            "[CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target=%s, class=%s, caller=%s, "
+            "nest_depth=%d, force_fresh=%s",
+            instance_name, agent_class, caller, nest_depth, force_fresh
+        )
+        
+        # Extracted to _find_or_create_instance() - Phase 3.2
+        inst, is_reuse = self._find_or_create_instance(
+            agent_class, instance_name, caller, nest_depth, force_fresh
+        )
+
+        # Extracted to _build_system_message() - Phase 3.2
+        sys_msg = self._build_system_message(agent_class, instance_name)
+
+        # Extracted to _build_task_message() - Phase 3.2
+        task_msg = self._build_task_message(args, caller)
+
+        # Extracted to _initialize_instance_conversation() - Phase 3.2
+        conv = self._initialize_instance_conversation(
+            inst, sys_msg, task_msg, is_reuse, instance_name, agent_class
+        )
+
+        # Extracted to _propagate_settings() - Phase 3.2
+        self._propagate_settings(inst, caller, agent_class)
 
         # Track in active stack with depth info (thread-safe via RLock)
         with self.pool._execution._state_lock:
@@ -2946,27 +3350,8 @@ class ExecutionEngine:
         except Exception as e:
             logger.debug(f"WebUI initial state update for {instance_name} failed (non-critical): {e}")
 
-        # ── Push immediate stream_update so the tab appears without delay ──
-        # Without this, the frontend won't see the new instance until the first
-        # engine yield + throttle cycle (up to 300-500ms later during LLM cold start).
-        try:
-            ws_queue = getattr(self.pool, '_ws_send_queue', None)
-            ws_loop = getattr(self.pool, '_ws_loop', None)
-            if ws_queue and ws_loop and not ws_loop.is_closed():
-                from agent_cascade.api_integration import build_stream_update_from_pool, _put_stream_update
-                su = build_stream_update_from_pool(
-                    pool=self.pool,
-                    instance_name=caller,  # Root instance for header stats
-                    responses=None,        # Reads full conversations from pool
-                )
-                if su is not None:
-                    # Use shared _put_stream_update helper to safely handle QueueFull
-                    asyncio.run_coroutine_threadsafe(
-                        _put_stream_update(ws_queue, {'type': 'stream_update', **su}),
-                        ws_loop,
-                    )
-        except Exception as e:
-            logger.debug(f"Immediate sub-agent tab stream_update failed (non-critical): {e}")
+        # Extracted to _push_subagent_stream_update() - Phase 3.2
+        self._push_subagent_stream_update(caller)
 
         try:
             # Execute through unified loop — push stream_update events so the
@@ -3031,26 +3416,9 @@ class ExecutionEngine:
                 now = time.time()  # Use time.time() for consistency with run_agent_unified.py:135
                 if now - _last_sub_send >= _sub_send_interval and not _stream_pushing_disabled:
                     try:
-                        ws_queue = getattr(self.pool, '_ws_send_queue', None)
-                        ws_loop = getattr(self.pool, '_ws_loop', None)
-                        if ws_queue and ws_loop and not ws_loop.is_closed():
-                            # Import here to avoid circular import at module level
-                            from agent_cascade.api_integration import build_stream_update_from_pool, _put_stream_update
-                            # Pass root agent name (caller) for token stats — the function
-                            # iterates over ALL instances in pool.instances anyway.
-                            su = build_stream_update_from_pool(
-                                pool=self.pool,
-                                instance_name=caller,  # Root/primary instance for header stats
-                                responses=None,        # Use None — reads full conversations from pool
-                            )
-                            if su is not None:
-                                # Use shared _put_stream_update helper — QueueFull handled inside event loop
-                                asyncio.run_coroutine_threadsafe(
-                                    _put_stream_update(ws_queue, {'type': 'stream_update', **su}),
-                                    ws_loop,
-                                )
-                            _last_sub_send = now
-                            _ws_error_count = 0  # Reset error counter on success
+                        self._push_subagent_stream_update(caller)
+                        _last_sub_send = now
+                        _ws_error_count = 0  # Reset error counter on success
                     except RuntimeError as e:
                         # RuntimeError from run_coroutine_threadsafe means event loop was closed
                         _ws_error_count += 1
@@ -3102,21 +3470,7 @@ class ExecutionEngine:
                 # ── Push final stream_update after sub-agent completes ──
                 if not _stream_pushing_disabled:
                     try:
-                        ws_queue = getattr(self.pool, '_ws_send_queue', None)
-                        ws_loop = getattr(self.pool, '_ws_loop', None)
-                        if ws_queue and ws_loop and not ws_loop.is_closed():
-                            from agent_cascade.api_integration import build_stream_update_from_pool, _put_stream_update
-                            su = build_stream_update_from_pool(
-                                pool=self.pool,
-                                instance_name=caller,
-                                responses=None,
-                            )
-                            if su is not None:
-                                # Use shared _put_stream_update helper — QueueFull handled inside event loop
-                                asyncio.run_coroutine_threadsafe(
-                                    _put_stream_update(ws_queue, {'type': 'stream_update', **su}),
-                                    ws_loop,
-                                )
+                        self._push_subagent_stream_update(caller)
                     except Exception as e:
                         logger.debug(f"Sub-agent final stream_update push failed (non-critical): {e}")
             except Exception as e:
@@ -3131,8 +3485,12 @@ class ExecutionEngine:
 
             # Determine exit reason for debugging
             _completed = getattr(self, '_create_completed', False)
-            logger.debug("_create_and_run_agent EXIT - %s (%s), conv_len=%d", 
-                        instance_name, 'completed' if _completed else 'aborted', len(conv))
+            logger.debug(
+                "[CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=%s, reason=%s, "
+                "inst_type=%s, conv_len=%d, final_resp_len=%d",
+                instance_name, 'completed' if _completed else 'aborted', type(inst).__name__,
+                len(conv), len(final_resp) if 'final_resp' in locals() else 0
+            )
 
         return inst, conv
 
