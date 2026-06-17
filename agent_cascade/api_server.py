@@ -1615,11 +1615,10 @@ def create_app(agents, agent_pool, config=None):
                                 # ── Fix 3: Restore agent instance conversations from JSONL logs if corrupted ──
                                 # After a failed forced compression cycle, agent instance pools may be empty/corrupted.
                                 # Read directly from log files on disk to recover.
-                                try:
-                                    # Import validate_message_pool locally (defined in execution_engine.py)
-                                    from agent_cascade.execution_engine import validate_message_pool
-                                    
-                                    for sa_name, agent_class in list(agent_pool.instance_classes.items()):
+                                # Import validate_message_pool locally (moved to utils/pool_validation.py in Phase 2)
+                                from agent_cascade.utils.pool_validation import validate_message_pool
+                                
+                                for sa_name, agent_class in list(agent_pool.instance_classes.items()):
                                         if sa_name == session['session_name']:
                                             continue  # Skip main session — already synced above
                                         
@@ -1684,8 +1683,6 @@ def create_app(agents, agent_pool, config=None):
                                         except Exception as _e:
                                             # Single agent failure shouldn't block resume for others
                                             logger.warning(f"Failed to restore agent instance {sa_name} pool: {_e}")
-                                except ImportError:
-                                    logger.warning("validate_message_pool not available — skipping agent instance pool restoration")
                                 # ── End Fix 3 ──
                             
                             # Fix #3 (Feature 020): Wrap session state modifications with session_lock to prevent race condition

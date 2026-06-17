@@ -67,7 +67,7 @@ def rebuild_working_set(
     """
     Rebuild a caller's working set from pool state after compression.
 
-    Feature 019: Optimized rebuild with cache invalidation support.
+    Optimized rebuild with cache invalidation support.
 
     With clean trim, the pool is already compact — we just replace the
     caller's list with a deepcopy of the current pool content.
@@ -92,7 +92,7 @@ def rebuild_working_set(
     messages_list.extend(copy.deepcopy(compressed))
     # deepcopy ensures callers don't accidentally mutate pool state through their references
     
-    # Feature 019: Invalidate token count cache in AgentInstance
+    # Invalidate token count cache in AgentInstance (cache invalidation)
     try:
         inst = agent_pool.get_instance(agent_name)
         if inst and hasattr(inst, '_cached_token_count'):
@@ -152,3 +152,9 @@ def extract_instance_output(messages: list[Any], instance_name: str) -> str:
         return f"Sub-agent {instance_name} finished but provided no text output."
 
     return result_str
+
+
+# ── Message Pool Validation (Phase 2 Task M3) ────────────────────────────────────
+# Note: validate_message_pool has been moved to utils/pool_validation.py to avoid circular imports.
+# This import provides backward compatibility for any code still importing from here.
+from agent_cascade.utils.pool_validation import validate_message_pool  # noqa: F401

@@ -105,11 +105,11 @@ class AgentInstance:
     _cached_token_count: int = field(default=0)                  # Cached cumulative token count for conversation
     _last_token_count_conversation_length: int = field(default=0)  # Length of conversation when tokens were last counted
 
-    # ── Ground-Truth Token Counts (Feature 006: Fix Force Compression Loop) ──
+    # ── Ground-Truth Token Counts from LLM API (Fix Force Compression Loop) ──
     _last_actual_token_count: int = field(default=0)             # Actual token count from LLM API response (ground truth)
     _allocated_max_input_tokens: int = field(default=0)          # Max input tokens allocated for the last LLM call
 
-    # ── Loop Cooldown for Forced Compression (Feature 018) ─────────────────
+    # ── Compression Cooldown and Overfeeding Detection ───────────────────────
     _last_force_compress_time: float = field(default=0.0)        # Monotonic timestamp of last forced compression attempt
     _force_compress_count: int = field(default=0)                # Number of forced compressions in current session
 

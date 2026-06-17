@@ -660,7 +660,7 @@ class AgentPool:
                     inst.conversation.clear()
                     # Fix #2: Invalidate token count cache — conversation was cleared
                     inst._last_token_count_conversation_length = -1
-                    # Reset compression tracking fields (Feature 018)
+                    # Reset compression tracking fields (cooldown and overfeeding detection)
                     inst._last_force_compress_time = 0.0
                     inst._force_compress_count = 0
         self._instances_version += 1
@@ -768,7 +768,7 @@ class AgentPool:
                 inst.conversation.clear()
                 # Invalidate token count cache — conversation cleared
                 inst._last_token_count_conversation_length = -1
-                # Reset compression tracking fields (Feature 018)
+                # Reset compression tracking fields (cooldown and overfeeding detection)
                 inst._last_force_compress_time = 0.0
                 inst._force_compress_count = 0
 
@@ -1213,7 +1213,7 @@ class AgentPool:
     def drain_queue(self, instance_name: str) -> List[str]:
         """Drain all pending messages for an instance atomically.
 
-        Feature 019: Batched drain operation for efficiency.
+        Batched drain operation for efficiency.
 
         This operation pops the entire queue at once, minimizing lock contention
         and ensuring no messages are missed between drain calls. Returns empty
@@ -1249,7 +1249,7 @@ class AgentPool:
     def drain_async_results(self, instance_name: str) -> List[Tuple[str, Optional[str]]]:
         """Drain all completed async results for an instance atomically.
 
-        Feature 019: Batched drain operation for efficiency.
+        Batched drain operation for efficiency.
 
         Delegate method for backward compatibility — delegates to AsyncResultBuffer.
         This operation pops the entire results list at once under lock, minimizing

@@ -766,11 +766,12 @@ class APIRouter:
                         if ep_limit <= 0 or ep_limit > general_limit:
                             cfg['max_input_tokens'] = general_limit
                     
-                    # Feature 022: When allocated_tokens is provided, ensure endpoint config reflects the agent's
-                    # actual context requirements. This allows dynamically-sized agents (e.g., compression agent)
-                    # to be routed to endpoints that can handle their full token budget rather than being capped by
-                    # static endpoint limits. NOTE: If the LLM API has a hard cap below allocated_tokens, the call
-                    # may fail with an error — this is acceptable as it's better than silent truncation.
+                    # Dynamic endpoint selection based on token requirements: when allocated_tokens is provided, 
+                    # ensure endpoint config reflects the agent's actual context requirements.
+                    # This allows dynamically-sized agents (e.g., compression agent) to be routed 
+                    # to endpoints that can handle their full token budget rather than being capped by
+                    # static endpoint limits. NOTE: If the LLM API has a hard cap below allocated_tokens, 
+                    # the call may fail with an error — this is acceptable as it's better than silent truncation.
                     if allocated_tokens is not None:
                         effective_limit = cfg.get('max_input_tokens', 0)
                         # Only adjust if effective_limit > 0 (explicitly configured). A limit of 0 means "unlimited".
@@ -795,7 +796,7 @@ class APIRouter:
                             if ep_limit <= 0 or ep_limit > general_limit:
                                 cfg['max_input_tokens'] = general_limit
                         
-                        # Feature 022: Adjust for allocated tokens requirement
+                        # Adjust for allocated tokens requirement (dynamic endpoint selection)
                         if allocated_tokens is not None:
                             effective_limit = cfg.get('max_input_tokens', 0)
                             # Only adjust if effective_limit > 0 (explicitly configured). A limit of 0 means "unlimited".
@@ -808,7 +809,7 @@ class APIRouter:
         # 3. Always append the default as last resort (Tier 3)
         configs.append(copy.deepcopy(self.default_llm_cfg))
         
-        # Feature 022: If allocated_tokens is provided and default doesn't meet it, adjust
+        # Adjust default endpoint for allocated tokens requirement (dynamic endpoint selection)
         # Note: We only adjust if effective_limit > 0 (explicitly configured). A limit of 0 means "unlimited".
         if allocated_tokens is not None and configs:
             default_cfg = configs[-1]

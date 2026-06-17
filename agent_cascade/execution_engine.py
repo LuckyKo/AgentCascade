@@ -17,6 +17,7 @@ import json
 import os
 import re
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, List, Optional, Tuple
@@ -37,7 +38,30 @@ from agent_cascade.tool_utils import (
 # hard dependency on api_integration at module scope (cleaner separation of concerns).
 from agent_cascade.utils.utils import extract_text_from_message
 
+# M3: Import validate_message_pool from standalone utils module (Phase 2 Task 2.4)
+# Moved to utils/pool_validation.py to break circular import chain with compression module
+from .utils.pool_validation import validate_message_pool
+
 from .agent_instance import AgentInstance, LoopDetectedError, AgentState
+
+
+# ── Message Field Accessor Helper (Phase 2 Task 2.0) ────────────────────────────
+def _msg_field(msg, field: str, default=None):
+    """Unified field accessor for dict or Message objects.
+    
+    Handles both dict format (e.g., {'role': 'user', ...}) and Message object
+    format with attributes (e.g., msg.role). Used throughout execution_engine
+    to avoid repetitive isinstance checks.
+    
+    Args:
+        msg: Message object or dict with message fields
+        field: Field name to access ('role', 'content', 'extra', etc.)
+        default: Default value if field not found
+        
+    Returns:
+        Field value or default
+    """
+    return msg.get(field, default) if isinstance(msg, dict) else getattr(msg, field, default)
 
 
 def _get_active_functions_from_template(template, instance=None) -> list:
@@ -101,6 +125,110 @@ def _invalidate_token_cache(instance):
     """Invalidate all token count caches after conversation mutation."""
     instance._last_actual_token_count = 0
     instance._last_token_count_conversation_length = -1
+
+
+# ── Token Cache Invalidation Context Manager (Phase 2 Task 2.1) ────────────────
+@contextmanager
+def token_cache_invalidated(instance):
+    """Context manager that ensures token cache is invalidated after conversation mutation.
+    
+    Usage:
+        with token_cache_invalidated(instance):
+            instance.conversation.append(new_msg)
+        # Token cache automatically invalidated here
+        
+    This replaces the pattern of manually calling _invalidate_token_cache() 
+    after every conversation mutation, which was error-prone and scattered across multiple sites.
+    
+    Args:
+        instance: AgentInstance whose token cache should be invalidated on exit
+        
+    Yields:
+        None (context manager for wrapping conversation mutations)
+    """
+    try:
+        yield
+    finally:
+        _invalidate_token_cache(instance)
+
+
+# ── Message Normalization Helpers (Phase 2 Task 2.2) ────────────────────────────
+def _normalize_gemma_thought_tags(msg):
+    """Normalize Gemma <|channel>thought tags into reasoning_content.
+    
+    Modifies msg in-place to extract thought content into reasoning_content field,
+    preventing history pollution from raw thinking tags.
+    
+    Args:
+        msg: Message dict or object with 'content' and 'reasoning_content' fields
+        
+    Returns:
+        None (modifies msg in-place)
+    """
+    content = _msg_field(msg, 'content', '')
+    if not _msg_field(msg, 'function_call') and isinstance(content, str) and '<|channel>thought' in content.lower():
+        match = re.search(r'^\s*<\|channel>thought\n?([\s\S]*?)(?:\n?<\|channel>|$)', content, re.IGNORECASE)
+        if match:
+            reasoning_text = match.group(1).strip()
+            cleaned_content = re.sub(r'^\s*<\|channel>thought\n?[\s\S]*?(?:\n?<\|channel>|$)', '', content, count=1, flags=re.IGNORECASE).strip()
+            if isinstance(msg, dict):
+                msg['reasoning_content'] = reasoning_text
+                msg['content'] = cleaned_content
+            else:
+                msg.reasoning_content = reasoning_text
+                msg.content = cleaned_content
+
+
+def _normalize_thinking_blocks(text):
+    """Strip thinking blocks from text to prevent tag pollution.
+    
+    Removes <thinking>...</thinking> and <thought>...</thought> tags from text.
+    
+    Args:
+        text: Raw text that may contain thinking tags
+        
+    Returns:
+        Cleaned text with thinking blocks removed
+    """
+    # Early return for very long texts to avoid expensive regex operations (Issue #5)
+    if isinstance(text, str) and len(text) > 1_000_000:
+        return text
+    if not isinstance(text, str):
+        return text
+    # Remove standard think blocks
+    cleaned = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
+    # Also remove <thought> blocks (common variant)
+    cleaned = re.sub(r'<thought>.*?</thought>', '', cleaned, flags=re.DOTALL)
+    return cleaned
+
+
+def _normalize_tool_arguments(func_call):
+    """Clean thinking blocks from function call arguments.
+    
+    Modifies func_call in-place to remove thinking tags that may have leaked
+    into the arguments field during LLM generation.
+    
+    Args:
+        func_call: FunctionCall object or dict with 'arguments' field
+    """
+    if isinstance(func_call, dict) and func_call.get('arguments'):
+        func_call['arguments'] = _normalize_thinking_blocks(func_call['arguments'])
+    elif hasattr(func_call, 'arguments'):
+        func_call.arguments = _normalize_thinking_blocks(func_call.arguments)
+
+
+def _check_message_truncation(msg):
+    """Check if message was truncated (finish_reason == 'length').
+    
+    Args:
+        msg: Message to check
+        
+    Returns:
+        True if message indicates truncation, False otherwise
+    """
+    extra = _msg_field(msg, 'extra')
+    # Type safety check: ensure extra is a dict before calling .get() (Issue #3)
+    return extra is not None and isinstance(extra, dict) and extra.get('finish_reason') == 'length'
 
 
 def _build_resources_block(pool, template, instance=None) -> str:
@@ -303,6 +431,34 @@ class ExecutionEngine:
         """
         self.pool = pool
 
+    # ── Slot acquisition helper (fixes 3x duplication) ─────────────────────
+
+    def _acquire_slot_with_logging(self, instance: AgentInstance, context: str = "initial") -> None:
+        """Acquire concurrency slot with debug logging.
+
+        Args:
+            instance: The agent instance acquiring the slot
+            context: Description of acquisition context ("initial", "after_async_wakeup", etc.)
+        """
+        if not hasattr(self.pool, '_acquire_slot'):
+            return
+
+        try:
+            logger.debug(
+                f"[SLOT_ACQUIRE] {context} - instance={instance.instance_name}, "
+                f"class={instance.agent_class}"
+            )
+            instance._slot_release = self.pool._acquire_slot(
+                instance.agent_class, instance.instance_name
+            )
+            logger.debug(
+                f"[SLOT_ACQUIRED] {context} - instance={instance.instance_name}, "
+                f"has_callback={instance._slot_release is not None}"
+            )
+        except Exception as e:
+            logger.error(f"[SLOT_ACQUIRE_FAILED] {context} for {instance.instance_name}: {e}")
+            raise
+
     # ── Unified injection helpers ──────────────────────────────────────────
 
     def _drain_and_inject(
@@ -321,8 +477,8 @@ class ExecutionEngine:
         """Drain a queue/buffer and inject results as USER messages into all working lists.
 
         Uses the pool's atomic helper (add_message) for conversation append + partial cache
-        invalidation, then calls _invalidate_token_cache to ensure FULL cache invalidation
-        (both _last_token_count_conversation_length and _last_actual_token_count).
+        invalidation, wrapped in token_cache_invalidated() context manager to ensure FULL
+        cache invalidation (both _last_token_count_conversation_length and _last_actual_token_count).
 
         Exactly one of drain_fn or items must be provided.
 
@@ -342,28 +498,27 @@ class ExecutionEngine:
         level = logger.info if log_level == "info" else logger.debug
         level(f"Draining {len(raw_data)} item(s) for {inst_name}.")
 
-        for item in raw_data:
-            msg = factory(item)
-            # Skip empty messages (preserves existing behavior from _inject_pending_messages)
-            if not msg.content.strip():
-                continue
+        with token_cache_invalidated(instance):
+            for item in raw_data:
+                msg = factory(item)
+                # Skip empty messages (preserves existing behavior from _inject_pending_messages)
+                if not msg.content.strip():
+                    continue
 
-            # Append to local working lists (these are not pool-managed)
-            messages.append(msg)
-            llm_messages.append(msg)
-            response.append(msg)
-            # Use pool's atomic helper for conversation append + partial cache invalidation
-            self.pool.add_message(inst_name, msg)
-            # Log to JSONL (pool.add_message does NOT log to JSONL by design)
-            try:
-                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                log_inst.log_message(msg)
-            except Exception as e:
-                logger.debug(f"Logging failed for {inst_name} (non-critical): {e}")
+                # Append to local working lists (these are not pool-managed)
+                messages.append(msg)
+                llm_messages.append(msg)
+                response.append(msg)
+                # Use pool's atomic helper for conversation append + partial cache invalidation
+                self.pool.add_message(inst_name, msg)
+                # Log to JSONL (pool.add_message does NOT log to JSONL by design)
+                try:
+                    log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                    log_inst.log_message(msg)
+                except Exception as e:
+                    logger.debug(f"Logging failed for {inst_name} (non-critical): {e}")
 
-        # FULL token cache invalidation — pool.add_message only invalidates _last_token_count_conversation_length,
-        # but _invalidate_token_cache also clears _last_actual_token_count which is needed for correctness.
-        _invalidate_token_cache(instance)
+            # Token cache invalidation is automatically handled by token_cache_invalidated context manager
 
         return True
 
@@ -392,10 +547,7 @@ class ExecutionEngine:
         Yields:
             List[Message]: Current conversation state after each phase.
         """
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] engine.run() ENTRY — instance={instance.instance_name}, "
-            f"class={instance.agent_class}, nest_depth={getattr(instance, '_nest_depth', 'N/A')}"
-        )
+        logger.debug("engine.run() ENTRY - instance=%s", instance.instance_name)
         # Transition to RUNNING state (replaces is_active=True)
         with instance._state_lock:
             if instance.state == AgentState.IDLE:
@@ -429,24 +581,10 @@ class ExecutionEngine:
         # slot throughout, preventing deadlock from release→nested→reacquire cycles.
         # Cache this once at the top since it never changes during engine.run().
         skip_slot_acquire = getattr(instance, '_skip_slot_acquire', False)
-        
+
         if not skip_slot_acquire:
             instance._slot_release = None  # Initialize for proper cleanup in finally block
-            
-            if hasattr(self.pool, '_acquire_slot'):
-                try:
-                    logger.debug(
-                        f"[SLOT_ACQUIRE] Before acquire - instance={instance.instance_name}, "
-                        f"class={instance.agent_class}"
-                    )
-                    instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
-                    logger.debug(
-                        f"[SLOT_ACQUIRED] After acquire - instance={instance.instance_name}, "
-                        f"has_callback={instance._slot_release is not None}"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to acquire slot for {instance.instance_name}: {e}")
-                    raise
+            self._acquire_slot_with_logging(instance, "initial")
         else:
             # Bypass mode — nested agent (Security/Compressor) running within existing turn
             logger.debug(
@@ -458,10 +596,7 @@ class ExecutionEngine:
             # ── Phase 1: Setup ─────────────────────────────────────────────
             messages, llm_messages, response = self._setup_turn(instance)
             if not messages:
-                logger.warning(
-                    f"[CALL_AGENT_DEBUG] engine.run() — early exit for instance={instance.instance_name}, "
-                    f"reason=_setup_turn returned None (empty conversation or error)"
-                )
+                logger.debug("early exit - %s (_setup_turn returned empty)", instance.instance_name)
                 return  # Manual command handled or error
 
             max_turns = instance.max_turns or 50
@@ -481,18 +616,13 @@ class ExecutionEngine:
                         with instance._state_lock:
                             # CHECK TERMINATED BEFORE TRANSITION — prevents resuming terminated agent
                             if instance.state == AgentState.TERMINATED:
-                                logger.debug(
-                                    f"[CALL_AGENT_DEBUG] engine.run() — TERMINATED while SLEEPING "
-                                    f"for instance={inst_name}, breaking immediately"
-                                )
+                                logger.debug("TERMINATED while SLEEPING for %s - breaking", inst_name)
                                 break
                             instance._transition(AgentState.RUNNING)
                             instance.sleeping_since = None
                             instance._last_wakeup_log = time.monotonic()
-                            logger.debug(
-                                f"[CALL_AGENT_DEBUG] engine.run() — RESUMED from SLEEPING for instance={inst_name}, "
-                                f"async_results={len(async_results)}, has_user_messages={self.pool.has_messages(inst_name)}"
-                            )
+                            logger.debug("RESUMED from SLEEPING - %s async results, user msgs=%s", 
+                                         len(async_results), self.pool.has_messages(inst_name))
 
                         # Inject async results FIRST (items mode — already drained)
                         self._drain_and_inject(
@@ -507,23 +637,11 @@ class ExecutionEngine:
                             drain_fn=self.pool.drain_queue,
                             factory=self._make_user_message,
                         )
-                        
+
                         # Re-acquire concurrency slot after waking from SLEEPING
-                        # SLOT_BYPASS FIX: Only re-acquire if we're not in bypass mode
-                        if not skip_slot_acquire and hasattr(self.pool, '_acquire_slot'):
-                            try:
-                                logger.debug(
-                                    f"[SLOT_ACQUIRE] After wakeup (async+user) - instance={instance.instance_name}"
-                                )
-                                instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
-                                logger.debug(
-                                    f"[SLOT_ACQUIRED] After wakeup (async+user) - instance={instance.instance_name}, "
-                                    f"has_callback={instance._slot_release is not None}"
-                                )
-                            except Exception as e:
-                                logger.error(f"[SLOT_ACQUIRE_FAILED] After wakeup (async+user) for {inst_name}: {e}")
-                                raise
-                        
+                        if not skip_slot_acquire:
+                            self._acquire_slot_with_logging(instance, "after_async_wakeup")
+
                         # Continue to normal LLM processing below (in RUNNING state now)
                         continue
 
@@ -544,10 +662,8 @@ class ExecutionEngine:
                         
                         # Check for timeout first
                         if sleeping_duration >= sleeping_timeout:
-                            logger.warning(
-                                f"[CALL_AGENT_DEBUG] engine.run() — SLEEPING TIMEOUT for instance={inst_name}, "
-                                f"waited {sleeping_duration:.1f}s for background tools (timeout={sleeping_timeout}s)"
-                            )
+                            logger.warning("SLEEPING TIMEOUT - %s waited %.1fs (timeout=%ss)", 
+                                            inst_name, sleeping_duration, sleeping_timeout)
                             # Final drain before giving up — prevents data loss of late-arriving results
                             final_results = self.pool.drain_async_results(inst_name)
                             self._drain_and_inject(
@@ -562,16 +678,11 @@ class ExecutionEngine:
                         
                         # Log wakeup message periodically
                         if (current_time - instance._last_wakeup_log) >= wakeup_interval:
-                            logger.info(
-                                f"[CALL_AGENT_DEBUG] engine.run() — SLEEPING wakeup for instance={inst_name}, "
-                                f"waiting {sleeping_duration:.1f}s for background tools to complete"
-                            )
+                            logger.info("SLEEPING - %s waiting %.1fs for background tools", 
+                                        inst_name, sleeping_duration)
                             instance._last_wakeup_log = current_time
                         
-                        logger.debug(
-                            f"[CALL_AGENT_DEBUG] engine.run() — WAITING for background tools "
-                            f"for instance={inst_name}, sleeping_duration={sleeping_duration:.1f}s"
-                        )
+                        logger.debug("WAITING for background tools - %s (%.1fs)", inst_name, sleeping_duration)
                         yield []  # Empty yield signals waiting state without consuming turn
                         time.sleep(0.1)  # Prevent tight loop when no results available yet
                         continue
@@ -603,23 +714,11 @@ class ExecutionEngine:
                                 instance._transition(AgentState.RUNNING)
                                 instance.sleeping_since = None
                                 instance._last_wakeup_log = time.monotonic()
-                            
+
                             # Re-acquire concurrency slot after waking from SLEEPING
-                            # SLOT_BYPASS FIX: Only re-acquire if we're not in bypass mode
-                            if not skip_slot_acquire and hasattr(self.pool, '_acquire_slot'):
-                                try:
-                                    logger.debug(
-                                        f"[SLOT_ACQUIRE] After wakeup (async results) - instance={instance.instance_name}"
-                                    )
-                                    instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
-                                    logger.debug(
-                                        f"[SLOT_ACQUIRED] After wakeup (async results) - instance={instance.instance_name}, "
-                                        f"has_callback={instance._slot_release is not None}"
-                                    )
-                                except Exception as e:
-                                    logger.error(f"[SLOT_ACQUIRE_FAILED] After wakeup (async results) for {inst_name}: {e}")
-                                    raise
-                            
+                            if not skip_slot_acquire:
+                                self._acquire_slot_with_logging(instance, "after_stable_drain")
+
                             # Loop back; now in RUNNING state → LLM processes injected results
                             yield []
                             continue
@@ -630,10 +729,7 @@ class ExecutionEngine:
                                 break
                             instance._transition(AgentState.COMPLETING)
                             instance.sleeping_since = None
-                        logger.debug(
-                            f"[CALL_AGENT_DEBUG] engine.run() — COMPLETING for instance={inst_name}, "
-                            f"all background tools done with no new results"
-                        )
+                        logger.debug("COMPLETING - %s (no pending tools)", inst_name)
                         break
 
                 # ── Phase 2: Pre-LLM Checks ────────────────────────────────
@@ -676,10 +772,7 @@ class ExecutionEngine:
                         logger.warning(f"[MSG_VALIDATION] Skipping non-Message in LLM response for {instance.instance_name}: type={type(msg).__name__}, value={str(msg)[:100]}")
 
                 if self.pool.stopped or self.pool.is_instance_halted(instance.instance_name) or self.pool.is_instance_terminated(instance.instance_name):
-                    logger.debug(
-                        f"[CALL_AGENT_DEBUG] engine.run() — halted/stopped for instance={instance.instance_name}, "
-                        f"pool_stopped={self.pool.stopped}"
-                    )
+                    logger.debug("halted/stopped - %s", instance.instance_name)
                     # Sleep to prevent tight loop when halted (Issue #6 fix)
                     time.sleep(0.5)
                     yield response
@@ -687,10 +780,7 @@ class ExecutionEngine:
 
                 # ── Phase 4: Response Processing and Tool Execution ─────────
                 if self._process_response(instance, turn_output, messages, llm_messages, response):
-                    logger.debug(
-                        f"[CALL_AGENT_DEBUG] engine.run() — tool used by instance={instance.instance_name}, "
-                        f"looping for next turn (turns_available={turns_available})"
-                    )
+                    logger.debug("tool used - %s looping", instance.instance_name)
                     yield response
                     continue
 
@@ -712,10 +802,7 @@ class ExecutionEngine:
             raise
         except Exception as e:
             # C4 fix: Catch unhandled exceptions — log and yield error state
-            logger.error(
-                f"[CALL_AGENT_DEBUG] engine.run() EXCEPTION for instance={instance.instance_name}: "
-                f"error_type={type(e).__name__}, error={e}"
-            )
+            logger.error("EXCEPTION - %s: %s: %s", instance.instance_name, type(e).__name__, e)
             error_msg = Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {e}]")
             yield [error_msg]
 
@@ -767,32 +854,17 @@ class ExecutionEngine:
                 current_state = instance.state
                 if current_state == AgentState.RUNNING:
                     instance._transition(AgentState.IDLE)
-                    logger.debug(
-                        f"[CALL_AGENT_DEBUG] engine.run() EXIT — instance={instance.instance_name}, "
-                        f"transited RUNNING → IDLE (cleanup in finally)"
-                    )
+                    logger.debug("EXIT - %s RUNNING→IDLE", instance.instance_name)
                 elif current_state == AgentState.SLEEPING:
                     instance._transition(AgentState.IDLE)
-                    logger.debug(
-                        f"[CALL_AGENT_DEBUG] engine.run() EXIT — instance={instance.instance_name}, "
-                        f"transited SLEEPING → IDLE (cleanup in finally)"
-                    )
+                    logger.debug("EXIT - %s SLEEPING→IDLE", instance.instance_name)
                 elif current_state == AgentState.COMPLETING:
                     instance._transition(AgentState.IDLE)
-                    logger.debug(
-                        f"[CALL_AGENT_DEBUG] engine.run() EXIT — instance={instance.instance_name}, "
-                        f"transited COMPLETING → IDLE (cleanup in finally)"
-                    )
+                    logger.debug("EXIT - %s COMPLETING→IDLE", instance.instance_name)
                 elif current_state == AgentState.TERMINATED:
-                    logger.debug(
-                        f"[CALL_AGENT_DEBUG] engine.run() EXIT — instance={instance.instance_name}, "
-                        f"already TERMINATED (no transition)"
-                    )
+                    logger.debug("EXIT - %s already TERMINATED", instance.instance_name)
                 else:
-                    logger.debug(
-                        f"[CALL_AGENT_DEBUG] engine.run() EXIT — instance={instance.instance_name}, "
-                        f"in {current_state.name} state (cleanup skipped)"
-                    )
+                    logger.debug("EXIT - %s in %s state", instance.instance_name, current_state.name)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Phase Methods — each ~20-60 lines, independently testable
@@ -807,20 +879,13 @@ class ExecutionEngine:
         Returns:
             Tuple of (messages, llm_messages, response) or (None, None, None) on error.
         """
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] _setup_turn ENTRY — instance={instance.instance_name}, "
-            f"agent_class={instance.agent_class}"
-        )
         inst_name = instance.instance_name
 
         # Load conversation from pool (single source of truth)
         with instance._compression_lock:
             conv = list(instance.conversation)
         if not conv:
-            logger.warning(
-                f"[CALL_AGENT_DEBUG] _setup_turn — empty conversation for instance={inst_name}, "
-                f"early exit returning None"
-            )
+            logger.warning("empty conversation for %s - early exit", inst_name)
             return None, None, None
 
         # Load template to get system message if needed
@@ -836,9 +901,9 @@ class ExecutionEngine:
             if m0_role != SYSTEM and template and getattr(template, 'system_message', None):
                 sys_msg = Message(role=SYSTEM, content=template.system_message)
                 conv.insert(0, sys_msg)
-                with instance._compression_lock:
-                    instance.conversation.insert(0, sys_msg)
-                _invalidate_token_cache(instance)
+                with token_cache_invalidated(instance):
+                    with instance._compression_lock:
+                        instance.conversation.insert(0, sys_msg)
                 m0 = sys_msg
                 m0_role = SYSTEM
 
@@ -920,7 +985,7 @@ class ExecutionEngine:
             drain_fn=self.pool.drain_queue,
             factory=self._make_user_message,
         ):
-            # Feature 019: Invalidate LLM preprocessing cache after queue injection
+            # Invalidate LLM preprocessing cache after queue injection for fresh processing
             template = self.pool.templates.get(instance.agent_class)
             if template and hasattr(template, 'llm') and template.llm:
                 try:
@@ -936,7 +1001,7 @@ class ExecutionEngine:
         # ── COMPRESSION CHECK (critical for long-running agents) ────────────
         max_tokens = self._get_max_tokens(instance)
         
-        # Feature 006: Use ground-truth token counts from last LLM call when available
+        # Ground-truth token counts from last LLM call (fixes force compression loop bug)
         # This fixes the force compression loop bug where manual counting was ~5x higher than actual
         # Atomic snapshot pattern: read both values into locals before check (thread-safe under GIL)
         actual_tokens = instance._last_actual_token_count
@@ -965,7 +1030,7 @@ class ExecutionEngine:
         if usage_pct > self.pool.settings.compression_warning_threshold:
             self._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens_for_check)
 
-        # ── Loop detection (with post-compression cooldown — Bug3 fix) ─────
+        # ── Loop detection (with post-compression cooldown) ───────────────────
         # After compression, the conversation state has concentrated patterns that
         # can trigger false-positive loop detection. Skip detection on the turn
         # immediately following compression via _suppress_loop_detection_next_turn flag.
@@ -990,7 +1055,7 @@ class ExecutionEngine:
         """Force compress when token usage exceeds critical threshold. Returns True (continue loop)."""
         inst_name = instance.instance_name
 
-        # ── Loop Cooldown Check (Feature 018) ─────────────────────────────────
+        # ── Loop Cooldown Check (Compression cooldown and overfeeding detection) ─────────────────────────────────
         # Thread-safe: acquire lock before reading/writing compression tracking fields
         with instance._compression_lock:
             now = time.monotonic()
@@ -1012,7 +1077,7 @@ class ExecutionEngine:
             instance._last_force_compress_time = now
             instance._force_compress_count += 1
 
-        # ── Overfeeding Detection (Feature 018) ───────────────────────────────
+        # ── Overfeeding Detection (Compression cooldown and overfeeding detection) ───────────────────────────────
         max_attempts = getattr(self.pool.settings, 'compression_max_attempts', 3)
         if instance._force_compress_count >= max_attempts:
             logger.error(
@@ -1050,10 +1115,8 @@ class ExecutionEngine:
             )
 
             if result.success:
-                # Rebuild working set from compressed pool state
+                # Rebuild working set from compressed pool state (includes token cache invalidation)
                 self._rebuild_working_set(messages, llm_messages, inst_name)
-                # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
-                _invalidate_token_cache(instance)
                 # Use summary_text directly from CompressResult (P2 fix — no fragile tag parsing)
                 instance.compression_summary = result.summary_text
                 # Update latest_marker_index to point to the new marker in the conversation (P2 fix)
@@ -1105,15 +1168,14 @@ class ExecutionEngine:
                             recov = self.pool.get_logger(inst_name, instance.agent_class).data.get('history', [])
                             if recov and validate_message_pool(recov, inst_name):
                                 # Phase 3: Write directly to instance.conversation instead of via bridge
-                                with instance._compression_lock:  # Thread-safe recovery write
-                                    instance.conversation = list(recov)
-                                # Invalidate token count cache — conversation was replaced (Fix #2)
-                                _invalidate_token_cache(instance)
+                                with token_cache_invalidated(instance):
+                                    with instance._compression_lock:  # Thread-safe recovery write
+                                        instance.conversation = list(recov)
                                 logger.info(f"Recovered message pool from log for '{inst_name}' ({len(recov)} messages)")
                                 conv = recov
-                                # Rebuild working sets from recovered data
+                                # Rebuild working sets from recovered data (internal invalidation at L1276)
                                 self._rebuild_working_set(messages, llm_messages, inst_name)
-                                # Bug3 fix: Set cooldown flag after successful recovery (compression occurred)
+                                # Set cooldown flag after successful recovery (compression occurred)
                                 instance._suppress_loop_detection_next_turn = True
                             else:
                                 logger.error("Recovery from log also failed — message pool may be corrupted")
@@ -1137,7 +1199,7 @@ class ExecutionEngine:
                                                           f"Pool may desync — manual intervention required. "
                                                           f"Note: Compression notification was injected into instance.conversation "
                                                           f"but not synced to logger history.")
-                    # Bug3 fix: Set cooldown flag to suppress loop detection on next turn after compression
+                    # Set cooldown flag to suppress loop detection on next turn after compression
                     instance._suppress_loop_detection_next_turn = True
             
             else:  # Compression failed or returned error
@@ -1174,7 +1236,7 @@ class ExecutionEngine:
     ):
         """Rebuild both working sets from pool state after compression.
         
-        Feature 019: Optimized rebuild with proper cache invalidation.
+        Optimized rebuild with proper cache invalidation.
         
         With clean-trim model (DESIGN_REWRITE §2.4), the pool is already compact —
         we just replace our references with deepcopies of the current pool content.
@@ -1204,11 +1266,11 @@ class ExecutionEngine:
         llm_messages.clear()
         llm_messages.extend(list(sliced))  # Already a new list from slice_history_for_llm
         
-        # ── Feature 019: Cache Invalidation ────────────────────────────────────
+        # ── Cache Invalidation (after rebuild) ────────────────────────────────────
         # Invalidate token count cache so next _count_history_tokens does fresh count
         if inst:
-            _invalidate_token_cache(inst)
             inst._cached_token_count = 0
+            _invalidate_token_cache(inst)  # Critical: invalidates ALL cache fields including _last_actual_token_count
         
         # Invalidate LLM preprocessing cache for this instance's template
         template = self.pool.templates.get(inst.agent_class) if inst else None
@@ -1430,8 +1492,7 @@ class ExecutionEngine:
         if self.pool.api_router and hasattr(self.pool.api_router, 'call_with_fallback'):
             # Route through API router for multi-endpoint failover
             
-            # Feature 022: Calculate allocated_tokens from instance/template config to pass to router
-            # This enables endpoint selection based on the agent's actual token requirements
+            # Dynamic endpoint selection based on agent's actual token requirements
             allocated_tokens = None
             if instance._generate_cfg_override is not None and 'max_input_tokens' in instance._generate_cfg_override:
                 val = instance._generate_cfg_override['max_input_tokens']
@@ -1454,14 +1515,14 @@ class ExecutionEngine:
                 merged_cfg.update(llm_cfg)
                 merged_cfg['agent_name'] = template.name
                 
-                # Feature 006: Store allocated max_input_tokens in instance for compression check
+                # Store allocated max_input_tokens in instance for compression check (ground-truth tracking)
                 # Validate to ensure it's a positive integer before storing
                 if 'max_input_tokens' in merged_cfg:
                     val = merged_cfg['max_input_tokens']
                     if isinstance(val, int) and val > 0:
                         instance._allocated_max_input_tokens = val
                 
-                # Feature 006: Register token count callback to capture actual token usage from LLM
+                # Register token count callback to capture actual token usage from LLM (ground-truth tracking)
                 merged_cfg['_on_token_count'] = _make_token_count_callback(instance)
 
                 return llm.chat(
@@ -1483,14 +1544,14 @@ class ExecutionEngine:
                 merged_cfg.update(llm.generate_cfg)
             merged_cfg['agent_name'] = template.name
             
-            # Feature 006: Store allocated max_input_tokens in instance for compression check
+            # Store allocated max_input_tokens in instance for compression check (ground-truth tracking)
             # Validate to ensure it's a positive integer before storing
             if 'max_input_tokens' in merged_cfg:
                 val = merged_cfg['max_input_tokens']
                 if isinstance(val, int) and val > 0:
                     instance._allocated_max_input_tokens = val
             
-            # Feature 006: Register token count callback to capture actual token usage from LLM
+            # Register token count callback to capture actual token usage from LLM (ground-truth tracking)
             merged_cfg['_on_token_count'] = _make_token_count_callback(instance)
 
             return llm.chat(
@@ -1516,33 +1577,23 @@ class ExecutionEngine:
         is_truncated = False
         for msg in turn_output:
             # P4: Gemma thought tag normalization — prevent history pollution
-            # Check for Gemma-style <|channel>thought tags
-            content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-            if not msg.get('reasoning_content') and isinstance(content, str) and '<|channel>thought' in content.lower():
-                import re as _re
-                # Only strip if at very beginning to avoid matching tags inside file content
-                match = _re.search(r'^\s*<\|channel>thought\n?([\s\S]*?)(?:\n?<channel\|>|$)', content, _re.IGNORECASE)
-                if match:
-                    msg['reasoning_content'] = match.group(1).strip()
-                    msg['content'] = _re.sub(r'^\s*<\|channel>thought\n?[\s\S]*?(?:\n?<channel\|>|$)', '', content, count=1, flags=_re.IGNORECASE).strip()
-
+            _normalize_gemma_thought_tags(msg)
+            
             # Strip thinking blocks from reasoning_content to prevent tag pollution in history
-            if msg.get('reasoning_content'):
-                rc = msg.get('reasoning_content')
-                if isinstance(rc, str):
-                    msg['reasoning_content'] = self._strip_thinking_blocks(rc)
+            reasoning_content = _msg_field(msg, 'reasoning_content')
+            if isinstance(reasoning_content, str):
+                if isinstance(msg, dict):
+                    msg['reasoning_content'] = _normalize_thinking_blocks(reasoning_content)
+                else:
+                    msg.reasoning_content = _normalize_thinking_blocks(reasoning_content)
             
             # Clean thinking blocks from function call arguments (P4 continuation)
-            func_call = msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None)
+            func_call = _msg_field(msg, 'function_call')
             if func_call:
-                if isinstance(func_call, dict) and func_call.get('arguments'):
-                    func_call['arguments'] = self._strip_thinking_blocks(func_call['arguments'])
-                elif hasattr(func_call, 'arguments'):
-                    func_call.arguments = self._strip_thinking_blocks(func_call.arguments)
+                _normalize_tool_arguments(func_call)
 
             # Check for truncation (finish_reason == 'length')
-            extra = msg.get('extra') if isinstance(msg, dict) else getattr(msg, 'extra', None)
-            if extra and extra.get('finish_reason') == 'length':
+            if _check_message_truncation(msg):
                 is_truncated = True
 
         # ── Persist pre-existing messages to JSONL before appending turn_output ──
@@ -1573,15 +1624,13 @@ class ExecutionEngine:
         response.extend(turn_output)
         messages.extend(turn_output)
         llm_messages.extend(turn_output)
-        with instance._compression_lock:
-            instance.conversation.extend(turn_output)
-            # Streaming UI Content Update Fix: Clear _streaming_responses after Phase 4 commits messages
-            instance._streaming_responses = []
-
-        # Fix #2: Invalidate token count cache — conversation length changed
-        _invalidate_token_cache(instance)
+        with token_cache_invalidated(instance):
+            with instance._compression_lock:
+                instance.conversation.extend(turn_output)
+                # Streaming UI Content Update Fix: Clear _streaming_responses after Phase 4 commits messages
+                instance._streaming_responses = []
         
-        # Feature 006: Extract ground-truth usage info from LLM response and update instance fields
+        # Extract ground-truth usage info from LLM response (ground-truth token tracking)
         # This replaces manual token counting with actual API-reported values
         for msg in turn_output:
             extra = msg.get('extra') if isinstance(msg, dict) else getattr(msg, 'extra', None)
@@ -1613,10 +1662,9 @@ class ExecutionEngine:
             )
             messages.append(cont_msg)
             llm_messages.append(cont_msg)
-            with instance._compression_lock:
-                instance.conversation.append(cont_msg)
-            # Fix #2: Invalidate token count cache — conversation mutated
-            _invalidate_token_cache(instance)
+            with token_cache_invalidated(instance):
+                with instance._compression_lock:
+                    instance.conversation.append(cont_msg)
             return True  # Continue to next LLM call
 
         # ── Tool detection and execution ────────────────────────────────────
@@ -1728,10 +1776,9 @@ class ExecutionEngine:
             messages.append(fn_msg)
             llm_messages.append(fn_msg)
             response.append(fn_msg)  # Stream tool result to UI (was missing)
-            with instance._compression_lock:
-                instance.conversation.append(fn_msg)
-            # Fix #2: Invalidate token count cache — conversation mutated
-            _invalidate_token_cache(instance)
+            with token_cache_invalidated(instance):
+                with instance._compression_lock:
+                    instance.conversation.append(fn_msg)
             
             # Track executed tool for orphan handling
             executed_tools.append(tool_name)
@@ -1749,39 +1796,38 @@ class ExecutionEngine:
         if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
             executed_set = set(executed_tools)  # Convert to set for O(1) lookup
             tools_processed = 0
-            for out in turn_output:
-                use_tool, tool_name, tool_args, _ = self._detect_tool(out)
-                if not use_tool:
-                    continue
+            with token_cache_invalidated(instance):
+                for out in turn_output:
+                    use_tool, tool_name, tool_args, _ = self._detect_tool(out)
+                    if not use_tool:
+                        continue
+                    
+                    # Only add placeholder for tools that were NOT executed
+                    if tool_name in executed_set:
+                        continue
+                    
+                    # Extract function_id from the assistant message that had the tool call
+                    extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
+                    
+                    # Add placeholder FUNCTION result for unexecuted tool
+                    fn_msg = Message(
+                        role=FUNCTION,
+                        name=tool_name,
+                        content=f"Tool execution skipped: instance {inst_name} was halted/stopped",
+                        extra={
+                            'function_id': extra_data.get('function_id', '1'),
+                            'tool_success': False,
+                        },
+                    )
+                    messages.append(fn_msg)
+                    llm_messages.append(fn_msg)
+                    response.append(fn_msg)  # Stream to UI
+                    with instance._compression_lock:
+                        instance.conversation.append(fn_msg)
+                    tools_processed += 1
                 
-                # Only add placeholder for tools that were NOT executed
-                if tool_name in executed_set:
-                    continue
-                
-                # Extract function_id from the assistant message that had the tool call
-                extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
-                
-                # Add placeholder FUNCTION result for unexecuted tool
-                fn_msg = Message(
-                    role=FUNCTION,
-                    name=tool_name,
-                    content=f"Tool execution skipped: instance {inst_name} was halted/stopped",
-                    extra={
-                        'function_id': extra_data.get('function_id', '1'),
-                        'tool_success': False,
-                    },
-                )
-                messages.append(fn_msg)
-                llm_messages.append(fn_msg)
-                response.append(fn_msg)  # Stream to UI
-                with instance._compression_lock:
-                    instance.conversation.append(fn_msg)
-                tools_processed += 1
-            
-            if tools_processed > 0:
-                logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
-            # Invalidate token count cache — conversation mutated
-            _invalidate_token_cache(instance)
+                if tools_processed > 0:
+                    logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
 
         # ── Post-tool urgent injection ───────────────────────────────────
         # Inject urgent messages AFTER all tools complete to avoid orphaned tool_call_id's
@@ -1873,15 +1919,13 @@ class ExecutionEngine:
             ):
                 return True  # Continue loop to process drained results
         except Exception as e:
-            logger.error(
-                f"[CALL_AGENT_DEBUG] _post_turn_checks — safety drain failed for {inst_name}: {e}"
-            )
+            logger.error("safety drain failed for %s: %s", inst_name, e)
 
         return False
 
 
     @staticmethod
-    def _release_slot(slot_holder: Any, holder_name: str, context: str = "") -> None:
+    def _release_slot(slot_holder: Any, holder_name: str, context: str = "cleanup") -> None:
         """Release a concurrency slot from a slot holder with error handling.
         
         FIX Mi3: Extracted helper to eliminate code duplication across three locations.
@@ -2003,22 +2047,13 @@ class ExecutionEngine:
             try:
                 parsed = json.loads(tool_args)
             except json.JSONDecodeError:
-                logger.debug(
-                    f"[CALL_AGENT_DEBUG] _resolve_placeholders — JSON parse failure for instance={instance_name}, "
-                    f"tool={tool_name}, args_preview={str(tool_args)[:200]}"
-                )
+                logger.debug("JSON parse failure for %s/%s", instance_name, tool_name)
                 return None  # JSON parse failure — signal error to caller
             if not isinstance(parsed, dict):
-                logger.debug(
-                    f"[CALL_AGENT_DEBUG] _resolve_placeholders — parsed to non-dict for instance={instance_name}, "
-                    f"tool={tool_name}, type={type(parsed).__name__}"
-                )
+                logger.debug("parsed to non-dict for %s/%s: %s", instance_name, tool_name, type(parsed).__name__)
                 return None  # Parsed to non-dict — signal error
         else:
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] _resolve_placeholders — unexpected type for instance={instance_name}, "
-                f"tool={tool_name}, type={type(tool_args).__name__}"
-            )
+            logger.debug("unexpected type for %s/%s: %s", instance_name, tool_name, type(tool_args).__name__)
             return None  # Unexpected type — signal error
 
         # ── Step 2: scan for placeholders (whitespace-tolerant) ────────────────
@@ -2065,27 +2100,11 @@ class ExecutionEngine:
             Tool execution result as a string.
         """
         if tool_name == 'call_agent':
-            # ── CALL_AGENT DEBUG: Entry point ──
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] _execute_tool ENTRY — instance={instance.instance_name}, "
-                f"tool_args_type={type(tool_args).__name__}, tool_args_preview={str(tool_args)[:200]}, "
-                f"function_id={function_id}"
-            )
             resolved = self._resolve_placeholders(tool_args, instance.instance_name, tool_name)
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] _resolve_placeholders returned — resolved_type={type(resolved).__name__}, "
-                f"resolved_preview={str(resolved)[:200]}"
-            )
             if resolved is None:
-                logger.warning(
-                    f"[CALL_AGENT_DEBUG] _resolve_placeholders returned None for instance {instance.instance_name} — "
-                    f"this means JSON parsing failed in tool args: {str(tool_args)[:300]}"
-                )
+                logger.warning("_resolve_placeholders returned None for %s", instance.instance_name)
             result = self._handle_call_agent(resolved, messages, instance, function_id=function_id)
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] _handle_call_agent returned — result_type={type(result).__name__}, "
-                f"result_preview={str(result)[:200]}"
-            )
+            logger.debug("_handle_call_agent returned type=%s", type(result).__name__)
             self._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result
         elif tool_name == 'dismiss_agent':
@@ -2132,29 +2151,19 @@ class ExecutionEngine:
             Result string from the called agent.
         """
         caller_name = instance.instance_name
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] _handle_call_agent ENTRY — caller={caller_name}, "
-            f"args_type={type(args).__name__}, args_preview={str(args)[:300]}, function_id={function_id}"
-        )
 
         if args is None:
             # JSON parsing failed in _resolve_placeholders — return error
-            logger.warning(f"[CALL_AGENT_DEBUG] EXIT (early) — caller={caller_name}, reason=args_is_None")
+            logger.warning("call_agent early exit - %s (args is None)", caller_name)
             return 'Error: Invalid JSON arguments.'
 
         instance_name = args.get('instance_name', '')
         agent_class = (args.get('agent_class') or '').strip().lower()
 
         if not instance_name or not agent_class:
-            logger.warning(
-                f"[CALL_AGENT_DEBUG] EXIT (early) — caller={caller_name}, "
-                f"reason=missing_instance_name_or_agent_class, instance_name='{instance_name}', agent_class='{agent_class}'"
-            )
+            logger.warning("call_agent early exit - %s missing instance_name='%s' or agent_class='%s'", 
+                          caller_name, instance_name, agent_class)
             return "Error: call_agent requires instance_name and agent_class."
-
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] _handle_call_agent — caller={caller_name}, target={instance_name}, class={agent_class}"
-        )
 
         # P2: Recursive self-call cloning — prevent state corruption on self-delegation
         with self.pool._execution._state_lock:
@@ -2162,19 +2171,13 @@ class ExecutionEngine:
                 count = sum(1 for n, _depth in self.pool._execution.active_stack if n == instance_name)
                 original_instance = instance_name
                 instance_name = f"{instance_name}_child{count}"
-                logger.debug(f"[CALL_AGENT_DEBUG] Recursive self-call detected for '{original_instance}'. Cloning to '{instance_name}'.")
-                logger.debug(
-                    f"[CALL_AGENT_DEBUG] EXIT (self-call clone) — caller={caller_name}, "
-                    f"original={original_instance}, cloned={instance_name}"
-                )
+                logger.debug("Recursive self-call - cloning %s to %s", original_instance, instance_name)
 
         # P5: Class mismatch detection — clear history if class differs on existing instance
         existing_class = self.pool.instance_classes.get(instance_name)
         if existing_class and agent_class and existing_class != agent_class:
-            logger.warning(
-                f"[CALL_AGENT_DEBUG] EXIT (early) — caller={caller_name}, reason=class_mismatch, "
-                f"target={instance_name}, existing={existing_class}, requested={agent_class}"
-            )
+            logger.warning("call_agent class mismatch - %s/%s exists as %s, requested %s", 
+                          caller_name, instance_name, existing_class, agent_class)
             return (f"Error: Agent '{instance_name}' already exists as '{existing_class}'. "
                     f"Cannot create as '{agent_class}'. Use a different instance name.")
 
@@ -2184,15 +2187,10 @@ class ExecutionEngine:
             caller_depth = getattr(caller_inst, '_nest_depth', 0)
         child_depth = caller_depth + 1
         max_depth = self.pool.settings.max_nesting_depth if hasattr(self.pool, 'settings') else 10
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] Nesting depth — caller={caller_name}, caller_depth={caller_depth}, "
-            f"child_depth={child_depth}, max_depth={max_depth}"
-        )
+        logger.debug("call_agent nesting - %s depth=%d/%d", caller_name, child_depth, max_depth)
         if child_depth > max_depth:
-            logger.warning(
-                f"[CALL_AGENT_DEBUG] EXIT (early) — caller={caller_name}, reason=nesting_depth_exceeded, "
-                f"child_depth={child_depth}, max_depth={max_depth}"
-            )
+            logger.warning("call_agent depth exceeded - %s at depth %d (max=%d)", 
+                          caller_name, child_depth, max_depth)
             return (f"Error: Nesting depth limit ({max_depth}) exceeded. "
                     f"The caller '{instance.instance_name}' is at depth {caller_depth}. "
                     f"Cannot create agent '{instance_name}' at depth {child_depth}.")
@@ -2219,10 +2217,8 @@ class ExecutionEngine:
             # IMPORTANT: Before running the child, we must release the caller's slot.
             # The child's engine.run() tries to acquire the same slot at line 348.
             # If we don't release first, same-thread Semaphore(1) deadlock occurs.
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] Taking SYNC path (caller holds slot) — caller={caller_name}, "
-                f"target={instance_name}, class={agent_class}, child_depth={child_depth}"
-            )
+            logger.debug("Taking SYNC path - %s calls %s/%s at depth %d", 
+                        caller_name, instance_name, agent_class, child_depth)
             
             # Import here to match pattern in agent_pool.py:1287
             from agent_cascade.compression.helpers import extract_instance_output
@@ -2242,8 +2238,6 @@ class ExecutionEngine:
                 If reacquire succeeds, it overwrites with a new callback. If it fails,
                 the old callback remains (if any) and the closure's _released flag prevents double-release.
                 """
-                import time
-                
                 if not slot_holder:
                     return False
                     
@@ -2266,8 +2260,7 @@ class ExecutionEngine:
                 return False
             
             # SLOT_TIMEOUT FIX v2: Enhanced logging for SYNC path slot management
-            import time as time_module
-            sync_path_start = time_module.monotonic()
+            sync_path_start = time.monotonic()
             
             # Release caller's slot so the child can acquire it inside engine.run() (using helper method FIX Mi3)
             if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release is not None:
@@ -2312,40 +2305,25 @@ class ExecutionEngine:
                 
                 # Consolidated null/empty check for cleaner logic
                 if inst is None or not conv:
-                    logger.warning(
-                        f"[CALL_AGENT_DEBUG] SYNC path FAILED — agent '{instance_name}' creation returned "
-                        f"inst={inst}, conv_len={len(conv) if conv else 'N/A'}"
-                    )
+                    logger.warning("SYNC path FAILED - %s creation returned inst=%s", instance_name, inst)
                     return f"Error: Agent '{instance_name}' execution failed with no output."
-                
+
                 # Extract and format result
                 result = extract_instance_output(conv, instance_name)
-                logger.debug(
-                    f"[CALL_AGENT_DEBUG] EXIT (sync) — caller={caller_name}, target={instance_name}, "
-                    f"result_preview={str(result)[:200]}"
-                )
                 return f"[Agent '{instance_name}' Completed]:\n{result}"
-            
+
             except Exception as e:
                 # Re-acquire caller's slot before returning error
                 if not _reacquire_slot(caller_slot_holder, caller_name, "sync child error"):
-                    # Helper logged warnings; original slot reference preserved for finally block cleanup
                     pass
-                
-                # Match ASYNC path error handling pattern (agent_pool.py:1301-1302)
-                logger.error(
-                    f"[CALL_AGENT_DEBUG] SYNC path EXCEPTION — caller={caller_name}, target={instance_name}, "
-                    f"error={type(e).__name__}: {str(e)[:200]}"
-                )
+
+                logger.error("SYNC path EXCEPTION - %s/%s: %s: %s", 
+                            caller_name, instance_name, type(e).__name__, str(e)[:200])
                 return f"[Agent '{instance_name}' Failed]:\n{str(e)}"
         else:
             # Async path: caller doesn't hold slot, use normal async path via register_async_call
-            # Note: function_id is used in ASYNC path for result tracking but not in SYNC path
-            # (SYNC path returns immediately with actual result, no async result injection needed)
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] Taking ASYNC path — caller={caller_name}, target={instance_name}, "
-                f"class={agent_class}, child_depth={child_depth}, function_id={function_id}"
-            )
+            logger.debug("Taking ASYNC path - %s calls %s/%s at depth %d", 
+                        caller_name, instance_name, agent_class, child_depth)
             
             # Register and launch agent asynchronously via AsyncToolRegistry.
             # The callable inside register_async_call handles:
@@ -2361,11 +2339,8 @@ class ExecutionEngine:
                 caller=caller_name,
                 nest_depth=child_depth,
             )
-            
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] EXIT (async) — caller={caller_name}, target={instance_name}, "
-                f"function_id={function_id}"
-            )
+
+            logger.debug("ASYNC - %s launched by %s", instance_name, caller_name)
             return f"Agent '{instance_name}' launched asynchronously. Waiting for result."
 
     def _handle_dismiss_agent(self, args: Any, instance: AgentInstance) -> str:
@@ -2441,9 +2416,9 @@ class ExecutionEngine:
         )
 
         if result.success:
-            # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
-            _invalidate_token_cache(inst)
-            # Bug3 fix: Set cooldown flag to suppress loop detection on next turn after compression
+            with token_cache_invalidated(inst):
+                pass  # Context manager handles invalidation on exit (Phase 2 fix)
+            # Set cooldown flag to suppress loop detection on next turn after compression
             inst._suppress_loop_detection_next_turn = True
 
             # Sync logger's internal data["history"] to match pool state (Item 11)
@@ -2620,10 +2595,9 @@ class ExecutionEngine:
                     recov = self.pool.get_logger(inst_name, instance.agent_class).data.get('history', [])
                     if recov and validate_message_pool(recov, inst_name):
                         # Phase 3: Write directly to instance.conversation instead of via bridge
-                        with instance._compression_lock:
-                            instance.conversation = list(recov)
-                        # Invalidate token count cache — conversation was replaced (Fix #2)
-                        _invalidate_token_cache(instance)
+                        with token_cache_invalidated(instance):
+                            with instance._compression_lock:
+                                instance.conversation = list(recov)
                         logger.info(f"Recovered message pool after /compress for '{inst_name}' ({len(recov)} messages)")
                         # Rebuild working sets from recovered data (matches forced compression path)
                         self._rebuild_working_set(messages, llm_messages, inst_name)
@@ -2640,12 +2614,9 @@ class ExecutionEngine:
             # This ensures llm_messages is synced to the compressed pool state
             conv = self.pool.get_conversation(inst_name)
             if conv and validate_message_pool(conv, inst_name) and not working_set_rebuilt:
-                self._rebuild_working_set(messages, llm_messages, inst_name)
-
-            # Fix #2: Invalidate token count cache — conversation was rebuilt by compression
-            _invalidate_token_cache(instance)
+                self._rebuild_working_set(messages, llm_messages, inst_name)  # Includes token cache invalidation
             
-            # Bug3 fix: Set cooldown flag to suppress loop detection on next turn after compression
+            # Set cooldown flag to suppress loop detection on next turn after compression
             instance._suppress_loop_detection_next_turn = True
 
             # Sync logger's internal data["history"] to match pool state (Item 11)
@@ -2690,10 +2661,6 @@ class ExecutionEngine:
             force_fresh: If True, always create new instance even if inactive one exists.
                         Used for Security/Compressor agents that should start fresh each time.
         """
-        logger.debug(
-            f"[CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target={instance_name}, class={agent_class}, "
-            f"caller={caller}, nest_depth={nest_depth}"
-        )
         self._create_completed = False  # Reset for this execution cycle
 
         # FIX #1: Check for existing inactive instance before creating new one
@@ -2748,15 +2715,12 @@ class ExecutionEngine:
         # FIX #7: Only assign new instances to pool (reused instances already exist)
         if not is_reuse:
             self.pool.instances[instance_name] = inst
-            logger.debug(f"[CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for {instance_name}")
+            logger.debug("registered new instance - %s", instance_name)
 
         # Build system message for new agent
         template = self.pool.templates.get(agent_class)
         if not template:
-            logger.error(
-                f"[CALL_AGENT_DEBUG] _create_and_run_agent — NO TEMPLATE for agent_class={agent_class}, "
-                f"target={instance_name}, caller={caller}"
-            )
+            logger.error("NO TEMPLATE for %s/%s (caller=%s)", agent_class, instance_name, caller)
             raise ValueError(f"No template for agent class {agent_class}")
 
         sys_content = getattr(template, 'base_system_message',
@@ -2785,7 +2749,6 @@ class ExecutionEngine:
                 
                 # FIX #4: Clear is_terminated flag and invalidate token cache
                 inst.is_terminated = False
-                _invalidate_token_cache(inst)
                 inst._cached_token_count = 0
                 
                 # SLOT_TIMEOUT FIX: Clear _slot_release to prevent stale callback issues
@@ -2883,10 +2846,9 @@ class ExecutionEngine:
         else:
             # Build conversation: [system, task] for new instances
             conv = [sys_msg, task_msg]
-            with inst._compression_lock:
-                inst.conversation = conv
-                # Invalidate token count cache — conversation replaced
-                _invalidate_token_cache(inst)
+            with token_cache_invalidated(inst):
+                with inst._compression_lock:
+                    inst.conversation = conv
 
                 # Log initial messages to agent's JSONL file (P1 continuation)
                 try:
@@ -3011,9 +2973,7 @@ class ExecutionEngine:
             # frontend sees sub-agent tab updates independently of main agent flow.
             # Without this, the main streaming loop is blocked during tool execution
             # and no WebSocket events arrive until the sub-agent finishes.
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] _create_and_run_agent — starting engine.run() for {instance_name}"
-            )
+            logger.debug("starting engine.run() for %s", instance_name)
             final_resp = []
             _update_counter = 0
             _last_sub_send = 0.0
@@ -3023,10 +2983,7 @@ class ExecutionEngine:
 
             # Bug #43 Fix: Pre-execution check — don't start if this instance was terminated while waiting
             if self.pool.is_instance_terminated(instance_name):
-                logger.info(
-                    f"[CALL_AGENT_DEBUG] _create_and_run_agent — instance {instance_name} was terminated "
-                    f"before execution started, skipping"
-                )
+                logger.info("instance %s terminated before execution - skipping", instance_name)
                 # Clear leftover queued messages to prevent accumulation
                 q = self.pool.message_queues.get(instance_name)
                 if q:
@@ -3174,12 +3131,8 @@ class ExecutionEngine:
 
             # Determine exit reason for debugging
             _completed = getattr(self, '_create_completed', False)
-            logger.debug(
-                f"[CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target={instance_name}, "
-                f"reason={'completed' if _completed else 'aborted'}, "
-                f"inst_type={type(inst).__name__}, conv_len={len(conv)}, "
-                f"final_resp_len={len(final_resp)}"
-            )
+            logger.debug("_create_and_run_agent EXIT - %s (%s), conv_len=%d", 
+                        instance_name, 'completed' if _completed else 'aborted', len(conv))
 
         return inst, conv
 
@@ -3254,10 +3207,9 @@ class ExecutionEngine:
         
         # Initialize conversation
         conv = [sys_msg, task_msg]
-        with inst._compression_lock:
-            inst.conversation = conv
-            # Invalidate token cache
-            _invalidate_token_cache(inst)
+        with token_cache_invalidated(inst):
+            with inst._compression_lock:
+                inst.conversation = conv
             
             # Log initial messages
             try:
@@ -3454,15 +3406,11 @@ class ExecutionEngine:
         return False, None, None, text or ''
 
     def _strip_thinking_blocks(self, text: str) -> str:
-        """Remove thinking tags from reasoning content."""
-        import re
-        if not isinstance(text, str):
-            return text
-        # Remove standard think blocks
-        cleaned = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
-        # Also remove  blocks (common variant)
-        cleaned = re.sub(r'<thought>.*?</thought>', '', cleaned, flags=re.DOTALL)
-        return cleaned
+        """Remove thinking tags from reasoning content.
+        
+        Delegates to module-level helper for consistency.
+        """
+        return _normalize_thinking_blocks(text)
 
     def _append_system_notification(
         self, messages: List[Message], guard_prefix: str, notification_text: str
@@ -3654,74 +3602,3 @@ class ExecutionEngine:
         except Exception as e:
             logger.error(f"Failed to write spillover file for {instance_name}/{tool_name}: {e}")
             return None
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Item 10: Message pool validation (module-level utility)
-# ═══════════════════════════════════════════════════════════════════════
-
-def validate_message_pool(messages: List[Message], agent_name: str) -> bool:
-    """Validate message pool integrity after compression operations.
-
-    Checks:
-      - Pool is not empty
-      - First message is SYSTEM (if present)
-      - No excessive duplicate consecutive messages (>30%)
-      - All message roles are valid non-empty strings
-      - No unexpected types (booleans, None, etc.) in the pool
-
-    Returns True if the pool is valid, False if corruption detected.
-    """
-    if not messages:
-        logger.error(f"[MSG POOL VALIDATION] Empty message pool for agent '{agent_name}'")
-        return False
-
-    # Check first message is SYSTEM
-    first = messages[0]
-    first_role = first.get('role') if isinstance(first, dict) else getattr(first, 'role', '')
-    if first_role != SYSTEM:
-        logger.warning(f"[MSG POOL VALIDATION] First message for '{agent_name}' is not SYSTEM (got {first_role})")
-
-    # Check for duplicate consecutive messages (compression can cause this via extend+clear issues)
-    prev_content = None
-    prev_role = None
-    dup_count = 0
-    for i, msg in enumerate(messages):
-        role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-        # Increase content window from 200 to 500 chars for better precision (Issue 8 fix)
-        content_key = str(content)[:500] if content else ''
-
-        if role == prev_role and content_key == prev_content:
-            dup_count += 1
-            logger.warning(f"[MSG POOL VALIDATION] Duplicate consecutive msg at index {i} for '{agent_name}'")
-
-        prev_role = role
-        prev_content = content_key
-
-    # Lower threshold from 30% to 10% — 10% duplicate consecutive msgs is suspicious (Issue 7 fix)
-    if len(messages) > 5 and dup_count > len(messages) * 0.1:
-        logger.error(f"[MSG POOL VALIDATION] Excessive duplicates ({dup_count}/{len(messages)}) for agent '{agent_name}'")
-        return False
-
-    # Check that roles are valid strings (not None or empty after compression)
-    invalid_roles = sum(1 for m in messages if not (m.get('role') if isinstance(m, dict) else getattr(m, 'role', '')))
-    if invalid_roles:
-        logger.error(f"[MSG POOL VALIDATION] {invalid_roles} messages with invalid roles for agent '{agent_name}'")
-        return False
-
-    # Check for unexpected types in the pool (booleans, None, etc.)
-    # These can leak via JSON parsing or logger recovery paths
-    unexpected_types = []
-    for i, msg in enumerate(messages):
-        if isinstance(msg, bool) or msg is None:
-            unexpected_types.append((i, type(msg).__name__))
-    
-    if unexpected_types:
-        logger.error(
-            f"[MSG POOL VALIDATION] Found {len(unexpected_types)} unexpected types in message pool for '{agent_name}': "
-            f"{unexpected_types[:5]}{'...' if len(unexpected_types) > 5 else ''}"
-        )
-        return False
-
-    return True
