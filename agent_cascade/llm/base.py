@@ -209,9 +209,22 @@ class BaseChatModel(ABC):
         for msg in messages:
             if isinstance(msg, dict):
                 new_messages.append(Message(**msg))
-            else:
+            elif isinstance(msg, Message):
                 new_messages.append(msg)
                 _return_message_type = 'message'
+            else:
+                # BUG FIX: Filter out unexpected types (booleans, None, lists) that can leak via JSON parsing or logger recovery
+                # Follows the same defensive pattern as get_history_stats() and has_chinese_messages() in utils.py
+                if msg is None:
+                    logger.debug(f"BaseChatModel.chat: skipping None value in messages list")
+                elif isinstance(msg, bool):
+                    # Check bool BEFORE int since bool is a subclass of int in Python
+                    logger.debug(f"BaseChatModel.chat: filtering out unexpected bool value in messages list: {msg}")
+                elif isinstance(msg, list):
+                    logger.debug(f"BaseChatModel.chat: filtering out unexpected list item in messages list")
+                else:
+                    logger.debug(f"BaseChatModel.chat: filtering out unexpected type {type(msg).__name__} in messages list")
+                continue  # Explicit: skip this item from new_messages
         messages = new_messages
 
         if not messages:

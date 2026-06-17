@@ -52,6 +52,9 @@ class BaseFnCallPrompt(object):
         lang: Literal['auto', 'en', 'zh'] = 'auto',
         parallel_function_calls: bool = True,
     ) -> List[Message]:
+        # BUG FIX: Filter out unexpected types (booleans, None, lists) before converting to Message objects
+        # Follows the same defensive pattern as get_history_stats() and has_chinese_messages() in utils.py
+        messages = [m for m in messages if isinstance(m, (Message, dict))]  # Filter out bool, None, list, etc.
         messages = [m if isinstance(m, Message) else Message(**m) for m in messages]
 
         if lang == 'auto':

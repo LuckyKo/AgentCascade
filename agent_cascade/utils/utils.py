@@ -105,10 +105,38 @@ def has_chinese_chars(data: Any) -> bool:
     return bool(CHINESE_CHAR_RE.search(text))
 
 
-def has_chinese_messages(messages: List[Union[Message, dict]], check_roles: Tuple[str] = (SYSTEM, USER)) -> bool:
+def has_chinese_messages(messages: List[Union[Message, dict, list, bool, None]], check_roles: Tuple[str] = (SYSTEM, USER)) -> bool:
+    """Check if any message in the list contains Chinese characters.
+    
+    Skips non-dict/non-Message items (booleans, None, lists) that can leak via JSON parsing or logger recovery.
+    Follows the same defensive pattern as get_history_stats().
+    """
     for m in messages:
-        if m['role'] in check_roles:
-            if has_chinese_chars(m['content']):
+        # Defensive type checking: skip unexpected types that can leak into messages list
+        if m is None:
+            logger.debug("has_chinese_messages: skipping None value in messages list")
+            continue
+        elif isinstance(m, bool):
+            # Check bool BEFORE int since bool is a subclass of int in Python
+            logger.debug(f"has_chinese_messages: skipping unexpected bool value in messages list: {m}")
+            continue
+        elif isinstance(m, list):
+            logger.debug("has_chinese_messages: skipping unexpected list item in messages list")
+            continue
+        elif not isinstance(m, (dict, Message)):
+            logger.debug(f"has_chinese_messages: skipping unexpected type {type(m).__name__} in messages list")
+            continue
+        
+        # Extract role safely based on type
+        if isinstance(m, dict):
+            role = m.get('role')
+            content = m.get('content', '')
+        else:  # Message object
+            role = getattr(m, 'role', None)
+            content = getattr(m, 'content', '')
+        
+        if role in check_roles:
+            if has_chinese_chars(content):
                 return True
     return False
 
