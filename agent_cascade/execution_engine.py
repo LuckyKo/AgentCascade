@@ -20,8 +20,6 @@ import os
 import re
 import time
 from contextlib import contextmanager
-from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Iterator, List, Optional, Tuple
 from enum import Enum, auto
 
@@ -2415,23 +2413,8 @@ class ExecutionEngine:
             self.pool._execution.active_stack.append((instance_name, inst._nest_depth))
 
         # Item 12: Initialize sub-agent WebUI state before execution begins (Fix #3: lighter snapshot)
-        try:
-            # FIX: Thread-safe state read - snapshot under lock before building dict
-            with inst._state_lock:
-                current_state = inst.state
-            
-            initial_state = {
-                'active': current_state in (AgentState.RUNNING, AgentState.SLEEPING),
-                'agent_state': current_state.name,  # Send actual state name for activity indicator coloring
-                'agent_name': f"{instance_name} ({agent_class})",
-                'message_count': len(conv),
-                'latest_message_summary': '',
-                'conversation_length_tokens': getattr(inst, '_cached_token_count', 0),
-            }
-            with self.pool._execution._state_lock:
-                self.pool.instance_state[instance_name] = initial_state
-        except Exception as e:
-            logger.debug(f"WebUI initial state update for {instance_name} failed (non-critical): {e}")
+        # Issue Y2: Use shared helper method instead of duplicated logic
+        self._update_webui_state(instance_name, agent_class, inst, conv, final_resp=[], is_initial=True)
 
         # Phase 4.4: Delegate to StreamPublisher for WebSocket push
         self.stream_publisher.push_initial_state(inst, caller)
@@ -2464,31 +2447,9 @@ class ExecutionEngine:
                 # Item 12: Throttled sub-agent WebUI state update (every 5 turns) — Fix #3: lighter snapshot
                 _update_counter += 1
                 if _update_counter % 5 == 0:
-                    try:
-                        current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
-                        # Build a lightweight summary of the latest message instead of full dump
-                        latest_summary = ''
-                        if final_resp:
-                            last_msg = final_resp[-1]
-                            content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
-                            latest_summary = str(content)[:500] if content else ''
-                        
-                        # FIX: Thread-safe state read - snapshot under lock before building dict
-                        with inst._state_lock:
-                            current_state = inst.state
-                        
-                        state = {
-                            'active': current_state in (AgentState.RUNNING, AgentState.SLEEPING),
-                            'agent_state': current_state.name,  # Send actual state name for activity indicator coloring
-                            'agent_name': f"{instance_name} ({agent_class})",
-                            'message_count': len(current_conv),  # inst.conversation already includes final_resp
-                            'latest_message_summary': latest_summary,
-                            'conversation_length_tokens': getattr(inst, '_cached_token_count', 0),
-                        }
-                        with self.pool._execution._state_lock:
-                            self.pool.instance_state[instance_name] = state
-                    except Exception as e:
-                        logger.debug(f"WebUI state update for {instance_name} failed (non-critical): {e}")
+                    # Issue Y2: Use shared helper method instead of duplicated logic
+                    current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
+                    self._update_webui_state(instance_name, agent_class, inst, current_conv, final_resp)
 
                 # ── Push stream_update to frontend during sub-agent execution ──
                 # This is the key fix: without this, the main agent's streaming loop
@@ -2504,33 +2465,12 @@ class ExecutionEngine:
 
             # Item 12: Always emit final sub-agent state after loop completes (Fix #3: lighter snapshot)
             # Ensures even short-lived agents (<5 turns) appear in the WebUI
-            try:
-                current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
-                latest_summary = ''
-                if final_resp:
-                    last_msg = final_resp[-1]
-                    content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
-                    latest_summary = str(content)[:500] if content else ''
-                
-                # FIX: Thread-safe state read - snapshot under lock before building dict
-                with inst._state_lock:
-                    current_state = inst.state
-                
-                final_state = {
-                    'active': current_state in (AgentState.RUNNING, AgentState.SLEEPING),  # Dynamic state check for consistency
-                    'agent_state': current_state.name,  # Send actual state name for activity indicator coloring
-                    'agent_name': f"{instance_name} ({agent_class})",
-                    'message_count': len(current_conv),  # inst.conversation already includes final_resp
-                    'latest_message_summary': latest_summary,
-                    'conversation_length_tokens': getattr(inst, '_cached_token_count', 0),
-                }
-                with self.pool._execution._state_lock:
-                    self.pool.instance_state[instance_name] = final_state
+            # Issue Y2: Use shared helper method instead of duplicated logic
+            current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
+            self._update_webui_state(instance_name, agent_class, inst, current_conv, final_resp)
 
-                # ── Push final stream_update after sub-agent completes ──
-                self.stream_publisher.push_final_state(inst, caller)
-            except Exception as e:
-                logger.debug(f"WebUI final state update for {instance_name} failed (non-critical): {e}")
+            # ── Push final stream_update after sub-agent completes ──
+            self.stream_publisher.push_final_state(inst, caller)
         finally:
             # Always clean up active stack — even on halt or error
             with self.pool._execution._state_lock:
@@ -2605,27 +2545,62 @@ class ExecutionEngine:
         self.pool.active_stack_append(instance_name, 0)
         
         # Initialize WebUI state for immediate tab visibility
+        # Issue Y2: Use shared helper method instead of duplicated logic
+        self._update_webui_state(instance_name, agent_class, inst, conv, final_resp=[], is_initial=True)
+        
+        # Phase 4.4: Delegate to StreamPublisher for WebSocket push
+        self.stream_publisher.push_initial_state(inst, caller)
+        
+        return inst
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  WebUI State Update Helpers (Issue Y2: Extract duplicated logic)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _update_webui_state(
+        self, instance_name: str, agent_class: str, inst: AgentInstance,
+        conv: list, final_resp: list = None, is_initial: bool = False
+    ) -> None:
+        """Update WebUI state for an agent instance (shared helper to eliminate duplication).
+        
+        Extracted from duplicated logic in _create_and_run_agent and _create_system_agent.
+        Handles initial, periodic, and final state updates with thread-safe operations.
+        
+        Args:
+            instance_name: The agent instance name
+            agent_class: The agent class type
+            inst: The AgentInstance object
+            conv: Current conversation list
+            final_resp: Optional final response for message summary extraction
+            is_initial: If True, use empty summary (initial state); otherwise extract from final_resp
+        """
         try:
+            # Build lightweight summary of latest message (or empty for initial state)
+            latest_summary = ''
+            if not is_initial and final_resp:
+                last_msg = final_resp[-1]
+                content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
+                latest_summary = str(content)[:500] if content else ''
+            
+            # Thread-safe state read - snapshot under lock before building dict
             with inst._state_lock:
                 current_state = inst.state
             
-            initial_state = {
+            state = {
                 'active': current_state in (AgentState.RUNNING, AgentState.SLEEPING),
-                'agent_state': current_state.name,
+                'agent_state': current_state.name,  # Send actual state name for activity indicator coloring
                 'agent_name': f"{instance_name} ({agent_class})",
                 'message_count': len(conv),
-                'latest_message_summary': '',
+                'latest_message_summary': latest_summary,
                 'conversation_length_tokens': getattr(inst, '_cached_token_count', 0),
             }
+            
+            # Update pool state (thread-safe)
             with self.pool._execution._state_lock:
-                self.pool.instance_state[instance_name] = initial_state
+                self.pool.instance_state[instance_name] = state
                 
-            # Phase 4.4: Delegate to StreamPublisher for WebSocket push
-            self.stream_publisher.push_initial_state(inst, caller)
         except Exception as e:
-            logger.debug(f"WebUI initial state update for {instance_name} failed (non-critical): {e}")
-        
-        return inst
+            logger.debug(f"WebUI state update for {instance_name} failed (non-critical): {e}")
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Helper methods — token counting, tool detection, truncation
@@ -2804,5 +2779,5 @@ class ExecutionEngine:
             if not has_notification:
                 content.append({'type': 'text', 'text': notification_text})
 
-    # Note: _truncate_tool_result removed in Phase 4.5 cleanup.
+    # Note: _truncate_tool_result removed during refactoring.
     # Callers should use self.tool_dispatcher.truncate_tool_result() directly.
