@@ -145,7 +145,7 @@ def invoke_compression_agent(
         # Create proper AgentInstance via _create_system_agent() — handles all state setup
         # The system message comes from Compressor_soul.md template, task contains the summary prompt
         engine = ExecutionEngine(agent_pool)
-        engine.initialize()  # Phase 4.1: Set lifecycle manager engine reference
+        # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
         comp_instance = engine._create_system_agent(
             agent_class='Compressor',
             instance_name=comp_state_key,

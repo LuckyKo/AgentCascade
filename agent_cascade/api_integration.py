@@ -291,7 +291,7 @@ def run_agent_in_pool(
     # minutes, blocking pause/resume/terminate operations.
     
     engine = ExecutionEngine(pool)
-    engine.initialize()  # Phase 4.1: Set lifecycle manager engine reference
+    # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
     yield from engine.run(instance)
 
 
