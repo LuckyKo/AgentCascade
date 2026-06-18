@@ -701,12 +701,164 @@ class CompressionHandler:
                 )
             return True
         
-        # Step 3: Request user approval
-        if not self.request_user_approval(messages, inst_name, fraction, summary):
-            return True  # User rejected — continue loop without compression
-        
-        # Step 4: Apply compression
+        # Step 3: Apply compression (skip user approval — proceed directly like WebSocket path)
         template = self.pool.get_template(instance.agent_class)
         compress_tool = template.function_map['compress_context']
         
         return self.apply_approved_compression(instance, messages, llm_messages, fraction, summary, compress_tool)
+
+    # ── /rollback Command Handler Methods ────────────────────────────────────
+
+    def detect_and_parse_rollback_command(
+        self,
+        instance: AgentInstance,
+        messages: List[Message]
+    ) -> Optional[int]:
+        """Detect /rollback command and parse count parameter.
+        
+        Scans the last user message for /rollback command pattern.
+        
+        Args:
+            instance: Current agent instance
+            messages: Working message list
+            
+        Returns:
+            Rollback count (positive integer) if command detected, None otherwise.
+        """
+        inst_name = instance.instance_name
+        
+        # Find the last USER message
+        last_user = None
+        for msg in reversed(messages):
+            role = _msg_role(msg)
+            if role == USER:
+                last_user = msg
+                break
+        
+        if last_user is None:
+            return None
+        
+        content = _msg_content(last_user)
+        if not isinstance(content, str):
+            return None
+        
+        stripped_content = content.strip()
+        if not stripped_content.startswith('/rollback'):
+            return None
+        
+        # Guard against re-detection of notification messages containing "/rollback"
+        if '\n/rollback' in content:
+            return None  # Skip embedded /rollback references (e.g., in notifications)
+        
+        # Parse count from command (default 1)
+        parts = content.strip().split()
+        count = 1
+        if len(parts) > 1:
+            try:
+                count = int(parts[1])
+                if count < 1:
+                    count = 1
+            except ValueError as e:
+                logger.warning(f"Invalid count in /rollback command for {inst_name}: {e}")
+                count = 1
+        
+        return count
+
+    def handle_rollback_command(
+        self,
+        instance: AgentInstance,
+        messages: List[Message],
+        llm_messages: List[Message]
+    ) -> bool:
+        """Detect and handle /rollback [count] user command.
+        
+        Returns True if the command was handled (whether successful or not).
+        """
+        inst_name = instance.instance_name
+        
+        # Step 1: Detect and parse command
+        count = self.detect_and_parse_rollback_command(instance, messages)
+        if count is None:
+            return False
+        
+        # Step 2: Clear the /rollback command to prevent re-detection on next loop iteration
+        last_user = None
+        for msg in reversed(messages):
+            role = _msg_role(msg)
+            if role == USER:
+                last_user = msg
+                break
+        
+        if last_user is not None:
+            if isinstance(last_user, dict):
+                last_user['content'] = "\u00a0"  # Non-breaking space — valid for all major LLM APIs
+            else:
+                last_user.content = "\u00a0"
+        
+        # Step 3: Apply rollback using pool's surgical_rollback (unified path)
+        try:
+            from agent_cascade.execution_engine import token_cache_invalidated
+            
+            with token_cache_invalidated(instance):
+                self.pool.surgical_rollback(inst_name, count, reason="Manual /rollback command")
+            
+            # Validate message pool after rollback (Item 10 - same as compress handler lines 602-626)
+            conv = self.pool.get_conversation(inst_name)
+            working_set_rebuilt = False
+            from agent_cascade.utils.pool_validation import validate_message_pool
+            if conv and not validate_message_pool(conv, inst_name):
+                logger.error(f"[MSG POOL VALIDATION] Pool invalid after /rollback for '{inst_name}'. Attempting recovery...")
+                try:
+                    recov = self.pool.get_logger(inst_name, instance.agent_class).data.get('history', [])
+                    if recov and validate_message_pool(recov, inst_name):
+                        with token_cache_invalidated(instance):
+                            with instance._compression_lock:
+                                instance.conversation = list(recov)
+                                instance._history_version += 1
+                        logger.info(f"Recovered message pool after /rollback for '{inst_name}' ({len(recov)} messages)")
+                        self.engine._rebuild_working_set(messages, llm_messages, inst_name)
+                        working_set_rebuilt = True
+                    else:
+                        self.engine._append_system_notification(
+                            messages, "[SYSTEM NOTIFICATION: Rollback corrupted pool",
+                            f"Rollback applied but message pool validation failed and recovery unsuccessful."
+                        )
+                except Exception as e:
+                    logger.error(f"Recovery after /rollback failed for '{inst_name}': {e}")
+            
+            # Rebuild working set after successful validation (if not already rebuilt in recovery path)
+            if conv and validate_message_pool(conv, inst_name) and not working_set_rebuilt:
+                self.engine._rebuild_working_set(messages, llm_messages, inst_name)
+            
+            # Sync logger's internal data["history"] to match pool state (Item 11 - same as compress handler)
+            try:
+                conv = self.pool.get_conversation(inst_name)
+                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                log_inst.update_history(conv)
+            except Exception as e:
+                logger.error(f"Logger sync after /rollback FAILED for '{inst_name}': {e}")
+            
+            # Explicit token cache invalidation to handle edge cases where rebuild_working_set is not called
+            # (e.g., conv is None or validation fails). Matches compress handler pattern at lines 644-647.
+            from agent_cascade.execution_engine import _invalidate_token_cache
+            _invalidate_token_cache(instance)
+            
+            # Suppress loop detection on next turn to prevent false positives from abrupt state change
+            instance._suppress_loop_detection_next_turn = True
+            
+            # Append system notification to confirm the action
+            self.engine._append_system_notification(
+                messages, f"[SYSTEM NOTIFICATION: Rollback applied",
+                f"Rolled back {count} message(s) for {inst_name}."
+            )
+            
+            logger.info(f"/rollback command executed for {inst_name}: rolled back {count} message(s)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"/rollback apply failed for {inst_name}: {e}")
+            self.engine._append_system_notification(
+                messages, "[SYSTEM NOTIFICATION: Rollback command failed",
+                f"Rollback failed for {inst_name}: {e}"
+            )
+            return True

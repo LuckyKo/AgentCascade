@@ -85,13 +85,6 @@ def _get_msg_role(msg):
     return getattr(msg, 'role', None)
 
 
-def _get_msg_func_call(msg):
-    """Extract the 'function_call' field from a message, handling both dict and Message object types."""
-    if isinstance(msg, dict):
-        return msg.get('function_call')
-    return getattr(msg, 'function_call', None)
-
-
 def _parse_multimodal_content(text):
     """
     Parse markdown images ![alt](data:...) and return a list of content items.
@@ -214,41 +207,6 @@ def detect_loop(messages: List[dict]) -> Optional[Tuple[str, int]]:
                     return reason, pop_count
             
     return None
-
-
-def _refine_pop_count(history, pop_count):
-    """Adjust pop_count to ensure we don't leave a dangling tool call."""
-    new_pop = pop_count
-    
-    # Safety: Determine core messages (SYSTEM + first USER) that must NEVER be removed
-    keep_at_least = 0
-    if len(history) > 0 and _get_msg_role(history[0]) == SYSTEM:
-        keep_at_least = 1
-        if len(history) > 1 and _get_msg_role(history[1]) == USER:
-            keep_at_least = 2
-            
-    removable = len(history) - keep_at_least
-    if removable <= 0:
-        return 0
-        
-    # Cap pop_count at removable length
-    if new_pop > removable:
-        new_pop = removable
-        
-    while new_pop < removable:
-        start_idx = len(history) - new_pop
-        if start_idx >= keep_at_least and _get_msg_role(history[start_idx]) == FUNCTION:
-            # If we land on a function response, we must also remove the call that preceded it.
-            new_pop += 1
-        elif start_idx >= keep_at_least and _get_msg_role(history[start_idx]) == ASSISTANT and _get_msg_func_call(history[start_idx]):
-            # If we land on a tool call, it means we've already included it (or it's the start of our rollback).
-            # We stop here to keep the history clean without rolling back into the previous successful turn.
-            break
-        else:
-            # Landed on a regular message (USER or text ASSISTANT). 
-            # This is a safe boundary to stop.
-            break
-    return new_pop
 
 
 # ─── Message serialization ────────────────────────────────────────────────────
@@ -1313,66 +1271,9 @@ def create_app(agents, agent_pool, config=None):
                     if 'generate_cfg' in data:
                         session['generate_cfg'] = data['generate_cfg']
 
-                    # Check for /rollback command
-                    if text.startswith('/rollback'):
-                        parts = text.split()
-                        n = 1
-                        if len(parts) > 1:
-                            try:
-                                n = int(parts[1])
-                            except ValueError as e:
-                                logger.warning(f"Invalid rollback count in /rollback command: {e}")
-                        
-                        # Rollback N messages using pool's surgical_rollback (unified path)
-                        if agent_pool:
-                            inst = agent_pool.get_instance(session['session_name'])
-                            if inst is not None and len(inst.conversation) > 0:
-                                agent_pool.surgical_rollback(
-                                    session['session_name'], n, reason="Manual /rollback command"
-                                )
-                            else:
-                                await broadcast({'type': 'error', 'message': 'Nothing to roll back — no conversation yet'})
-                                continue
-                        await broadcast({'type': 'state', **build_state()})
-                        continue
-
-                    # Fix #7: /compress manual command (external — no agent start)
-                    if text.startswith('/compress'):
-                        parts = text.split()
-                        fraction = 0.5
-                        if len(parts) > 1:
-                            try:
-                                fraction = float(parts[1])
-                                fraction = max(0.1, min(0.9, fraction))  # Clamp to valid range
-                            except ValueError as e:
-                                logger.warning(f"Invalid fraction in /compress command: {e}")
-                        
-                        # Apply compression using pool's compress_context function
-                        if agent_pool:
-                            target = session['session_name']
-                            inst = agent_pool.get_instance(target)
-                            if inst is not None:
-                                from agent_cascade.compression.core import compress_context
-                                result = compress_context(
-                                    agent_pool=agent_pool,
-                                    target_agent_name=target,
-                                    fraction=fraction,
-                                    mode='auto',
-                                    force=False,
-                                )
-                                
-                                if result.success:
-                                    logger.info(f"/compress applied via WebSocket for '{target}': {result.messages_discarded} messages discarded")
-                                    await broadcast({'type': 'state', **build_state()})
-                                else:
-                                    await broadcast({'type': 'error', 'message': f"Compression failed: {result.error}"})
-                            else:
-                                await broadcast({'type': 'error', 'message': f'No instance found for "{target}"'})
-                        else:
-                            await broadcast({'type': 'error', 'message': 'Agent pool not available'})
-                        continue
-
                     # Add user message to the pool instance's conversation (unified path).
+                    # Note: /compress and /rollback commands are now handled through the agent turn loop
+                    # in handler.py, allowing a single unified processing path for all messages.
                     # This replaces: session['history'].append(...) + sync to pool.
                     parsed_content = _parse_multimodal_content(text)
                     instance_name = data.get('target_agent') or session['session_name']

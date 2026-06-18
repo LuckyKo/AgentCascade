@@ -1084,15 +1084,19 @@ class ExecutionEngine:
         if self._inject_async_messages(instance, messages, llm_messages, response):
             return True  # Yield and continue loop to process new messages
         
-        # 3. Compress command check (Phase 4.2: delegated to compression_handler)
+        # 3. Rollback command check (delegated to compression_handler)
+        if self.compression_handler.handle_rollback_command(instance, messages, llm_messages):
+            return True  # Command handled — yield and continue
+        
+        # 4. Compress command check (Phase 4.2: delegated to compression_handler)
         if self.compression_handler.handle_compress_command(instance, messages, llm_messages):
             return True  # Command handled — yield and continue
         
-        # 4. Compression trigger
+        # 5. Compression trigger
         if self._check_and_trigger_compression(instance, messages, llm_messages):
             return True  # Compression triggered — yield and continue
         
-        # 5. Loop detection (with post-compression cooldown) ───────────────────
+        # 6. Loop detection (with post-compression cooldown) ───────────────────
         # After compression, the conversation state has concentrated patterns that
         # can trigger false-positive loop detection. Skip detection on the turn
         # immediately following compression via _suppress_loop_detection_next_turn flag.
