@@ -417,10 +417,17 @@ class CompressionHandler:
         if not isinstance(content, str):
             return None
         
-        if not content.strip().startswith('/compress'):
+        stripped_content = content.strip()
+        if not stripped_content.startswith('/compress'):
             return None
         
-        # Fix #1 & #2: Clear the /compress command immediately to prevent infinite re-detection loop
+        # Guard against re-detection of notification messages containing "/compress"
+        # When a notification is appended with "\n\n{notification_text}", any text starting
+        # with "/compress" will have "\n/compress" in the content. This catches such cases.
+        if '\n/compress' in content:
+            return None  # Skip embedded /compress references (e.g., in notifications)
+        
+        # Clear the /compress command to prevent re-detection on next loop iteration
         if isinstance(last_user, dict):
             last_user['content'] = "\u00a0"  # Non-breaking space — valid for all major LLM APIs
         else:
@@ -524,7 +531,7 @@ class CompressionHandler:
                 logger.error(f"User approval request failed for {inst_name}: {e}")
                 self.engine._append_system_notification(
                     messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                    f"/compress approval request failed: {e}"
+                    f"Compression approval request failed: {e}"
                 )
                 return False
         else:
@@ -535,7 +542,7 @@ class CompressionHandler:
             logger.info(f"/compress rejected by user for {inst_name}: {rejection_reason}")
             self.engine._append_system_notification(
                 messages, "[SYSTEM NOTIFICATION: Compression cancelled",
-                f"/compress cancelled by user. Reason: {rejection_reason}"
+                f"Compression cancelled by user. Reason: {rejection_reason}"
             )
         
         return approved  # FIX Bug #2: Return actual approval status
@@ -587,7 +594,7 @@ class CompressionHandler:
                 logger.warning(f"/compress silently failed for {inst_name}: {result}")
                 self.engine._append_system_notification(
                     messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                    f"/compress failed for {inst_name}: {result}"
+                    f"Compression failed for {inst_name}: {result}"
                 )
                 return True
             
@@ -613,7 +620,7 @@ class CompressionHandler:
                     else:
                         self.engine._append_system_notification(
                             messages, "[SYSTEM NOTIFICATION: Compression corrupted pool",
-                            f"/compress applied but message pool validation failed and recovery unsuccessful."
+                            f"Compression applied but message pool validation failed and recovery unsuccessful."
                         )
                 except Exception as e:
                     logger.error(f"Recovery after /compress failed for '{inst_name}': {e}")
@@ -641,7 +648,7 @@ class CompressionHandler:
             
             self.engine._append_system_notification(
                 messages, "[SYSTEM NOTIFICATION: Compression applied",
-                f"/compress applied successfully for {inst_name}."
+                f"Compression applied successfully for {inst_name}."
             )
             
             return True
@@ -650,7 +657,7 @@ class CompressionHandler:
             logger.error(f"/compress apply failed for {inst_name}: {e}")
             self.engine._append_system_notification(
                 messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                f"/compress apply failed for {inst_name}: {e}"
+                f"Compression apply failed for {inst_name}: {e}"
             )
             return True
     
@@ -680,17 +687,17 @@ class CompressionHandler:
             if reason == 'tool_unavailable':
                 self.engine._append_system_notification(
                     messages, "[SYSTEM NOTIFICATION: Compression tool unavailable",
-                    f"/compress command issued but compress_context tool is unavailable for {inst_name}."
+                    f"Compression command issued but compress_context tool is unavailable for {inst_name}."
                 )
             elif reason == 'preview_failed':
                 self.engine._append_system_notification(
                     messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                    f"/compress preview failed for {inst_name}. Cannot compress."
+                    f"Compression preview failed for {inst_name}. Cannot compress."
                 )
             else:  # exception or unknown
                 self.engine._append_system_notification(
                     messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                    f"/compress preview encountered an error for {inst_name}. Cannot compress."
+                    f"Compression preview encountered an error for {inst_name}. Cannot compress."
                 )
             return True
         
