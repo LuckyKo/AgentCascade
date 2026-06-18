@@ -647,6 +647,18 @@ class ExecutionEngine:
             # ── Phase 1: Setup ─────────────────────────────────────────────
             messages, llm_messages, response = self._setup_turn(instance)
             if not messages:
+                # Safety: drain any queued user messages before exiting, so they aren't lost
+                inst_name = instance.instance_name
+                queued = self.pool.drain_queue(inst_name)
+                for item in queued:
+                    msg = self._make_user_message(item)
+                    if msg.content.strip():
+                        self.pool.add_message(inst_name, msg)
+                        try:
+                            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                            log_inst.log_message(msg)
+                        except Exception:
+                            pass
                 logger.debug("early exit - %s (_setup_turn returned empty)", instance.instance_name)
                 return  # Manual command handled or error
 

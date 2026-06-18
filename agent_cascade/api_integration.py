@@ -747,21 +747,16 @@ def execute_agent_turn(
     if instance is None:
         raise KeyError(f"Instance '{instance_name}' not found in pool")
 
-    # Append user message to the instance's conversation (single source of truth).
-    # Use per-instance lock for thread safety — ExecutionEngine may be reading
-    # conversation from another thread during its _setup_turn() snapshot.
-    with instance._compression_lock:
-        user_msg = Message(role=USER, content=user_message_content)
-        instance.conversation.append(user_msg)
-        # Invalidate token count cache — conversation length changed
-        instance._last_token_count_conversation_length = -1
-    pool._mark_activity(instance_name)
+    # Enqueue the user message — same queue used by tool responses.
+    # The existing _drain_and_inject logic will pick it up at normal injection points
+    # (pre-LLM, post-tool), appending to working lists just like any other message.
+    pool.enqueue_message(instance_name, user_message_content)
 
     # Apply UI config if provided (sanitize and inject into LLM config)
     if ui_cfg:
         _apply_ui_config(pool, instance_name, ui_cfg)
 
-    # Execute through unified engine
+    # Execute through unified engine — drain logic handles the queued message
     yield from run_agent_in_pool(pool, instance_name)
 
 

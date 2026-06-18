@@ -1394,9 +1394,8 @@ def create_app(agents, agent_pool, config=None):
                                     system_message_content=sys_content,
                                 )
                         
-                        # Now add the user message (instance guaranteed to exist)
-                        user_msg = Message(role=USER, content=parsed_content)
-                        agent_pool.add_message(instance_name, user_msg)
+                        # Enqueue the user message — same queue drained during turn loop via _drain_and_inject
+                        agent_pool.enqueue_message(instance_name, parsed_content)
 
                     # Start agent generation
                     with session_lock:
@@ -1534,12 +1533,11 @@ def create_app(agents, agent_pool, config=None):
                             agent_pool.stopped = True
                             await asyncio.sleep(0.1)
                         
-                        # Inject continuation message
+                        # Enqueue continuation message — same queue drained during turn loop
                         cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
                         parsed_content = _parse_multimodal_content(cont_msg)
                         if agent_pool:
-                            cont_user_msg = Message(role=USER, content=parsed_content)
-                            agent_pool.add_message(target_instance, cont_user_msg)
+                            agent_pool.enqueue_message(target_instance, parsed_content)
                         
                         # Increment generation_id BEFORE starting new thread (Issue #1 fix)
                         # This ensures the old thread detects stale gen_id and exits before new thread starts
@@ -1599,12 +1597,11 @@ def create_app(agents, agent_pool, config=None):
                         
                         if was_halted:
                             # Was halted (regardless of generating state — we already handled the generating case above)
-                            # Inject continuation message into pool instance conversation (unified path)
+                            # Enqueue continuation message — same queue drained during turn loop
                             cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
                             parsed_content = _parse_multimodal_content(cont_msg)
                             if agent_pool:
-                                cont_user_msg = Message(role=USER, content=parsed_content)
-                                agent_pool.add_message(target_instance, cont_user_msg)
+                                agent_pool.enqueue_message(target_instance, parsed_content)
                             
                             # Start agent generation
                             with session_lock:
@@ -1785,13 +1782,13 @@ def create_app(agents, agent_pool, config=None):
                                 # Invalidate token count cache — conversation length changed
                                 inst._last_token_count_conversation_length = -1
                         else:
-                            # Fallback: create the instance first, then add the message
+                            # Fallback: create the instance first, then enqueue the message
                             create_main_agent_instance(
                                 pool=agent_pool,
                                 instance_name=instance_name,
                                 system_message_content="",
                             )
-                            agent_pool.add_message(instance_name, last_user_msg)
+                            agent_pool.enqueue_message(instance_name, last_user_msg.content)
 
                     if 'generate_cfg' in data:
                         session['generate_cfg'] = data['generate_cfg']
