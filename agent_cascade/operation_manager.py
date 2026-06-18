@@ -189,6 +189,8 @@ class OperationManager:
         if new_path != self.base_dir:
             self.base_dir = new_path
             self.base_dir.mkdir(parents=True, exist_ok=True)
+            if self.agent_pool:
+                self.agent_pool.notify_config_changed()
             return True
         return False
 
@@ -232,6 +234,8 @@ class OperationManager:
                 logger.warning("Failed to resolve extra RW work folder %s: %s", folder, e)
         
         logger.info("[Workspace] Tiered folders updated: RO=%d, RW=%d", len(self.extra_work_folders_ro), len(self.extra_work_folders_rw))
+        if self.agent_pool:
+            self.agent_pool.notify_config_changed()
 
     # ─── Auto-Approval for Agent-Owned Files ──────────────────────────────
 
