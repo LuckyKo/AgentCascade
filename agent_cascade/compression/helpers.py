@@ -103,7 +103,7 @@ def rebuild_working_set(
         pass
 
 
-def extract_instance_output(messages: list[Any], instance_name: str) -> str:
+def extract_instance_output(messages: list[Any], instance_name: str, was_terminated: bool = False) -> str:
     """
     Extract text output from a sub-agent's conversation messages.
 
@@ -113,6 +113,7 @@ def extract_instance_output(messages: list[Any], instance_name: str) -> str:
     Args:
         messages: List of Message objects or dicts (mixed types).
         instance_name: The agent instance name (used in fallback warnings).
+        was_terminated: If True, the agent was terminated by user — return a termination message instead of generic warning.
 
     Returns:
         The extracted text, or a warning message if no output was found.
@@ -147,6 +148,8 @@ def extract_instance_output(messages: list[Any], instance_name: str) -> str:
     result_str = "\n\n".join(collected_text).strip()
 
     if not result_str:
+        if was_terminated:
+            return f"Sub-agent {instance_name} was terminated by user."
         if last_tool_idx != -1:
             return f"WARNING: Sub-agent {instance_name} performed tool calls but provided no final summary."
         return f"Sub-agent {instance_name} finished but provided no text output."

@@ -68,6 +68,10 @@ try:
 except ImportError:
     PENDING_USER_INPUT = 'PENDING_USER_INPUT'
 
+# Agent state management imports for Stop handler
+from agent_cascade.agent_pool import ACTIVE_STATES
+from agent_cascade.agent_instance import AgentState, InvalidStateTransition
+
 # Pre-compiled regexes moved to agent_cascade.utils.thinking_block
 
 
@@ -1471,13 +1475,31 @@ def create_app(agents, agent_pool, config=None):
                     await broadcast({'type': 'state', **build_state(generating=True)})
 
                 elif msg_type == 'stop':
+                    # Stop all streaming and set ALL active agents to IDLE state.
                     with session_lock:
                         session['stop_requested'] = True
                         session['generating'] = False
                         session['generation_id'] += 1
+                    
                     if agent_pool:
-                        agent_pool.stopped = True
-                        agent_pool.reset()
+                        # Transition ALL active agents to IDLE state (not just reset)
+                        for inst_name, instance in list(agent_pool.instances.items()):
+                            try:
+                                # Read state INSIDE lock to avoid race condition (Reviewer Finding #2)
+                                with instance._state_lock:
+                                    current_state = instance.state
+                                    if current_state in ACTIVE_STATES:
+                                        # Use _transition() instead of direct assignment for proper validation (Finding #1)
+                                        instance._transition(AgentState.IDLE)
+                                        logger.info(f"Stop: Transitioned {inst_name} from {current_state.name} to IDLE")
+                            except InvalidStateTransition as e:
+                                logger.warning(f"Invalid state transition for {inst_name}: {e}")
+                            except Exception as e:
+                                logger.warning(f"Failed to transition {inst_name} to IDLE: {e}")
+                        
+                        # Halt threads and unblock pending approvals (non-destructive — preserves sessions)
+                        agent_pool.stop_session()
+                    
                     await broadcast({'type': 'done', **build_state()})
 
                 elif msg_type == 'pause':
@@ -1716,10 +1738,51 @@ def create_app(agents, agent_pool, config=None):
                         logger.info(f"Injected continuation message into agent instance {target_instance}'s queue.")
 
                 elif msg_type in ('terminate_agent_instance', 'terminate_sub_agent'):
+                    """Terminate the specified agent instance and set it to TERMINATED state."""
+                    # Add session_lock guard for consistency with other handlers (Finding #5)
+                    with session_lock:
+                        if session.get('stop_requested', False):
+                            logger.debug(f"Skip terminate {data.get('instance_name')} - stop already requested")
+                            continue
+                    
                     instance_name = data.get('instance_name')
                     if instance_name and agent_pool:
+                        # SAFEGUARD: Never allow terminating the root orchestrator — it breaks the session.
+                        # If a frontend bug sends the session name, just transition it to IDLE instead.
+                        inst = agent_pool.get_instance(instance_name)
+                        is_root = (inst is not None and inst.parent_instance is None)
+                        
+                        if is_root:
+                            logger.warning(f"Terminate requested for root orchestrator '{instance_name}' — blocked. Transitioning to IDLE instead.")
+                            with session_lock:
+                                session['stop_requested'] = True
+                                session['generating'] = False
+                                session['generation_id'] += 1
+                            agent_pool._stopped_event.set()
+                            with inst._state_lock:
+                                current_state = inst.state
+                                if current_state in ACTIVE_STATES:
+                                    inst._transition(AgentState.IDLE)
+                            await broadcast({'type': 'done', **build_state()})
+                            continue
+                        
+                        # Get parent instance name for feedback BEFORE dismissal (Finding #4)
+                        parent_instance = getattr(inst, 'parent_instance', None) if inst else None
+                        
+                        # Enqueue feedback message to parent/caller agent BEFORE dismiss_instance() removes it
+                        if parent_instance and parent_instance != instance_name:
+                            feedback_msg = f"[SYSTEM]: Agent '{instance_name}' has been terminated by user."
+                            agent_pool.enqueue_message(parent_instance, feedback_msg)
+                            logger.info(f"Enqueued termination feedback to {parent_instance}: {feedback_msg}")
+                        
+                        # dismiss_instance() handles:
+                        # - Recursive dismissal of child agents (cascade termination)
+                        # - State transition to TERMINATED for active agents
+                        # - Removal from the pool
                         agent_pool.dismiss_instance(instance_name)
-                    # Dismissal callback triggers a state broadcast via the sender loop — no need for a direct one here
+                        
+                        # Broadcast updated state immediately so frontend reflects terminated agent
+                        await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'retry':
                     # FIX 1c: Protect session['generating'] read with lock (consistent with Fix 1)

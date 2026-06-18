@@ -338,9 +338,11 @@ class ToolDispatcher:
                 logger.warning("SYNC path FAILED - %s creation returned inst=%s", instance_name, inst)
                 return f"Error: Agent '{instance_name}' execution failed with no output."
 
-            # Extract and format result
-            result = extract_instance_output(conv, instance_name)
-            return f"[Agent '{instance_name}' Completed]:\n{result}"
+            # Extract and format result — check if agent was terminated by user
+            was_terminated = instance_name in self.pool.terminated_instances
+            result = extract_instance_output(conv, instance_name, was_terminated=was_terminated)
+            status = "Terminated" if was_terminated else "Completed"
+            return f"[Agent '{instance_name}' {status}]:\n{result}"
 
         except Exception as e:
             self._reacquire_caller_slot(caller_slot_holder, caller_name, "sync child error")

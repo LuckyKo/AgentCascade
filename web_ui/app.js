@@ -3561,6 +3561,11 @@ if (terminateBtn) {
   terminateBtn.addEventListener('click', () => {
     const activeInstance = getActiveInstanceName();
     if (!activeInstance) return;
+    // Never allow terminating the root orchestrator — it breaks the session.
+    if (isSessionPrimaryAgent(activeInstance)) {
+      alert(`Cannot terminate the root agent '${activeInstance}'. Use Stop instead.`);
+      return;
+    }
     if (confirm(`Terminate ${activeInstance}?`)) {
       send({ type: 'terminate_agent_instance', instance_name: activeInstance });
     }

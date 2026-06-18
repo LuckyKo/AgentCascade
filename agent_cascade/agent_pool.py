@@ -551,6 +551,15 @@ class AgentPool:
             except Exception as e:
                 logger.debug(f"Clearing message queue for {instance_name} failed (non-critical): {e}")
 
+        # Clear _streaming_responses to discard half-completed LLM output.
+        # Without this, the streaming UI keeps showing partial content from a terminated agent.
+        if inst:
+            try:
+                with inst._compression_lock:
+                    inst._streaming_responses.clear()
+            except Exception as e:
+                logger.debug(f"Clearing streaming responses for {instance_name} failed (non-critical): {e}")
+
     def dismiss_instance(self, instance_name: str):
         """Remove an instance from the pool. If active, terminate it; otherwise clean up.
 
@@ -734,6 +743,47 @@ class AgentPool:
         # Callers that explicitly set stopped=True before reset will need to re-set it
         # if they want threads halted during post-reset operations (e.g., api_server line 1697).
         self._stopped_event.clear()
+
+    def stop_session(self):
+        """Minimal interrupt for "Stop" action — halts execution but preserves sessions.
+        
+        This method is used when the user clicks "Stop" to halt all streaming and put
+        agents in IDLE state WITHOUT dismissing them (unlike reset() which dismisses
+        sub-agents, setting them to TERMINATED).
+        
+        The key design principle: Stop is NON-DESTRUCTIVE. It should only interrupt
+        execution — NOT clear conversations, summaries, or any user-visible session data.
+        The user expects to be able to Resume exactly where they left off.
+        
+        Order of operations:
+          1. Set _stopped_event (to halt threads)
+          2. Clear pending approvals (unblocks any threads waiting for user approval)
+        
+        Does NOT:
+          - Dismiss sub-agents (they remain in pool with their current state)
+          - Clear conversations (user expects to Resume from the same point)
+          - Clear instance_summaries, terminated_instances, or any session data
+          - Create a new logger session
+          - Shutdown/recreate async infrastructure
+        
+        See reset() for full session reset that dismisses sub-agents and clears everything.
+        """
+        # Step 1: Set stopped event to signal threads to halt
+        self._stopped_event.set()
+
+        # ── Step 2: Clear pending approvals ──────────────────────────────────
+        # Prevent dangling threads waiting for user approval.
+        if self.operation_manager:
+            try:
+                with self.operation_manager._lock:
+                    for approval in self.operation_manager.pending.values():
+                        if not approval.event.is_set():
+                            approval.approved = False
+                            approval.outcome_reason = "Session stopped"
+                            approval.event.set()
+                    self.operation_manager.pending.clear()
+            except Exception as e:
+                logger.warning(f"clear_pending failed during stop_session (threads may hang): {e}")
 
     @property
     def _state_lock(self):
@@ -1381,8 +1431,11 @@ class AgentPool:
                 if not child_conv:
                     return f"[Parallel Agent '{child_instance_name}' Failed]: Execution terminated with no output."
 
-                result = extract_instance_output(child_conv, child_instance_name)
-                return f"[Parallel Agent '{child_instance_name}' Finished]:\n{result}"
+                # Check if agent was terminated by user
+                was_terminated = child_instance_name in self.terminated_instances
+                result = extract_instance_output(child_conv, child_instance_name, was_terminated=was_terminated)
+                status = "Terminated" if was_terminated else "Finished"
+                return f"[Parallel Agent '{child_instance_name}' {status}]:\n{result}"
 
             except Exception as e:
                 return f"[Parallel Agent '{child_instance_name}' Failed]:\n{str(e)}"
