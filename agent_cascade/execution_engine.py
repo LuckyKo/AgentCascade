@@ -20,7 +20,7 @@ import os
 import re
 import time
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 from enum import Enum, auto
 
 from agent_cascade.llm.schema import (
@@ -585,7 +585,7 @@ class ExecutionEngine:
     #  Main Execution Loop — Core turn loop orchestration and phase dispatch
     # ═══════════════════════════════════════════════════════════════════════
 
-    def run(self, instance: AgentInstance) -> Iterator[List[Message]]:
+    def run(self, instance: AgentInstance) -> Iterator[Union[List[Message], tuple[List[Message], bool]]]:
         """Execute the agent's turn loop as a generator yielding state updates.
 
         This is THE execution entry point for ALL agents. No separate paths
@@ -596,7 +596,9 @@ class ExecutionEngine:
             instance: The AgentInstance to execute.
 
         Yields:
-            List[Message]: Current conversation state after each phase.
+            Union[List[Message], tuple[List[Message], bool]]: Either a list of messages,
+                or a tuple of (messages_list, is_streaming_bool) during LLM streaming phases.
+                Consumers should unpack tuples before extending conversations to avoid bool leaks.
         """
         logger.debug("engine.run() ENTRY - instance=%s", instance.instance_name)
         # Transition to RUNNING state (replaces is_active=True)
@@ -2454,7 +2456,13 @@ class ExecutionEngine:
             for resp in self.run(inst):
                 if self.pool.stopped or self.pool.is_instance_halted(instance_name) or self.pool.is_instance_terminated(instance_name):
                     break
-                final_resp = resp
+                
+                # FIX BOOL_LEAK: Unpack (messages, is_streaming) tuple from engine.run()
+                # engine.run() yields tuples like (List[Message], bool), but we only need the message list
+                if isinstance(resp, tuple) and len(resp) == 2:
+                    final_resp = resp[0]  # Extract just the message list
+                else:
+                    final_resp = resp
 
                 # Item 12: Throttled sub-agent WebUI state update (every 5 turns) — Fix #3: lighter snapshot
                 _update_counter += 1
