@@ -235,6 +235,10 @@ class CompressionHandler:
                         else:
                             logger.debug(f"Compression notification already exists in conversation for '{inst_name}' — skipping. Conv length: {len(instance.conversation)}")
 
+                    # M4: Increment history version AFTER notification injection (if it happened)
+                    # This ensures the cached working set reflects the complete state including notifications
+                    instance._history_version += 1
+
                     # Re-fetch conv after notification append so validation includes the notification message
                     conv = self.pool.get_conversation(inst_name)
 
@@ -249,12 +253,13 @@ class CompressionHandler:
                                 # Phase 3: Write directly to instance.conversation instead of via bridge
                                 from agent_cascade.execution_engine import token_cache_invalidated
                                 with token_cache_invalidated(instance):
-                                    with instance._compression_lock:  # Thread-safe recovery write
+                                    with instance._compression_lock:  # M5: Thread-safe recovery write + rebuild
                                         instance.conversation = list(recov)
+                                        instance._history_version += 1  # Persist WS fix: increment version on conversation mutation
+                                        # Token cache will be invalidated again by _rebuild_working_set below (Fix Issue #5)
+                                        self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                                 logger.info(f"Recovered message pool from log for '{inst_name}' ({len(recov)} messages)")
                                 conv = recov
-                                # Token cache will be invalidated again by _rebuild_working_set below (Fix Issue #5)
-                                self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                                 # Set cooldown flag after successful recovery (compression occurred)
                                 instance._suppress_loop_detection_next_turn = True
                             else:
@@ -346,6 +351,17 @@ class CompressionHandler:
             from agent_cascade.execution_engine import token_cache_invalidated
             with token_cache_invalidated(instance):
                 pass  # Context manager handles invalidation on exit (Phase 2 fix)
+            
+            # C6: Increment history version and rebuild working set after successful compression
+            instance._history_version += 1
+            
+            # Get current messages for rebuild
+            conv = self.pool.get_conversation(target_agent_name)
+            if conv:
+                messages_list = list(conv)
+                llm_messages_list = list(self.pool.slice_history_for_llm(conv))
+                self.engine._rebuild_working_set(messages_list, llm_messages_list, target_agent_name)
+            
             # Set cooldown flag to suppress loop detection on next turn after compression
             instance._suppress_loop_detection_next_turn = True
 
@@ -575,6 +591,7 @@ class CompressionHandler:
                 )
                 return True
             
+            instance._history_version += 1
             # Validate message pool after compression (Item 10)
             conv = self.pool.get_conversation(inst_name)
             working_set_rebuilt = False
@@ -588,6 +605,8 @@ class CompressionHandler:
                         with token_cache_invalidated(instance):
                             with instance._compression_lock:
                                 instance.conversation = list(recov)
+                                # Increment history version to invalidate cached working set (conversation assigned in recovery)
+                                instance._history_version += 1
                         logger.info(f"Recovered message pool after /compress for '{inst_name}' ({len(recov)} messages)")
                         self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                         working_set_rebuilt = True

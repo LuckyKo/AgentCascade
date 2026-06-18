@@ -91,6 +91,8 @@ class _InstanceConversationMapping(dict):
                 inst.conversation = list(value)  # defensive copy
             # Fix #2: Invalidate token count cache — conversation was replaced
             inst._last_token_count_conversation_length = -1
+            # C2: Increment history version to invalidate cached working set
+            inst._history_version += 1
         super().__setitem__(key, value)
 
     def __delitem__(self, key: str) -> None:
@@ -100,6 +102,8 @@ class _InstanceConversationMapping(dict):
         if inst is not None:
             with inst._compression_lock:
                 inst.conversation.clear()
+            # C2: Increment history version after clearing conversation
+            inst._history_version += 1
 
     def get(self, key: str, default=None):
         """Get conversation for instance, returning default if not found."""
@@ -121,6 +125,7 @@ class _InstanceConversationMapping(dict):
         with inst._compression_lock:
             value = list(inst.conversation)
             inst.conversation.clear()
+            inst._history_version += 1  # Persist WS fix: increment version on conversation mutation
 
         # Remove from dict storage only — don't delete the instance
         super().pop(key, None)
@@ -202,6 +207,8 @@ class _InstanceConversationMapping(dict):
         for inst in self._pool.instances.values():
             with inst._compression_lock:
                 inst.conversation.clear()
+            # C2: Increment history version after clearing each instance's conversation
+            inst._history_version += 1
 
 
 class AgentPool:
@@ -299,6 +306,11 @@ class AgentPool:
         # ── Version counter for lazy sync of instance_conversations (Fix #3) ──
         self._instances_version = 0                        # increments on create/remove/dismiss/reset
         self._mapping_synced_to_version = -1              # tracks last version instance_conversations was synced to
+
+        # ── Configuration Version (Fix LLM Reprocessing) ─────────────────────
+        # Incremented when global config changes (workspace dir, extra folders, refresh_agents).
+        # Used by ExecutionEngine._setup_turn() to detect if system prompt needs rebuild.
+        self._config_version = 0
 
         # Dismissal callbacks (used by api_server to broadcast real-time tab removal)
         self._on_dismissed_callbacks: list = []
@@ -698,6 +710,8 @@ class AgentPool:
                     inst.conversation.clear()
                     # Fix #2: Invalidate token count cache — conversation was cleared
                     inst._last_token_count_conversation_length = -1
+                    # Signal structural change for cache preservation
+                    inst._history_version += 1
                     # Reset compression tracking fields (cooldown and overfeeding detection)
                     inst._last_force_compress_time = 0.0
                     inst._force_compress_count = 0
@@ -847,6 +861,8 @@ class AgentPool:
                 inst.conversation.clear()
                 # Invalidate token count cache — conversation cleared
                 inst._last_token_count_conversation_length = -1
+                # C4: Increment history version to invalidate cached working set
+                inst._history_version += 1
                 # Reset compression tracking fields (cooldown and overfeeding detection)
                 inst._last_force_compress_time = 0.0
                 inst._force_compress_count = 0
@@ -872,6 +888,8 @@ class AgentPool:
                         del inst.conversation[target_len:]
                         # Invalidate token count cache — conversation length changed
                         inst._last_token_count_conversation_length = -1
+                        # C3: Increment history version to invalidate cached working set
+                        inst._history_version += 1
                 try:
                     log_inst = self._logger.get_logger(name, inst.agent_class)
                     log_inst.truncate_to(target_len)
@@ -1058,6 +1076,8 @@ class AgentPool:
                 existing.conversation = restored_messages
                 # Invalidate token count cache — conversation replaced
                 existing._last_token_count_conversation_length = -1
+                # C4: Increment history version to invalidate cached working set
+                existing._history_version += 1
                 existing.agent_class = agent_class
         else:
             now = time.monotonic()
@@ -1089,6 +1109,15 @@ class AgentPool:
         """Reload all agent souls and templates from disk."""
         self.templates.clear()
         self._discover_agents(str(self.agents_dir))
+        self.notify_config_changed()
+
+    def notify_config_changed(self):
+        """Signal that global configuration has changed (workspace dir, templates, etc).
+        
+        Increments _config_version, which triggers ExecutionEngine to rebuild system prompts.
+        """
+        self._config_version += 1
+        logger.debug(f"[CONFIG] Global configuration version incremented to {self._config_version}")
 
     @property
     def instance_classes(self) -> Dict[str, str]:
@@ -1162,6 +1191,8 @@ class AgentPool:
                 inst.conversation.append(message)
                 # Invalidate token count cache — conversation length changed
                 inst._last_token_count_conversation_length = -1
+                # C1: Increment history version to invalidate cached working set
+                inst._history_version += 1
             self._mark_activity(instance_name)
             # Note: Logging to JSONL is now handled by execution_engine.run() as the single source of truth.
             # This method only adds messages to the in-memory conversation (AgentInstance.conversation).
@@ -1561,6 +1592,8 @@ class AgentPool:
             del conv[new_len:]
             # Invalidate token count cache — conversation length changed
             inst._last_token_count_conversation_length = -1
+            # Signal structural change for cache preservation
+            inst._history_version += 1
 
             # Sync logger under lock to avoid stale reads
             try:

@@ -362,6 +362,8 @@ def run_agent_in_pool_with_recovery(
                 instance.conversation.append(hint_msg)
                 # Invalidate token count cache — conversation length changed
                 instance._last_token_count_conversation_length = -1
+                # Increment history version to invalidate cached working set
+                instance._history_version += 1
 
             retry_count += 1
 
@@ -1316,33 +1318,12 @@ def _apply_ui_config(
                     if _key in sanitized:
                         pool.llm_cfg[_key] = sanitized[_key]
 
-            # If disabled_tools changed, refresh the resources block in m0
-            # so the agent sees the updated tool list on its next turn
-            # NOTE: This runs OUTSIDE _state_lock to avoid nested lock acquisition
-            # with _compression_lock — lock ordering invariant: _state_lock before _compression_lock
-            needs_m0_refresh = disabled_tools_changed or 'work_access_folders' in ui_cfg
-            if needs_m0_refresh and instance.conversation:
-                try:
-                    with instance._compression_lock:
-                        m0 = instance.conversation[0]
-                        m0_content = m0.get('content', '') if isinstance(m0, dict) else getattr(m0, 'content', '')
-                        if isinstance(m0_content, str):
-                            # Refresh session metadata (workspace folders may have changed)
-                            meta_block = _build_session_metadata(pool, instance)
-                            if meta_block:
-                                m0_content = _replace_section(m0_content, "## Session Metadata", meta_block)
-                            # Refresh resources block if disabled_tools changed
-                            if disabled_tools_changed:
-                                res_block = _build_resources_block(pool, template, instance)
-                                if res_block:
-                                    m0_content = _replace_resources_block(m0_content, res_block)
-                            if isinstance(m0, dict):
-                                m0['content'] = m0_content
-                            else:
-                                m0.content = m0_content
-                except Exception as e:
-                    # Don't let m0 refresh break the main flow
-                    logger.debug("Failed to refresh m0 after UI config change: %s", e)
+                # M2: Flag instance as dirty inside lock for thread safety
+                # This triggers ExecutionEngine._setup_turn() to rebuild the system prompt
+                # surgically on the next turn, preserving LLM prefix caching if possible.
+                if disabled_tools_changed or 'work_access_folders' in ui_cfg:
+                    instance._metadata_dirty = True
+                    logger.debug(f"[CONFIG] Flagged {instance_name} as dirty (metadata change)")
         except AttributeError:
             # pool._execution or _state_lock doesn't exist — skip safely
             logger.debug("Execution engine not available for disabled_tools update")

@@ -829,6 +829,8 @@ class ExecutionEngine:
         Builds the system message from template (for main agent), loads conversation history,
         applies slice_history_for_llm to get working set, and sets up the response accumulator.
 
+        Uses the "Persistent Working Set" model (Fix LLM Reprocessing) to preserve caching.
+        
         Returns:
             Tuple of (messages, llm_messages, response) or (None, None, None) on error.
         """
@@ -837,9 +839,28 @@ class ExecutionEngine:
         # Load conversation from pool (single source of truth)
         with instance._compression_lock:
             conv = list(instance.conversation)
+            
+            # M1: Move dirty check inside lock to prevent TOCTOU race conditions
+            # Check if we can reuse the cached working set to preserve LLM prefix caching.
+            # Breaking events: config change, history structural change, or tool metadata dirty.
+            is_dirty = (
+                instance._last_config_version != self.pool._config_version or
+                instance._history_version != instance._last_history_version or
+                instance._metadata_dirty
+            )
+        
         if not conv:
             logger.warning("empty conversation for %s - early exit", inst_name)
             return None, None, None
+
+        if not is_dirty and instance._cached_messages and instance._cached_llm_messages:
+            # PURE APPEND PATH: Use cached lists. No list copying, no regex, no slicing.
+            # This ensures the m0 (system prompt) object is identical to previous turns.
+            logger.debug(f"[CACHE_PRESERVE] Using cached working set for {inst_name} (preserving LLM cache)")
+            return instance._cached_messages, instance._cached_llm_messages, []
+
+        # REBUILD PATH: Config or history has changed — perform full setup.
+        logger.debug(f"[CACHE_REBUILD] Rebuilding working set for {inst_name} (dirty={is_dirty})")
 
         # Load template to get system message if needed
         template = self.pool.get_template(instance.agent_class)
@@ -857,18 +878,23 @@ class ExecutionEngine:
                 with token_cache_invalidated(instance):
                     with instance._compression_lock:
                         instance.conversation.insert(0, sys_msg)
+                        instance._history_version += 1  # Persist WS fix: increment version on conversation mutation
+                    # M3: Clear cached lists when system message is inserted to prevent stale data
+                    instance._cached_messages = []
+                    instance._cached_llm_messages = []
                 m0 = sys_msg
                 m0_role = SYSTEM
 
             if m0_role == SYSTEM:
                 m0_content = m0.get('content', '') if isinstance(m0, dict) else getattr(m0, 'content', '')
                 if isinstance(m0_content, str):
+                    original_content = m0_content
                     # 1. Update identity "You are [instance]."
                     pattern = rf"(?i)You are\s+\w+\."
                     if re.search(pattern, m0_content):
                         m0_content = re.sub(pattern, f"You are {inst_name}.", m0_content, count=1)
                     
-                    # 2. Inject/update Session Metadata section — always rebuild each turn so changes are reflected immediately
+                    # 2. Inject/update Session Metadata section
                     meta_block = _build_session_metadata(self.pool, instance)
                     if meta_block:
                         if '## Session Metadata' in m0_content:
@@ -883,8 +909,7 @@ class ExecutionEngine:
                             m0_content = '\n'.join(content_lines)
                     
                     # 3. Inject/update available resources (enabled tools always; agent types only if call_agent is available)
-                    # Always rebuild this block each turn so that changes to disabled_tools are reflected immediately
-                    # Note: Using already-resolved template from line 831, no need for re-lookup
+                    # Note: Using already-resolved template, no need for re-lookup
                     new_block = _build_resources_block(self.pool, template, instance)
                     if new_block:
                         if '--- CURRENT AVAILABLE RESOURCES' in m0_content:
@@ -902,18 +927,29 @@ class ExecutionEngine:
                             'use the exact placeholder: "__USE_PREV_ARG__". This saves tokens and processing time.'
                         )
                     
-                    # Update the message
-                    if isinstance(m0, dict):
-                        m0['content'] = m0_content
+                    # Update the message ONLY if content actually changed (preserves LLM prefix caching)
+                    if m0_content != original_content:
+                        if isinstance(m0, dict):
+                            m0['content'] = m0_content
+                        else:
+                            m0.content = m0_content
+                        logger.debug(f"[CACHE_REBUILD] System prompt content CHANGED for {inst_name}")
                     else:
-                        m0.content = m0_content
+                        logger.debug(f"[CACHE_REBUILD] System prompt for {inst_name} textually identical — skipping pool update")
 
         # messages = full working set; llm_messages = what actually goes to LLM
         # Apply slice to extract system + post-marker tail if markers exist
         sliced = self.pool.slice_history_for_llm(conv)
         llm_messages = list(sliced) if sliced else list(conv)
+        
+        # Sync caches and versions
+        instance._cached_messages = conv
+        instance._cached_llm_messages = llm_messages
+        instance._last_config_version = self.pool._config_version
+        instance._last_history_version = instance._history_version
+        instance._metadata_dirty = False
+        
         response: List[Message] = []
-
         return conv, llm_messages, response
 
     def _check_stop_conditions(self, instance: AgentInstance) -> bool:
@@ -1150,6 +1186,17 @@ class ExecutionEngine:
                 template.llm._clear_preprocess_cache()
             except Exception as e:
                 logger.debug(f"Failed to clear LLM preprocess cache for {inst_name}: {e}")
+        
+        # Sync the instance caches as well (Fix LLM Reprocessing)
+        if inst:
+            inst._cached_messages = messages
+            inst._cached_llm_messages = llm_messages
+            # Note: _history_version was already incremented by the caller (CompressionHandler)
+            # or should be manually incremented if called from elsewhere.
+            inst._last_history_version = inst._history_version
+            inst._last_config_version = self.pool._config_version
+            # C5: Reset metadata dirty flag after rebuild to prevent spurious cache misses
+            inst._metadata_dirty = False
         
         logger.debug(
             f"Rebuilt working sets for {inst_name}: "
@@ -1617,6 +1664,8 @@ class ExecutionEngine:
             with token_cache_invalidated(instance):
                 with instance._compression_lock:
                     instance.conversation.append(cont_msg)
+                    # Increment history version to invalidate cached working set
+                    instance._history_version += 1
             return True
         
         return False
@@ -1740,6 +1789,10 @@ class ExecutionEngine:
 
             # Track compress_context execution
             if tool_name == 'compress_context':
+                # C7: Increment history version before rebuilding working set
+                inst = self.pool.get_instance(inst_name)
+                if inst:
+                    inst._history_version += 1
                 self._rebuild_working_set(messages, llm_messages, inst_name)
                 # Item 10: Validate message pool after agent-triggered compression
                 conv = self.pool.get_conversation(inst_name)
@@ -1763,6 +1816,8 @@ class ExecutionEngine:
             with token_cache_invalidated(instance):
                 with instance._compression_lock:
                     instance.conversation.append(fn_msg)
+                    # Increment history version to invalidate cached working set
+                    instance._history_version += 1
             
             # Track executed tool for orphan handling
             executed_tools.append(tool_name)
@@ -1808,7 +1863,11 @@ class ExecutionEngine:
                         llm_messages.append(fn_msg)
                         response.append(fn_msg)  # Stream to UI
                         instance.conversation.append(fn_msg)  # FIX #1: Moved inside batch lock
+                        # Increment history version to invalidate cached working set (done once after loop)
                         tools_processed += 1
+            
+            if tools_processed > 0:
+                instance._history_version += 1
                 
                 if tools_processed > 0:
                     logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
@@ -1842,6 +1901,7 @@ class ExecutionEngine:
         with token_cache_invalidated(instance):
             with instance._compression_lock:
                 instance.conversation.extend(turn_output)
+                instance._history_version += 1  # Persist WS fix: increment version on conversation mutation
                 # Streaming UI Content Update Fix: Clear _streaming_responses after Phase 4 commits messages
                 instance._streaming_responses = []
         
@@ -2481,6 +2541,7 @@ class ExecutionEngine:
                     _last_sub_send = now
 
             conv.extend(final_resp)
+            inst._history_version += 1  # Persist WS fix: increment version on conversation mutation
             self._create_completed = True  # Mark for finally-block EXIT log reason tracking
 
             # Item 12: Always emit final sub-agent state after loop completes (Fix #3: lighter snapshot)

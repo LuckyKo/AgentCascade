@@ -126,6 +126,16 @@ class AgentInstance:
     _slot_release: Optional[Callable[[], None]] = None  # Callback to release the endpoint concurrency slot when transitioning to SLEEPING or exiting
     _skip_slot_acquire: bool = False  # When True, engine.run() skips slot acquisition (used for nested agents like Security/Compressor)
 
+    # ── Persistent Working Set Caching (Fix LLM Reprocessing) ────────────────
+    # These fields enable "pure append" turns by caching the message sets and only
+    # rebuilding when configuration or history structure changes.
+    _cached_messages: List[Message] = field(default_factory=list)      # Full conversation working set
+    _cached_llm_messages: List[Message] = field(default_factory=list)  # Sliced working set for LLM
+    _last_config_version: int = field(default=-1)                      # Pool config version at last rebuild
+    _history_version: int = field(default=0)                           # Incremented on structural changes (compression/edit)
+    _last_history_version: int = field(default=-1)                     # Last history version seen by ExecutionEngine
+    _metadata_dirty: bool = field(default=True)                        # Set when tool config changes (toggled via UI)
+
     def _transition(self, new_state: AgentState) -> None:
         """Transition to a new state with validation.
         
