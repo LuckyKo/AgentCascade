@@ -135,6 +135,11 @@ class AgentInstance:
     _history_version: int = field(default=0)                           # Incremented on structural changes (compression/edit)
     _last_history_version: int = field(default=-1)                     # Last history version seen by ExecutionEngine
     _metadata_dirty: bool = field(default=True)                        # Set when tool config changes (toggled via UI)
+    
+    # ── Loop Detection Cooldown (Fix /compress Bug) ───────────────────────────
+    # After compression/rollback, the conversation state has concentrated patterns that can trigger
+    # false-positive loop detection. This flag suppresses loop detection on the next turn only.
+    _suppress_loop_detection_next_turn: bool = field(default=False)     # Cooldown flag for loop detection after compression/rollback
 
     def _transition(self, new_state: AgentState) -> None:
         """Transition to a new state with validation.

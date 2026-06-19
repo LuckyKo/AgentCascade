@@ -117,7 +117,8 @@ class CompressionHandler:
     def check_overfeeding(
         self,
         instance: AgentInstance,
-        llm_messages: List[Message]
+        llm_messages: List[Message],
+        response: Optional[List[Message]] = None
     ) -> bool:
         """Check if overfeeding threshold exceeded.
         
@@ -126,6 +127,7 @@ class CompressionHandler:
         Args:
             instance: Agent instance
             llm_messages: Working set for notification injection
+            response: Optional list to append notifications for yielding (fixes compress feedback bug)
             
         Returns:
             True if overfeeding detected (terminate agent)
@@ -139,10 +141,17 @@ class CompressionHandler:
                 f"{instance._force_compress_count} forced compressions exceeded limit of {max_attempts}. "
                 f"Context keeps filling faster than compression can reduce it. Terminating agent."
             )
-            notification = (
-                f"[SYSTEM NOTIFICATION: Overfeeding — {instance._force_compress_count} compressions without relief. Terminating.]"
-            )
-            self.engine._append_system_notification(llm_messages, "[SYSTEM NOTIFICATION: Overfeeding", notification)
+            # Append notification as a new Message object (not mutating last message content)
+            from agent_cascade.execution_engine import token_cache_invalidated
+            notification_text = f"[SYSTEM NOTIFICATION: Overfeeding — {instance._force_compress_count} compressions without relief. Terminating.]"
+            notif_msg = Message(role=USER, content=notification_text)
+            with token_cache_invalidated(instance):
+                with instance._compression_lock:
+                    instance.conversation.append(notif_msg)
+                    llm_messages.append(notif_msg)
+                    if response is not None:
+                        response.append(notif_msg)
+                    instance._history_version += 1
             self.pool.halt_instance(inst_name)
             return True
         
@@ -153,7 +162,8 @@ class CompressionHandler:
         instance: AgentInstance,
         messages: List[Message],
         llm_messages: List[Message],
-        usage_pct: float
+        usage_pct: float,
+        response: Optional[List[Message]] = None
     ) -> bool:
         """Execute forced compression and rebuild working set.
         
@@ -163,6 +173,7 @@ class CompressionHandler:
             instance: Agent instance
             messages, llm_messages: Working message sets
             usage_pct: Current token usage percentage
+            response: Optional list to append notifications for yielding (fixes compress feedback bug)
             
         Returns:
             True if compression successful (continue loop)
@@ -231,6 +242,8 @@ class CompressionHandler:
                                 instance.conversation.append(notification_msg)
                                 messages.append(notification_msg)
                                 llm_messages.append(notification_msg)
+                                if response is not None:
+                                    response.append(notification_msg)
                             logger.info(f"Compression notification injected into conversation pool for '{inst_name}'")
                         else:
                             logger.debug(f"Compression notification already exists in conversation for '{inst_name}' — skipping. Conv length: {len(instance.conversation)}")
@@ -264,10 +277,18 @@ class CompressionHandler:
                                 instance._suppress_loop_detection_next_turn = True
                             else:
                                 logger.error("Recovery from log also failed — message pool may be corrupted")
-                                self.engine._append_system_notification(
-                                    llm_messages, "[SYSTEM NOTIFICATION: Compression corrupted pool",
-                                    f"Forced compression and recovery both failed for {inst_name}. Agent halted to prevent corruption."
-                                )
+                                # Append notification as a new Message object (not mutating last message content)
+                                notification_text = f"[SYSTEM NOTIFICATION: Compression corrupted pool: Forced compression and recovery both failed for {inst_name}. Agent halted to prevent corruption."
+                                notif_msg = Message(role=USER, content=notification_text)
+                                from agent_cascade.execution_engine import token_cache_invalidated
+                                with token_cache_invalidated(instance):
+                                    with instance._compression_lock:
+                                        instance.conversation.append(notif_msg)
+                                        messages.append(notif_msg)
+                                        llm_messages.append(notif_msg)
+                                        if response is not None:
+                                            response.append(notif_msg)
+                                        instance._history_version += 1
                                 # Halt this instance to prevent further execution with corrupted state
                                 self.pool.halt_instance(inst_name)
                         except Exception as e:
@@ -289,11 +310,18 @@ class CompressionHandler:
             
             else:  # Compression failed or returned error
                 logger.error(f"Forced compression failed for {inst_name}: {result.error}")
-                notification = (
-                    f"Context exceeded {usage_pct:.1f}%, "
-                    f"but automatic compression failed."
-                )
-                self.engine._append_system_notification(llm_messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
+                # Append notification as a new Message object (not mutating last message content)
+                notification_text = f"[SYSTEM NOTIFICATION: Context exceeded {usage_pct:.1f}%, but automatic compression failed."
+                notif_msg = Message(role=USER, content=notification_text)
+                from agent_cascade.execution_engine import token_cache_invalidated
+                with token_cache_invalidated(instance):
+                    with instance._compression_lock:
+                        instance.conversation.append(notif_msg)
+                        messages.append(notif_msg)
+                        llm_messages.append(notif_msg)
+                        if response is not None:
+                            response.append(notif_msg)
+                        instance._history_version += 1
 
             return True  # Continue loop — don't make LLM call this turn
 
@@ -348,9 +376,8 @@ class CompressionHandler:
         )
 
         if result.success:
-            from agent_cascade.execution_engine import token_cache_invalidated
-            with token_cache_invalidated(instance):
-                pass  # Context manager handles invalidation on exit (Phase 2 fix)
+            from agent_cascade.execution_engine import _invalidate_token_cache
+            _invalidate_token_cache(instance)  # Invalidate cache before rebuilding working set (Fix Finding #3)
             
             # C6: Increment history version and rebuild working set after successful compression
             instance._history_version += 1
@@ -427,13 +454,7 @@ class CompressionHandler:
         if '\n/compress' in content:
             return None  # Skip embedded /compress references (e.g., in notifications)
         
-        # Clear the /compress command to prevent re-detection on next loop iteration
-        if isinstance(last_user, dict):
-            last_user['content'] = "\u00a0"  # Non-breaking space — valid for all major LLM APIs
-        else:
-            last_user.content = "\u00a0"
-        
-        # Parse fraction from command (default 0.5)
+        # Parse fraction from command before modifying content - default 0.5
         parts = content.strip().split()
         fraction = 0.5
         if len(parts) > 1:
@@ -444,6 +465,15 @@ class CompressionHandler:
         
         # Clamp fraction to valid range
         fraction = max(0.1, min(0.9, fraction))
+        
+        # Replace the /compress command with a descriptive system message to prevent re-detection
+        # Convert decimal fraction to percentage (e.g., 0.5 → "50%")
+        percentage = int(round(fraction * 100))
+        system_message = f"[SYSTEM] Compressing {percentage}% of context..."
+        if isinstance(last_user, dict):
+            last_user['content'] = system_message
+        else:
+            last_user.content = system_message
         
         return fraction
     
@@ -504,7 +534,10 @@ class CompressionHandler:
         messages: List[Message],
         inst_name: str,
         fraction: float,
-        summary: str
+        summary: str,
+        instance: Optional[AgentInstance] = None,
+        llm_messages: Optional[List[Message]] = None,
+        response: Optional[List[Message]] = None
     ) -> bool:
         """Request user approval for compression via UI.
         
@@ -515,6 +548,9 @@ class CompressionHandler:
             inst_name: Instance name for logging
             fraction: Compression fraction
             summary: Preview summary text
+            instance: Agent instance (needed for lock/cache invalidation)
+            llm_messages: LLM working set (for notification append)
+            response: Optional list to append notifications for yielding (fixes compress feedback bug)
             
         Returns:
             True if approved, False if rejected.
@@ -525,14 +561,23 @@ class CompressionHandler:
                     agent_name=inst_name,
                     tool_name='compress_context',
                     tool_args={'fraction': fraction, 'summary': summary},
-                    description=f"Proposed Compression Summary ({int(fraction*100)}% of history)",
+                    description=f"Proposed Compression Summary ({int(round(fraction * 100))}% of history)",
                 )
             except Exception as e:
                 logger.error(f"User approval request failed for {inst_name}: {e}")
-                self.engine._append_system_notification(
-                    messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                    f"Compression approval request failed: {e}"
-                )
+                # Append notification as a new Message object (not mutating last message content)
+                if instance is not None and llm_messages is not None:
+                    notification_text = f"[SYSTEM NOTIFICATION: Compression command failed: Compression approval request failed: {e}"
+                    notif_msg = Message(role=USER, content=notification_text)
+                    from agent_cascade.execution_engine import token_cache_invalidated
+                    with token_cache_invalidated(instance):
+                        with instance._compression_lock:
+                            instance.conversation.append(notif_msg)
+                            messages.append(notif_msg)
+                            llm_messages.append(notif_msg)
+                            if response is not None:
+                                response.append(notif_msg)
+                            instance._history_version += 1
                 return False
         else:
             # No operation_manager — auto-approve (standalone mode)
@@ -540,10 +585,19 @@ class CompressionHandler:
         
         if not approved:
             logger.info(f"/compress rejected by user for {inst_name}: {rejection_reason}")
-            self.engine._append_system_notification(
-                messages, "[SYSTEM NOTIFICATION: Compression cancelled",
-                f"Compression cancelled by user. Reason: {rejection_reason}"
-            )
+            # Append notification as a new Message object (not mutating last message content)
+            if instance is not None and llm_messages is not None:
+                notification_text = f"[SYSTEM NOTIFICATION: Compression cancelled: Compression cancelled by user. Reason: {rejection_reason}"
+                notif_msg = Message(role=USER, content=notification_text)
+                from agent_cascade.execution_engine import token_cache_invalidated
+                with token_cache_invalidated(instance):
+                    with instance._compression_lock:
+                        instance.conversation.append(notif_msg)
+                        messages.append(notif_msg)
+                        llm_messages.append(notif_msg)
+                        if response is not None:
+                            response.append(notif_msg)
+                        instance._history_version += 1
         
         return approved  # FIX Bug #2: Return actual approval status
     
@@ -554,7 +608,8 @@ class CompressionHandler:
         llm_messages: List[Message],
         fraction: float,
         summary: str,
-        compress_tool
+        compress_tool,
+        response: Optional[List[Message]] = None
     ) -> bool:
         """Apply compression with validation and recovery.
         
@@ -592,10 +647,18 @@ class CompressionHandler:
             result_str = str(result) if result else ""
             if result_str.startswith("Compression failed"):
                 logger.warning(f"/compress silently failed for {inst_name}: {result}")
-                self.engine._append_system_notification(
-                    messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                    f"Compression failed for {inst_name}: {result}"
-                )
+                # Append notification as a new Message object (not mutating last message content)
+                notification_text = f"[SYSTEM NOTIFICATION: Compression command failed: Compression failed for {inst_name}: {result}"
+                notif_msg = Message(role=USER, content=notification_text)
+                from agent_cascade.execution_engine import token_cache_invalidated
+                with token_cache_invalidated(instance):
+                    with instance._compression_lock:
+                        instance.conversation.append(notif_msg)
+                        messages.append(notif_msg)
+                        llm_messages.append(notif_msg)
+                        if response is not None:
+                            response.append(notif_msg)
+                        instance._history_version += 1
                 return True
             
             instance._history_version += 1
@@ -618,10 +681,18 @@ class CompressionHandler:
                         self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                         working_set_rebuilt = True
                     else:
-                        self.engine._append_system_notification(
-                            messages, "[SYSTEM NOTIFICATION: Compression corrupted pool",
-                            f"Compression applied but message pool validation failed and recovery unsuccessful."
-                        )
+                        # Append notification as a new Message object (not mutating last message content)
+                        notification_text = f"[SYSTEM NOTIFICATION: Compression corrupted pool: Compression applied but message pool validation failed and recovery unsuccessful."
+                        notif_msg = Message(role=USER, content=notification_text)
+                        from agent_cascade.execution_engine import token_cache_invalidated
+                        with token_cache_invalidated(instance):
+                            with instance._compression_lock:
+                                instance.conversation.append(notif_msg)
+                                messages.append(notif_msg)
+                                llm_messages.append(notif_msg)
+                                if response is not None:
+                                    response.append(notif_msg)
+                                instance._history_version += 1
                 except Exception as e:
                     logger.error(f"Recovery after /compress failed for '{inst_name}': {e}")
             
@@ -646,30 +717,53 @@ class CompressionHandler:
             from agent_cascade.execution_engine import _invalidate_token_cache
             _invalidate_token_cache(instance)
             
-            self.engine._append_system_notification(
-                messages, "[SYSTEM NOTIFICATION: Compression applied",
-                f"Compression applied successfully for {inst_name}."
-            )
+            # Append notification as a new Message object (not mutating last message content)
+            # This ensures the serialization cache version key changes and notification gets yielded
+            notification_text = f"[SYSTEM NOTIFICATION: Compression applied successfully for {inst_name}."
+            notif_msg = Message(role=USER, content=notification_text)
+            from agent_cascade.execution_engine import token_cache_invalidated
+            with token_cache_invalidated(instance):
+                with instance._compression_lock:
+                    instance.conversation.append(notif_msg)
+                    messages.append(notif_msg)
+                    llm_messages.append(notif_msg)
+                    if response is not None:
+                        response.append(notif_msg)
+                    instance._history_version += 1
             
             return True
             
         except Exception as e:
             logger.error(f"/compress apply failed for {inst_name}: {e}")
-            self.engine._append_system_notification(
-                messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                f"Compression apply failed for {inst_name}: {e}"
-            )
+            # Append notification as a new Message object (not mutating last message content)
+            notification_text = f"[SYSTEM NOTIFICATION: Compression command failed: Compression apply failed for {inst_name}: {e}"
+            notif_msg = Message(role=USER, content=notification_text)
+            from agent_cascade.execution_engine import token_cache_invalidated
+            with token_cache_invalidated(instance):
+                with instance._compression_lock:
+                    instance.conversation.append(notif_msg)
+                    messages.append(notif_msg)
+                    llm_messages.append(notif_msg)
+                    if response is not None:
+                        response.append(notif_msg)
+                    instance._history_version += 1
             return True
     
     def handle_compress_command(
         self,
         instance: AgentInstance,
         messages: List[Message],
-        llm_messages: List[Message]
+        llm_messages: List[Message],
+        response: Optional[List[Message]] = None
     ) -> bool:
         """Detect and handle /compress [fraction] user command.
 
         Extracted from _handle_compress_command() - Phase 3.7
+        
+        Args:
+            instance: Current agent instance
+            messages, llm_messages: Working message sets
+            response: Optional list to append notifications for yielding (fixes compress feedback bug)
         
         Returns True if the command was handled (whether approved or not).
         """
@@ -684,28 +778,31 @@ class CompressionHandler:
         result = self.generate_compression_preview(instance, messages, fraction)
         summary, reason = result if result else (None, None)
         if not summary:
+            # Append notification as a new Message object (not mutating last message content)
+            from agent_cascade.execution_engine import token_cache_invalidated
             if reason == 'tool_unavailable':
-                self.engine._append_system_notification(
-                    messages, "[SYSTEM NOTIFICATION: Compression tool unavailable",
-                    f"Compression command issued but compress_context tool is unavailable for {inst_name}."
-                )
+                notification_text = f"[SYSTEM NOTIFICATION: Compression tool unavailable: Compression command issued but compress_context tool is unavailable for {inst_name}."
             elif reason == 'preview_failed':
-                self.engine._append_system_notification(
-                    messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                    f"Compression preview failed for {inst_name}. Cannot compress."
-                )
+                notification_text = f"[SYSTEM NOTIFICATION: Compression command failed: Compression preview failed for {inst_name}. Cannot compress."
             else:  # exception or unknown
-                self.engine._append_system_notification(
-                    messages, "[SYSTEM NOTIFICATION: Compression command failed",
-                    f"Compression preview encountered an error for {inst_name}. Cannot compress."
-                )
+                notification_text = f"[SYSTEM NOTIFICATION: Compression command failed: Compression preview encountered an error for {inst_name}. Cannot compress."
+            
+            notif_msg = Message(role=USER, content=notification_text)
+            with token_cache_invalidated(instance):
+                with instance._compression_lock:
+                    instance.conversation.append(notif_msg)
+                    messages.append(notif_msg)
+                    llm_messages.append(notif_msg)
+                    if response is not None:
+                        response.append(notif_msg)
+                    instance._history_version += 1
             return True
         
         # Step 3: Apply compression (skip user approval — proceed directly like WebSocket path)
         template = self.pool.get_template(instance.agent_class)
         compress_tool = template.function_map['compress_context']
         
-        return self.apply_approved_compression(instance, messages, llm_messages, fraction, summary, compress_tool)
+        return self.apply_approved_compression(instance, messages, llm_messages, fraction, summary, compress_tool, response)
 
     # ── /rollback Command Handler Methods ────────────────────────────────────
 
@@ -717,6 +814,7 @@ class CompressionHandler:
         """Detect /rollback command and parse count parameter.
         
         Scans the last user message for /rollback command pattern.
+        Also replaces the command content with a descriptive system message to prevent re-detection.
         
         Args:
             instance: Current agent instance
@@ -750,7 +848,7 @@ class CompressionHandler:
         if '\n/rollback' in content:
             return None  # Skip embedded /rollback references (e.g., in notifications)
         
-        # Parse count from command (default 1)
+        # Parse count from command before modifying content - default 1
         parts = content.strip().split()
         count = 1
         if len(parts) > 1:
@@ -762,45 +860,48 @@ class CompressionHandler:
                 logger.warning(f"Invalid count in /rollback command for {inst_name}: {e}")
                 count = 1
         
+        # Clamp count to reasonable range (1-50) to prevent catastrophic rollbacks
+        max_rollback_count = getattr(self.pool.settings, 'rollback_max_count', 50)
+        count = max(1, min(max_rollback_count, count))
+        
+        # Replace the /rollback command with a descriptive system message to prevent re-detection
+        system_message = f"[SYSTEM] Rolling back {count} {'message' if count == 1 else 'messages'}..."
+        if isinstance(last_user, dict):
+            last_user['content'] = system_message
+        else:
+            last_user.content = system_message
+        
         return count
 
     def handle_rollback_command(
         self,
         instance: AgentInstance,
         messages: List[Message],
-        llm_messages: List[Message]
+        llm_messages: List[Message],
+        response: Optional[List[Message]] = None
     ) -> bool:
         """Detect and handle /rollback [count] user command.
+        
+        Args:
+            instance: Current agent instance
+            messages, llm_messages: Working message sets
+            response: Optional list to append notifications for yielding (fixes compress feedback bug)
         
         Returns True if the command was handled (whether successful or not).
         """
         inst_name = instance.instance_name
         
-        # Step 1: Detect and parse command
+        # Step 1: Detect and parse command (also replaces content with descriptive message)
         count = self.detect_and_parse_rollback_command(instance, messages)
         if count is None:
             return False
         
-        # Step 2: Clear the /rollback command to prevent re-detection on next loop iteration
-        last_user = None
-        for msg in reversed(messages):
-            role = _msg_role(msg)
-            if role == USER:
-                last_user = msg
-                break
-        
-        if last_user is not None:
-            if isinstance(last_user, dict):
-                last_user['content'] = "\u00a0"  # Non-breaking space — valid for all major LLM APIs
-            else:
-                last_user.content = "\u00a0"
-        
-        # Step 3: Apply rollback using pool's surgical_rollback (unified path)
+        # Step 2: Apply rollback using pool's surgical_rollback (unified path)
         try:
             from agent_cascade.execution_engine import token_cache_invalidated
             
             with token_cache_invalidated(instance):
-                self.pool.surgical_rollback(inst_name, count, reason="Manual /rollback command")
+                actual_count = self.pool.surgical_rollback(inst_name, count, reason="Manual /rollback command")
             
             # Validate message pool after rollback (Item 10 - same as compress handler lines 602-626)
             conv = self.pool.get_conversation(inst_name)
@@ -811,6 +912,7 @@ class CompressionHandler:
                 try:
                     recov = self.pool.get_logger(inst_name, instance.agent_class).data.get('history', [])
                     if recov and validate_message_pool(recov, inst_name):
+                        from agent_cascade.execution_engine import token_cache_invalidated
                         with token_cache_invalidated(instance):
                             with instance._compression_lock:
                                 instance.conversation = list(recov)
@@ -819,10 +921,18 @@ class CompressionHandler:
                         self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                         working_set_rebuilt = True
                     else:
-                        self.engine._append_system_notification(
-                            messages, "[SYSTEM NOTIFICATION: Rollback corrupted pool",
-                            f"Rollback applied but message pool validation failed and recovery unsuccessful."
-                        )
+                        # Append notification as a new Message object (not mutating last message content)
+                        notification_text = f"[SYSTEM NOTIFICATION: Rollback corrupted pool: Rollback applied but message pool validation failed and recovery unsuccessful."
+                        notif_msg = Message(role=USER, content=notification_text)
+                        from agent_cascade.execution_engine import token_cache_invalidated
+                        with token_cache_invalidated(instance):
+                            with instance._compression_lock:
+                                instance.conversation.append(notif_msg)
+                                messages.append(notif_msg)
+                                llm_messages.append(notif_msg)
+                                if response is not None:
+                                    response.append(notif_msg)
+                                instance._history_version += 1
                 except Exception as e:
                     logger.error(f"Recovery after /rollback failed for '{inst_name}': {e}")
             
@@ -846,19 +956,34 @@ class CompressionHandler:
             # Suppress loop detection on next turn to prevent false positives from abrupt state change
             instance._suppress_loop_detection_next_turn = True
             
-            # Append system notification to confirm the action
-            self.engine._append_system_notification(
-                messages, f"[SYSTEM NOTIFICATION: Rollback applied",
-                f"Rolled back {count} message(s) for {inst_name}."
-            )
+            # Append notification as a new Message object (not mutating last message content)
+            notification_text = f"[SYSTEM NOTIFICATION: Rollback applied: Rolled back {actual_count} message(s) for {inst_name}."
+            notif_msg = Message(role=USER, content=notification_text)
+            from agent_cascade.execution_engine import token_cache_invalidated
+            with token_cache_invalidated(instance):
+                with instance._compression_lock:
+                    instance.conversation.append(notif_msg)
+                    messages.append(notif_msg)
+                    llm_messages.append(notif_msg)
+                    if response is not None:
+                        response.append(notif_msg)
+                    instance._history_version += 1
             
-            logger.info(f"/rollback command executed for {inst_name}: rolled back {count} message(s)")
+            logger.info(f"/rollback command executed for {inst_name}: rolled back {actual_count} message(s)")
             return True
             
         except Exception as e:
             logger.error(f"/rollback apply failed for {inst_name}: {e}")
-            self.engine._append_system_notification(
-                messages, "[SYSTEM NOTIFICATION: Rollback command failed",
-                f"Rollback failed for {inst_name}: {e}"
-            )
+            # Append notification as a new Message object (not mutating last message content)
+            notification_text = f"[SYSTEM NOTIFICATION: Rollback command failed: Rollback failed for {inst_name}: {e}"
+            notif_msg = Message(role=USER, content=notification_text)
+            from agent_cascade.execution_engine import token_cache_invalidated
+            with token_cache_invalidated(instance):
+                with instance._compression_lock:
+                    instance.conversation.append(notif_msg)
+                    messages.append(notif_msg)
+                    llm_messages.append(notif_msg)
+                    if response is not None:
+                        response.append(notif_msg)
+                    instance._history_version += 1
             return True

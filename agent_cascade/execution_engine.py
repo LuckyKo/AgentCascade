@@ -1011,7 +1011,8 @@ class ExecutionEngine:
         self,
         instance: AgentInstance,
         messages: List[Message],
-        llm_messages: List[Message]
+        llm_messages: List[Message],
+        response: Optional[List[Message]] = None
     ) -> bool:
         """Calculate usage percentage and trigger force compression if needed.
         
@@ -1023,6 +1024,7 @@ class ExecutionEngine:
         Args:
             instance: Current agent instance
             messages, llm_messages: Working message sets
+            response: Optional list to append notifications for yielding (fixes compress feedback bug)
             
         Returns:
             True if compression was triggered (skip LLM call), False otherwise.
@@ -1052,9 +1054,9 @@ class ExecutionEngine:
 
         # Forced compression at >95% — halts other agents, compresses, rebuilds
         if usage_pct > self.pool.settings.compression_force_threshold:
-            return self._force_compression(instance, messages, llm_messages, usage_pct)
+            return self._force_compression(instance, messages, llm_messages, usage_pct, response)
 
-        # Warning injection at >85%
+        # Warning injection at >85% (warning is inline hint, not yielded to UI)
         if usage_pct > self.pool.settings.compression_warning_threshold:
             self._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens_for_check)
             
@@ -1085,15 +1087,17 @@ class ExecutionEngine:
             return True  # Yield and continue loop to process new messages
         
         # 3. Rollback command check (delegated to compression_handler)
-        if self.compression_handler.handle_rollback_command(instance, messages, llm_messages):
+        # Pass response so notification messages get yielded (fixes compress feedback bug)
+        if self.compression_handler.handle_rollback_command(instance, messages, llm_messages, response):
             return True  # Command handled — yield and continue
         
         # 4. Compress command check (Phase 4.2: delegated to compression_handler)
-        if self.compression_handler.handle_compress_command(instance, messages, llm_messages):
+        # Pass response so notification messages get yielded (fixes compress feedback bug)
+        if self.compression_handler.handle_compress_command(instance, messages, llm_messages, response):
             return True  # Command handled — yield and continue
         
-        # 5. Compression trigger
-        if self._check_and_trigger_compression(instance, messages, llm_messages):
+        # 5. Compression trigger (pass response for notification feedback)
+        if self._check_and_trigger_compression(instance, messages, llm_messages, response):
             return True  # Compression triggered — yield and continue
         
         # 6. Loop detection (with post-compression cooldown) ───────────────────
@@ -1116,25 +1120,31 @@ class ExecutionEngine:
 
     def _force_compression(
         self, instance: AgentInstance, messages: List[Message],
-        llm_messages: List[Message], usage_pct: float
+        llm_messages: List[Message], usage_pct: float,
+        response: Optional[List[Message]] = None
     ) -> bool:
         """Force compress when token usage exceeds critical threshold. Returns True (continue loop)."""
         inst_name = instance.instance_name
         
-        # Phase 4.2: Delegate to compression_handler
+        # Phase 4.2: Delegate to compression_handler (pass response for notification feedback)
         if self.compression_handler.check_cooldown(instance, llm_messages, usage_pct):
             return True
         
-        if self.compression_handler.check_overfeeding(instance, llm_messages):
+        if self.compression_handler.check_overfeeding(instance, llm_messages, response):
             return True
         
-        return self.compression_handler.execute_force_compression(instance, messages, llm_messages, usage_pct)
+        return self.compression_handler.execute_force_compression(instance, messages, llm_messages, usage_pct, response)
 
     def _inject_compression_warning(
         self, llm_messages: List[Message], usage_pct: float,
         current_tokens: int, max_tokens: int
     ):
-        """Inject a warning message when context is approaching limit."""
+        """Inject a warning message when context is approaching limit.
+        
+        Note: This warning goes directly to the LLM's working set without being persisted
+        to conversation pool or yielded (it's an inline hint, not a system notification).
+        Uses _append_system_notification for simplicity since it doesn't need UI feedback.
+        """
         warning = (
             f"[SYSTEM WARNING: Context window at {usage_pct:.1f}% capacity "
             f"({current_tokens}/{max_tokens} tokens). "

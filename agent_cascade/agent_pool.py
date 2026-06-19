@@ -1532,7 +1532,7 @@ class AgentPool:
                 return i
         return -1
 
-    def surgical_rollback(self, instance_name: str, pop_count: int, reason: Optional[str] = None):
+    def surgical_rollback(self, instance_name: str, pop_count: int, reason: Optional[str] = None) -> int:
         """Remove the last `pop_count` messages from an agent's conversation.
 
         Used by loop recovery to roll back repetitive patterns.
@@ -1542,6 +1542,9 @@ class AgentPool:
             pop_count: Number of messages to remove from the end.
             reason: Optional reason string for logging.
 
+        Returns:
+            The actual number of messages rolled back (after capping and refinement), or 0 if no rollback occurred.
+
         Safety guarantees (§7.3):
             1. Never removes SYSTEM message or first USER message
             2. Caps rollback at 50% of removable history per operation
@@ -1550,15 +1553,15 @@ class AgentPool:
         from agent_cascade.llm.schema import ASSISTANT, FUNCTION, SYSTEM
 
         if pop_count <= 0:
-            return
+            return 0
 
         inst = self.instances.get(instance_name)
         if not inst:
-            return
+            return 0
 
         with inst._compression_lock:
             if not inst.conversation:
-                return
+                return 0
 
             conv = inst.conversation
 
@@ -1571,7 +1574,7 @@ class AgentPool:
 
             removable = len(conv) - keep_at_least
             if removable <= 0:
-                return
+                return 0
 
             # Safety cap: never rollback more than 50% of removable history in one op
             max_pop = max(1, removable // 2)
@@ -1601,6 +1604,8 @@ class AgentPool:
                 log_inst.truncate_to(len(inst.conversation))
             except Exception as e:
                 logger.debug(f"Logger truncation failed during rollback for {instance_name} (non-critical): {e}")
+
+            return pop_count
 
     # ── Logger delegation ──────────────────────────────────────────────────
 
