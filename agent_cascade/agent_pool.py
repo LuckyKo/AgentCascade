@@ -761,7 +761,7 @@ class AgentPool:
         execution — NOT clear conversations, summaries, or any user-visible session data.
         The user expects to be able to Resume exactly where they left off.
         
-        Order of operations:
+        Order of operations (MINOR-1 FIX - updated docstring):
           1. Set _stopped_event (to halt threads)
           2. Clear pending approvals (unblocks any threads waiting for user approval)
         
@@ -777,7 +777,7 @@ class AgentPool:
         # Step 1: Set stopped event to signal threads to halt
         self._stopped_event.set()
 
-        # ── Step 2: Clear pending approvals ──────────────────────────────────
+        # ── Step 3: Clear pending approvals ────────────────────────────────────────
         # Prevent dangling threads waiting for user approval.
         if self.operation_manager:
             try:

@@ -284,17 +284,20 @@ class OperationManager:
         with self._lock:
             self.pending[request_id] = approval
 
-        # Block until user responds, timeout, or agent is stopped
+        # Block until user responds, timeout, or agent is stopped (FIX 5)
         timeout_val = APPROVAL_TIMEOUT_SECONDS if self.enable_timeout else 3600
         start_time = time.time()
         got_response = False
         
         while time.time() - start_time < timeout_val:
-            if self.agent_pool and getattr(self.agent_pool, 'stopped', False):
+            # FIX 5: Check _stopped_event to unblock threads waiting on approval
+            # REVIEWER FIX: Use .stopped directly instead of getattr - it's a well-defined property
+            if self.agent_pool and self.agent_pool.stopped:
+                logger.debug(f"[APPROVAL_STOPPED] Approval wait interrupted for {agent_name} due to pool stop")
                 break
             
-            # Wait in small increments to remain responsive to stopped flag
-            if approval.event.wait(timeout=1.0):
+            # MINOR-3 FIX: Reduce polling from 1s to 0.1s for more responsive stop detection
+            if approval.event.wait(timeout=0.1):
                 got_response = True
                 break
 
@@ -303,8 +306,13 @@ class OperationManager:
             self.pending.pop(request_id, None)
 
         if not got_response:
-            # Timed out
-            return False, "User is AFK, try another method if possible"
+            # Check if we exited due to stop (FIX 5) or timeout
+            # REVIEWER FIX: Use .stopped directly instead of getattr
+            if self.agent_pool and self.agent_pool.stopped:
+                return False, "Session stopped by user"
+            else:
+                # Timed out - user is AFK
+                return False, "User is AFK, try another method if possible"
 
         if approval.approved:
             return True, approval.outcome_reason

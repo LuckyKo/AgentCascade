@@ -1378,6 +1378,9 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'stop':
                     # Stop all streaming and set ALL active agents to IDLE state.
                     with session_lock:
+                        # CRIT-2 FIX: Document lifecycle - stop_requested is set here by stop handler,
+                        # cleared by continue handler (line ~1353). If user never clicks continue, 
+                        # it stays True. This is by design - the flag persists until explicit resume.
                         session['stop_requested'] = True
                         session['generating'] = False
                         session['generation_id'] += 1
@@ -1400,6 +1403,49 @@ def create_app(agents, agent_pool, config=None):
                         
                         # Halt threads and unblock pending approvals (non-destructive — preserves sessions)
                         agent_pool.stop_session()
+                    
+                    # FIX 1 & 2: Clean up endpoint slots and active stack after stop_session()
+                    if agent_pool:
+                        try:
+                            # CRIT-1 FIX: Only release slots for TERMINATED instances, NOT IDLE.
+                            # IDLE instances may be in the middle of _reacquire_caller_slot() and we'd 
+                            # release their newly acquired slot. TERMINATED instances are done executing.
+                            from agent_cascade.agent_instance import AgentState as InstanceAgentState
+                            
+                            # MAJOR-2 FIX: Acquire pool lock during instance iteration to protect from concurrent creation/deletion
+                            with agent_pool._execution._state_lock:
+                                for inst_name, instance in list(agent_pool.instances.items()):
+                                    with instance._state_lock:
+                                        if instance.state == InstanceAgentState.TERMINATED:
+                                            if hasattr(instance, '_slot_release') and instance._slot_release is not None:
+                                                try:
+                                                    logger.debug(f"[STOP_SLOT_CLEANUP] Releasing slot for TERMINATED '{inst_name}'")
+                                                    instance._slot_release()
+                                                    instance._slot_release = None
+                                                except Exception as e:
+                                                    logger.warning(f"[STOP_SLOT_CLEANUP] Failed to release slot for '{inst_name}': {e}")
+                            
+                            # CRIT-3 FIX: Use active_stack[:] = [...] to mutate list in place, not replace it.
+                            # Other code may hold references to the old list; mutation ensures all refs see updates.
+                            if hasattr(agent_pool, '_execution') and hasattr(agent_pool._execution, 'active_stack'):
+                                with agent_pool._execution._state_lock:
+                                    logger.debug(f"[STOP_STACK_CLEANUP] Cleaning active_stack: {agent_pool._execution.active_stack}")
+                                    original_len = len(agent_pool._execution.active_stack)
+                                    # Mutate in place instead of replacing the list
+                                    agent_pool._execution.active_stack[:] = [
+                                        (name, depth) for name, depth in agent_pool._execution.active_stack
+                                        if name not in agent_pool.terminated_instances
+                                    ]
+                                    removed_count = original_len - len(agent_pool._execution.active_stack)
+                                    if removed_count > 0:
+                                        logger.debug(f"[STOP_STACK_CLEANUP] Removed {removed_count} terminated entries from active_stack")
+                            
+                            # MINOR-4 FIX: Clear _halted_instances to prevent stale pause state after stop
+                            if hasattr(agent_pool, '_halted_instances'):
+                                agent_pool._halted_instances.clear()
+                                logger.debug("[STOP_HALTED_CLEANUP] Cleared _halted_instances")
+                        except Exception as e:
+                            logger.warning(f"[STOP_CLEANUP_ERROR] Error during slot/stack cleanup: {e}")
                     
                     await broadcast({'type': 'done', **build_state()})
 

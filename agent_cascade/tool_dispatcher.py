@@ -283,7 +283,7 @@ class ToolDispatcher:
         This method:
         1. Releases caller's slot
         2. Runs _create_and_run_agent()
-        3. Re-acquires caller's slot via _reacquire_caller_slot()
+        3. Re-acquires caller's slot via _reacquire_caller_slot() (in finally block for FIX 3)
         4. Extracts and returns result
         
         Args:
@@ -307,6 +307,9 @@ class ToolDispatcher:
                 f"[SLOT_SYNC_RELEASE] Slot released for '{caller_name}', active agents can now acquire"
             )
         
+        inst = None
+        conv = None
+        
         try:
             # Run child synchronously via _create_and_run_agent
             force_fresh = agent_class in ('security', 'compressor')  # Lowercase comparison
@@ -318,37 +321,44 @@ class ToolDispatcher:
                 f"[SLOT_SYNC_CHILD_COMPLETE] Sync child '{instance_name}' completed in {time.monotonic() - sync_path_start:.2f}s"
             )
             
-            # Re-acquire caller's slot so it can continue its turn
+        finally:
+            # FIX 3: Always re-acquire caller's slot, even on early exit due to stop
+            # This ensures the parent agent can continue its turn after child execution ends
             logger.debug(
-                f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child completed"
+                f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child"
             )
             if not self._reacquire_caller_slot(caller_slot_holder, caller_name, "sync child"):
                 logger.warning(
                     f"[SLOT_SYNC_REACQUIRE_FAILED] Failed to re-acquire slot for '{caller_name}' after sync child. "
-                    f"Original release callback preserved for proper cleanup. Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s"
+                    f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s"
                 )
             else:
                 logger.debug(
                     f"[SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for '{caller_name}'. "
                     f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s"
                 )
-            
-            # Consolidated null/empty check
-            if inst is None or not conv:
-                logger.warning("SYNC path FAILED - %s creation returned inst=%s", instance_name, inst)
-                return f"Error: Agent '{instance_name}' execution failed with no output."
+        
+        # Check if execution was stopped or child was terminated (FIX 4)
+        # REVIEWER FIX: Active stack check removed - by the time we reach here, 
+        # _create_and_run_agent()'s finally block already removed the instance from active_stack
+        was_stopped = self.pool.stopped
+        was_terminated = instance_name in self.pool.terminated_instances
+        
+        # Consolidated null/empty check
+        if inst is None or not conv:
+            logger.warning("SYNC path FAILED - %s creation returned inst=%s", instance_name, inst)
+            return f"Error: Agent '{instance_name}' execution failed with no output."
 
-            # Extract and format result — check if agent was terminated by user
-            was_terminated = instance_name in self.pool.terminated_instances
-            result = extract_instance_output(conv, instance_name, was_terminated=was_terminated)
-            status = "Terminated" if was_terminated else "Completed"
-            return f"[Agent '{instance_name}' {status}]:\n{result}"
-
-        except Exception as e:
-            self._reacquire_caller_slot(caller_slot_holder, caller_name, "sync child error")
-            logger.error("SYNC path EXCEPTION - %s/%s: %s: %s", 
-                        caller_name, instance_name, type(e).__name__, str(e)[:200])
-            return f"[Agent '{instance_name}' Failed]:\n{str(e)}"
+        # Extract and format result — provide clear feedback for stopped/terminated agents (FIX 4)
+        if was_stopped:
+            result = extract_instance_output(conv, instance_name, was_terminated=False)
+            return f"[Agent '{instance_name}' Stopped]: Execution was stopped by user.\n{result}"
+        elif was_terminated:
+            result = extract_instance_output(conv, instance_name, was_terminated=True)
+            return f"[Agent '{instance_name}' Terminated]:\n{result}"
+        else:
+            result = extract_instance_output(conv, instance_name, was_terminated=False)
+            return f"[Agent '{instance_name}' Completed]:\n{result}"
 
     def _run_child_async(
         self,
@@ -412,18 +422,27 @@ class ToolDispatcher:
         if not slot_holder:
             return False
             
-        for attempt in range(2):
+        # MAJOR-1 FIX: Increase retry timeout from 0.2s total to 2s+ total for better robustness
+        # during stop cleanup when semaphore may be contended. Use 20 attempts with 0.1s sleep = 2s total.
+        max_attempts = 20
+        retry_delay = 0.1
+        
+        for attempt in range(max_attempts):
             try:
                 slot_holder._slot_release = self.pool._acquire_slot(
                     slot_holder.agent_class, slot_holder_name
                 )
                 return True
             except Exception as e:
-                if attempt == 0:
-                    logger.warning(f"First attempt failed to re-acquire caller slot after {context_label}: {e}. Retrying...")
-                    time.sleep(0.1)  # Brief pause before retry
+                if attempt < max_attempts - 1:
+                    logger.debug(f"Attempt {attempt + 1}/{max_attempts} failed to re-acquire caller slot after {context_label}: {e}. Retrying...")
+                    time.sleep(retry_delay)
                 else:
-                    logger.warning(f"Failed to re-acquire caller slot after {context_label} (all attempts exhausted): {e}. Subsequent calls will use ASYNC path.")
+                    # If pool is stopped, no need to re-acquire - just release and return False
+                    if self.pool.stopped:
+                        logger.debug(f"Pool stopped during slot re-acquisition for '{slot_holder_name}' after {context_label}")
+                        return False
+                    logger.warning(f"Failed to re-acquire caller slot after {context_label} ({max_attempts} attempts, ~{max_attempts * retry_delay}s total): {e}. Subsequent calls will use ASYNC path.")
         
         return False
 
