@@ -210,10 +210,13 @@ TOOL_METADATA = {
             '"/workspace/src/main.py". The container working directory is /workspace, so relative paths '
             '"src/main.py" also work directly in your code. Use system_info to find exact folder mapping. '
             'You can use write_file to create .py files and then import them here. '
-            'To access services on the host machine (like local APIs), use "host.docker.internal" instead of "localhost".'
+            'To access services on the host machine (like local APIs), use "host.docker.internal" instead of "localhost". '
+            'Windows paths in code (e.g., N:\\work\\...) are auto-translated to container paths by default. '
+            'Set fix_paths=false to disable this behavior.'
         ),
         'parameters': {
-            'code': 'The python code to execute.'
+            'code': 'The Python code to execute.',
+            'fix_paths': 'Auto-translate Windows host paths to Docker container paths. Default is true. Set to false to disable.',
         }
     },
     'python_compiler': {

@@ -44,6 +44,7 @@ from agent_cascade.tool_utils import (
     generate_spillover_filename,  # Shared collision detection helper
 )
 from agent_cascade.utils.utils import append_signal_handler, extract_code, has_chinese_chars, json_loads, print_traceback
+from agent_cascade.utils.code_path_resolver import resolve_code_paths, build_path_resolution_notice
 
 
 # --- Timeout Configuration ---
@@ -220,6 +221,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
             'code': {
                 'description': TOOL_METADATA['code_interpreter']['parameters']['code'],
                 'type': 'string',
+            },
+            'fix_paths': {
+                'description': 'Auto-translate Windows host paths (e.g. N:\\work\\...) to Docker container paths (/workspace/...). Set to false to disable.',
+                'type': 'boolean',
+                'default': True,
             }
         },
         'required': ['code'],
@@ -283,6 +289,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
         if not code.strip():
             return ''
 
+        # Determine if path fixing is enabled (default: True)
+        fix_paths = True  # default
+        if isinstance(params, dict) and 'fix_paths' in params:
+            fix_paths = bool(params.get('fix_paths', True))
+
         # Use configured timeout: explicit param > config > default
         exec_timeout = timeout
         if exec_timeout is None:
@@ -341,11 +352,22 @@ class CodeInterpreter(BaseToolWithFileAccess):
                         del _DOCKER_CONTAINERS[kernel_id]
                 raise  # Re-raise so caller sees the failure
 
+        # Auto-resolve Windows paths to Docker container paths if enabled
+        resolved_code = code
+        path_resolve_count = 0
+        if fix_paths:
+            try:
+                resolved_code, path_resolve_count = resolve_code_paths(code)
+            except Exception as e:
+                logger.warning(f"Path resolution failed: {e}. Executing code as-is.")
+                resolved_code = code
+                path_resolve_count = 0
+
         if exec_timeout:
-            code = f'_M6CountdownTimer.start({exec_timeout})\n{code}'
+            resolved_code = f'_M6CountdownTimer.start({exec_timeout})\n{resolved_code}'
 
         fixed_code = []
-        for line in code.split('\n'):
+        for line in resolved_code.split('\n'):
             fixed_code.append(line)
             if line.startswith('sns.set_theme('):
                 fixed_code.append('plt.rcParams["font.family"] = _m6_font_prop.get_name()')
@@ -472,7 +494,12 @@ class CodeInterpreter(BaseToolWithFileAccess):
             if kernel_id in _KERNEL_ACTIVITY and isinstance(_KERNEL_ACTIVITY[kernel_id], dict):
                 _KERNEL_ACTIVITY[kernel_id]['last_active'] = time.time()
 
+        # Add path resolution feedback if paths were auto-resolved
+        path_notice = build_path_resolution_notice(path_resolve_count)
+        
         if not result.strip():
+            if path_notice:
+                return f'Finished execution.\n\n{path_notice}'
             return 'Finished execution.'
 
         # Get the truncation limit from agent/tool options
@@ -485,6 +512,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
             char_limit = llm_cfg.get('code_char_limit', char_limit)
         elif self.cfg.get('code_char_limit'):
             char_limit = self.cfg.get('code_char_limit')
+
+        # Append path resolution notice to result (before truncation check so it's included in spill file)
+        if path_notice:
+            result = f'{result}\n\n{path_notice}'
 
         if char_limit != -1 and len(result) > char_limit:
             # Save full result to spill file (use work_dir from config for correct path resolution)
