@@ -290,9 +290,23 @@ class CompressionHandler:
                     # Item 11: Sync the logger's internal data["history"] to match pool state
                     # Without this, update_history() will treat pool messages not yet seen by
                     # the logger as "new" and append them, causing duplication.
+                    # FIX: Only sync if there are actually unlogged messages (prevents double-logging)
                     try:
                         log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                        log_inst.update_history(conv)
+                        # Check if sync is needed - only proceed if pool has more messages than logged
+                        logged_count = len(log_inst.data.get("history", []))
+                        pool_count = len(conv) if conv else 0
+                        if pool_count > logged_count:
+                            logger.debug(
+                                f"Logger sync after compression for '{inst_name}': "
+                                f"pool={pool_count}, logged={logged_count}, syncing {pool_count - logged_count} messages"
+                            )
+                            log_inst.update_history(conv)
+                        else:
+                            logger.debug(
+                                f"Logger already synced after compression for '{inst_name}': "
+                                f"pool={pool_count}, logged={logged_count}"
+                            )
                     except Exception as e:
                         logger.error(f"Logger sync after forced compression FAILED for '{inst_name}': {e}. "
                                       f"Pool may desync — manual intervention required. "
@@ -385,10 +399,24 @@ class CompressionHandler:
             # Sync logger's internal data["history"] to match pool state (Item 11)
             # Without this, update_history() will treat pool messages not yet seen by
             # the logger as "new" and append them, causing duplication.
+            # FIX: Only sync if there are actually unlogged messages (prevents double-logging)
             try:
                 conv = self.pool.get_conversation(target_agent_name)
                 log_inst = self.pool.get_logger(target_agent_name, instance.agent_class)
-                log_inst.update_history(conv)
+                # Check if sync is needed - only proceed if pool has more messages than logged
+                logged_count = len(log_inst.data.get("history", []))
+                pool_count = len(conv) if conv else 0
+                if pool_count > logged_count:
+                    logger.debug(
+                        f"Logger sync after compress_context tool for '{target_agent_name}': "
+                        f"pool={pool_count}, logged={logged_count}, syncing {pool_count - logged_count} messages"
+                    )
+                    log_inst.update_history(conv)
+                else:
+                    logger.debug(
+                        f"Logger already synced after compress_context tool for '{target_agent_name}': "
+                        f"pool={pool_count}, logged={logged_count}"
+                    )
             except Exception as e:
                 logger.error(f"Logger sync after compress_context tool FAILED for '{target_agent_name}': {e}")
 
@@ -688,10 +716,23 @@ class CompressionHandler:
             instance._suppress_loop_detection_next_turn = True
             
             # Sync logger's internal data["history"] to match pool state (Item 11)
+            # FIX: Only sync if there are actually unlogged messages (prevents double-logging)
             try:
                 conv = self.pool.get_conversation(inst_name)
                 log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                log_inst.update_history(conv)
+                logged_count = len(log_inst.data.get("history", []))
+                pool_count = len(conv) if conv else 0
+                if pool_count > logged_count:
+                    logger.debug(
+                        f"Logger sync after /compress command for '{inst_name}': "
+                        f"pool={pool_count}, logged={logged_count}, syncing {pool_count - logged_count} messages"
+                    )
+                    log_inst.update_history(conv)
+                else:
+                    logger.debug(
+                        f"Logger already synced after /compress command for '{inst_name}': "
+                        f"pool={pool_count}, logged={logged_count}"
+                    )
             except Exception as e:
                 logger.error(f"Logger sync after /compress FAILED for '{inst_name}': {e}")
             
@@ -919,10 +960,23 @@ class CompressionHandler:
                 self.engine._rebuild_working_set(messages, llm_messages, inst_name)
             
             # Sync logger's internal data["history"] to match pool state (Item 11 - same as compress handler)
+            # FIX: Only sync if there are actually unlogged messages (prevents double-logging)
             try:
                 conv = self.pool.get_conversation(inst_name)
                 log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                log_inst.update_history(conv)
+                logged_count = len(log_inst.data.get("history", []))
+                pool_count = len(conv) if conv else 0
+                if pool_count > logged_count:
+                    logger.debug(
+                        f"Logger sync after /rollback command for '{inst_name}': "
+                        f"pool={pool_count}, logged={logged_count}, syncing {pool_count - logged_count} messages"
+                    )
+                    log_inst.update_history(conv)
+                else:
+                    logger.debug(
+                        f"Logger already synced after /rollback command for '{inst_name}': "
+                        f"pool={pool_count}, logged={logged_count}"
+                    )
             except Exception as e:
                 logger.error(f"Logger sync after /rollback FAILED for '{inst_name}': {e}")
             
