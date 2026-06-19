@@ -344,9 +344,18 @@ class AgentLifecycleManager:
                     # This ensures no leftover release callback from previous execution interferes
                     instance._slot_release = None
                     
-                    # FIX #2: Preserve & extend conversation
+                    # FIX: Preserve & extend conversation
                     # Update system message in-place (first message is always system)
                     if instance.conversation and len(instance.conversation) > 0:
+                        # Preserve old system message's timestamp so update_history() can match it as an update
+                        # rather than appending a duplicate. The logger uses timestamps as identity markers.
+                        old_sys_msg = instance.conversation[0]
+                        if hasattr(old_sys_msg, 'timestamp') and old_sys_msg.timestamp:
+                            try:
+                                sys_msg.timestamp = old_sys_msg.timestamp
+                            except Exception:
+                                pass  # Fallback: _format_message() will generate a new timestamp
+                        
                         # Update the existing system message with new template content
                         instance.conversation[0] = sys_msg
                     else:
