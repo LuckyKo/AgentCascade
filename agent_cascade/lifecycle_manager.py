@@ -16,6 +16,7 @@ from agent_cascade.log import logger
 
 
 if TYPE_CHECKING:
+    from agent_cascade.agent_pool import AgentPool
     from agent_cascade.execution_engine import ExecutionEngine
 
 
@@ -28,6 +29,34 @@ def _msg_role(msg: dict | Message) -> str:  # FIX #3 + tighter type annotation
 def _msg_content(msg: dict | Message) -> str:  # FIX #3 + tighter type annotation
     """Get content from message dict or object."""
     return msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+
+
+def _inject_metadata_into_message(sys_msg: Message, pool: 'AgentPool', instance: AgentInstance) -> None:
+    """Inject Session Metadata block into system message if not already present.
+    
+    This is called before logging to ensure sub-agent log files contain the metadata block.
+    The existing injection in execution_engine._setup_turn() is preserved for runtime updates.
+    
+    Args:
+        sys_msg: System Message object to modify in-place
+        pool: AgentPool instance (needed for _build_session_metadata)
+        instance: AgentInstance whose metadata should be injected
+    """
+    from agent_cascade.execution_engine import _build_session_metadata
+    
+    # Defensive guard for empty content
+    if not sys_msg.content or not sys_msg.content.strip():
+        return
+    
+    if '## Session Metadata' not in sys_msg.content:
+        meta_block = _build_session_metadata(pool, instance)
+        if meta_block:
+            content_lines = sys_msg.content.split('\n')
+            # Insert after identity line; skip extra blank/comment lines (matches execution_engine.py line 943)
+            insert_pos = 2 if len(content_lines) > 1 and not content_lines[1].startswith("#") else 1
+            for i, ml in enumerate(meta_block.split('\n')):
+                content_lines.insert(insert_pos + i, ml)
+            sys_msg.content = '\n'.join(content_lines)
 
 
 class AgentLifecycleManager:
@@ -291,6 +320,11 @@ class AgentLifecycleManager:
         # and token_cache_invalidated is defined in execution_engine.py.
         # Importing here (inside method) breaks the circular dependency.
         from agent_cascade.execution_engine import token_cache_invalidated
+        
+        # METADATA INJECTION FIX: Inject metadata into sys_msg BEFORE logging/update_history().
+        # This ensures sub-agent log files contain the "Session Metadata" block in their initial system message.
+        # The existing injection in _setup_turn() is preserved for runtime updates (e.g., workspace changes).
+        _inject_metadata_into_message(sys_msg, self.pool, instance)
         
         if is_reuse:
             # Thread-safe update of instance state for reuse
