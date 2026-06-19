@@ -14,7 +14,7 @@
 
 from typing import List, Literal, Optional, Tuple, Union
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from agent_cascade.prompts.dna import DEFAULT_SYSTEM_MESSAGE
 
@@ -35,6 +35,14 @@ VIDEO = 'video'
 
 
 class BaseModelCompatibleDict(BaseModel):
+    """Base model that allows dynamic attributes like timestamp via extra='allow'.
+    
+    SECURITY NOTE: This class is only instantiated internally by the framework
+    with trusted values. Dynamic attributes are NOT validated — do not use
+    extra='allow' on models constructed from untrusted user input.
+    """
+    
+    model_config = ConfigDict(extra='allow')
 
     def __getitem__(self, item):
         return getattr(self, item)

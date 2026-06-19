@@ -353,7 +353,7 @@ class AgentLifecycleManager:
                         if hasattr(old_sys_msg, 'timestamp') and old_sys_msg.timestamp:
                             try:
                                 sys_msg.timestamp = old_sys_msg.timestamp
-                            except Exception:
+                            except AttributeError:
                                 pass  # Fallback: _format_message() will generate a new timestamp
                         
                         # Update the existing system message with new template content
