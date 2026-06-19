@@ -143,7 +143,7 @@ class CompressionHandler:
             )
             # Append notification as a new Message object (not mutating last message content)
             from agent_cascade.execution_engine import token_cache_invalidated
-            notification_text = f"[SYSTEM]: Overfeeding — {instance._force_compress_count} compressions without relief. Terminating."
+            notification_text = f"[SYSTEM] Overfeeding — {instance._force_compress_count} compressions without relief. Terminating."
             notif_msg = Message(role=USER, content=notification_text)
             with token_cache_invalidated(instance):
                 with instance._compression_lock:
@@ -219,7 +219,7 @@ class CompressionHandler:
                     # This ensures the notification persists across turn loop iterations and is visible
                     # to the LLM on the next call (not just appended to local llm_messages which gets lost).
                     notification_text = (
-                        f"[SYSTEM]: Context exceeded {usage_pct:.1f}%. "
+                        f"[SYSTEM] Context exceeded {usage_pct:.1f}%. "
                         f"Forced compression applied. Continue your work — context has been preserved."
                     )
                     
@@ -278,7 +278,7 @@ class CompressionHandler:
                             else:
                                 logger.error("Recovery from log also failed — message pool may be corrupted")
                                 # Append notification as a new Message object (not mutating last message content)
-                                notification_text = f"[SYSTEM]: Compression corrupted pool: Forced compression and recovery both failed for {inst_name}. Agent halted to prevent corruption."
+                                notification_text = f"[SYSTEM] Compression corrupted pool: Forced compression and recovery both failed for {inst_name}. Agent halted to prevent corruption."
                                 notif_msg = Message(role=USER, content=notification_text)
                                 from agent_cascade.execution_engine import token_cache_invalidated
                                 with token_cache_invalidated(instance):
@@ -311,7 +311,7 @@ class CompressionHandler:
             else:  # Compression failed or returned error
                 logger.error(f"Forced compression failed for {inst_name}: {result.error}")
                 # Append notification as a new Message object (not mutating last message content)
-                notification_text = f"[SYSTEM]: Context exceeded {usage_pct:.1f}%, but automatic compression failed."
+                notification_text = f"[SYSTEM] Context exceeded {usage_pct:.1f}%, but automatic compression failed."
                 notif_msg = Message(role=USER, content=notification_text)
                 from agent_cascade.execution_engine import token_cache_invalidated
                 with token_cache_invalidated(instance):
@@ -567,7 +567,7 @@ class CompressionHandler:
                 logger.error(f"User approval request failed for {inst_name}: {e}")
                 # Append notification as a new Message object (not mutating last message content)
                 if instance is not None and llm_messages is not None:
-                    notification_text = f"[SYSTEM]: Compression command failed: Compression approval request failed: {e}"
+                    notification_text = f"[SYSTEM] Compression command failed: Compression approval request failed: {e}"
                     notif_msg = Message(role=USER, content=notification_text)
                     from agent_cascade.execution_engine import token_cache_invalidated
                     with token_cache_invalidated(instance):
@@ -587,7 +587,7 @@ class CompressionHandler:
             logger.info(f"/compress rejected by user for {inst_name}: {rejection_reason}")
             # Append notification as a new Message object (not mutating last message content)
             if instance is not None and llm_messages is not None:
-                notification_text = f"[SYSTEM]: Compression cancelled: Compression cancelled by user. Reason: {rejection_reason}"
+                notification_text = f"[SYSTEM] Compression cancelled: Compression cancelled by user. Reason: {rejection_reason}"
                 notif_msg = Message(role=USER, content=notification_text)
                 from agent_cascade.execution_engine import token_cache_invalidated
                 with token_cache_invalidated(instance):
@@ -648,7 +648,7 @@ class CompressionHandler:
             if result_str.startswith("Compression failed"):
                 logger.warning(f"/compress silently failed for {inst_name}: {result}")
                 # Append notification as a new Message object (not mutating last message content)
-                notification_text = f"[SYSTEM]: Compression command failed: Compression failed for {inst_name}: {result}"
+                notification_text = f"[SYSTEM] Compression command failed: Compression failed for {inst_name}: {result}"
                 notif_msg = Message(role=USER, content=notification_text)
                 from agent_cascade.execution_engine import token_cache_invalidated
                 with token_cache_invalidated(instance):
@@ -682,7 +682,7 @@ class CompressionHandler:
                         working_set_rebuilt = True
                     else:
                         # Append notification as a new Message object (not mutating last message content)
-                        notification_text = f"[SYSTEM]: Compression corrupted pool: Compression applied but message pool validation failed and recovery unsuccessful."
+                        notification_text = f"[SYSTEM] Compression corrupted pool: Compression applied but message pool validation failed and recovery unsuccessful."
                         notif_msg = Message(role=USER, content=notification_text)
                         from agent_cascade.execution_engine import token_cache_invalidated
                         with token_cache_invalidated(instance):
@@ -719,7 +719,7 @@ class CompressionHandler:
             
             # Append notification as a new Message object (not mutating last message content)
             # This ensures the serialization cache version key changes and notification gets yielded
-            notification_text = f"[SYSTEM]: Compression applied successfully for {inst_name}."
+            notification_text = f"[SYSTEM] Compression applied successfully for {inst_name}."
             notif_msg = Message(role=USER, content=notification_text)
             from agent_cascade.execution_engine import token_cache_invalidated
             with token_cache_invalidated(instance):
@@ -736,7 +736,7 @@ class CompressionHandler:
         except Exception as e:
             logger.error(f"/compress apply failed for {inst_name}: {e}")
             # Append notification as a new Message object (not mutating last message content)
-            notification_text = f"[SYSTEM]: Compression command failed: Compression apply failed for {inst_name}: {e}"
+            notification_text = f"[SYSTEM] Compression command failed: Compression apply failed for {inst_name}: {e}"
             notif_msg = Message(role=USER, content=notification_text)
             from agent_cascade.execution_engine import token_cache_invalidated
             with token_cache_invalidated(instance):
@@ -781,11 +781,11 @@ class CompressionHandler:
             # Append notification as a new Message object (not mutating last message content)
             from agent_cascade.execution_engine import token_cache_invalidated
             if reason == 'tool_unavailable':
-                notification_text = f"[SYSTEM]: Compression tool unavailable: Compression command issued but compress_context tool is unavailable for {inst_name}."
+                notification_text = f"[SYSTEM] Compression tool unavailable: Compression command issued but compress_context tool is unavailable for {inst_name}."
             elif reason == 'preview_failed':
-                notification_text = f"[SYSTEM]: Compression command failed: Compression preview failed for {inst_name}. Cannot compress."
+                notification_text = f"[SYSTEM] Compression command failed: Compression preview failed for {inst_name}. Cannot compress."
             else:  # exception or unknown
-                notification_text = f"[SYSTEM]: Compression command failed: Compression preview encountered an error for {inst_name}. Cannot compress."
+                notification_text = f"[SYSTEM] Compression command failed: Compression preview encountered an error for {inst_name}. Cannot compress."
             
             notif_msg = Message(role=USER, content=notification_text)
             with token_cache_invalidated(instance):
@@ -922,7 +922,7 @@ class CompressionHandler:
                         working_set_rebuilt = True
                     else:
                         # Append notification as a new Message object (not mutating last message content)
-                        notification_text = f"[SYSTEM]: Rollback corrupted pool: Rollback applied but message pool validation failed and recovery unsuccessful."
+                        notification_text = f"[SYSTEM] Rollback corrupted pool: Rollback applied but message pool validation failed and recovery unsuccessful."
                         notif_msg = Message(role=USER, content=notification_text)
                         from agent_cascade.execution_engine import token_cache_invalidated
                         with token_cache_invalidated(instance):
@@ -957,7 +957,7 @@ class CompressionHandler:
             instance._suppress_loop_detection_next_turn = True
             
             # Append notification as a new Message object (not mutating last message content)
-            notification_text = f"[SYSTEM]: Rollback applied: Rolled back {actual_count} message(s) for {inst_name}."
+            notification_text = f"[SYSTEM] Rollback applied: Rolled back {actual_count} message(s) for {inst_name}."
             notif_msg = Message(role=USER, content=notification_text)
             from agent_cascade.execution_engine import token_cache_invalidated
             with token_cache_invalidated(instance):
@@ -975,7 +975,7 @@ class CompressionHandler:
         except Exception as e:
             logger.error(f"/rollback apply failed for {inst_name}: {e}")
             # Append notification as a new Message object (not mutating last message content)
-            notification_text = f"[SYSTEM]: Rollback command failed: Rollback failed for {inst_name}: {e}"
+            notification_text = f"[SYSTEM] Rollback command failed: Rollback failed for {inst_name}: {e}"
             notif_msg = Message(role=USER, content=notification_text)
             from agent_cascade.execution_engine import token_cache_invalidated
             with token_cache_invalidated(instance):
