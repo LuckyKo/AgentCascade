@@ -523,9 +523,10 @@ class ExecutionEngine:
     ) -> bool:
         """Drain a queue/buffer and inject results as USER messages into all working lists.
 
-        Uses the pool's atomic helper (add_message) for conversation append + partial cache
-        invalidation, wrapped in token_cache_invalidated() context manager to ensure FULL
-        cache invalidation (both _last_token_count_conversation_length and _last_actual_token_count).
+        Messages are appended atomically to all working lists (messages, llm_messages,
+        response, instance.conversation) under instance._compression_lock, ensuring
+        no length mismatches between cached lists and conversation. Wrapped in
+        token_cache_invalidated() context manager to ensure FULL cache invalidation.
 
         Exactly one of drain_fn or items must be provided.
 
@@ -545,27 +546,37 @@ class ExecutionEngine:
         level = logger.info if log_level == "info" else logger.debug
         level(f"Draining {len(raw_data)} item(s) for {inst_name}.")
 
-        with token_cache_invalidated(instance):
-            for item in raw_data:
-                msg = factory(item)
-                # Skip empty messages (preserves existing behavior from _inject_pending_messages)
-                if not msg.content.strip():
-                    continue
+        # Pre-process all items into messages to avoid calling factory() twice
+        processed_messages = []
+        for item in raw_data:
+            msg = factory(item)
+            if msg.content.strip():  # Skip empty messages
+                processed_messages.append(msg)
 
-                # Append to local working lists (these are not pool-managed)
-                messages.append(msg)
-                llm_messages.append(msg)
-                response.append(msg)
-                # Use pool's atomic helper for conversation append + partial cache invalidation
-                self.pool.add_message(inst_name, msg)
-                # Log to JSONL (pool.add_message does NOT log to JSONL by design)
+        if not processed_messages:
+            return True
+
+        with instance._compression_lock:
+            with token_cache_invalidated(instance):
+                for msg in processed_messages:
+                    # Append to all working lists atomically under the compression_lock.
+                    # This ensures cached lists and instance.conversation stay in sync,
+                    # preventing silent cache rebuilds on next turn (Fix 1).
+                    messages.append(msg)
+                    llm_messages.append(msg)
+                    response.append(msg)
+                    instance.conversation.append(msg)  # Direct append, same lock as cached lists
+                    
+                    # Mark activity since we're bypassing pool.add_message() which used to do this (Fix 4)
+                    self.pool._mark_activity(inst_name)
+
+            # Log messages outside the lock to minimize hold time (logging can be slow)
+            for msg in processed_messages:
                 try:
                     log_inst = self.pool.get_logger(inst_name, instance.agent_class)
                     log_inst.log_message(msg)
                 except Exception as e:
                     logger.debug(f"Logging failed for {inst_name} (non-critical): {e}")
-
-            # Token cache invalidation is automatically handled by token_cache_invalidated context manager
 
         return True
 
@@ -649,7 +660,10 @@ class ExecutionEngine:
             # ── Phase 1: Setup ─────────────────────────────────────────────
             messages, llm_messages, response = self._setup_turn(instance)
             if not messages:
-                # Safety: drain any queued user messages before exiting, so they aren't lost
+                # Safety: drain any queued user messages before exiting, so they aren't lost.
+                # Note: Using pool.add_message() here is safe because the engine returns immediately
+                # after this block (line 676), so cached lists are never used again for this instance.
+                # This prevents reintroducing the silent cache rebuild bug from Fix 1.
                 inst_name = instance.instance_name
                 queued = self.pool.drain_queue(inst_name)
                 for item in queued:
@@ -858,22 +872,33 @@ class ExecutionEngine:
                 cached_len = len(instance._cached_messages)
                 current_len = len(instance.conversation)
                 
-                if current_len > cached_len:
-                    # New messages were appended - extend the cache
-                    logger.debug(
-                        f"[CACHE_EXTEND] Extending cached working set for {inst_name} "
-                        f"by {current_len - cached_len} message(s)"
-                    )
-                    new_messages = list(instance.conversation[cached_len:])
-                    instance._cached_messages.extend(new_messages)
-                    # Re-slice to ensure marker correctness after extension
-                    sliced = self.pool.slice_history_for_llm(instance._cached_messages)
-                    instance._cached_llm_messages = list(sliced) if sliced else list(instance._cached_messages)
+                # Fix 2: Cache sanity check - detect mismatches that would cause silent rebuilds
+                if cached_len != current_len:
+                    if current_len > cached_len:
+                        # Normal case: new messages were appended - extend the cache
+                        logger.debug(
+                            f"[CACHE_EXTEND] Extending cached working set for {inst_name} "
+                            f"by {current_len - cached_len} message(s)"
+                        )
+                        new_messages = list(instance.conversation[cached_len:])
+                        instance._cached_messages.extend(new_messages)
+                        # Re-slice to ensure marker correctness after extension
+                        sliced = self.pool.slice_history_for_llm(instance._cached_messages)
+                        instance._cached_llm_messages = list(sliced) if sliced else list(instance._cached_messages)
+                    else:
+                        # cached_len > current_len indicates a regression in Fix 1 — atomic updates should prevent this.
+                        # Force rebuild to resync, log at INFO level for visibility (Fix 2 + Fix 3).
+                        logger.info(
+                            f"[CACHE_MISMATCH] {inst_name}: conv={current_len}, cached={cached_len} "
+                            f"— forcing rebuild to resync"
+                        )
+                        can_use_cache = False
                 
-                return instance._cached_messages, instance._cached_llm_messages, []
+                if can_use_cache:
+                    return instance._cached_messages, instance._cached_llm_messages, []
 
-        # Cache miss or config change - rebuild from pool
-        logger.debug(f"[CACHE_REBUILD] Rebuilding working set for {inst_name}")
+        # Cache miss or config change - rebuild from pool (Fix 3: promoted to INFO for visibility)
+        logger.info(f"[CACHE_REBUILD] Rebuilding working set for {inst_name}")
 
         # Load template to get system message if needed
         template = self.pool.get_template(instance.agent_class)
