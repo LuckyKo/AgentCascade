@@ -127,14 +127,11 @@ class AgentInstance:
     _skip_slot_acquire: bool = False  # When True, engine.run() skips slot acquisition (used for nested agents like Security/Compressor)
 
     # ── Persistent Working Set Caching (Fix LLM Reprocessing) ────────────────
-    # These fields enable "pure append" turns by caching the message sets and only
-    # rebuilding when configuration or history structure changes.
+    # These fields cache the working set to preserve LLM prefix caching across turns.
+    # Simple model: if config unchanged, extend with new messages; otherwise rebuild.
     _cached_messages: List[Message] = field(default_factory=list)      # Full conversation working set
     _cached_llm_messages: List[Message] = field(default_factory=list)  # Sliced working set for LLM
     _last_config_version: int = field(default=-1)                      # Pool config version at last rebuild
-    _history_version: int = field(default=0)                           # Incremented on structural changes (compression/edit)
-    _last_history_version: int = field(default=-1)                     # Last history version seen by ExecutionEngine
-    _metadata_dirty: bool = field(default=True)                        # Set when tool config changes (toggled via UI)
     
     # ── Loop Detection Cooldown (Fix /compress Bug) ───────────────────────────
     # After compression/rollback, the conversation state has concentrated patterns that can trigger

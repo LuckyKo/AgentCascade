@@ -151,7 +151,6 @@ class CompressionHandler:
                     llm_messages.append(notif_msg)
                     if response is not None:
                         response.append(notif_msg)
-                    instance._history_version += 1
             self.pool.halt_instance(inst_name)
             return True
         
@@ -248,9 +247,6 @@ class CompressionHandler:
                         else:
                             logger.debug(f"Compression notification already exists in conversation for '{inst_name}' — skipping. Conv length: {len(instance.conversation)}")
 
-                    # M4: Increment history version AFTER notification injection (if it happened)
-                    # This ensures the cached working set reflects the complete state including notifications
-                    instance._history_version += 1
 
                     # Re-fetch conv after notification append so validation includes the notification message
                     conv = self.pool.get_conversation(inst_name)
@@ -266,10 +262,8 @@ class CompressionHandler:
                                 # Phase 3: Write directly to instance.conversation instead of via bridge
                                 from agent_cascade.execution_engine import token_cache_invalidated
                                 with token_cache_invalidated(instance):
-                                    with instance._compression_lock:  # M5: Thread-safe recovery write + rebuild
+                                    with instance._compression_lock:  # Thread-safe recovery write + rebuild
                                         instance.conversation = list(recov)
-                                        instance._history_version += 1  # Persist WS fix: increment version on conversation mutation
-                                        # Token cache will be invalidated again by _rebuild_working_set below (Fix Issue #5)
                                         self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                                 logger.info(f"Recovered message pool from log for '{inst_name}' ({len(recov)} messages)")
                                 conv = recov
@@ -288,7 +282,6 @@ class CompressionHandler:
                                         llm_messages.append(notif_msg)
                                         if response is not None:
                                             response.append(notif_msg)
-                                        instance._history_version += 1
                                 # Halt this instance to prevent further execution with corrupted state
                                 self.pool.halt_instance(inst_name)
                         except Exception as e:
@@ -321,7 +314,6 @@ class CompressionHandler:
                         llm_messages.append(notif_msg)
                         if response is not None:
                             response.append(notif_msg)
-                        instance._history_version += 1
 
             return True  # Continue loop — don't make LLM call this turn
 
@@ -379,8 +371,6 @@ class CompressionHandler:
             from agent_cascade.execution_engine import _invalidate_token_cache
             _invalidate_token_cache(instance)  # Invalidate cache before rebuilding working set (Fix Finding #3)
             
-            # C6: Increment history version and rebuild working set after successful compression
-            instance._history_version += 1
             
             # Get current messages for rebuild
             conv = self.pool.get_conversation(target_agent_name)
@@ -577,7 +567,6 @@ class CompressionHandler:
                             llm_messages.append(notif_msg)
                             if response is not None:
                                 response.append(notif_msg)
-                            instance._history_version += 1
                 return False
         else:
             # No operation_manager — auto-approve (standalone mode)
@@ -597,7 +586,6 @@ class CompressionHandler:
                         llm_messages.append(notif_msg)
                         if response is not None:
                             response.append(notif_msg)
-                        instance._history_version += 1
         
         return approved  # FIX Bug #2: Return actual approval status
     
@@ -658,10 +646,8 @@ class CompressionHandler:
                         llm_messages.append(notif_msg)
                         if response is not None:
                             response.append(notif_msg)
-                        instance._history_version += 1
                 return True
             
-            instance._history_version += 1
             # Validate message pool after compression (Item 10)
             conv = self.pool.get_conversation(inst_name)
             working_set_rebuilt = False
@@ -675,8 +661,6 @@ class CompressionHandler:
                         with token_cache_invalidated(instance):
                             with instance._compression_lock:
                                 instance.conversation = list(recov)
-                                # Increment history version to invalidate cached working set (conversation assigned in recovery)
-                                instance._history_version += 1
                         logger.info(f"Recovered message pool after /compress for '{inst_name}' ({len(recov)} messages)")
                         self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                         working_set_rebuilt = True
@@ -692,7 +676,6 @@ class CompressionHandler:
                                 llm_messages.append(notif_msg)
                                 if response is not None:
                                     response.append(notif_msg)
-                                instance._history_version += 1
                 except Exception as e:
                     logger.error(f"Recovery after /compress failed for '{inst_name}': {e}")
             
@@ -729,7 +712,6 @@ class CompressionHandler:
                     llm_messages.append(notif_msg)
                     if response is not None:
                         response.append(notif_msg)
-                    instance._history_version += 1
             
             return True
             
@@ -746,7 +728,6 @@ class CompressionHandler:
                     llm_messages.append(notif_msg)
                     if response is not None:
                         response.append(notif_msg)
-                    instance._history_version += 1
             return True
     
     def handle_compress_command(
@@ -795,7 +776,6 @@ class CompressionHandler:
                     llm_messages.append(notif_msg)
                     if response is not None:
                         response.append(notif_msg)
-                    instance._history_version += 1
             return True
         
         # Step 3: Apply compression (skip user approval — proceed directly like WebSocket path)
@@ -916,7 +896,6 @@ class CompressionHandler:
                         with token_cache_invalidated(instance):
                             with instance._compression_lock:
                                 instance.conversation = list(recov)
-                                instance._history_version += 1
                         logger.info(f"Recovered message pool after /rollback for '{inst_name}' ({len(recov)} messages)")
                         self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                         working_set_rebuilt = True
@@ -932,7 +911,6 @@ class CompressionHandler:
                                 llm_messages.append(notif_msg)
                                 if response is not None:
                                     response.append(notif_msg)
-                                instance._history_version += 1
                 except Exception as e:
                     logger.error(f"Recovery after /rollback failed for '{inst_name}': {e}")
             
@@ -967,7 +945,6 @@ class CompressionHandler:
                     llm_messages.append(notif_msg)
                     if response is not None:
                         response.append(notif_msg)
-                    instance._history_version += 1
             
             logger.info(f"/rollback command executed for {inst_name}: rolled back {actual_count} message(s)")
             return True
@@ -985,5 +962,4 @@ class CompressionHandler:
                     llm_messages.append(notif_msg)
                     if response is not None:
                         response.append(notif_msg)
-                    instance._history_version += 1
             return True

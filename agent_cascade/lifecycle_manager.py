@@ -319,8 +319,6 @@ class AgentLifecycleManager:
                         # Fallback: prepend system message if conversation is empty
                         instance.conversation.insert(0, sys_msg)
                     
-                    # Increment history version to invalidate cached working set (conversation mutated)
-                    instance._history_version += 1
                     
                     # Get the preserved conversation (will be extended with task below)
                     conv = instance.conversation
@@ -328,7 +326,6 @@ class AgentLifecycleManager:
             # FIX #2: For reused instances, append task message to preserved conversation
             # (conv already set above with system message updated in-place)
             conv.append(task_msg)
-            instance._history_version += 1  # Persist WS fix: increment version on conversation mutation
             
             # FIX #6: Use update_history() for logger synchronization on reused instances
             # This prevents duplicate log_message(task_msg) calls and properly syncs the logger
@@ -344,8 +341,6 @@ class AgentLifecycleManager:
             with token_cache_invalidated(instance):
                 with instance._compression_lock:
                     instance.conversation = conv
-                    # Increment history version to invalidate cached working set (conversation assigned)
-                    instance._history_version += 1
 
                 # Log initial messages to agent's JSONL file (P1 continuation)
                 try:

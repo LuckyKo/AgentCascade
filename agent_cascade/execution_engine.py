@@ -829,7 +829,8 @@ class ExecutionEngine:
         Builds the system message from template (for main agent), loads conversation history,
         applies slice_history_for_llm to get working set, and sets up the response accumulator.
 
-        Uses the "Persistent Working Set" model (Fix LLM Reprocessing) to preserve caching.
+        Simple caching model: if config unchanged and cache exists, extend with new messages;
+        otherwise rebuild from pool. The LLM API handles prefix caching automatically.
         
         Returns:
             Tuple of (messages, llm_messages, response) or (None, None, None) on error.
@@ -839,66 +840,40 @@ class ExecutionEngine:
         # Load conversation from pool (single source of truth)
         with instance._compression_lock:
             conv = list(instance.conversation)
-            
-            # M1: Move dirty check inside lock to prevent TOCTOU race conditions
-            # Check if we can reuse the cached working set to preserve LLM prefix caching.
-            # Breaking events: config change, history structural change, or tool metadata dirty.
-            is_dirty = (
-                instance._last_config_version != self.pool._config_version or
-                instance._history_version != instance._last_history_version or
-                instance._metadata_dirty
-            )
-            
-            # Track conversation lengths for pure append detection (TOCTOU fix)
-            current_conv_len = len(conv)
-            cached_conv_len = len(instance._cached_messages) if instance._cached_messages else 0
-            
-            # Capture metadata_dirty state to avoid race condition when resetting later
-            metadata_was_dirty = instance._metadata_dirty
         
         if not conv:
             logger.warning("empty conversation for %s - early exit", inst_name)
             return None, None, None
 
-        if not is_dirty and instance._cached_messages and instance._cached_llm_messages:
-            # PURE APPEND PATH: Check if we just have new appends to handle
-            new_message_count = current_conv_len - cached_conv_len
-            
-            if new_message_count > 0:
-                # We have new messages appended since last cache sync
-                # Extend the cached lists instead of rebuilding (TOCTOU fix: single lock acquisition)
+        # Simple cache check: use cached working set if config hasn't changed
+        can_use_cache = (
+            instance._last_config_version == self.pool._config_version and
+            instance._cached_messages and
+            instance._cached_llm_messages
+        )
+        
+        if can_use_cache:
+            # Extend cached lists with any new messages appended since last turn
+            with instance._compression_lock:
+                cached_len = len(instance._cached_messages)
+                current_len = len(instance.conversation)
                 
-                # Get the new messages from conversation and extend cache in SINGLE lock acquisition
-                with instance._compression_lock:
-                    # Re-check lengths inside lock for accuracy (handles concurrent appends between locks)
-                    actual_cached_len = len(instance._cached_messages) if instance._cached_messages else 0
-                    current_len_in_lock = len(instance.conversation)
-                    actual_new_count = current_len_in_lock - actual_cached_len
-                    
-                    if actual_new_count > 0:
-                        logger.debug(
-                            f"[CACHE_EXTEND] Extending cached working set for {inst_name} "
-                            f"by {actual_new_count} message(s) (preserving LLM cache)"
-                        )
-                        
-                        new_messages = list(instance.conversation[actual_cached_len:])
-                        instance._cached_messages.extend(new_messages)
-                        # Re-slice llm_messages to ensure marker correctness after extend
-                        sliced = self.pool.slice_history_for_llm(instance._cached_messages)
-                        instance._cached_llm_messages = list(sliced) if sliced else list(instance._cached_messages)
-                        instance._last_history_version = instance._history_version
-                        # Only reset metadata_dirty if it was already False (avoids race with API thread)
-                        if not metadata_was_dirty:
-                            instance._metadata_dirty = False
-                    
-                    return instance._cached_messages, instance._cached_llm_messages, []
-            else:
-                # No new messages - use cached lists as-is
-                logger.debug(f"[CACHE_PRESERVE] Using cached working set for {inst_name} (preserving LLM cache)")
+                if current_len > cached_len:
+                    # New messages were appended - extend the cache
+                    logger.debug(
+                        f"[CACHE_EXTEND] Extending cached working set for {inst_name} "
+                        f"by {current_len - cached_len} message(s)"
+                    )
+                    new_messages = list(instance.conversation[cached_len:])
+                    instance._cached_messages.extend(new_messages)
+                    # Re-slice to ensure marker correctness after extension
+                    sliced = self.pool.slice_history_for_llm(instance._cached_messages)
+                    instance._cached_llm_messages = list(sliced) if sliced else list(instance._cached_messages)
+                
                 return instance._cached_messages, instance._cached_llm_messages, []
 
-        # REBUILD PATH: Config or history has changed — perform full setup.
-        logger.debug(f"[CACHE_REBUILD] Rebuilding working set for {inst_name} (dirty={is_dirty})")
+        # Cache miss or config change - rebuild from pool
+        logger.debug(f"[CACHE_REBUILD] Rebuilding working set for {inst_name}")
 
         # Load template to get system message if needed
         template = self.pool.get_template(instance.agent_class)
@@ -916,8 +891,7 @@ class ExecutionEngine:
                 with token_cache_invalidated(instance):
                     with instance._compression_lock:
                         instance.conversation.insert(0, sys_msg)
-                        instance._history_version += 1  # Persist WS fix: increment version on conversation mutation
-                    # M3: Clear cached lists when system message is inserted to prevent stale data
+                    # Clear cached lists when system message is inserted to prevent stale data
                     instance._cached_messages = []
                     instance._cached_llm_messages = []
                 m0 = sys_msg
@@ -980,12 +954,10 @@ class ExecutionEngine:
         sliced = self.pool.slice_history_for_llm(conv)
         llm_messages = list(sliced) if sliced else list(conv)
         
-        # Sync caches and versions
+        # Sync caches — simple extend-or-rebuild model
         instance._cached_messages = conv
         instance._cached_llm_messages = llm_messages
         instance._last_config_version = self.pool._config_version
-        instance._last_history_version = instance._history_version
-        instance._metadata_dirty = False
         
         response: List[Message] = []
         return conv, llm_messages, response
@@ -1239,16 +1211,11 @@ class ExecutionEngine:
             except Exception as e:
                 logger.debug(f"Failed to clear LLM preprocess cache for {inst_name}: {e}")
         
-        # Sync the instance caches as well (Fix LLM Reprocessing)
+        # Sync the instance caches (Fix LLM Reprocessing)
         if inst:
             inst._cached_messages = messages
             inst._cached_llm_messages = llm_messages
-            # Note: _history_version was already incremented by the caller (CompressionHandler)
-            # or should be manually incremented if called from elsewhere.
-            inst._last_history_version = inst._history_version
             inst._last_config_version = self.pool._config_version
-            # C5: Reset metadata dirty flag after rebuild to prevent spurious cache misses
-            inst._metadata_dirty = False
         
         logger.debug(
             f"Rebuilt working sets for {inst_name}: "
@@ -1716,8 +1683,6 @@ class ExecutionEngine:
             with token_cache_invalidated(instance):
                 with instance._compression_lock:
                     instance.conversation.append(cont_msg)
-                    # Increment history version to invalidate cached working set
-                    instance._history_version += 1
             return True
         
         return False
@@ -1841,11 +1806,9 @@ class ExecutionEngine:
 
             # Track compress_context execution
             if tool_name == 'compress_context':
-                # C7: Increment history version before rebuilding working set
                 inst = self.pool.get_instance(inst_name)
                 if inst:
-                    inst._history_version += 1
-                self._rebuild_working_set(messages, llm_messages, inst_name)
+                    self._rebuild_working_set(messages, llm_messages, inst_name)
                 # Item 10: Validate message pool after agent-triggered compression
                 conv = self.pool.get_conversation(inst_name)
                 if conv and not validate_message_pool(conv, inst_name):
@@ -1868,8 +1831,6 @@ class ExecutionEngine:
             with token_cache_invalidated(instance):
                 with instance._compression_lock:
                     instance.conversation.append(fn_msg)
-                    # Increment history version to invalidate cached working set
-                    instance._history_version += 1
             
             # Track executed tool for orphan handling
             executed_tools.append(tool_name)
@@ -1915,11 +1876,9 @@ class ExecutionEngine:
                         llm_messages.append(fn_msg)
                         response.append(fn_msg)  # Stream to UI
                         instance.conversation.append(fn_msg)  # FIX #1: Moved inside batch lock
-                        # Increment history version to invalidate cached working set (done once after loop)
                         tools_processed += 1
             
             if tools_processed > 0:
-                instance._history_version += 1
                 
                 if tools_processed > 0:
                     logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
@@ -1953,7 +1912,6 @@ class ExecutionEngine:
         with token_cache_invalidated(instance):
             with instance._compression_lock:
                 instance.conversation.extend(turn_output)
-                instance._history_version += 1  # Persist WS fix: increment version on conversation mutation
                 # Streaming UI Content Update Fix: Clear _streaming_responses after Phase 4 commits messages
                 instance._streaming_responses = []
         
@@ -2593,7 +2551,6 @@ class ExecutionEngine:
                     _last_sub_send = now
 
             conv.extend(final_resp)
-            inst._history_version += 1  # Persist WS fix: increment version on conversation mutation
             self._create_completed = True  # Mark for finally-block EXIT log reason tracking
 
             # Item 12: Always emit final sub-agent state after loop completes (Fix #3: lighter snapshot)

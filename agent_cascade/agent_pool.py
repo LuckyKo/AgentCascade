@@ -91,8 +91,6 @@ class _InstanceConversationMapping(dict):
                 inst.conversation = list(value)  # defensive copy
             # Fix #2: Invalidate token count cache — conversation was replaced
             inst._last_token_count_conversation_length = -1
-            # C2: Increment history version to invalidate cached working set
-            inst._history_version += 1
         super().__setitem__(key, value)
 
     def __delitem__(self, key: str) -> None:
@@ -102,8 +100,7 @@ class _InstanceConversationMapping(dict):
         if inst is not None:
             with inst._compression_lock:
                 inst.conversation.clear()
-            # C2: Increment history version after clearing conversation
-            inst._history_version += 1
+            # Conversation cleared — next _setup_turn() will trigger full rebuild
 
     def get(self, key: str, default=None):
         """Get conversation for instance, returning default if not found."""
@@ -125,7 +122,6 @@ class _InstanceConversationMapping(dict):
         with inst._compression_lock:
             value = list(inst.conversation)
             inst.conversation.clear()
-            inst._history_version += 1  # Persist WS fix: increment version on conversation mutation
 
         # Remove from dict storage only — don't delete the instance
         super().pop(key, None)
@@ -207,8 +203,6 @@ class _InstanceConversationMapping(dict):
         for inst in self._pool.instances.values():
             with inst._compression_lock:
                 inst.conversation.clear()
-            # C2: Increment history version after clearing each instance's conversation
-            inst._history_version += 1
 
 
 class AgentPool:
@@ -710,8 +704,6 @@ class AgentPool:
                     inst.conversation.clear()
                     # Fix #2: Invalidate token count cache — conversation was cleared
                     inst._last_token_count_conversation_length = -1
-                    # Signal structural change for cache preservation
-                    inst._history_version += 1
                     # Reset compression tracking fields (cooldown and overfeeding detection)
                     inst._last_force_compress_time = 0.0
                     inst._force_compress_count = 0
@@ -861,8 +853,6 @@ class AgentPool:
                 inst.conversation.clear()
                 # Invalidate token count cache — conversation cleared
                 inst._last_token_count_conversation_length = -1
-                # C4: Increment history version to invalidate cached working set
-                inst._history_version += 1
                 # Reset compression tracking fields (cooldown and overfeeding detection)
                 inst._last_force_compress_time = 0.0
                 inst._force_compress_count = 0
@@ -888,8 +878,6 @@ class AgentPool:
                         del inst.conversation[target_len:]
                         # Invalidate token count cache — conversation length changed
                         inst._last_token_count_conversation_length = -1
-                        # C3: Increment history version to invalidate cached working set
-                        inst._history_version += 1
                 try:
                     log_inst = self._logger.get_logger(name, inst.agent_class)
                     log_inst.truncate_to(target_len)
@@ -1076,8 +1064,6 @@ class AgentPool:
                 existing.conversation = restored_messages
                 # Invalidate token count cache — conversation replaced
                 existing._last_token_count_conversation_length = -1
-                # C4: Increment history version to invalidate cached working set
-                existing._history_version += 1
                 existing.agent_class = agent_class
         else:
             now = time.monotonic()
@@ -1180,14 +1166,11 @@ class AgentPool:
     def add_message(self, instance_name: str, message: Message):
         """Append a message (thread-safe) to an agent's conversation.
 
-        This is the single point of truth for adding messages — all writes go
-        directly to instances[name].conversation. The instance_conversations
-        mapping is a convenience view used by other components.
-        Also persists the message to the JSONL log file.
+        Simple append operation - no version tracking. Token count cache is
+        invalidated on each append. The LLM API handles prefix caching automatically.
         
-        Note: Does NOT increment _history_version (pure append doesn't invalidate cache).
-        The version is incremented only for structural changes (compression, edits, etc.)
-        elsewhere in the codebase.
+        This is the single point of truth for adding messages — all writes go
+        directly to instances[name].conversation.
         """
         inst = self.instances.get(instance_name)
         if inst:
@@ -1195,12 +1178,7 @@ class AgentPool:
                 inst.conversation.append(message)
                 # Invalidate token count cache — conversation length changed
                 inst._last_token_count_conversation_length = -1
-                # NOTE: Do NOT increment _history_version here. Pure appends don't 
-                # invalidate the working set cache - they just extend it.
-                # Version is incremented only for structural changes (compression, edits, etc.)
             self._mark_activity(instance_name)
-            # Note: Logging to JSONL is now handled by execution_engine.run() as the single source of truth.
-            # This method only adds messages to the in-memory conversation (AgentInstance.conversation).
 
     # ── Compression module compatibility layer
     # The compress_context() API in core.py expects agent_pool.get_conversation() and
@@ -1600,8 +1578,6 @@ class AgentPool:
             del conv[new_len:]
             # Invalidate token count cache — conversation length changed
             inst._last_token_count_conversation_length = -1
-            # Signal structural change for cache preservation
-            inst._history_version += 1
 
             # Sync logger under lock to avoid stale reads
             try:

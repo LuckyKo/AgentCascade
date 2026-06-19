@@ -981,8 +981,6 @@ def create_app(agents, agent_pool, config=None):
                     inst.conversation.clear()
                     # Invalidate token count cache — conversation cleared
                     inst._last_token_count_conversation_length = -1
-                    # Signal structural change for cache preservation
-                    inst._history_version += 1
                     # Reset compression tracking fields (Feature 018)
                     inst._last_force_compress_time = 0.0
                     inst._force_compress_count = 0
@@ -1597,7 +1595,6 @@ def create_app(agents, agent_pool, config=None):
                                                 if sa_inst is not None:
                                                     with sa_inst._compression_lock:
                                                         sa_inst.conversation[:] = recov  # Replace in-place under lock
-                                                        sa_inst._history_version += 1  # Persist WS fix: increment version on conversation mutation
                                             else:
                                                 logger.warning(
                                                     f"Could not restore agent instance {sa_name} pool — "
@@ -1705,7 +1702,6 @@ def create_app(agents, agent_pool, config=None):
                             with inst._compression_lock:
                                 while inst.conversation and _get_msg_role(inst.conversation[-1]) in (ASSISTANT, FUNCTION):
                                     inst.conversation.pop()
-                                    inst._history_version += 1  # Persist WS fix: increment version on conversation mutation
 
                     # Roll back one more (the user message) to allow a clean re-trigger
                     last_user_msg = None
@@ -1713,7 +1709,6 @@ def create_app(agents, agent_pool, config=None):
                     with inst._compression_lock:
                         if inst.conversation and _get_msg_role(inst.conversation[-1]) == USER:
                             last_user_msg = inst.conversation.pop()
-                            inst._history_version += 1  # Persist WS fix: increment version on conversation mutation
 
                     # Post-unification: use pool instance directly — no legacy fallback needed
                     inst = agent_pool.get_instance(instance_name) if agent_pool else None
@@ -1750,8 +1745,6 @@ def create_app(agents, agent_pool, config=None):
                                 inst.conversation.insert(insert_pos, last_user_msg)
                                 # Invalidate token count cache — conversation length changed
                                 inst._last_token_count_conversation_length = -1
-                                # Increment history version to invalidate cached working set
-                                inst._history_version += 1
                         else:
                             # Fallback: create the instance first, then enqueue the message
                             create_main_agent_instance(
@@ -1791,8 +1784,6 @@ def create_app(agents, agent_pool, config=None):
                                 inst.conversation.clear()
                                 # Invalidate token count cache — conversation cleared
                                 inst._last_token_count_conversation_length = -1
-                                # Increment history version to invalidate cached working set
-                                inst._history_version += 1
                                 # Reset compression tracking fields (Feature 018)
                                 inst._last_force_compress_time = 0.0
                                 inst._force_compress_count = 0
@@ -2336,7 +2327,6 @@ def create_app(agents, agent_pool, config=None):
                             if inst is not None:
                                 with inst._compression_lock:
                                     inst.conversation[:] = history  # In-place replace under lock
-                                    inst._history_version += 1  # Persist WS fix: increment version on conversation mutation
                             
                             logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
                             logger_inst.reset_history(history, rewrite=True)
@@ -2382,7 +2372,6 @@ def create_app(agents, agent_pool, config=None):
                         if inst is not None:
                             with inst._compression_lock:
                                 inst.conversation[:] = history  # In-place replace under lock
-                                inst._history_version += 1  # Persist WS fix: increment version on conversation mutation
                         
                         logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
                         logger_inst.reset_history(history, rewrite=True)
@@ -2615,7 +2604,6 @@ if __name__ == "__main__":
         maine_inst = agent_pool.get_instance('Maine')
         if maine_inst and not maine_inst.conversation:
             maine_inst.conversation.append(Message(role=SYSTEM, content=sys_msg_content))
-            maine_inst._history_version += 1  # Persist WS fix: increment version on conversation mutation
     
     app = create_app(agents=[orch_agent], agent_pool=agent_pool)
     

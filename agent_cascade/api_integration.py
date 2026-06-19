@@ -362,8 +362,6 @@ def run_agent_in_pool_with_recovery(
                 instance.conversation.append(hint_msg)
                 # Invalidate token count cache — conversation length changed
                 instance._last_token_count_conversation_length = -1
-                # Increment history version to invalidate cached working set
-                instance._history_version += 1
 
             retry_count += 1
 
@@ -863,7 +861,7 @@ def _resolve_max_tokens(pool, instance=None):
 
 
 def _streaming_content_length(messages: list) -> int:
-    """Calculate total content length of streaming messages for version tracking.
+    """Calculate total content length of streaming messages for streaming dedup cache.
     
     This helper extracts the pattern used in 3 places to calculate content length
     for cache invalidation during streaming updates. It handles both dict and 
@@ -1302,14 +1300,12 @@ def _apply_ui_config(
         try:
             with pool._execution._state_lock:  # Thread-safe write to shared config
                 # Re-apply disabled_tools under lock to prevent race with concurrent reads
-                disabled_tools_changed = False
                 if 'disabled_tools' in sanitized and sanitized['disabled_tools'] is not None:
                     dt = sanitized['disabled_tools']
                     if isinstance(dt, (list, dict)):
                         cfg = dict(instance._generate_cfg_override or {})
                         cfg['disabled_tools'] = dt
                         instance._generate_cfg_override = cfg
-                        disabled_tools_changed = True
 
                 for _key in (
                     'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
@@ -1318,18 +1314,12 @@ def _apply_ui_config(
                     if _key in sanitized:
                         pool.llm_cfg[_key] = sanitized[_key]
 
-                # M2: Flag instance as dirty inside lock for thread safety
-                # This triggers ExecutionEngine._setup_turn() to rebuild the system prompt
-                # surgically on the next turn, preserving LLM prefix caching if possible.
-                if disabled_tools_changed or 'work_access_folders' in ui_cfg:
-                    instance._metadata_dirty = True
-                    logger.debug(f"[CONFIG] Flagged {instance_name} as dirty (metadata change)")
         except AttributeError:
             # pool._execution or _state_lock doesn't exist — skip safely
             logger.debug("Execution engine not available for disabled_tools update")
-        except Exception:
+        except Exception as e:
             # Lock access should always work, but don't let it break generation
-            pass
+            logger.exception("Unexpected error updating pool.llm_cfg: %s", e)
 
 
 def get_agent_state_from_pool(
