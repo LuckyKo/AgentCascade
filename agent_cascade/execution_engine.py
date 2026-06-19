@@ -848,16 +848,54 @@ class ExecutionEngine:
                 instance._history_version != instance._last_history_version or
                 instance._metadata_dirty
             )
+            
+            # Track conversation lengths for pure append detection (TOCTOU fix)
+            current_conv_len = len(conv)
+            cached_conv_len = len(instance._cached_messages) if instance._cached_messages else 0
+            
+            # Capture metadata_dirty state to avoid race condition when resetting later
+            metadata_was_dirty = instance._metadata_dirty
         
         if not conv:
             logger.warning("empty conversation for %s - early exit", inst_name)
             return None, None, None
 
         if not is_dirty and instance._cached_messages and instance._cached_llm_messages:
-            # PURE APPEND PATH: Use cached lists. No list copying, no regex, no slicing.
-            # This ensures the m0 (system prompt) object is identical to previous turns.
-            logger.debug(f"[CACHE_PRESERVE] Using cached working set for {inst_name} (preserving LLM cache)")
-            return instance._cached_messages, instance._cached_llm_messages, []
+            # PURE APPEND PATH: Check if we just have new appends to handle
+            new_message_count = current_conv_len - cached_conv_len
+            
+            if new_message_count > 0:
+                # We have new messages appended since last cache sync
+                # Extend the cached lists instead of rebuilding (TOCTOU fix: single lock acquisition)
+                
+                # Get the new messages from conversation and extend cache in SINGLE lock acquisition
+                with instance._compression_lock:
+                    # Re-check lengths inside lock for accuracy (handles concurrent appends between locks)
+                    actual_cached_len = len(instance._cached_messages) if instance._cached_messages else 0
+                    current_len_in_lock = len(instance.conversation)
+                    actual_new_count = current_len_in_lock - actual_cached_len
+                    
+                    if actual_new_count > 0:
+                        logger.debug(
+                            f"[CACHE_EXTEND] Extending cached working set for {inst_name} "
+                            f"by {actual_new_count} message(s) (preserving LLM cache)"
+                        )
+                        
+                        new_messages = list(instance.conversation[actual_cached_len:])
+                        instance._cached_messages.extend(new_messages)
+                        # Re-slice llm_messages to ensure marker correctness after extend
+                        sliced = self.pool.slice_history_for_llm(instance._cached_messages)
+                        instance._cached_llm_messages = list(sliced) if sliced else list(instance._cached_messages)
+                        instance._last_history_version = instance._history_version
+                        # Only reset metadata_dirty if it was already False (avoids race with API thread)
+                        if not metadata_was_dirty:
+                            instance._metadata_dirty = False
+                    
+                    return instance._cached_messages, instance._cached_llm_messages, []
+            else:
+                # No new messages - use cached lists as-is
+                logger.debug(f"[CACHE_PRESERVE] Using cached working set for {inst_name} (preserving LLM cache)")
+                return instance._cached_messages, instance._cached_llm_messages, []
 
         # REBUILD PATH: Config or history has changed — perform full setup.
         logger.debug(f"[CACHE_REBUILD] Rebuilding working set for {inst_name} (dirty={is_dirty})")

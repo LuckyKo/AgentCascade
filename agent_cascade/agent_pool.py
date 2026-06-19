@@ -1184,6 +1184,10 @@ class AgentPool:
         directly to instances[name].conversation. The instance_conversations
         mapping is a convenience view used by other components.
         Also persists the message to the JSONL log file.
+        
+        Note: Does NOT increment _history_version (pure append doesn't invalidate cache).
+        The version is incremented only for structural changes (compression, edits, etc.)
+        elsewhere in the codebase.
         """
         inst = self.instances.get(instance_name)
         if inst:
@@ -1191,8 +1195,9 @@ class AgentPool:
                 inst.conversation.append(message)
                 # Invalidate token count cache — conversation length changed
                 inst._last_token_count_conversation_length = -1
-                # C1: Increment history version to invalidate cached working set
-                inst._history_version += 1
+                # NOTE: Do NOT increment _history_version here. Pure appends don't 
+                # invalidate the working set cache - they just extend it.
+                # Version is incremented only for structural changes (compression, edits, etc.)
             self._mark_activity(instance_name)
             # Note: Logging to JSONL is now handled by execution_engine.run() as the single source of truth.
             # This method only adds messages to the in-memory conversation (AgentInstance.conversation).
