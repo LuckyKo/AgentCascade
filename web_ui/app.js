@@ -346,6 +346,8 @@ const settingUserColor = $('#setting-user-color');
 const settingAssistantColor = $('#setting-assistant-color');
 const settingRawEditColor = $('#setting-raw-edit-color');
 const settingTruncateTools = $('#setting-truncate-tools');
+// Auto Agent Tab Focus toggle - controls whether tabs auto-switch when agent stack changes
+const settingAutoTabFocus = $('#setting-auto-tab-focus');
 
 const workAccessFoldersRW = $('#workAccessFoldersRW');
 const workAccessFoldersRO = $('#workAccessFoldersRO');
@@ -612,6 +614,8 @@ function saveSettings() {
   if (settingFontSize) s['setting-font-size'] = settingFontSize.value;
   if (settingMaxContext) s['setting-max-context'] = settingMaxContext.value;
   if (settingTruncateTools) s['truncate-tools'] = settingTruncateTools.checked;
+  // Save Auto Agent Tab Focus toggle state
+  if (settingAutoTabFocus) s['auto-tab-focus'] = settingAutoTabFocus.checked;
 
   if (settingImageDetail) s['setting-image-detail'] = settingImageDetail.value;
   if (settingMaxImageSize) s['setting-max-image-size'] = settingMaxImageSize.value;
@@ -687,6 +691,11 @@ function loadSettings() {
 
     if (settingTruncateTools && s['truncate-tools'] !== undefined) {
       settingTruncateTools.checked = s['truncate-tools'];
+    }
+
+    // Load Auto Agent Tab Focus toggle state
+    if (settingAutoTabFocus && s['auto-tab-focus'] !== undefined) {
+      settingAutoTabFocus.checked = s['auto-tab-focus'];
     }
 
     if (settingUserColor && s['setting-user-color'] !== undefined) {
@@ -1324,36 +1333,40 @@ function handleServerMessage(data) {
               // Reset timer BEFORE render logic to reduce latency (moved from after renderSubAgents)
               state.genStats.lastSubAgentRender = now;
       
+        // Check if Auto Agent Tab Focus is enabled (default: true if setting not found or checked)
+        const autoTabFocusEnabled = !settingAutoTabFocus || settingAutoTabFocus.checked;
+        
         // Only call renderSubAgents if we're NOT about to call switchMainTab,
         // since switchMainTab calls renderSubAgents internally at the end.
         // This avoids redundant rendering when stackChanged triggers a tab switch.
-        const willSwitchTab = stackChanged && (
+        const willSwitchTab = autoTabFocusEnabled && stackChanged && (
           (state.activeStack.length > 0 && state.subAgents?.[state.activeStack[state.activeStack.length - 1]] && 
            state.activeSubTab !== 'sub-' + state.activeStack[state.activeStack.length - 1]) ||
           (state.activeStack.length === 0 && state.activeSubTab !== getAgentTabId(state.sessionName))
         );
-      
+        
         if (!willSwitchTab) {
           renderSubAgents();
         }
         
-        if (stackChanged) {
-          if (state.activeStack.length > 0) {
-            const topAgent = state.activeStack[state.activeStack.length - 1];
-            // Only auto-switch if the sub-agent panel has actually been created
-            if (state.subAgents && state.subAgents[topAgent] && state.activeSubTab !== 'sub-' + topAgent) {
-              switchMainTab('sub-' + topAgent);
-            }
-          } else {
-            // Auto-switch back to session primary agent when stack empties (if user isn't already on it)
-            const primaryTab = getAgentTabId(state.sessionName);
-            if (state.activeSubTab !== primaryTab) {
-              switchMainTab(primaryTab);
+        // Auto-switch tabs only when enabled and stack changed
+        if (autoTabFocusEnabled && stackChanged) {
+            if (state.activeStack.length > 0) {
+              const topAgent = state.activeStack[state.activeStack.length - 1];
+              // Only auto-switch if the sub-agent panel has actually been created
+              if (state.subAgents && state.subAgents[topAgent] && state.activeSubTab !== 'sub-' + topAgent) {
+                switchMainTab('sub-' + topAgent);
+              }
+            } else {
+              // Auto-switch back to session primary agent when stack empties (if user isn't already on it)
+              const primaryTab = getAgentTabId(state.sessionName);
+              if (state.activeSubTab !== primaryTab) {
+                switchMainTab(primaryTab);
+              }
             }
           }
-        }
       }
-
+        
       // Throttle gen stats to ~2Hz instead of ~6.5Hz. The token/sec display is
       // approximate anyway, so updating twice per second is visually indistinguishable
       // from the original frequency.
