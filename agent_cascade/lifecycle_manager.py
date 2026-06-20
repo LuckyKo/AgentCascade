@@ -12,8 +12,9 @@ import time
 from typing import Tuple, Optional, TYPE_CHECKING
 
 from agent_cascade.agent_instance import AgentInstance, AgentState
-from agent_cascade.llm.schema import Message, SYSTEM, USER
+from agent_cascade.llm.schema import Message, SYSTEM, USER, IMAGE
 from agent_cascade.log import logger
+from agent_cascade.utils.utils import get_basename_from_url
 
 
 if TYPE_CHECKING:
@@ -230,6 +231,9 @@ class AgentLifecycleManager:
         Scans caller's conversation for images and includes them as multimodal content
         if referenced in the task text or present in the last user message.
         
+        Matches main AC branch formatting: always wraps context and task with labeled sections,
+        adds caller prefix to context section, and includes a closing instruction.
+        
         Args:
             args: Tool arguments (task, context)
             caller: Parent instance name to scan for images
@@ -239,12 +243,20 @@ class AgentLifecycleManager:
         """
         task_text = args.get('task', '')
         context_text = args.get('context', '')
+        
+        # Match main AC branch formatting behavior
+        caller_prefix = f"This is a message from {caller}."
         if context_text:
-            task_text = f"{context_text}\n\n{task_text}"
+            context_text = f"{caller_prefix}\n{context_text}"
+        else:
+            context_text = caller_prefix
+        
+        task_text = f'Context: {context_text}\n\nTask: {task_text}\n\nPlease help with this task.'
 
         # Item 9: Multimodal image propagation — scan caller's conversation for images
         # referenced in the task text and include them as multimodal content
-        agent_msg_content: list = [{'type': 'text', 'text': task_text}]
+        # Match main AC branch format: single-key dicts
+        agent_msg_content: list = [{'text': task_text}]
         added_to_inst = set()
 
         # Get caller's conversation history to scan for images
@@ -257,18 +269,23 @@ class AgentLifecycleManager:
                     for item in content:
                         item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
                         item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
-                        if item_type == 'image':
+                        if item_type == IMAGE:  # Issue 1 fix: use constant instead of hardcoded string
                             img_url = item_value
-                            seen_images[img_url] = img_url
+                            # Match main AC branch behavior: generate aliases for image references
+                            basename = get_basename_from_url(img_url)  # Issue 2 fix: use utility function
+                            seen_images[basename] = img_url
+                            idx = len([v for k, v in seen_images.items() if not k.startswith("image_")]) - 1
+                            seen_images[f"image_{idx}"] = img_url
 
-        # Include images that are referenced in the task text
+        # Include images that are referenced in the task text (by basename or alias)
         for img_url in seen_images.values():
-            basename = img_url.split('/')[-1].split('?')[0] if '/' in img_url else img_url
+            basename = get_basename_from_url(img_url)  # Issue 2 fix: use utility function
             if basename in task_text and img_url not in added_to_inst:
-                agent_msg_content.append({'type': 'image', 'value': img_url})
+                agent_msg_content.append({IMAGE: img_url})  # Match main AC branch format
                 added_to_inst.add(img_url)
 
         # Also check the last user message for images even if not referenced in text
+        # Note: No tool_name guard needed here since build_task_message() is exclusively called from call_agent path
         if caller_conv:
             last_user_msg = None
             for m in reversed(caller_conv):
@@ -281,10 +298,17 @@ class AgentLifecycleManager:
                     for item in content:
                         item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
                         item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
-                        if item_type == 'image' and item_value not in added_to_inst:
-                            agent_msg_content.append({'type': 'image', 'value': item_value})
+                        if item_type == IMAGE and item_value not in added_to_inst:  # Issue 1 fix: use constant
+                            agent_msg_content.append({IMAGE: item_value})  # Match main AC branch format
                             added_to_inst.add(item_value)
 
+        # Fallback for empty message (match main AC branch behavior)
+        # Note: This is technically dead code since the formatted string above always contains
+        # non-empty text (caller prefix + labels), but kept as a safety net for consistency.
+        if not task_text.strip():
+            task_text = "Please proceed with your task."
+            agent_msg_content[0]['text'] = task_text  # Issue 3 fix: removed redundant guard
+        
         # Use multimodal content list if images found, otherwise plain text
         if len(agent_msg_content) > 1:
             return Message(role=USER, content=agent_msg_content)
