@@ -411,7 +411,7 @@ class AgentPool:
             if parent_instance not in self.children:
                 self.children[parent_instance] = []
             self.children[parent_instance].append(instance_name)
-        self._mark_activity(instance_name)
+        # RECOMMENDED FIX: Removed redundant _mark_activity() call - constructor already sets last_activity=now above
         return instance
 
     def get_instance(self, instance_name: str) -> Optional[AgentInstance]:
@@ -540,6 +540,10 @@ class AgentPool:
             # Bug5 Fix #1: Only set global _stopped_event when explicitly requested
             if set_global_stopped:
                 self._stopped_event.set()  # Global signal for ALL agents
+            
+            # RECOMMENDED FIX: Mark activity before transitioning to TERMINATED for consistency
+            self._mark_activity(instance_name)
+            
             with inst._state_lock:
                 inst._transition(AgentState.TERMINATED)
 
@@ -1804,6 +1808,15 @@ class IdleManager:
         if inst.parent_instance is None:
             return False
 
+        # MAJOR FIX: Read state and last_activity under same lock for consistency (prevents TOCTOU race)
+        with inst._state_lock:
+            state = inst.state
+            last_activity = inst.last_activity
+        
+        # Must NOT be sleeping (waiting for async results)
+        if state == AgentState.SLEEPING:
+            return False
+
         # Must NOT be actively running
         with self.pool._execution._state_lock:
             if any(n == instance_name for n, _depth in self.pool._execution.active_stack):
@@ -1814,7 +1827,7 @@ class IdleManager:
             return False
 
         # Must have exceeded the idle timeout threshold
-        idle_secs = time.monotonic() - inst.last_activity
+        idle_secs = time.monotonic() - last_activity
         if idle_secs < self.pool.settings.idle_timeout_seconds:
             return False
 

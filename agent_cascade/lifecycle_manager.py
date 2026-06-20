@@ -141,6 +141,9 @@ class AgentLifecycleManager:
                 # Update _nest_depth to reflect current call chain depth (Fix #1 improvement)
                 inst._nest_depth = nest_depth
                 
+                # MAJOR FIX: Reset last_activity when reusing instance so idle timer starts from reuse event
+                inst.last_activity = now
+                
                 logger.debug(
                     f"[INSTANCE REUSE] '{instance_name}' ({agent_class}) reusing existing inactive instance. "
                     f"Conversation history will be preserved and extended."

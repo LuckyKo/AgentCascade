@@ -1389,6 +1389,9 @@ def create_app(agents, agent_pool, config=None):
                         # Transition ALL active agents to IDLE state (not just reset)
                         for inst_name, instance in list(agent_pool.instances.items()):
                             try:
+                                # CRITICAL FIX: Mark activity BEFORE transitioning to IDLE so idle timer starts from stop event
+                                agent_pool._mark_activity(inst_name)
+                                
                                 # Read state INSIDE lock to avoid race condition (Reviewer Finding #2)
                                 with instance._state_lock:
                                     current_state = instance.state
@@ -1706,6 +1709,10 @@ def create_app(agents, agent_pool, config=None):
                                 session['generating'] = False
                                 session['generation_id'] += 1
                             agent_pool._stopped_event.set()
+                            
+                            # CRITICAL FIX: Mark activity BEFORE transitioning to IDLE so idle timer starts from stop event
+                            agent_pool._mark_activity(instance_name)
+                            
                             with inst._state_lock:
                                 current_state = inst.state
                                 if current_state in ACTIVE_STATES:

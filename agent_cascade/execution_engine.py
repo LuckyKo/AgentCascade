@@ -819,15 +819,11 @@ class ExecutionEngine:
             
             with instance._state_lock:
                 current_state = instance.state
-                if current_state == AgentState.RUNNING:
+                if current_state in (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING):
+                    # Mark activity at task completion so idle timer starts from when agent becomes idle, not from creation
+                    self.pool._mark_activity(instance.instance_name)
                     instance._transition(AgentState.IDLE)
-                    logger.debug("EXIT - %s RUNNING→IDLE", instance.instance_name)
-                elif current_state == AgentState.SLEEPING:
-                    instance._transition(AgentState.IDLE)
-                    logger.debug("EXIT - %s SLEEPING→IDLE", instance.instance_name)
-                elif current_state == AgentState.COMPLETING:
-                    instance._transition(AgentState.IDLE)
-                    logger.debug("EXIT - %s COMPLETING→IDLE", instance.instance_name)
+                    logger.debug("EXIT - %s %s→IDLE", instance.instance_name, current_state.name)
                 elif current_state == AgentState.TERMINATED:
                     logger.debug("EXIT - %s already TERMINATED", instance.instance_name)
                 else:
@@ -2213,6 +2209,8 @@ class ExecutionEngine:
         
         with instance._state_lock:
             if instance.state == AgentState.RUNNING:
+                # Mark activity before transitioning to SLEEPING so idle timer is updated
+                self.pool._mark_activity(instance.instance_name)
                 instance._transition(AgentState.SLEEPING)
                 instance.sleeping_since = time.monotonic()
                 instance._last_wakeup_log = time.monotonic()
