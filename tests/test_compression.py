@@ -220,44 +220,54 @@ class TestComputeDiscardCount:
 # ──────────────────────────────────────────────
 
 class TestBuildMarkerMessage:
-    """Test marker message construction."""
+    """Test marker message construction.
+
+    Current signature: build_marker_message(summary_text, fraction)
+    where fraction is a float (e.g., 0.5 for 50%).
+    """
 
     def test_returns_message_object(self):
         """build_marker_message returns a Message with role=USER."""
-        msg = build_marker_message("test summary", 5, 10)
+        msg = build_marker_message("test summary", 0.5)
         assert isinstance(msg, Message)
         assert msg.role == USER
 
     def test_contains_compression_marker(self):
         """Marker message content starts with COMPRESSION_MARKER."""
-        msg = build_marker_message("test summary", 5, 10)
+        msg = build_marker_message("test summary", 0.6)
         assert msg.content.startswith(COMPRESSION_MARKER)
 
     def test_contains_summary_text(self):
         """Marker message includes the raw summary text."""
         summary = "The agent was building a web app"
-        msg = build_marker_message(summary, 0, 20)
+        msg = build_marker_message(summary, 0.5)
         assert summary in msg.content
 
-    def test_contains_message_range(self):
-        """Marker message includes the range of compressed messages."""
-        msg = build_marker_message("summary", 5, 15)
-        assert "[SYSTEM]: Compressed messages [5-15]" in msg.content
+    def test_contains_fraction_header(self):
+        """Marker message includes the compression fraction in the header."""
+        msg = build_marker_message("summary", 0.75)
+        assert "75% of history summarized" in msg.content
 
-    def test_single_message_compression(self):
-        """Single message compression uses same start and end index."""
-        msg = build_marker_message("summary", 3, 3)
-        assert "[SYSTEM]: Compressed messages [3-3]" in msg.content
+    def test_small_fraction_rounds_correctly(self):
+        """Fraction is converted to integer percent without decimals."""
+        msg = build_marker_message("summary", 0.33)
+        assert "33% of history summarized" in msg.content
 
     def test_full_template_format(self):
         """Marker message matches the expected template structure."""
-        msg = build_marker_message("Test summary", 5, 10)
-        assert "--- CONTEXT COMPRESSED ---\n[SYSTEM]: Compressed messages [5-10]\n<context_summary>\nTest summary\n</context_summary>" in msg.content
+        summary = "Test summary"
+        msg = build_marker_message(summary, 0.5)
+        assert "--- CONTEXT COMPRESSED (50% of history summarized) ---" in msg.content
+        assert "<context_summary>" in msg.content
+        assert "</context_summary>" in msg.content
+        assert summary in msg.content
 
-    def test_raises_on_invalid_range(self):
-        """build_marker_message raises ValueError when start > end."""
-        with pytest.raises(ValueError, match="start.*end"):
-            build_marker_message("summary", 10, 5)
+    def test_invalid_fraction_is_handled(self):
+        """Fraction > 1.0 produces a percentage > 100% (no ValueError, just unusual output)."""
+        # The function doesn't validate fraction — it just formats it as a percentage.
+        # A fraction of 2.0 would produce "200% of history summarized".
+        msg = build_marker_message("summary", 2.0)
+        assert "200% of history summarized" in msg.content
 
 
 # ──────────────────────────────────────────────

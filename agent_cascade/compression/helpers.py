@@ -1,10 +1,7 @@
 """Helper functions for the compression system."""
 import copy
 from typing import Any
-from agent_cascade.prompts.dna import (
-    COMPRESSION_BASELINE_TEMPLATE,
-    COMPRESSION_NOTICE_TEMPLATE,
-)
+from agent_cascade.prompts.dna import COMPRESSION_BASELINE_TEMPLATE
 from agent_cascade.llm.schema import USER, ASSISTANT, FUNCTION, Message
 from agent_cascade.utils.utils import extract_text_from_message
 
