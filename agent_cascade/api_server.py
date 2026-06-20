@@ -2021,17 +2021,23 @@ def create_app(agents, agent_pool, config=None):
                                             caller=session.get('session_name', 'Orchestrator')
                                         )
 
-                                        # Configure with UI settings (preserve NON_LLM_KEYS filtering from existing code)
-                                        NON_LLM_KEYS = (
-                                            'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
-                                            'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-                                            'read_file_limit', 'grep_char_limit', 'grep_spillover', 'shell_char_limit', 'code_char_limit',
-                                            'disabled_tools',
-                                            # Exclude endpoint-identifying keys to let the agent use its own assigned API Router config
-                                            'model', 'model_server', 'api_base', 'base_url', 'api_key', 'model_type'
-                                        )
+                                        # Configure with UI settings using centralized constants and utilities.
+                                        # Note: propagate_settings() already ran inside _create_system_agent(), but we
+                                        # intentionally replace its disabled_tools result with ui_cfg + defense-in-depth
+                                        # defaults to ensure auto-launched agents never get more tools than intended.
+                                        from agent_cascade.constants import NON_LLM_KEYS, DEFAULT_SECURITY_DISABLED_TOOLS
+                                        from agent_cascade.utils import merge_disabled_tools_for_auto_agent
+                                        
                                         ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
                                         llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
+                                        # Add disabled_tools back — needed for tool filtering but must not leak to LLM API
+                                        if 'disabled_tools' in ui_cfg:
+                                            llm_safe_cfg['disabled_tools'] = ui_cfg['disabled_tools']
+                                        # Defense-in-depth: disable user-approval tools for auto-launched Security agent
+                                        existing_disabled = llm_safe_cfg.get('disabled_tools', [])
+                                        llm_safe_cfg['disabled_tools'] = merge_disabled_tools_for_auto_agent(
+                                            existing_disabled, 'Security', DEFAULT_SECURITY_DISABLED_TOOLS
+                                        )
                                     
                                         template = agent_pool.get_template('Security')  # Template lookup by CLASS name (NOT instance name)
                                         if template and hasattr(template, 'llm'):

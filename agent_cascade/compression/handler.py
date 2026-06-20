@@ -10,7 +10,6 @@ Design Pattern: Lazy Initialization (same as AgentLifecycleManager)
 - self.engine property raises RuntimeError if accessed before initialization
 """
 
-import asyncio
 import json
 import time
 from typing import TYPE_CHECKING, Any, List, Optional
@@ -115,71 +114,7 @@ class CompressionHandler:
         
         return False
     
-    def _broadcast_post_compression_state(
-        self,
-        instance: AgentInstance
-    ) -> None:
-        """Broadcast updated state to UI after compression completes.
-        
-        This ensures the agent's tab refreshes with new token/context info
-        immediately after forced or tool-initiated compression.
-        
-        Args:
-            instance: The agent instance that was compressed
-            
-        Note:
-            Uses pool._ws_send_queue and pool._ws_loop which are set by
-            run_agent_thread_unified to allow background thread WebSocket pushes.
-        """
-        inst_name = instance.instance_name
-        
-        # Get WebSocket queue and loop from pool (set by run_agent_thread_unified)
-        send_queue = getattr(self.pool, '_ws_send_queue', None)
-        ws_loop = getattr(self.pool, '_ws_loop', None)
-        
-        if not send_queue or not ws_loop:
-            logger.warning(
-                f"Post-compression state broadcast skipped for {inst_name}: "
-                f"WebSocket queue/loop not available (may be running outside main thread)"
-            )
-            return
-        
-        try:
-            # Import here to avoid circular imports at module level
-            from agent_cascade.api_integration import build_stream_update_from_pool, _put_stream_update
-            
-            # Build lightweight stream update with fresh token stats
-            stream_update = build_stream_update_from_pool(
-                pool=self.pool,
-                instance_name=inst_name,
-                responses=None,  # No partial responses during compression
-                force_full=False,  # Only compressed instance needs updating; periodic push catches others
-            )
-            
-            if stream_update is not None:
-                event = {
-                    'type': 'stream_update',
-                    **stream_update,
-                }
-                
-                # Push to WebSocket queue from background thread using helper
-                future = asyncio.run_coroutine_threadsafe(
-                    _put_stream_update(send_queue, event),
-                    ws_loop,
-                )
-                # Wait for result with timeout to catch exceptions (don't silently swallow)
-                try:
-                    future.result(timeout=1.0)
-                except Exception as e:
-                    logger.warning(f"Post-compression broadcast failed for {inst_name}: {e}")
-                    return  # Early exit since we already logged the error
-                
-                logger.debug(f"Post-compression state broadcast sent for {inst_name}")
-            
-        except Exception as e:
-            # Non-critical error — log and continue
-            logger.warning(f"Post-compression state broadcast failed for {inst_name} (non-critical): {e}")
-
+   
     def check_overfeeding(
         self,
         instance: AgentInstance,
@@ -380,10 +315,6 @@ class CompressionHandler:
                                       f"but not synced to logger history.")
                     # Set cooldown flag to suppress loop detection on next turn after compression
                     instance._suppress_loop_detection_next_turn = True
-                    
-                    # Broadcast updated state to UI AFTER all mutations complete (Fix: Tab Refresh After Compression)
-                    # This ensures notification injection, pool validation/recovery, and logger sync are all included
-                    self._broadcast_post_compression_state(instance)
             
             else:  # Compression failed or returned error
                 logger.error(f"Forced compression failed for {inst_name}: {result.error}")
@@ -489,11 +420,6 @@ class CompressionHandler:
                     )
             except Exception as e:
                 logger.error(f"Logger sync after compress_context tool FAILED for '{target_agent_name}': {e}")
-
-            # Broadcast updated state to UI so tab refreshes with new token count (Fix: Tab Refresh After Compression)
-            target_instance = self.pool.get_instance(target_agent_name)
-            if target_instance:
-                self._broadcast_post_compression_state(target_instance)
 
             return (f"Compression successful. Discarded {result.messages_discarded} messages. "
                     f"Tail count: {result.tail_count}.")
@@ -828,9 +754,6 @@ class CompressionHandler:
                     llm_messages.append(notif_msg)
                     if response is not None:
                         response.append(notif_msg)
-            
-            # Broadcast updated state to UI so tab refreshes with new token count (Fix: Tab Refresh After Compression)
-            self._broadcast_post_compression_state(instance)
             
             return True
             

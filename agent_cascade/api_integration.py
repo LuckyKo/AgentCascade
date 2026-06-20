@@ -1270,12 +1270,7 @@ def _apply_ui_config(
     # NOTE: max_turns appears in both the ints list above (for sanitization) AND
     # here in NON_LLM_KEYS (to prevent it leaking to the LLM). This is intentional —
     # we sanitize it as an int but then strip it from LLM config; it goes to instance.max_turns.
-    NON_LLM_KEYS = (
-        'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue',
-        'max_turns', 'max_parallel_agents', 'mcpServers', 'work_access_folders',
-        'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
-        'shell_char_limit', 'code_char_limit', 'disabled_tools'
-    )
+    from agent_cascade.constants import NON_LLM_KEYS
     llm_safe = {k: v for k, v in sanitized.items() if k not in NON_LLM_KEYS}
 
     # Apply to instance override using deepcopy of generate_cfg, then store on instance.

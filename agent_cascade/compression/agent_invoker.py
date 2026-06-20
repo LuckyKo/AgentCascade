@@ -155,14 +155,13 @@ def invoke_compression_agent(
             caller=caller_name,
         )
 
-        # Configure Compressor settings (similar to Security agent pattern)
-        NON_LLM_KEYS = (
-            'max_auto_rollbacks', 'auto_rollback_on_loop', 'auto_continue', 
-            'max_turns', 'mcpServers', 'work_access_folders', 'seed',
-            'read_file_limit', 'grep_char_limit', 'grep_spillover', 'shell_char_limit', 'code_char_limit',
-            'disabled_tools',
-            'model', 'model_server', 'api_base', 'base_url', 'api_key', 'model_type'
-        )
+        # Configure Compressor settings using centralized constants and utilities.
+        # Note: propagate_settings() already ran inside _create_system_agent(), but we intentionally replace its
+        # disabled_tools result with ui_cfg + defense-in-depth defaults to ensure auto-launched agents never get
+        # more tools than intended. If session is unavailable, defaults are still applied for safety.
+        from agent_cascade.constants import NON_LLM_KEYS, DEFAULT_COMPRESSOR_DISABLED_TOOLS
+        from agent_cascade.utils import merge_disabled_tools_for_auto_agent
+        
         if hasattr(agent_pool, 'operation_manager'):
             session = getattr(agent_pool.operation_manager, '_current_session', None)
             if session:
@@ -171,8 +170,28 @@ def invoke_compression_agent(
                     cfg = (template.llm.generate_cfg or {}).copy()
                     ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
                     llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
+                    # Add disabled_tools back — needed for tool filtering but must not leak to LLM API
+                    if 'disabled_tools' in ui_cfg:
+                        llm_safe_cfg['disabled_tools'] = ui_cfg['disabled_tools']
+                    # Defense-in-depth: disable user-approval tools for auto-launched Compressor agent
+                    existing_disabled = llm_safe_cfg.get('disabled_tools', [])
+                    llm_safe_cfg['disabled_tools'] = merge_disabled_tools_for_auto_agent(
+                        existing_disabled, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS
+                    )
                     cfg.update(llm_safe_cfg)
                     comp_instance._generate_cfg_override = cfg
+        else:
+            # Defense-in-depth: even without operation_manager/session, apply defaults
+            template = agent_pool.get_template('Compressor')
+            if template and hasattr(template, 'llm'):
+                cfg = (template.llm.generate_cfg or {}).copy()
+                cfg['disabled_tools'] = sorted(DEFAULT_COMPRESSOR_DISABLED_TOOLS)  # Sort for deterministic ordering
+                comp_instance._generate_cfg_override = cfg
+            else:
+                logger.warning(
+                    "[COMPRESSION] Could not apply defense-in-depth disabled_tools for Compressor — "
+                    "template not available or missing llm attribute. Agent may have unrestricted tools."
+                )
         
         # Execute via engine.run() — handles LLM call, retries, streaming
         final_msgs = []

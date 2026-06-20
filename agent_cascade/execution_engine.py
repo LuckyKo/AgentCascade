@@ -747,7 +747,7 @@ class ExecutionEngine:
 
                 # ── Phase 4: Response Processing and Tool Execution ─────────
                 if self._process_response(instance, turn_output, messages, llm_messages, response):
-                    logger.debug("tool used - %s looping", instance.instance_name)
+                    # logger.debug("tool used - %s looping", instance.instance_name)
                     yield response
                     continue
 
