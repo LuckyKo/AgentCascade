@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 from enum import Enum, auto
 
+from agent_cascade.constants import DEFAULT_SECURITY_DISABLED_TOOLS, DEFAULT_COMPRESSOR_DISABLED_TOOLS
 from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
 )
@@ -90,22 +91,30 @@ def _get_active_functions_from_template(template, instance=None) -> list:
         instance: Optional AgentInstance — if provided, its _generate_cfg_override
                   takes precedence over the template config for disabled_tools.
     """
+    # DEBUG: Log entry point with instance info
+    inst_name = getattr(instance, 'instance_name', 'UNKNOWN') if instance else 'NO_INSTANCE'
+    agent_class = getattr(template, 'agent_type', getattr(template, 'name', 'UNKNOWN'))
+    logger.info(f"[{inst_name}] _get_active_functions_from_template ENTER: agent_class={agent_class}")
+    
     # Read disabled_tools from instance override first, then fall back to template
     if instance is not None and instance._generate_cfg_override is not None:
         raw_disabled = instance._generate_cfg_override.get('disabled_tools')
+        logger.info(f"[{inst_name}] _get_active_functions_from_template: instance._generate_cfg_override EXISTS")
+        logger.info(f"[{inst_name}] _get_active_functions_from_template: override keys={list(instance._generate_cfg_override.keys())}")
         if raw_disabled is None:
             # Override exists but lacks 'disabled_tools' key — fall back to template (mirrors _build_resources_block)
             llm = getattr(template, 'llm', None)
             raw_disabled = getattr(llm, 'generate_cfg', {}).get('disabled_tools', [])
-            logger.debug(f"[{instance.instance_name}] _get_active_functions_from_template: falling back to template disabled_tools")
+            logger.info(f"[{inst_name}] _get_active_functions_from_template: falling back to template disabled_tools={raw_disabled}")
         elif not raw_disabled:  # Empty list or empty dict
-            logger.debug(f"[{instance.instance_name}] _get_active_functions_from_template: disabled_tools in override is empty")
+            logger.info(f"[{inst_name}] _get_active_functions_from_template: disabled_tools in override is EMPTY")
         else:
-            logger.debug(f"[{instance.instance_name}] _get_active_functions_from_template: found disabled_tools, type={type(raw_disabled).__name__}")
+            logger.info(f"[{inst_name}] _get_active_functions_from_template: found disabled_tools, type={type(raw_disabled).__name__}, value={raw_disabled}")
     else:
         # Defensive: template.llm may be None for templates without LLM config
         llm = getattr(template, 'llm', None)
         raw_disabled = getattr(llm, 'generate_cfg', {}).get('disabled_tools', [])
+        logger.info(f"[{inst_name}] _get_active_functions_from_template: NO instance override, using template disabled_tools={raw_disabled}")
 
     # Handle both dict format (per-agent: {"Maine": ["tool1"]}) and flat list format
     if isinstance(raw_disabled, dict):
@@ -124,10 +133,43 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     else:
         disabled = set()
 
+    # ── Agent-class-based default disabled tools (defense-in-depth) ──────────────
+    # Regardless of whether upstream code set _generate_cfg_override, always apply
+    # the agent-type-specific defaults.  This is the ultimate safety net: even if
+    # every other layer fails, Security and Compressor agents will never get more
+    # tools than intended.
+    if agent_class == 'Security':
+        disabled = disabled | DEFAULT_SECURITY_DISABLED_TOOLS
+        logger.info(f"[{inst_name}] Applied Security-agent defaults: added {len(DEFAULT_SECURITY_DISABLED_TOOLS)} tools to disabled set")
+    elif agent_class == 'Compressor':
+        disabled = disabled | DEFAULT_COMPRESSOR_DISABLED_TOOLS
+        logger.info(f"[{inst_name}] Applied Compressor-agent defaults: added {len(DEFAULT_COMPRESSOR_DISABLED_TOOLS)} tools to disabled set")
+
+    # DEBUG: Log the final disabled set before filtering
+    logger.info(f"[{inst_name}] _get_active_functions_from_template: FINAL disabled_tools={disabled}")
+
     # Defensive: template.function_map may be None for templates without tools
     func_map = getattr(template, 'function_map', None)
     if not func_map:
+        logger.info(f"[{inst_name}] _get_active_functions_from_template: No function_map, returning empty list")
         return []
+    
+    # Build the active functions list and log what's being filtered out
+    all_tool_names = set(func_map.keys())
+    filtered_out = all_tool_names & disabled
+    active_tool_names = all_tool_names - disabled
+    
+    logger.info(f"[{inst_name}] _get_active_functions_from_template: All tools={sorted(all_tool_names)}")
+    logger.info(f"[{inst_name}] _get_active_functions_from_template: FILTERED OUT={sorted(filtered_out)}")
+    logger.info(f"[{inst_name}] _get_active_functions_from_template: ACTIVE TOOLS={sorted(active_tool_names)}")
+    
+    # Check specifically for shell_cmd
+    if 'shell_cmd' in all_tool_names:
+        if 'shell_cmd' in disabled:
+            logger.info(f"[{inst_name}] ✓ shell_cmd IS DISABLED (will be filtered out)")
+        else:
+            logger.warning(f"[{inst_name}] ⚠ shell_cmd is NOT in disabled set - WILL BE AVAILABLE TO AGENT!")
+    
     return [func.function for name, func in func_map.items() if name not in disabled]
 
 
@@ -1500,6 +1542,13 @@ class ExecutionEngine:
 
         # Get active functions (tool schemas) from template
         active_functions = _get_active_functions_from_template(template, instance)
+        
+        # DEBUG: Log what's being sent to LLM
+        active_tool_names_in_schemas = [f.get('name', 'UNKNOWN') for f in active_functions] if active_functions else []
+        logger.info(f"[{instance.instance_name}] _call_llm_with_injection: Sending {len(active_functions)} function schemas to LLM")
+        logger.info(f"[{instance.instance_name}] _call_llm_with_injection: Active tool names={sorted(active_tool_names_in_schemas)}")
+        if 'shell_cmd' in active_tool_names_in_schemas:
+            logger.warning(f"[{instance.instance_name}] ⚠⚠ shell_cmd IS IN ACTIVE_FUNCTIONS sent to LLM! ⚠⚠")
         
         # Delegate to extracted method - Phase 3.6
         yield from self._execute_llm_call_with_retry(instance, llm_messages, template, active_functions)
