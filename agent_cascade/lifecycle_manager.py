@@ -7,6 +7,7 @@ Extracted from ExecutionEngine to reduce God Object complexity.
 See DESIGN_REWRITE.md §4.1 for design rationale.
 """
 
+import copy
 import datetime
 import time
 from typing import Tuple, Optional, TYPE_CHECKING
@@ -508,7 +509,7 @@ class AgentLifecycleManager:
                 # Propagate disabled_tools — merge with any existing instance override (not overwrite)
                 caller_disabled_tools = llm_cfg.get('disabled_tools')
                 if caller_disabled_tools:
-                    cfg = dict(instance._generate_cfg_override or {}) if instance._generate_cfg_override else (target_template.llm.generate_cfg or {}).copy()
+                    cfg = copy.deepcopy(instance._generate_cfg_override) if instance._generate_cfg_override else (target_template.llm.generate_cfg or {}).copy()
                     existing_disabled = cfg.get('disabled_tools', [])
                     if isinstance(existing_disabled, list):
                         # Merge: combine existing with caller's disabled tools (deduplicated)
@@ -516,5 +517,35 @@ class AgentLifecycleManager:
                     else:
                         cfg['disabled_tools'] = list(caller_disabled_tools)
                     instance._generate_cfg_override = cfg
+                
+                # Defense-in-depth: For Security and Compressor agents, always ensure default disabled tools are set
+                # This ensures these system agents never get more tools than intended, even if caller has no disabled_tools
+                from agent_cascade.constants import DEFAULT_SECURITY_DISABLED_TOOLS, DEFAULT_COMPRESSOR_DISABLED_TOOLS
+                if agent_class in ('Security', 'Compressor'):
+                    defaults = DEFAULT_COMPRESSOR_DISABLED_TOOLS if agent_class == 'Compressor' else DEFAULT_SECURITY_DISABLED_TOOLS
+                    # Get current cfg (may have been set by max_input_tokens or caller_disabled_tools above)
+                    current_cfg = copy.deepcopy(instance._generate_cfg_override) if instance._generate_cfg_override else {}
+                    existing_disabled_in_cfg = current_cfg.get('disabled_tools')
+                    
+                    # Merge with defaults - handle both dict and list formats correctly
+                    if existing_disabled_in_cfg:
+                        if isinstance(existing_disabled_in_cfg, dict):
+                            # Dict format: merge defaults into each agent's entry AND add/update the current agent_class entry
+                            for k, v in existing_disabled_in_cfg.items():
+                                if isinstance(v, (list, tuple)):
+                                    existing_disabled_in_cfg[k] = list(set(list(v) + list(defaults)))
+                            # Ensure the current agent class has defaults merged
+                            existing_disabled_in_cfg[agent_class] = list(set(
+                                (existing_disabled_in_cfg.get(agent_class, []) or []) + list(defaults)
+                            ))
+                            current_cfg['disabled_tools'] = existing_disabled_in_cfg
+                        else:
+                            # List format: merge with defaults
+                            current_cfg['disabled_tools'] = list(set(list(existing_disabled_in_cfg) + list(defaults)))
+                    else:
+                        # No existing disabled_tools - set defaults directly (sorted for deterministic ordering)
+                        current_cfg['disabled_tools'] = sorted(defaults)
+                    
+                    instance._generate_cfg_override = current_cfg
         except Exception as e:
             logger.debug(f"Settings propagation from {caller} to instance failed (non-critical): {e}")

@@ -2042,8 +2042,14 @@ def create_app(agents, agent_pool, config=None):
                                         template = agent_pool.get_template('Security')  # Template lookup by CLASS name (NOT instance name)
                                         if template and hasattr(template, 'llm'):
                                             cfg = (template.llm.generate_cfg or {}).copy()
+                                            logger.debug(f"[SECURITY] Before update - llm_safe_cfg disabled_tools: {llm_safe_cfg.get('disabled_tools', 'MISSING')}")
                                             cfg.update(llm_safe_cfg)
                                             sec_instance._generate_cfg_override = cfg
+                                            logger.info(f"[SECURITY] Set _generate_cfg_override for '{sec_state_key}': disabled_tools={cfg.get('disabled_tools', 'NOT SET')}")
+                                        else:
+                                            logger.warning(f"[SECURITY] Template missing or has no llm attribute for '{sec_state_key}'")
+                                            # Fallback: set disabled_tools directly even without template
+                                            sec_instance._generate_cfg_override = {'disabled_tools': llm_safe_cfg.get('disabled_tools', [])}
 
                                         logger.info(f"[SECURITY] Created AgentInstance '{sec_state_key}' for request {rid}")
                                         # Initialize variables for engine.run() flow
@@ -2098,6 +2104,10 @@ def create_app(agents, agent_pool, config=None):
                                     # Acquire concurrency semaphore for Security checks (prevents unlimited parallelism)
                                     app.security_check_semaphore.acquire()
                                     try:
+                                        # Log instance state before running (debug level to reduce log noise)
+                                        override_disabled = getattr(sec_instance, '_generate_cfg_override', {}).get('disabled_tools', 'NOT SET')
+                                        logger.debug(f"[SECURITY] Before engine.run - sec_instance._generate_cfg_override['disabled_tools']={override_disabled}")
+                                        
                                         # Execute via engine.run() — this handles LLM call, retries, and streaming
                                         for resp in engine.run(sec_instance):
                                             elapsed = time.monotonic() - sec_start_time

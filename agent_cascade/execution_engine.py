@@ -91,12 +91,21 @@ def _get_active_functions_from_template(template, instance=None) -> list:
                   takes precedence over the template config for disabled_tools.
     """
     # Read disabled_tools from instance override first, then fall back to template
-    if instance is not None and instance._generate_cfg_override:
-        raw_disabled = instance._generate_cfg_override.get('disabled_tools', {})
+    if instance is not None and instance._generate_cfg_override is not None:
+        raw_disabled = instance._generate_cfg_override.get('disabled_tools')
+        if raw_disabled is None:
+            # Override exists but lacks 'disabled_tools' key — fall back to template (mirrors _build_resources_block)
+            llm = getattr(template, 'llm', None)
+            raw_disabled = getattr(llm, 'generate_cfg', {}).get('disabled_tools', [])
+            logger.debug(f"[{instance.instance_name}] _get_active_functions_from_template: falling back to template disabled_tools")
+        elif not raw_disabled:  # Empty list or empty dict
+            logger.debug(f"[{instance.instance_name}] _get_active_functions_from_template: disabled_tools in override is empty")
+        else:
+            logger.debug(f"[{instance.instance_name}] _get_active_functions_from_template: found disabled_tools, type={type(raw_disabled).__name__}")
     else:
         # Defensive: template.llm may be None for templates without LLM config
         llm = getattr(template, 'llm', None)
-        raw_disabled = getattr(llm, 'generate_cfg', {}).get('disabled_tools', {})
+        raw_disabled = getattr(llm, 'generate_cfg', {}).get('disabled_tools', [])
 
     # Handle both dict format (per-agent: {"Maine": ["tool1"]}) and flat list format
     if isinstance(raw_disabled, dict):
@@ -274,7 +283,7 @@ def _build_resources_block(pool, template, instance=None) -> str:
     else:
         raw_disabled = getattr(getattr(template, 'llm', None), 'generate_cfg', {}).get('disabled_tools', [])
     if isinstance(raw_disabled, dict):
-        agent_key = getattr(template, 'agent_class', None) or getattr(template, 'name', '')
+        agent_key = getattr(template, 'agent_type', None) or getattr(template, 'name', '')
         slug = agent_key.lower().replace(' ', '_') if agent_key else ''
         disabled_tools = list(set(
             raw_disabled.get(agent_key, []) + raw_disabled.get(slug, [])
