@@ -422,9 +422,8 @@ def build_state_from_pool(
         instance_name: Name of the primary instance (main agent) for this state.
         responses: Optional current partial response messages to include.
         generating: Whether the agent is currently generating.
-        streaming: Controls tail optimization for large conversations. When False (default),
-            all messages are included including system message at index 0. When True, only
-            the last 10% of messages are sent if agent is RUNNING with >50 messages.
+        streaming: Deprecated — previously controlled tail optimization for large conversations.
+            Now all messages are always included regardless of this parameter.
 
     Returns:
         Dictionary with full state snapshot, or None if instance not found.
@@ -1050,9 +1049,8 @@ def _serialize_instance(
     during streaming) is appended to the result dict along with token stats
     and max_tokens — matching the legacy API server path.
 
-    Streaming optimisation: during active generation for large conversations (>30
-    messages), only a proportional tail (10% of messages, minimum 5) is sent to avoid
-    O(N²) serialisation on every ~150ms tick. Smaller conversations are sent in full.
+    All messages are always sent — no tail optimization applied. The client merges
+    partials correctly so there is no risk of losing early context during streaming.
     
     Streaming UI Content Update Fix (Step 3): When streaming_responses is provided, 
     append partial LLM content after persisted messages with fingerprint-based dedup.
@@ -1092,20 +1090,11 @@ def _serialize_instance(
     # Previously, the key only included message count, making it blind to token-by-token growth.
     stream_content_len = _streaming_content_length(stream_responses)
 
-    if streaming and current_state == AgentState.RUNNING and len(msgs) > 50:
-        # During active generation only send the tail for large conversations (>50 messages) to avoid
-        # O(N²) serialisation on every ~150ms tick. Tail size is proportional (10% of
-        # messages, minimum 5) to reduce sync gaps while still reducing bandwidth.
-        # Smaller conversations are sent in full — dropping early context during
-        # mid-conversation streaming would break incremental rendering.
-        tail_size = max(5, len(msgs) // 10)  # Send at least 10% or 5 messages as tail
-        start_idx = max(0, len(msgs) - tail_size)
-        serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs[-tail_size:], start_idx)]
-        result['is_partial'] = True
-    else:
-        start_idx = 0
-        serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
-        result['is_partial'] = False
+    # Always send all messages — no tail optimization. The client properly merges partials,
+    # and removing the tail cut avoids any risk of losing early context during streaming.
+    start_idx = 0
+    serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
+    result['is_partial'] = False
 
     # ── Streaming UI Content Update Fix: Append partial LLM content ────────
     num_streaming = 0
