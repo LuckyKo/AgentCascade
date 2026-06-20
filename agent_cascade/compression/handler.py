@@ -138,7 +138,7 @@ class CompressionHandler:
         ws_loop = getattr(self.pool, '_ws_loop', None)
         
         if not send_queue or not ws_loop:
-            logger.debug(
+            logger.warning(
                 f"Post-compression state broadcast skipped for {inst_name}: "
                 f"WebSocket queue/loop not available (may be running outside main thread)"
             )
@@ -146,14 +146,14 @@ class CompressionHandler:
         
         try:
             # Import here to avoid circular imports at module level
-            from agent_cascade.api_integration import build_stream_update_from_pool
+            from agent_cascade.api_integration import build_stream_update_from_pool, _put_stream_update
             
             # Build lightweight stream update with fresh token stats
             stream_update = build_stream_update_from_pool(
                 pool=self.pool,
                 instance_name=inst_name,
                 responses=None,  # No partial responses during compression
-                force_full=True,  # Force full serialization to ensure UI gets complete state
+                force_full=False,  # Only compressed instance needs updating; periodic push catches others
             )
             
             if stream_update is not None:
@@ -162,16 +162,23 @@ class CompressionHandler:
                     **stream_update,
                 }
                 
-                # Push to WebSocket queue from background thread
-                asyncio.run_coroutine_threadsafe(
-                    send_queue.put(event),
+                # Push to WebSocket queue from background thread using helper
+                future = asyncio.run_coroutine_threadsafe(
+                    _put_stream_update(send_queue, event),
                     ws_loop,
                 )
+                # Wait for result with timeout to catch exceptions (don't silently swallow)
+                try:
+                    future.result(timeout=1.0)
+                except Exception as e:
+                    logger.warning(f"Post-compression broadcast failed for {inst_name}: {e}")
+                    return  # Early exit since we already logged the error
+                
                 logger.debug(f"Post-compression state broadcast sent for {inst_name}")
             
         except Exception as e:
             # Non-critical error — log and continue
-            logger.debug(f"Post-compression state broadcast failed for {inst_name} (non-critical): {e}")
+            logger.warning(f"Post-compression state broadcast failed for {inst_name} (non-critical): {e}")
 
     def check_overfeeding(
         self,
@@ -273,9 +280,6 @@ class CompressionHandler:
                         if isinstance(c, str) and '<context_summary>' in c:
                             instance.latest_marker_index = idx
 
-                    # Broadcast updated state to UI so tab refreshes with new token count (Fix: Tab Refresh After Compression)
-                    self._broadcast_post_compression_state(instance)
-
                     # Inject system notification as a USER message into the pool so the agent sees it.
                     # This ensures the notification persists across turn loop iterations and is visible
                     # to the LLM on the next call (not just appended to local llm_messages which gets lost).
@@ -376,6 +380,10 @@ class CompressionHandler:
                                       f"but not synced to logger history.")
                     # Set cooldown flag to suppress loop detection on next turn after compression
                     instance._suppress_loop_detection_next_turn = True
+                    
+                    # Broadcast updated state to UI AFTER all mutations complete (Fix: Tab Refresh After Compression)
+                    # This ensures notification injection, pool validation/recovery, and logger sync are all included
+                    self._broadcast_post_compression_state(instance)
             
             else:  # Compression failed or returned error
                 logger.error(f"Forced compression failed for {inst_name}: {result.error}")
