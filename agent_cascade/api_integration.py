@@ -211,7 +211,7 @@ def create_main_agent_instance(
             conversation=[sys_msg],
         )
     """
-    if conversation is None:
+    if not conversation:  # Changed from "is None" to catch empty list edge case too
         # Build initial conversation with system message
         sys_msg = Message(role=SYSTEM, content=system_message_content)
         conversation = [sys_msg]
@@ -223,6 +223,24 @@ def create_main_agent_instance(
         max_turns=max_turns,
         conversation=conversation,
     )
+
+    # FIX: Log initial messages to JSONL so index-based sync in _log_messages_to_jsonl() works correctly.
+    # Load existing history from file first (for session restore) so we don't double-log.
+    # Only log initial messages if the history was empty (new session).
+    try:
+        log_inst = pool.get_logger(instance_name, 'orchestrator')
+        # Load existing history from file so in-memory count matches disk state
+        log_inst.load_history_from_file()
+        # Only log initial messages for new sessions (no existing history loaded)
+        if not log_inst.data.get("history"):
+            for msg in conversation:
+                if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
+                    try:
+                        log_inst.log_message(msg)
+                    except Exception as e:
+                        logger.warning(f"Failed to log message for {instance_name}: {e}")
+    except Exception as e:
+        logger.warning(f"Logging initial messages for {instance_name} failed: {e}")
 
     # Populate instance_state for the main instance so get_session_history() can read it.
     # Register under the actual instance name — no legacy 'root' key needed post-unification.

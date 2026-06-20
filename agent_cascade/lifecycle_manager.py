@@ -7,6 +7,7 @@ Extracted from ExecutionEngine to reduce God Object complexity.
 See DESIGN_REWRITE.md §4.1 for design rationale.
 """
 
+import datetime
 import time
 from typing import Tuple, Optional, TYPE_CHECKING
 
@@ -357,7 +358,11 @@ class AgentLifecycleManager:
                             try:
                                 sys_msg.timestamp = old_sys_msg.timestamp
                             except AttributeError:
-                                pass  # Fallback: _format_message() will generate a new timestamp
+                                pass  # Fallback: generate new timestamp below
+                        
+                        # FIX #3: Ensure sys_msg.timestamp is ALWAYS set (never None)
+                        if not getattr(sys_msg, 'timestamp', None):
+                            sys_msg.timestamp = datetime.datetime.now().isoformat()
                         
                         # Update the existing system message with new template content
                         instance.conversation[0] = sys_msg

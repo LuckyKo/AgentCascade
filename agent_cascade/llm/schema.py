@@ -156,7 +156,8 @@ class Message(BaseModelCompatibleDict):
                          reasoning_content=reasoning_content,
                          name=name,
                          function_call=function_call,
-                         extra=extra)
+                         extra=extra,
+                         **kwargs)
 
     def __repr__(self):
         return f'Message({self.model_dump()})'

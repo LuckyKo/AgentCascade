@@ -82,8 +82,10 @@ class AgentInstanceLogger:
         if hasattr(message, 'model_dump'):  # For Pydantic-based Message
             msg_dict = message.model_dump()
 
-            # If it already has a timestamp (from a prior call to this method), reuse it.
-            ts = getattr(message, 'timestamp', None)
+            # If it already has a timestamp (from a prior call or from constructor), reuse it.
+            # Check both the dict and getattr as fallback — Pydantic extra='allow' may store
+            # dynamic fields in model_dump but not always as direct attributes.
+            ts = msg_dict.get('timestamp') or getattr(message, 'timestamp', None)
             if ts:
                 msg_dict['timestamp'] = ts
             else:
@@ -182,6 +184,44 @@ class AgentInstanceLogger:
         formatted_msg = self._format_message(message)
         self.data["history"].append(formatted_msg)
         self._append_line(formatted_msg)
+
+    # ── History loading from disk ─────────────────────────────────────────
+
+    def load_history_from_file(self):
+        """Load existing message history from the JSONL file into in-memory data["history"].
+        
+        Called during session restore to ensure the logger's in-memory state matches
+        what's already persisted on disk. This prevents double-logging when initial
+        messages are re-added to the conversation.
+        
+        The JSONL format is:
+          - Line 1: metadata dict (has "metadata" key) — skip this
+          - Lines 2+: message dicts — load these into data["history"]
+        """
+        # FIX #1: Clear history before loading to prevent duplication if called twice
+        self.data["history"] = []
+        
+        if not os.path.exists(self.log_path):
+            return
+        
+        try:
+            with open(self.log_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            for line in lines[1:]:  # Skip metadata line
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg_dict = json.loads(line)
+                    # FIX #2: Ensure msg_dict is actually a dict before checking keys
+                    if isinstance(msg_dict, dict) and "metadata" not in msg_dict:  # Only load message dicts, skip metadata lines and non-dict JSON values
+                        self.data["history"].append(msg_dict)
+                except json.JSONDecodeError:
+                    continue  # Skip malformed lines
+        except OSError as e:
+            logger.debug(f"Could not read log file {self.log_path}: {e}")
+            pass  # File disappeared or unreadable — stay with empty history
 
     # ── Compression marker insertion ──────────────────────────────────────
 
