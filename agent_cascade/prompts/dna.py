@@ -41,15 +41,12 @@ COMPRESSION_PROMPT = (
 
 COMPRESSION_BASELINE_TEMPLATE = (
     COMPRESSION_MARKER + " ({header}) ---\n"
-    "**[SYSTEM NOTICE]**: Context compression was applied. {compression_notice}\n"
-    "The following is a summary of the conversation context that was removed to save space.\n"
-    "Summary of previous context:\n"
     "<context_summary>\n"
     "{summary}\n"
     "</context_summary>"
 )
 
-COMPRESSION_NOTICE_TEMPLATE = "A portion of earlier conversation history ({fraction}%) has been summarized to preserve context space. The key information from those messages is captured below."
+COMPRESSION_NOTICE_TEMPLATE = ""  # Unused — header is now minimal
 
 # --- Security Advisor ---
 SECURITY_ADVISOR_PROMPT = (

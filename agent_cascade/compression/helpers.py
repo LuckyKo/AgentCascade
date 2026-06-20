@@ -49,12 +49,10 @@ def build_marker_message(summary_text, fraction):
     """
     pct = int(fraction * 100)
     header = f"{pct}% of history summarized"
-    compression_notice = COMPRESSION_NOTICE_TEMPLATE.format(fraction=pct)
 
     content = COMPRESSION_BASELINE_TEMPLATE.format(
         header=header,
         summary=summary_text,
-        compression_notice=compression_notice,
     )
     return Message(role=USER, content=str(content))
 
