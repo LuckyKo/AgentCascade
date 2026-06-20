@@ -315,6 +315,9 @@ class CompressionHandler:
                                       f"but not synced to logger history.")
                     # Set cooldown flag to suppress loop detection on next turn after compression
                     instance._suppress_loop_detection_next_turn = True
+                    
+                    # Force immediate stream update via existing periodic push mechanism (avoids duplicate broadcasts)
+                    self.engine.stream_publisher.push_periodic_update(instance.parent_instance or inst_name)
             
             else:  # Compression failed or returned error
                 logger.error(f"Forced compression failed for {inst_name}: {result.error}")
@@ -420,6 +423,9 @@ class CompressionHandler:
                     )
             except Exception as e:
                 logger.error(f"Logger sync after compress_context tool FAILED for '{target_agent_name}': {e}")
+
+            # Force immediate stream update via existing periodic push mechanism (avoids duplicate broadcasts)
+            self.engine.stream_publisher.push_periodic_update(instance.parent_instance or instance.instance_name)
 
             return (f"Compression successful. Discarded {result.messages_discarded} messages. "
                     f"Tail count: {result.tail_count}.")
@@ -755,6 +761,9 @@ class CompressionHandler:
                     if response is not None:
                         response.append(notif_msg)
             
+            # Force immediate stream update via existing periodic push mechanism (avoids duplicate broadcasts)
+            self.engine.stream_publisher.push_periodic_update(instance.parent_instance or inst_name)
+
             return True
             
         except Exception as e:
