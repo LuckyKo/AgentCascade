@@ -2573,7 +2573,11 @@ class ExecutionEngine:
                     self.stream_publisher.push_periodic_update(caller)
                     _last_sub_send = now
 
-            conv.extend(final_resp)
+            # FIX MSG_COUNT_BUG: Removed conv.extend(final_resp) to prevent duplicate messages.
+            # Reason: conv and instance.conversation are the same object reference (from lifecycle_manager.initialize_conversation).
+            # Messages are already added to instance.conversation during engine.run() via _process_response() at line 1935.
+            # Extending again here caused each LLM response to be duplicated in the conversation.
+            # See: .agent_lessons/lessons_msg_count_bug.md for detailed analysis.
             self._create_completed = True  # Mark for finally-block EXIT log reason tracking
 
             # Item 12: Always emit final sub-agent state after loop completes (Fix #3: lighter snapshot)
