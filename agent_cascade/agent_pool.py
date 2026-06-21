@@ -754,6 +754,70 @@ class AgentPool:
         # if they want threads halted during post-reset operations (e.g., api_server line 1697).
         self._stopped_event.clear()
 
+    def clear_sub_agents(self):
+        """Clear all sub-agent instances from the pool, preserving root orchestrator(s).
+        
+        This method dismisses all non-root instances (where parent_instance is not None),
+        which are typically delegated workers created during session execution. Root 
+        orchestrator instances (parent_instance is None) are preserved.
+        
+        Use case: Called before loading a saved session to remove stale sub-agents from
+        previous sessions that would otherwise appear in the UI as if they belong to
+        the newly loaded session.
+        
+        Order of operations:
+          1. Temporarily suppress dismissal callbacks (prevents premature broadcasts)
+          2. Take snapshot of instance keys (avoids RuntimeError during iteration)
+          3. Dismiss all instances where parent_instance is not None
+             - dismiss_instance() recursively cascade-dismisses children first
+          4. Use double-dismiss guard (instance may have been cascade-dismissed by parent)
+          5. Clean up instance_summaries for dismissed instances
+          6. Increment _instances_version to signal the change
+          7. Restore dismissal callbacks
+        
+        Does NOT:
+          - Touch root orchestrator instances (parent_instance is None)
+          - Clear conversations of remaining instances
+          - Reset logger sessions or async infrastructure
+          - Fire dismissal callbacks during clear (suppressed to prevent UX flicker)
+        
+        See reset() for full session reset that clears everything including root instances.
+        See load_session_from_log() for where this is typically called before loading.
+        
+        Example:
+            >>> # Before loading a new session, clear stale sub-agents
+            >>> agent_pool.clear_sub_agents()
+            >>> agent_pool.load_session_from_log(path, target_instance='Maine')
+        """
+        # Issue 1 fix: Temporarily suppress dismissal callbacks to prevent premature 
+        # frontend broadcasts. The final state broadcast happens after load completes.
+        _callbacks = self._on_dismissed_callbacks.copy()
+        self._on_dismissed_callbacks = []
+        
+        try:
+            # Take a snapshot of instance keys to avoid RuntimeError during iteration.
+            # dismiss_instance() modifies self.instances by removing dismissed instances
+            # and recursively cascade-dismisses children first.
+            for name in list(self.instances.keys()):
+                inst = self.instances.get(name)
+                if inst is None or inst.parent_instance is None:
+                    continue  # Skip root orchestrator and already-removed instances
+                # Double-dismiss guard: instance may have been cascade-dismissed by parent
+                if name not in self.instances:
+                    continue
+                self.dismiss_instance(name)
+            
+            # Clean up instance_summaries for dismissed instances (Issue 2 fix)
+            for name in list(self.instance_summaries.keys()):
+                if name not in self.instances:
+                    self.instance_summaries.pop(name, None)
+            
+            # Signal that instances changed (for lazy sync compatibility)
+            self._instances_version += 1
+        finally:
+            # Restore dismissal callbacks
+            self._on_dismissed_callbacks = _callbacks
+
     def stop_session(self):
         """Minimal interrupt for "Stop" action — halts execution but preserves sessions.
         
@@ -888,16 +952,36 @@ class AgentPool:
                 except Exception as e:
                     logger.debug(f"Logger truncation failed for {name} (non-critical): {e}")
 
-    def load_session_from_log(self, log_input: str, target_instance: Optional[str] = None) -> str:
+    def load_session_from_log(
+        self, 
+        log_input: str, 
+        target_instance: Optional[str] = None,
+        clear_sub_agents_before_load: bool = False
+    ) -> str:
         """Load session history from a log file path or JSON string.
 
         Reads JSONL log, restores conversation into self.instances[name].conversation,
         and sets up the logger for the restored session.
         Returns a status message string.
+        
+        Args:
+            log_input: Path to log file or JSON string containing session history.
+            target_instance: Name of the instance to load into (default: from metadata or 'RecoveredSession').
+            clear_sub_agents_before_load: If True, clears sub-agents before loading to prevent
+                stale agents from previous sessions appearing in UI. Defaults to False for
+                backward compatibility.
+        
+        Example:
+            >>> # Load session and automatically clear stale sub-agents
+            >>> status = pool.load_session_from_log(path, target_instance='Maine', clear_sub_agents_before_load=True)
         """
         import json
         from agent_cascade.llm.schema import ASSISTANT, CONTENT, FUNCTION, ROLE, SYSTEM, USER
 
+        # Issue 1 fix: Clear sub-agents at the very start if requested
+        if clear_sub_agents_before_load:
+            self.clear_sub_agents()
+        
         log_input = log_input.strip()
         if not log_input:
             return "Error: Empty log input."

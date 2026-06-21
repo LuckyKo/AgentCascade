@@ -2480,7 +2480,14 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'load_session':
                     path = data.get('path')
                     if path and agent_pool:
-                        status = agent_pool.load_session_from_log(path, target_instance=session.get('session_name'))
+                        # Issue 4 fix: Wrap pool modifications with session_lock for thread safety
+                        with session_lock:
+                            # Issue 1 fix: Use clear_sub_agents_before_load parameter instead of separate call
+                            status = agent_pool.load_session_from_log(
+                                path, 
+                                target_instance=session.get('session_name'),
+                                clear_sub_agents_before_load=True
+                            )
                         if status.startswith("Error"):
                             await websocket.send_text(json.dumps({"type": "error", "message": status}, ensure_ascii=False))
                         else:
