@@ -662,10 +662,9 @@ class APIRouter:
         """
         Returns the effective max_input_tokens for an agent type.
         
-        If general settings has a non-zero max_input_tokens, returns MIN of
-        (general settings limit) and (highest priority endpoint limit).
-        Otherwise (general_limit = 0), returns the endpoint limit directly
-        with no capping — allowing each agent type its own configured limit.
+        Uses the per-endpoint value if configured, otherwise falls back to
+        the general settings value. The general settings is a fallback only,
+        not a hard cap — each agent type keeps its own configured limit.
         """
         # Read general_limit AND resolve endpoint chain inside a single lock scope
         # to ensure atomicity — no risk of general_limit changing mid-computation.
@@ -684,12 +683,12 @@ class APIRouter:
                     ep_limit = ep.max_input_tokens
                     break
         
-        # Resolve MIN logic
-        if general_limit <= 0:
+        # Use endpoint-specific limit; fall back to general settings only when endpoint has none configured
+        if ep_limit > 0:
             return ep_limit
-        if ep_limit <= 0:
+        if general_limit > 0:
             return general_limit
-        return min(general_limit, ep_limit)
+        return 0
 
     def _normalize_agent_type(self, agent_type: str) -> str:
         """
@@ -760,11 +759,10 @@ class APIRouter:
                 if ep and ep.enabled:
                     cfg = ep.to_llm_cfg()
                     
-                    # Apply MIN logic: min(endpoint_limit, general_limit)
+                    # Use endpoint-specific max_input_tokens; fall back to general settings only when endpoint has none configured
                     ep_limit = ep.max_input_tokens
-                    if general_limit > 0:
-                        if ep_limit <= 0 or ep_limit > general_limit:
-                            cfg['max_input_tokens'] = general_limit
+                    if ep_limit <= 0 and general_limit > 0:
+                        cfg['max_input_tokens'] = general_limit
                     
                     # Dynamic endpoint selection based on token requirements: when allocated_tokens is provided, 
                     # ensure endpoint config reflects the agent's actual context requirements.
@@ -792,9 +790,8 @@ class APIRouter:
                         # Use the stored config but ensure it has proper token limits
                         cfg = copy.deepcopy(last_success_cfg)
                         ep_limit = ep.max_input_tokens
-                        if general_limit > 0:
-                            if ep_limit <= 0 or ep_limit > general_limit:
-                                cfg['max_input_tokens'] = general_limit
+                        if ep_limit <= 0 and general_limit > 0:
+                            cfg['max_input_tokens'] = general_limit
                         
                         # Adjust for allocated tokens requirement (dynamic endpoint selection)
                         if allocated_tokens is not None:

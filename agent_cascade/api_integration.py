@@ -809,7 +809,7 @@ def _resolve_max_tokens(pool, instance=None):
     api_integration, and api_server. Called from all 5 resolution sites.
 
     Resolution Order (short-circuit on first hit):
-      1. API router effective limit (per-endpoint MIN logic) — checked first
+      1. API router effective limit (per-endpoint priority-based selection) — checked first
       2. Per-instance override (_generate_cfg_override) — absolute priority, short-circuits below
       2b. Instance's allocated max_input_tokens (Feature 006) — from last LLM call for consistency
       3. Runtime-detected LLM limit (OAI detection writes to llm.generate_cfg)
@@ -840,7 +840,7 @@ def _resolve_max_tokens(pool, instance=None):
     except ImportError:
         DEFAULT_MAX_INPUT_TOKENS = 58000
 
-    # ── Step 1: API Router (per-endpoint MIN logic) ──
+    # ── Step 1: API Router (per-endpoint priority-based selection) ──
     router_limit = 0
     if pool and hasattr(pool, 'api_router') and pool.api_router:
         try:
