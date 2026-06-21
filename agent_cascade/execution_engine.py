@@ -91,23 +91,34 @@ def _get_active_functions_from_template(template, instance=None) -> list:
         instance: Optional AgentInstance — if provided, its _generate_cfg_override
                   takes precedence over the template config for disabled_tools.
     """
-    agent_class = getattr(template, 'agent_type', getattr(template, 'name', None))
-
+    inst_name = getattr(instance, 'instance_name', 'UNKNOWN') if instance else 'NO_INSTANCE'
+    agent_class = getattr(template, 'agent_type', getattr(template, 'name', 'UNKNOWN'))
+    
+    # Also check instance.agent_class for defense-in-depth
+    instance_agent_class = getattr(instance, 'agent_class', None) if instance else None
+    
+    logger.debug(f"[{inst_name}] _get_active_functions_from_template: agent_class='{agent_class}', instance.agent_class={instance_agent_class}")
+    
     # Read disabled_tools from instance override first, then fall back to template
     if instance is not None and instance._generate_cfg_override is not None:
         raw_disabled = instance._generate_cfg_override.get('disabled_tools')
         if raw_disabled is None:
-            # Override exists but lacks 'disabled_tools' key — fall back to template (mirrors _build_resources_block)
+            # Override exists but lacks 'disabled_tools' key — fall back to template
             llm = getattr(template, 'llm', None)
-            raw_disabled = getattr(llm, 'generate_cfg', {}).get('disabled_tools', [])
-        elif not raw_disabled:  # Empty list or empty dict
-            pass
-        else:
-            pass
+            if llm is None:
+                logger.warning(f"[{inst_name}] template.llm is None, using empty disabled_tools")
+                raw_disabled = []
+            else:
+                raw_disabled = getattr(llm, 'generate_cfg', {}).get('disabled_tools', [])
+        # elif not raw_disabled:  # Empty — nothing to log
     else:
         # Defensive: template.llm may be None for templates without LLM config
         llm = getattr(template, 'llm', None)
-        raw_disabled = getattr(llm, 'generate_cfg', {}).get('disabled_tools', [])
+        if llm is None:
+            logger.warning(f"[{inst_name}] template.llm is None, using empty disabled_tools")
+            raw_disabled = []
+        else:
+            raw_disabled = getattr(llm, 'generate_cfg', {}).get('disabled_tools', [])
 
     # Handle both dict format (per-agent: {"Maine": ["tool1"]}) and flat list format
     if isinstance(raw_disabled, dict):
@@ -131,16 +142,37 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     # the agent-type-specific defaults.  This is the ultimate safety net: even if
     # every other layer fails, Security and Compressor agents will never get more
     # tools than intended.
-    if agent_class == 'Security':
+    
+    # Check BOTH template.agent_type AND instance.agent_class for defense-in-depth
+    is_security_agent = (agent_class == 'Security' or instance_agent_class == 'Security')
+    is_compressor_agent = (agent_class == 'Compressor' or instance_agent_class == 'Compressor')
+    
+    if is_security_agent:
         disabled = disabled | DEFAULT_SECURITY_DISABLED_TOOLS
-    elif agent_class == 'Compressor':
+        logger.debug(f"[{inst_name}] Applied Security-agent defaults: {len(DEFAULT_SECURITY_DISABLED_TOOLS)} tools added")
+    elif is_compressor_agent:
         disabled = disabled | DEFAULT_COMPRESSOR_DISABLED_TOOLS
+        logger.debug(f"[{inst_name}] Applied Compressor-agent defaults: {len(DEFAULT_COMPRESSOR_DISABLED_TOOLS)} tools added")
+
+    logger.debug(f"[{inst_name}] _get_active_functions_from_template: disabled_tools={disabled}")
 
     # Defensive: template.function_map may be None for templates without tools
     func_map = getattr(template, 'function_map', None)
     if not func_map:
+        logger.info(f"[{inst_name}] _get_active_functions_from_template: No function_map, returning empty list")
         return []
-
+    
+    # Build the active functions list and log what's being filtered out
+    all_tool_names = set(func_map.keys())
+    filtered_out = all_tool_names & disabled
+    active_tool_names = all_tool_names - disabled
+    
+    logger.debug(f"[{inst_name}] _get_active_functions_from_template: {len(all_tool_names)} tools total, {len(filtered_out)} filtered, {len(active_tool_names)} active")
+    
+    # Check specifically for shell_cmd — warn if Security agent has it enabled
+    if 'shell_cmd' in all_tool_names and is_security_agent and 'shell_cmd' not in disabled:
+        logger.warning(f"[{inst_name}] CRITICAL: shell_cmd is NOT disabled for Security agent!")
+    
     return [func.function for name, func in func_map.items() if name not in disabled]
 
 
@@ -1759,6 +1791,37 @@ class ExecutionEngine:
         used_any_tool = False
         executed_tools = []  # Track which tools were actually executed (for orphan handling)
         
+        # ── Hoist template lookup outside loop (performance optimization) ────────
+        # Template and disabled tool list don't change during the loop.
+        # Also check instance._generate_cfg_override for defense-in-depth.
+        _primary_template = self.pool.get_template(instance.agent_class)
+        _primary_disabled_tools = set()
+        _primary_function_map = {}
+        if _primary_template:
+            # Start with template's disabled tools
+            _primary_disabled_tools = _primary_template._get_disabled_tool_names()
+            
+            # Also check instance override for defense-in-depth
+            # This mirrors the logic in _get_active_functions_from_template()
+            if hasattr(instance, '_generate_cfg_override') and instance._generate_cfg_override:
+                inst_disabled = instance._generate_cfg_override.get('disabled_tools', {})
+                if isinstance(inst_disabled, dict):
+                    agent_name = getattr(_primary_template, 'name', None)
+                    if agent_name and agent_name in inst_disabled:
+                        _primary_disabled_tools.update(inst_disabled[agent_name])
+                    # Also check slugified name for robustness
+                    if agent_name:
+                        slug = agent_name.lower().replace(' ', '_')
+                        if slug in inst_disabled:
+                            _primary_disabled_tools.update(inst_disabled[slug])
+                    agent_type = getattr(_primary_template, 'agent_type', None)
+                    if agent_type and agent_type in inst_disabled:
+                        _primary_disabled_tools.update(inst_disabled[agent_type])
+                elif isinstance(inst_disabled, (list, tuple)):
+                    _primary_disabled_tools.update(inst_disabled)
+            
+            _primary_function_map = getattr(_primary_template, 'function_map', {})
+        
         for out in turn_output:
             use_tool, tool_name, tool_args, _ = self._detect_tool(out)
             if not use_tool:
@@ -1767,6 +1830,71 @@ class ExecutionEngine:
             # Stop/halt check BEFORE tool execution (check before setting used_any_tool)
             if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
                 break
+            
+            # ── Disabled/Inexistent Tool Auto-Deny ────────────────────────────
+            # Defense-in-depth: check if tool is disabled BEFORE execution.
+            # Disabled tools are still in function_map (only filtered from active functions sent to LLM).
+            # If an agent generates a call for a disabled tool, it gets auto-denied here.
+            if _primary_template and (tool_name in _primary_disabled_tools or tool_name not in _primary_function_map):
+                # Determine deny reason with same logic as legacy implementation
+                if tool_name in _primary_disabled_tools and tool_name not in _primary_function_map:
+                    deny_reason = "disabled and does not exist"
+                elif tool_name in _primary_disabled_tools:
+                    deny_reason = "disabled"
+                else:
+                    deny_reason = "does not exist"
+                
+                logger.info(f"Auto-denying tool '{tool_name}' for agent {inst_name} — tool is {deny_reason}.")
+                tool_result = f"Tool '{tool_name}' was auto-denied because it is {deny_reason} for this agent. This tool cannot be used."
+                
+                # Extract function_id from the assistant message that had the tool call
+                extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
+                function_id = extra_data.get('function_id')
+                
+                # Telemetry: record tool call start and end for auto-denied tools
+                try:
+                    if hasattr(self.pool, 'telemetry'):
+                        self.pool.telemetry.record_tool_call_start(inst_name, tool_name)
+                        self.pool.telemetry.record_tool_call_end(
+                            inst_name, tool_name,
+                            success=False,
+                            result_chars=len(tool_result),
+                            truncated=False,
+                            error=f"Tool {deny_reason}",
+                        )
+                except Exception:
+                    pass
+                
+                # Build function result message with denial — include function_id per OpenAI spec
+                fn_msg = Message(
+                    role=FUNCTION,
+                    name=tool_name,
+                    content=tool_result,
+                    extra={
+                        'function_id': function_id or '1',
+                        'tool_success': False,
+                    },
+                )
+                messages.append(fn_msg)
+                llm_messages.append(fn_msg)
+                response.append(fn_msg)  # Stream denial to UI
+                
+                with token_cache_invalidated(instance):
+                    with instance._compression_lock:
+                        instance.conversation.append(fn_msg)
+                
+                # Track as executed for orphan handling (it was processed, just denied)
+                executed_tools.append(tool_name)
+                
+                # Log the function result to JSONL
+                try:
+                    log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                    log_inst.log_message(fn_msg)
+                except Exception:
+                    pass  # Logging must never block tool execution
+                
+                used_any_tool = True
+                continue  # Skip actual tool execution
             
             used_any_tool = True
 
@@ -1891,40 +2019,122 @@ class ExecutionEngine:
         if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
             executed_set = set(executed_tools)  # Convert to set for O(1) lookup
             tools_processed = 0
+            
+            # ── Hoist template lookup outside compression lock ──────────────────
+            # Template and disabled tool list don't change during the loop.
+            _orphan_template = self.pool.get_template(instance.agent_class)
+            _orphan_disabled_tools = set()
+            _orphan_function_map = {}
+            if _orphan_template:
+                # Start with template's disabled tools
+                _orphan_disabled_tools = _orphan_template._get_disabled_tool_names()
+                
+                # Also check instance override for defense-in-depth
+                # This mirrors the logic in _get_active_functions_from_template()
+                if hasattr(instance, '_generate_cfg_override') and instance._generate_cfg_override:
+                    inst_disabled = instance._generate_cfg_override.get('disabled_tools', {})
+                    if isinstance(inst_disabled, dict):
+                        agent_name = getattr(_orphan_template, 'name', None)
+                        if agent_name and agent_name in inst_disabled:
+                            _orphan_disabled_tools.update(inst_disabled[agent_name])
+                        # Also check slugified name for robustness
+                        if agent_name:
+                            slug = agent_name.lower().replace(' ', '_')
+                            if slug in inst_disabled:
+                                _orphan_disabled_tools.update(inst_disabled[slug])
+                        agent_type = getattr(_orphan_template, 'agent_type', None)
+                        if agent_type and agent_type in inst_disabled:
+                            _orphan_disabled_tools.update(inst_disabled[agent_type])
+                    elif isinstance(inst_disabled, (list, tuple)):
+                        _orphan_disabled_tools.update(inst_disabled)
+                
+                _orphan_function_map = getattr(_orphan_template, 'function_map', {})
+            
             with token_cache_invalidated(instance):
                 with instance._compression_lock:  # FIX #1: Batch lock acquisition for all placeholder appends
-                    for out in turn_output:
-                        use_tool, tool_name, tool_args, _ = self._detect_tool(out)
-                        if not use_tool:
-                            continue
                         
-                        # Only add placeholder for tools that were NOT executed
-                        if tool_name in executed_set:
-                            continue
+                        for out in turn_output:
+                            use_tool, tool_name, tool_args, _ = self._detect_tool(out)
+                            if not use_tool:
+                                continue
+                            
+                            # Only add placeholder for tools that were NOT executed
+                            if tool_name in executed_set:
+                                continue
+                            
+                            # ── Disabled/Inexistent Tool Auto-Deny (orphan handling) ────────
+                            # For unexecuted tools due to halt, check if they're disabled/inexistent.
+                            # If so, give proper denial message instead of generic "skipped" message.
+                            deny_reason = None
+                            # Template guard for consistency with primary loop
+                            if _orphan_template and (tool_name in _orphan_disabled_tools or tool_name not in _orphan_function_map):
+                                # Determine deny reason with same logic as legacy implementation
+                                if tool_name in _orphan_disabled_tools and tool_name not in _orphan_function_map:
+                                    deny_reason = "disabled and does not exist"
+                                elif tool_name in _orphan_disabled_tools:
+                                    deny_reason = "disabled"
+                                else:
+                                    deny_reason = "does not exist"
+                                
+                                # Log the denial (matching primary loop pattern)
+                                logger.info(f"Auto-denying tool '{tool_name}' for agent {inst_name} — tool is {deny_reason}.")
+                            
+                            # Extract function_id from the assistant message that had the tool call
+                            extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
+                            _orphan_function_id = extra_data.get('function_id')  # Use same pattern as primary loop
+                            
+                            # Add placeholder FUNCTION result for unexecuted tool
+                            # Use denial message if tool is disabled/inexistent, otherwise use skip message
+                            if deny_reason:
+                                fn_content = f"Tool '{tool_name}' was auto-denied because it is {deny_reason} for this agent. This tool cannot be used."
+                            else:
+                                fn_content = f"Tool execution skipped: instance {inst_name} was halted/stopped"
+                            
+                            # Telemetry: record tool call start and end (matching primary loop pattern)
+                            try:
+                                if hasattr(self.pool, 'telemetry'):
+                                    self.pool.telemetry.record_tool_call_start(inst_name, tool_name)
+                                    self.pool.telemetry.record_tool_call_end(
+                                        inst_name, tool_name,
+                                        success=False,
+                                        result_chars=len(fn_content),
+                                        truncated=False,
+                                        error=f"Tool {deny_reason}" if deny_reason else "Skipped (halt/stop)",
+                                    )
+                            except Exception:
+                                pass
+                            
+                            fn_msg = Message(
+                                role=FUNCTION,
+                                name=tool_name,
+                                content=fn_content,
+                                extra={
+                                    'function_id': _orphan_function_id or '1',  # Use same pattern as primary loop
+                                    'tool_success': False,
+                                },
+                            )
+                            messages.append(fn_msg)
+                            llm_messages.append(fn_msg)
+                            response.append(fn_msg)  # Stream to UI
+                            
+                            with token_cache_invalidated(instance):
+                                with instance._compression_lock:
+                                    instance.conversation.append(fn_msg)
+                            
+                            # Track as executed for consistency (matching primary loop pattern)
+                            executed_tools.append(tool_name)
+                            
+                            # Log the function result to JSONL (matching primary loop pattern)
+                            try:
+                                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                                log_inst.log_message(fn_msg)
+                            except Exception:
+                                pass  # Logging must never block tool execution
+                            
+                            tools_processed += 1
                         
-                        # Extract function_id from the assistant message that had the tool call
-                        extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
-                        
-                        # Add placeholder FUNCTION result for unexecuted tool
-                        fn_msg = Message(
-                            role=FUNCTION,
-                            name=tool_name,
-                            content=f"Tool execution skipped: instance {inst_name} was halted/stopped",
-                            extra={
-                                'function_id': extra_data.get('function_id', '1'),
-                                'tool_success': False,
-                            },
-                        )
-                        messages.append(fn_msg)
-                        llm_messages.append(fn_msg)
-                        response.append(fn_msg)  # Stream to UI
-                        instance.conversation.append(fn_msg)  # FIX #1: Moved inside batch lock
-                        tools_processed += 1
-            
-            if tools_processed > 0:
-                
-                if tools_processed > 0:
-                    logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
+                        if tools_processed > 0:
+                            logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
 
         return used_any_tool
 
