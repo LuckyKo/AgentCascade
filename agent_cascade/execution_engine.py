@@ -3056,6 +3056,11 @@ class ExecutionEngine:
                     # Skip false positives: single-function/single-user patterns
                     if L == 1 and roles[0] in (FUNCTION, USER):
                         continue
+                    # Skip FUNCTION-only sequences with no ASSISTANT messages interspersed.
+                    # A real agent loop involves the agent making decisions between tool calls.
+                    # Consecutive FUNCTION messages are from parallel execution / batch overflow.
+                    if roles and all(role == FUNCTION for role in roles):
+                        continue
 
                     second_rep_window_idx = feature_to_window_idx[i + L]
                     pop_count = len(window) - second_rep_window_idx

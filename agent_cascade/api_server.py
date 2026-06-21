@@ -195,6 +195,11 @@ def detect_loop(messages: List[dict]) -> Optional[Tuple[str, int]]:
                     # or consecutive user inputs, which are NOT agent loops.
                     if L == 1 and roles[0] in (FUNCTION, USER):
                         continue
+                    # Skip FUNCTION-only sequences with no ASSISTANT messages interspersed.
+                    # A real agent loop involves the agent making decisions between tool calls.
+                    # Consecutive FUNCTION messages are from parallel execution / batch overflow.
+                    if roles and all(role == FUNCTION for role in roles):
+                        continue
 
                     # Calculate how many messages to pop from the end of 'messages'.
                     # Only remove the DUPLICATE repetitions (K-1 copies), not the first occurrence.

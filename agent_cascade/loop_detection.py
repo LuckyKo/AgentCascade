@@ -140,6 +140,14 @@ def detect_loop(
                 if L == 1 and roles[0] in (FUNCTION, USER):
                     continue
 
+                # Skip FUNCTION-only sequences with no ASSISTANT messages interspersed.
+                # A real agent loop always involves the agent making decisions:
+                # ASSISTANT→FUNCTION→ASSISTANT→FUNCTION. If the pattern contains only
+                # FUNCTION role messages consecutively (no assistant decisions between them),
+                # it's likely from parallel tool execution / batch overflow, not an agent loop.
+                if roles and all(role == FUNCTION for role in roles):
+                    continue
+
                 # Calculate pop_count: messages from end that belong to the loop
                 second_rep_window_idx = feature_to_window_idx[i + L]
                 pop_count = len(window) - second_rep_window_idx
