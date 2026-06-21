@@ -1153,6 +1153,25 @@ class AgentPool:
                 # Invalidate token count cache — conversation replaced
                 existing._last_token_count_conversation_length = -1
                 existing.agent_class = agent_class
+                # Clear streaming responses to prevent old session's partial messages from appearing
+                # (Bug: when loading a new session, _streaming_responses from previous session persists)
+                existing._streaming_responses = []
+                # Reset cached working sets to force rebuild with new conversation
+                existing._cached_messages = []
+                existing._cached_llm_messages = []
+                existing._last_config_version = -1
+                # Clear per-instance LLM config overrides from previous session
+                existing._generate_cfg_override = None
+                # Clear compression cooldown tracking (prevents stale timers affecting new session)
+                existing._last_force_compress_time = 0.0
+                existing._force_compress_count = 0
+                # Clear slot release callback to prevent stale callbacks firing
+                existing._slot_release = None
+                # Reset loop detection suppression flag (one-turn cooldown shouldn't persist)
+                existing._suppress_loop_detection_next_turn = False
+                # Reset state to IDLE for loaded sessions (they're not actively running)
+                from agent_cascade.agent_instance import AgentState
+                existing.state = AgentState.IDLE
         else:
             now = time.monotonic()
             new_inst = AgentInstance(
@@ -1173,6 +1192,8 @@ class AgentPool:
         # Set up logger for the restored session
         try:
             log_inst = self._logger.get_logger(instance_name, agent_class)
+            # Clear stale history — update_history() is additive and would merge old+new messages
+            log_inst.data["history"] = []
             log_inst.update_history(restored_messages)
         except Exception as e:
             logger.debug(f"Logger history sync after log load failed for {instance_name} (non-critical): {e}")
