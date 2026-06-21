@@ -63,6 +63,7 @@ class AgentInstanceLogger:
 
         self._file_handle = None  # Cached file handle to avoid open/write/close per message (Fix #1)
         self._initialized = False  # Belt-and-suspenders guard against duplicate _initial_save() (get_logger lock is primary protection)
+        self._file_history_synced = False  # One-shot file sync guard for update_history() — prevents duplicate file loads
         self._initial_save()
 
     @classmethod
@@ -267,9 +268,11 @@ class AgentInstanceLogger:
                     if isinstance(msg_dict, dict) and "metadata" not in msg_dict:  # Only load message dicts, skip metadata lines and non-dict JSON values
                         self.data["history"].append(msg_dict)
                 except json.JSONDecodeError:
+                    logger.warning(f"Skipping malformed JSON line in {self.log_path} — data may be incomplete")
                     continue  # Skip malformed lines
         except OSError as e:
-            logger.debug(f"Could not read log file {self.log_path}: {e}")
+            logger.warning(f"Could not read log file {self.log_path} during sync: {e}. "
+                           "History may be out of sync, potentially causing duplicate appends.")
             pass  # File disappeared or unreadable — stay with empty history
 
     # ── Compression marker insertion ──────────────────────────────────────
@@ -323,26 +326,37 @@ class AgentInstanceLogger:
         across pool mutations. DO NOT change this matching logic without ensuring the logger
         sync after compression events also uses timestamp-based identity.
         """
+        # FIX: Ensure internal state matches file before comparing/appending.
+        # If self.data["history"] is empty but the file has content, load from file first.
+        # This prevents duplicate appends during startup when the logger's internal state
+        # may be out of sync with the file (e.g., after session load or WebSocket reconnection).
+        # One-shot guard (_file_history_synced) prevents double-load under concurrent access.
+        if not self._file_history_synced and not self.data["history"] and os.path.exists(self.log_path):
+            self.load_history_from_file()
+            self._file_history_synced = True
+        
+        # Update timestamp AFTER sync check to avoid misleading metadata when no writes occur
         self.update_timestamp()
+        
         old_history = self.data["history"]
         last_match_in_log = -1
         needs_rewrite = False
+
+        # Robust comparison helper — defined outside loop to avoid redefinition on each iteration (Fix #6)
+        def normalize(v):
+            if v is None:
+                return ""
+            if isinstance(v, dict):
+                try:
+                    return json.dumps(v, sort_keys=True, ensure_ascii=False).strip()
+                except Exception:
+                    return str(v).strip()
+            return str(v).replace('\r\n', '\n').strip()
 
         # Surgical Merge: Identify gaps, insertions, and UPDATES
         buffer = []
         for i, msg in enumerate(history):
             formatted = self._format_message(msg)
-
-            # Robust comparison
-            def normalize(v):
-                if v is None:
-                    return ""
-                if isinstance(v, dict):
-                    try:
-                        return json.dumps(v, sort_keys=True, ensure_ascii=False).strip()
-                    except Exception:
-                        return str(v).strip()
-                return str(v).replace('\r\n', '\n').strip()
 
             # Search for this message in the log
             found_idx = -1
@@ -456,6 +470,10 @@ class AgentInstanceLogger:
 
             # Update internal tracking
             self.data["history"] = [self._format_message(msg) for msg in new_history]
+            
+            # Fix #1: Reset the sync guard flag after file modification so future update_history() calls can properly sync again
+            self._file_history_synced = False
+            
             return True
 
         # Find the summary message in new_history
@@ -558,6 +576,10 @@ class AgentInstanceLogger:
             else:
                 break
 
+        # Fix #2: Reset the sync guard flag after file modification (soft=False) so future update_history() calls can properly sync again
+        if not soft:
+            self._file_history_synced = False
+        
         if soft:
             logger.info(f"Soft rollback of {count} messages for {self.instance_name} recorded in log.")
 
