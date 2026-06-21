@@ -1570,7 +1570,7 @@ class AgentPool:
                 from agent_cascade.execution_engine import ExecutionEngine
                 from agent_cascade.compression.helpers import extract_instance_output
                 # Bug #4 fix: Import LoopDetectedError to re-raise it before generic handler
-                from .agent_instance import LoopDetectedError
+                from .loop_detection import LoopDetectedError
 
                 engine = ExecutionEngine(self)
                 # initialize() now called automatically in __init__ (Phase 4.5 cleanup)

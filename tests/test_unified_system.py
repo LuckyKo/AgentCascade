@@ -301,7 +301,7 @@ class TestExecutionEngine:
         
         # The missing template causes error responses which trigger loop detection.
         # What matters is the engine doesn't crash — it raises a controlled exception.
-        from agent_cascade.agent_instance import LoopDetectedError
+        from agent_cascade.loop_detection import LoopDetectedError
         try:
             list(engine.run(instance))
         except LoopDetectedError:

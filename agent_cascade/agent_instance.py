@@ -421,35 +421,6 @@ class CompressResult:
     mode: str = ""
 
 
-class LoopDetectedError(Exception):
-    """Raised when detect_loop() finds a repetitive pattern in agent conversation."""
-
-    def __init__(
-        self, 
-        reason: str, 
-        agent_name: Optional[str] = None, 
-        pop_count: Optional[int] = None, 
-        turn_pop_count: int = 0, 
-        resp_snapshot: Optional[list] = None
-    ):
-        """Initialize LoopDetectedError with loop detection details.
-        
-        Args:
-            reason: Description of the loop detected
-            agent_name: Name of the agent that entered a loop (Bug #0 fix)
-            pop_count: Number of messages to roll back
-            turn_pop_count: Number of turns to roll back (default 0)
-            resp_snapshot: Snapshot of responses for debugging (default None)
-        """
-        # Fix #3 from reviewer: Align with loop_detection.py for consistent exception messages
-        super().__init__(f"Loop detected for {agent_name or 'agent'}: {reason}")
-        self.reason = reason
-        self.agent_name = agent_name  # Bug #0: Add agent_name field
-        self.pop_count = pop_count  # How many messages to roll back
-        self.turn_pop_count = turn_pop_count  # Bug #0: Add turn_pop_count field
-        self.resp_snapshot = resp_snapshot or []  # Bug #0: Add resp_snapshot field
-
-
 @dataclass
 class PoolSettings:
     """Configurable thresholds and timeouts for the agent pool."""

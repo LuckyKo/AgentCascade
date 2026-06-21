@@ -43,11 +43,12 @@ from agent_cascade.utils.utils import extract_text_from_message
 # Moved to utils/pool_validation.py to break circular import chain with compression module
 from .utils.pool_validation import validate_message_pool
 
-from .agent_instance import AgentInstance, LoopDetectedError, AgentState
+from .agent_instance import AgentInstance, AgentState
 from .lifecycle_manager import AgentLifecycleManager
 from .compression.handler import CompressionHandler
 from .tool_dispatcher import ToolDispatcher
 from .stream_publisher import StreamPublisher
+from .loop_detection import LoopDetectedError
 
 
 # ── SleepAction Enum (Phase 3.1) ───────────────────────────────────────────────

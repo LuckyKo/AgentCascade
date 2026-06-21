@@ -25,9 +25,8 @@ from agent_cascade.llm.schema import (
 )
 from agent_cascade.log import logger
 
-from .agent_instance import LoopDetectedError
 from .agent_pool import AgentPool
-from .loop_detection import detect_loop as _detect_loop_func
+from .loop_detection import detect_loop as _detect_loop_func, LoopDetectedError
 
 
 # ═══════════════════════════════════════════════════════════════════════
