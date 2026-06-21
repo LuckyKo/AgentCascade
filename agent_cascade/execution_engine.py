@@ -19,7 +19,6 @@ import json
 import os
 import re
 import time
-from contextlib import contextmanager
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 from enum import Enum, auto
 
@@ -191,36 +190,6 @@ def _invalidate_token_cache(instance):
     """Invalidate all token count caches after conversation mutation."""
     instance._last_actual_token_count = 0
     instance._last_token_count_conversation_length = -1
-
-
-# ── Token Cache Invalidation Context Manager (Phase 2 Task 2.1) ────────────────
-@contextmanager
-def token_cache_invalidated(instance):
-    """Context manager that ensures token cache is invalidated after conversation mutation.
-    
-    PR3 Note: Most callers should now use centralized API methods like append_message(),
-    trim_tail(), rebuild_conversation() which handle cache invalidation automatically.
-    This context manager is useful for legacy code or when multiple mutations need to
-    be batched under a single lock with deferred cache invalidation.
-    
-    Usage (legacy pattern):
-        with token_cache_invalidated(instance):
-            instance.conversation.append(new_msg)
-        # Token cache automatically invalidated here
-    
-    Usage (PR3 preferred pattern):
-        instance.append_message(new_msg)  # Cache handled automatically
-        
-    Args:
-        instance: AgentInstance whose token cache should be invalidated on exit
-        
-    Yields:
-        None (context manager for wrapping conversation mutations)
-    """
-    try:
-        yield
-    finally:
-        _invalidate_token_cache(instance)
 
 
 # ── Message Normalization Helpers (Phase 2 Task 2.2) ────────────────────────────
@@ -583,9 +552,9 @@ class ExecutionEngine:
         """Drain a queue/buffer and inject results as USER messages into all working lists.
 
         Messages are appended atomically to all working lists (messages, llm_messages,
-        response, instance.conversation) under instance._compression_lock, ensuring
-        no length mismatches between cached lists and conversation. Wrapped in
-        token_cache_invalidated() context manager to ensure FULL cache invalidation.
+        response, instance.conversation) under instance._compression_lock using the
+        centralized append_message() API, ensuring no length mismatches between cached 
+        lists and conversation with automatic cache invalidation.
 
         Exactly one of drain_fn or items must be provided.
 
@@ -2064,89 +2033,88 @@ class ExecutionEngine:
                 
                 _orphan_function_map = getattr(_orphan_template, 'function_map', {})
             
-            with token_cache_invalidated(instance):
-                with instance._compression_lock:  # FIX #1: Batch lock acquisition for all placeholder appends
+            with instance._compression_lock:  # FIX #1: Batch lock acquisition for all placeholder appends
+                
+                for out in turn_output:
+                    use_tool, tool_name, tool_args, _ = self._detect_tool(out)
+                    if not use_tool:
+                        continue
+                    
+                    # Only add placeholder for tools that were NOT executed
+                    if tool_name in executed_set:
+                        continue
+                    
+                    # ── Disabled/Inexistent Tool Auto-Deny (orphan handling) ────────
+                    # For unexecuted tools due to halt, check if they're disabled/inexistent.
+                    # If so, give proper denial message instead of generic "skipped" message.
+                    deny_reason = None
+                    # Template guard for consistency with primary loop
+                    if _orphan_template and (tool_name in _orphan_disabled_tools or tool_name not in _orphan_function_map):
+                        # Determine deny reason with same logic as legacy implementation
+                        if tool_name in _orphan_disabled_tools and tool_name not in _orphan_function_map:
+                            deny_reason = "disabled and does not exist"
+                        elif tool_name in _orphan_disabled_tools:
+                            deny_reason = "disabled"
+                        else:
+                            deny_reason = "does not exist"
                         
-                        for out in turn_output:
-                            use_tool, tool_name, tool_args, _ = self._detect_tool(out)
-                            if not use_tool:
-                                continue
-                            
-                            # Only add placeholder for tools that were NOT executed
-                            if tool_name in executed_set:
-                                continue
-                            
-                            # ── Disabled/Inexistent Tool Auto-Deny (orphan handling) ────────
-                            # For unexecuted tools due to halt, check if they're disabled/inexistent.
-                            # If so, give proper denial message instead of generic "skipped" message.
-                            deny_reason = None
-                            # Template guard for consistency with primary loop
-                            if _orphan_template and (tool_name in _orphan_disabled_tools or tool_name not in _orphan_function_map):
-                                # Determine deny reason with same logic as legacy implementation
-                                if tool_name in _orphan_disabled_tools and tool_name not in _orphan_function_map:
-                                    deny_reason = "disabled and does not exist"
-                                elif tool_name in _orphan_disabled_tools:
-                                    deny_reason = "disabled"
-                                else:
-                                    deny_reason = "does not exist"
-                                
-                                # Log the denial (matching primary loop pattern)
-                                logger.info(f"Auto-denying tool '{tool_name}' for agent {inst_name} — tool is {deny_reason}.")
-                            
-                            # Extract function_id from the assistant message that had the tool call
-                            extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
-                            _orphan_function_id = extra_data.get('function_id')  # Use same pattern as primary loop
-                            
-                            # Add placeholder FUNCTION result for unexecuted tool
-                            # Use denial message if tool is disabled/inexistent, otherwise use skip message
-                            if deny_reason:
-                                fn_content = f"Tool '{tool_name}' was auto-denied because it is {deny_reason} for this agent. This tool cannot be used."
-                            else:
-                                fn_content = f"Tool execution skipped: instance {inst_name} was halted/stopped"
-                            
-                            # Telemetry: record tool call start and end (matching primary loop pattern)
-                            try:
-                                if hasattr(self.pool, 'telemetry'):
-                                    self.pool.telemetry.record_tool_call_start(inst_name, tool_name)
-                                    self.pool.telemetry.record_tool_call_end(
-                                        inst_name, tool_name,
-                                        success=False,
-                                        result_chars=len(fn_content),
-                                        truncated=False,
-                                        error=f"Tool {deny_reason}" if deny_reason else "Skipped (halt/stop)",
-                                    )
-                            except Exception:
-                                pass
-                            
-                            fn_msg = Message(
-                                role=FUNCTION,
-                                name=tool_name,
-                                content=fn_content,
-                                extra={
-                                    'function_id': _orphan_function_id or '1',  # Use same pattern as primary loop
-                                    'tool_success': False,
-                                },
+                        # Log the denial (matching primary loop pattern)
+                        logger.info(f"Auto-denying tool '{tool_name}' for agent {inst_name} — tool is {deny_reason}.")
+                    
+                    # Extract function_id from the assistant message that had the tool call
+                    extra_data = out.get('extra', {}) if isinstance(out, dict) else (getattr(out, 'extra', None) or {})
+                    _orphan_function_id = extra_data.get('function_id')  # Use same pattern as primary loop
+                    
+                    # Add placeholder FUNCTION result for unexecuted tool
+                    # Use denial message if tool is disabled/inexistent, otherwise use skip message
+                    if deny_reason:
+                        fn_content = f"Tool '{tool_name}' was auto-denied because it is {deny_reason} for this agent. This tool cannot be used."
+                    else:
+                        fn_content = f"Tool execution skipped: instance {inst_name} was halted/stopped"
+                    
+                    # Telemetry: record tool call start and end (matching primary loop pattern)
+                    try:
+                        if hasattr(self.pool, 'telemetry'):
+                            self.pool.telemetry.record_tool_call_start(inst_name, tool_name)
+                            self.pool.telemetry.record_tool_call_end(
+                                inst_name, tool_name,
+                                success=False,
+                                result_chars=len(fn_content),
+                                truncated=False,
+                                error=f"Tool {deny_reason}" if deny_reason else "Skipped (halt/stop)",
                             )
-                            messages.append(fn_msg)
-                            llm_messages.append(fn_msg)
-                            response.append(fn_msg)  # Stream to UI
-                            
-                            instance.append_message(fn_msg)  # PR2: centralized mutation API handles cache sync
-                            
-                            # Track as executed for consistency (matching primary loop pattern)
-                            executed_tools.append(tool_name)
-                            
-                            # Log the function result to JSONL (matching primary loop pattern)
-                            try:
-                                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                                log_inst.log_message(fn_msg)
-                            except Exception:
-                                pass  # Logging must never block tool execution
-                            
-                            tools_processed += 1
-                        
-                        if tools_processed > 0:
-                            logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
+                    except Exception:
+                        pass
+                    
+                    fn_msg = Message(
+                        role=FUNCTION,
+                        name=tool_name,
+                        content=fn_content,
+                        extra={
+                            'function_id': _orphan_function_id or '1',  # Use same pattern as primary loop
+                            'tool_success': False,
+                        },
+                    )
+                    messages.append(fn_msg)
+                    llm_messages.append(fn_msg)
+                    response.append(fn_msg)  # Stream to UI
+                    
+                    instance.append_message(fn_msg)  # PR2: centralized mutation API handles cache sync
+                    
+                    # Track as executed for consistency (matching primary loop pattern)
+                    executed_tools.append(tool_name)
+                    
+                    # Log the function result to JSONL (matching primary loop pattern)
+                    try:
+                        log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                        log_inst.log_message(fn_msg)
+                    except Exception:
+                        pass  # Logging must never block tool execution
+                    
+                    tools_processed += 1
+                
+                if tools_processed > 0:
+                    logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
 
         return used_any_tool
 

@@ -344,12 +344,6 @@ class AgentLifecycleManager:
         Returns:
             Conversation list (either preserved or newly created)
         """
-        # FIX #2 (reviewer): Import at function level to avoid circular import.
-        # execution_engine.py imports from lifecycle_manager.py at module level,
-        # and token_cache_invalidated is defined in execution_engine.py.
-        # Importing here (inside method) breaks the circular dependency.
-        from agent_cascade.execution_engine import token_cache_invalidated
-        
         # METADATA INJECTION FIX: Inject metadata into sys_msg BEFORE logging/update_history().
         # This ensures sub-agent log files contain the "Session Metadata" block in their initial system message.
         # The existing injection in _setup_turn() is preserved for runtime updates (e.g., workspace changes).
@@ -357,49 +351,50 @@ class AgentLifecycleManager:
         
         if is_reuse:
             # Thread-safe update of instance state for reuse
-            with token_cache_invalidated(instance):  # FIX: Invalidate token cache for reused instances
-                with instance._compression_lock:
-                    # FIX #3: Reset stale state fields to prepare for new task
-                    instance.compression_summary = None
-                    instance.latest_marker_index = -1
-                    instance._generate_cfg_override = None
-                    instance.max_turns = None
+            # Note: All mutations use centralized API methods (edit_message_in_place, insert_message_at_head)
+            # which handle cache invalidation automatically. No explicit token_cache_invalidated wrapper needed.
+            with instance._compression_lock:
+                # FIX #3: Reset stale state fields to prepare for new task
+                instance.compression_summary = None
+                instance.latest_marker_index = -1
+                instance._generate_cfg_override = None
+                instance.max_turns = None
+                
+                # FIX #4: Clear is_terminated flag
+                instance.is_terminated = False
+                
+                # SLOT_TIMEOUT FIX: Clear _slot_release to prevent stale callback issues
+                # The reused instance will acquire a fresh slot in engine.run() at line 349
+                # This ensures no leftover release callback from previous execution interferes
+                instance._slot_release = None
+                
+                # FIX: Preserve & extend conversation
+                # Update system message in-place (first message is always system)
+                if instance.conversation and len(instance.conversation) > 0:
+                    # Preserve old system message's timestamp so update_history() can match it as an update
+                    # rather than appending a duplicate. The logger uses timestamps as identity markers.
+                    old_sys_msg = instance.conversation[0]
+                    if hasattr(old_sys_msg, 'timestamp') and old_sys_msg.timestamp:
+                        try:
+                            sys_msg.timestamp = old_sys_msg.timestamp
+                        except AttributeError:
+                            pass  # Fallback: generate new timestamp below
                     
-                    # FIX #4: Clear is_terminated flag (token cache invalidated by outer context manager)
-                    instance.is_terminated = False
+                    # FIX #3: Ensure sys_msg.timestamp is ALWAYS set (never None)
+                    if not getattr(sys_msg, 'timestamp', None):
+                        sys_msg.timestamp = datetime.datetime.now().isoformat()
                     
-                    # SLOT_TIMEOUT FIX: Clear _slot_release to prevent stale callback issues
-                    # The reused instance will acquire a fresh slot in engine.run() at line 349
-                    # This ensures no leftover release callback from previous execution interferes
-                    instance._slot_release = None
-                    
-                    # FIX: Preserve & extend conversation
-                    # Update system message in-place (first message is always system)
-                    if instance.conversation and len(instance.conversation) > 0:
-                        # Preserve old system message's timestamp so update_history() can match it as an update
-                        # rather than appending a duplicate. The logger uses timestamps as identity markers.
-                        old_sys_msg = instance.conversation[0]
-                        if hasattr(old_sys_msg, 'timestamp') and old_sys_msg.timestamp:
-                            try:
-                                sys_msg.timestamp = old_sys_msg.timestamp
-                            except AttributeError:
-                                pass  # Fallback: generate new timestamp below
-                        
-                        # FIX #3: Ensure sys_msg.timestamp is ALWAYS set (never None)
-                        if not getattr(sys_msg, 'timestamp', None):
-                            sys_msg.timestamp = datetime.datetime.now().isoformat()
-                        
-                        # Update the existing system message with new template content
-                        instance.edit_message_in_place(0, sys_msg)  # PR2: centralized API handles cache sync
-                    else:
-                        # Fallback: prepend system message if conversation is empty
-                        instance.insert_message_at_head(sys_msg)  # PR2: centralized API handles cache sync
-                    
-                    
-                    # Get the preserved conversation (will be extended with task below)
-                    conv = instance.conversation
-            
-            # FIX #2: For reused instances, append task message to preserved conversation
+                    # Update the existing system message with new template content
+                    instance.edit_message_in_place(0, sys_msg)  # PR2: centralized API handles cache sync
+                else:
+                    # Fallback: prepend system message if conversation is empty
+                    instance.insert_message_at_head(sys_msg)  # PR2: centralized API handles cache sync
+                
+                
+                # Get the preserved conversation (will be extended with task below)
+                conv = instance.conversation
+        
+        # FIX #2: For reused instances, append task message to preserved conversation
             # (conv already set above with system message updated in-place)
             instance.append_message(task_msg)  # PR2: centralized mutation API handles cache sync
             

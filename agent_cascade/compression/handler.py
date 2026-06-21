@@ -890,11 +890,9 @@ class CompressionHandler:
             return False
         
         # Step 2: Apply rollback using pool's surgical_rollback (unified path)
+        # Note: surgical_rollback() already handles cache invalidation internally (sets _last_token_count_conversation_length = -1)
         try:
-            from agent_cascade.execution_engine import token_cache_invalidated
-            
-            with token_cache_invalidated(instance):
-                actual_count = self.pool.surgical_rollback(inst_name, count, reason="Manual /rollback command")
+            actual_count = self.pool.surgical_rollback(inst_name, count, reason="Manual /rollback command")
             
             # Validate message pool after rollback (Item 10 - same as compress handler lines 602-626)
             conv = self.pool.get_conversation(inst_name)
