@@ -390,10 +390,10 @@ class AgentLifecycleManager:
                             sys_msg.timestamp = datetime.datetime.now().isoformat()
                         
                         # Update the existing system message with new template content
-                        instance.conversation[0] = sys_msg
+                        instance.edit_message_in_place(0, sys_msg)  # PR2: centralized API handles cache sync
                     else:
                         # Fallback: prepend system message if conversation is empty
-                        instance.conversation.insert(0, sys_msg)
+                        instance.insert_message_at_head(sys_msg)  # PR2: centralized API handles cache sync
                     
                     
                     # Get the preserved conversation (will be extended with task below)
@@ -401,7 +401,7 @@ class AgentLifecycleManager:
             
             # FIX #2: For reused instances, append task message to preserved conversation
             # (conv already set above with system message updated in-place)
-            conv.append(task_msg)
+            instance.append_message(task_msg)  # PR2: centralized mutation API handles cache sync
             
             # FIX #6: Use update_history() for logger synchronization on reused instances
             # This prevents duplicate log_message(task_msg) calls and properly syncs the logger
@@ -414,17 +414,15 @@ class AgentLifecycleManager:
         else:
             # Build conversation: [system, task] for new instances
             conv = [sys_msg, task_msg]
-            with token_cache_invalidated(instance):
-                with instance._compression_lock:
-                    instance.conversation = conv
+            instance.rebuild_conversation(conv)  # PR2: centralized mutation API handles full cache invalidation
 
-                # Log initial messages to agent's JSONL file (P1 continuation)
-                try:
-                    log_inst = self.pool.get_logger(instance_name, agent_class)
-                    log_inst.log_message(sys_msg)
-                    log_inst.log_message(task_msg)
-                except Exception as e:
-                    logger.debug(f"Logging initial messages for {instance_name} failed (non-critical): {e}")
+            # Log initial messages to agent's JSONL file (P1 continuation)
+            try:
+                log_inst = self.pool.get_logger(instance_name, agent_class)
+                log_inst.log_message(sys_msg)
+                log_inst.log_message(task_msg)
+            except Exception as e:
+                logger.debug(f"Logging initial messages for {instance_name} failed (non-critical): {e}")
         
         return conv
     

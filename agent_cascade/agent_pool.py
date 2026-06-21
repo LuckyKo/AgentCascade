@@ -1330,10 +1330,7 @@ class AgentPool:
         """
         inst = self.instances.get(instance_name)
         if inst:
-            with inst._compression_lock:
-                inst.conversation.append(message)
-                # Invalidate token count cache — conversation length changed
-                inst._last_token_count_conversation_length = -1
+            inst.append_message(message)  # PR2: centralized mutation API handles cache sync
             self._mark_activity(instance_name)
 
     # ── Compression module compatibility layer

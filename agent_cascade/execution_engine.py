@@ -611,18 +611,17 @@ class ExecutionEngine:
             return True
 
         with instance._compression_lock:
-            with token_cache_invalidated(instance):
-                for msg in processed_messages:
-                    # Append to all working lists atomically under the compression_lock.
-                    # This ensures cached lists and instance.conversation stay in sync,
-                    # preventing silent cache rebuilds on next turn (Fix 1).
-                    messages.append(msg)
-                    llm_messages.append(msg)
-                    response.append(msg)
-                    instance.conversation.append(msg)  # Direct append, same lock as cached lists
-                    
-                    # Mark activity since we're bypassing pool.add_message() which used to do this (Fix 4)
-                    self.pool._mark_activity(inst_name)
+            for msg in processed_messages:
+                # Append to all working lists atomically under the compression_lock.
+                # This ensures cached lists and instance.conversation stay in sync,
+                # preventing silent cache rebuilds on next turn (Fix 1).
+                messages.append(msg)
+                llm_messages.append(msg)
+                response.append(msg)
+                instance.append_message(msg)  # PR2: centralized mutation API handles cache sync
+                
+                # Mark activity since we're bypassing pool.add_message() which used to do this (Fix 4)
+                self.pool._mark_activity(inst_name)
 
             # Log messages outside the lock to minimize hold time (logging can be slow)
             for msg in processed_messages:
@@ -972,12 +971,7 @@ class ExecutionEngine:
                         pass
                 
                 conv.insert(0, sys_msg)
-                with token_cache_invalidated(instance):
-                    with instance._compression_lock:
-                        instance.conversation.insert(0, sys_msg)
-                    # Clear cached lists when system message is inserted to prevent stale data
-                    instance._cached_messages = []
-                    instance._cached_llm_messages = []
+                instance.insert_message_at_head(sys_msg)  # PR2: centralized API handles cache sync and clear
                 m0 = sys_msg
                 m0_role = SYSTEM
                 
@@ -1776,9 +1770,7 @@ class ExecutionEngine:
             )
             messages.append(cont_msg)
             llm_messages.append(cont_msg)
-            with token_cache_invalidated(instance):
-                with instance._compression_lock:
-                    instance.conversation.append(cont_msg)
+            instance.append_message(cont_msg)  # PR2: centralized mutation API handles cache sync
             return True
         
         return False
@@ -1900,9 +1892,7 @@ class ExecutionEngine:
                 llm_messages.append(fn_msg)
                 response.append(fn_msg)  # Stream denial to UI
                 
-                with token_cache_invalidated(instance):
-                    with instance._compression_lock:
-                        instance.conversation.append(fn_msg)
+                instance.append_message(fn_msg)  # PR2: centralized mutation API handles cache sync
                 
                 # Track as executed for orphan handling (it was processed, just denied)
                 executed_tools.append(tool_name)
@@ -2020,9 +2010,7 @@ class ExecutionEngine:
             messages.append(fn_msg)
             llm_messages.append(fn_msg)
             response.append(fn_msg)  # Stream tool result to UI (was missing)
-            with token_cache_invalidated(instance):
-                with instance._compression_lock:
-                    instance.conversation.append(fn_msg)
+            instance.append_message(fn_msg)  # PR2: centralized mutation API
             
             # Track executed tool for orphan handling
             executed_tools.append(tool_name)
@@ -2138,9 +2126,7 @@ class ExecutionEngine:
                             llm_messages.append(fn_msg)
                             response.append(fn_msg)  # Stream to UI
                             
-                            with token_cache_invalidated(instance):
-                                with instance._compression_lock:
-                                    instance.conversation.append(fn_msg)
+                            instance.append_message(fn_msg)  # PR2: centralized mutation API handles cache sync
                             
                             # Track as executed for consistency (matching primary loop pattern)
                             executed_tools.append(tool_name)
@@ -2183,11 +2169,9 @@ class ExecutionEngine:
         response.extend(turn_output)
         messages.extend(turn_output)
         llm_messages.extend(turn_output)
-        with token_cache_invalidated(instance):
-            with instance._compression_lock:
-                instance.conversation.extend(turn_output)
-                # Streaming UI Content Update Fix: Clear _streaming_responses after Phase 4 commits messages
-                instance._streaming_responses = []
+        instance.append_messages(turn_output)  # PR2: centralized mutation API handles cache sync
+        # Streaming UI Content Update Fix: Clear _streaming_responses after Phase 4 commits messages
+        instance._streaming_responses = []
         
         # Extract ground-truth usage info from LLM response (ground-truth token tracking)
         # This replaces manual token counting with actual API-reported values

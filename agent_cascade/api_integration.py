@@ -376,10 +376,7 @@ def run_agent_in_pool_with_recovery(
                 content=f"[SYSTEM]: A repetitive loop was detected ({e.reason}). "
                         f"Please try a different approach.",
             )
-            with instance._compression_lock:
-                instance.conversation.append(hint_msg)
-                # Invalidate token count cache — conversation length changed
-                instance._last_token_count_conversation_length = -1
+            instance.append_message(hint_msg)  # PR2: centralized mutation API handles cache sync
 
             retry_count += 1
 
