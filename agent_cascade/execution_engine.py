@@ -97,7 +97,7 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     # Also check instance.agent_class for defense-in-depth
     instance_agent_class = getattr(instance, 'agent_class', None) if instance else None
     
-    logger.debug(f"[{inst_name}] _get_active_functions_from_template: agent_class='{agent_class}', instance.agent_class={instance_agent_class}")
+    # logger.debug(f"[{inst_name}] _get_active_functions_from_template: agent_class='{agent_class}', instance.agent_class={instance_agent_class}")
     
     # Read disabled_tools from instance override first, then fall back to template
     if instance is not None and instance._generate_cfg_override is not None:
@@ -154,7 +154,7 @@ def _get_active_functions_from_template(template, instance=None) -> list:
         disabled = disabled | DEFAULT_COMPRESSOR_DISABLED_TOOLS
         logger.debug(f"[{inst_name}] Applied Compressor-agent defaults: {len(DEFAULT_COMPRESSOR_DISABLED_TOOLS)} tools added")
 
-    logger.debug(f"[{inst_name}] _get_active_functions_from_template: disabled_tools={disabled}")
+    # logger.debug(f"[{inst_name}] _get_active_functions_from_template: disabled_tools={disabled}")
 
     # Defensive: template.function_map may be None for templates without tools
     func_map = getattr(template, 'function_map', None)
@@ -167,7 +167,7 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     filtered_out = all_tool_names & disabled
     active_tool_names = all_tool_names - disabled
     
-    logger.debug(f"[{inst_name}] _get_active_functions_from_template: {len(all_tool_names)} tools total, {len(filtered_out)} filtered, {len(active_tool_names)} active")
+    # logger.debug(f"[{inst_name}] _get_active_functions_from_template: {len(all_tool_names)} tools total, {len(filtered_out)} filtered, {len(active_tool_names)} active")
     
     # Check specifically for shell_cmd — warn if Security agent has it enabled
     if 'shell_cmd' in all_tool_names and is_security_agent and 'shell_cmd' not in disabled:
@@ -962,6 +962,15 @@ class ExecutionEngine:
             # If no system message at start, inject it from template
             if m0_role != SYSTEM and template and getattr(template, 'system_message', None):
                 sys_msg = Message(role=SYSTEM, content=template.system_message)
+                
+                # Preserve old first message's timestamp so update_history() can match it as an update
+                # rather than appending a duplicate. The logger uses timestamps as identity markers.
+                if len(conv) > 0 and hasattr(conv[0], 'timestamp') and conv[0].timestamp:
+                    try:
+                        sys_msg.timestamp = conv[0].timestamp
+                    except AttributeError:
+                        pass
+                
                 conv.insert(0, sys_msg)
                 with token_cache_invalidated(instance):
                     with instance._compression_lock:
@@ -971,6 +980,9 @@ class ExecutionEngine:
                     instance._cached_llm_messages = []
                 m0 = sys_msg
                 m0_role = SYSTEM
+                
+                # Note: No update_history() call here - _log_messages_to_jsonl() already handles first-time logging.
+                # Calling update_history() with fresh timestamp causes dedup to fail and create duplicates.
 
             if m0_role == SYSTEM:
                 m0_content = m0.get('content', '') if isinstance(m0, dict) else getattr(m0, 'content', '')
@@ -1021,6 +1033,15 @@ class ExecutionEngine:
                         else:
                             m0.content = m0_content
                         logger.debug(f"[CACHE_REBUILD] System prompt content CHANGED for {inst_name}")
+                        
+                        # Persist updated system message to file so it survives restarts
+                        try:
+                            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                            with instance._compression_lock:
+                                conv_snapshot = list(instance.conversation)
+                            log_inst.update_history(conv_snapshot)
+                        except Exception as e:
+                            logger.warning(f"Failed to persist system message update for {inst_name}: {e}")
                     else:
                         logger.debug(f"[CACHE_REBUILD] System prompt for {inst_name} textually identical — skipping pool update")
 
