@@ -1567,15 +1567,15 @@ class ExecutionEngine:
                     allocated_tokens = val
 
             def _do_call(llm_cfg: dict) -> Iterator[List[Message]]:
-                merged_cfg = {}
-                # Use per-instance override if present, otherwise fall back to template config
+                # Start with endpoint config as base, then apply per-instance overrides
+                merged_cfg = dict(llm_cfg)  # Endpoint defaults first
+                # Per-instance override (set by user via UI) takes precedence over endpoint defaults
                 if instance._generate_cfg_override is not None:
                     merged_cfg.update(instance._generate_cfg_override)
                 elif hasattr(llm, 'generate_cfg'):
                     merged_cfg.update(llm.generate_cfg)
-                # Endpoint config (from router) overwrites — including max_input_tokens.
-                # This allows user's General Settings / endpoint limit to take effect.
-                merged_cfg.update(llm_cfg)
+                # No more merged_cfg.update(llm_cfg) here — already set as base above
+                # This ensures user's max_input_tokens override is not silently lost
                 merged_cfg['agent_name'] = template.name
                 
                 # Store allocated max_input_tokens in instance for compression check (ground-truth tracking)
