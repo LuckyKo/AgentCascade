@@ -149,10 +149,10 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     
     if is_security_agent:
         disabled = disabled | DEFAULT_SECURITY_DISABLED_TOOLS
-        logger.debug(f"[{inst_name}] Applied Security-agent defaults: {len(DEFAULT_SECURITY_DISABLED_TOOLS)} tools added")
+        # logger.debug(f"[{inst_name}] Applied Security-agent defaults: {len(DEFAULT_SECURITY_DISABLED_TOOLS)} tools added")
     elif is_compressor_agent:
         disabled = disabled | DEFAULT_COMPRESSOR_DISABLED_TOOLS
-        logger.debug(f"[{inst_name}] Applied Compressor-agent defaults: {len(DEFAULT_COMPRESSOR_DISABLED_TOOLS)} tools added")
+        # logger.debug(f"[{inst_name}] Applied Compressor-agent defaults: {len(DEFAULT_COMPRESSOR_DISABLED_TOOLS)} tools added")
 
     # logger.debug(f"[{inst_name}] _get_active_functions_from_template: disabled_tools={disabled}")
 
@@ -198,14 +198,19 @@ def _invalidate_token_cache(instance):
 def token_cache_invalidated(instance):
     """Context manager that ensures token cache is invalidated after conversation mutation.
     
-    Usage:
+    PR3 Note: Most callers should now use centralized API methods like append_message(),
+    trim_tail(), rebuild_conversation() which handle cache invalidation automatically.
+    This context manager is useful for legacy code or when multiple mutations need to
+    be batched under a single lock with deferred cache invalidation.
+    
+    Usage (legacy pattern):
         with token_cache_invalidated(instance):
             instance.conversation.append(new_msg)
         # Token cache automatically invalidated here
-        
-    This replaces the pattern of manually calling _invalidate_token_cache() 
-    after every conversation mutation, which was error-prone and scattered across multiple sites.
     
+    Usage (PR3 preferred pattern):
+        instance.append_message(new_msg)  # Cache handled automatically
+        
     Args:
         instance: AgentInstance whose token cache should be invalidated on exit
         

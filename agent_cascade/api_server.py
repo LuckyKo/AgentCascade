@@ -977,13 +977,7 @@ def create_app(agents, agent_pool, config=None):
         if agent_pool:
             inst = agent_pool.get_instance(session['session_name'])
             if inst is not None:
-                with inst._compression_lock:
-                    inst.conversation.clear()
-                    # Invalidate token count cache — conversation cleared
-                    inst._last_token_count_conversation_length = -1
-                    # Reset compression tracking fields (Feature 018)
-                    inst._last_force_compress_time = 0.0
-                    inst._force_compress_count = 0
+                inst.reset_conversation()  # PR3: centralized API handles full reset with cache sync
                 # Create a new logger session so messages go to a new JSONL file (Fix: New Session was appending to old logs)
                 try:
                     agent_pool._logger.create_new_session(
@@ -1642,8 +1636,7 @@ def create_app(agents, agent_pool, config=None):
                                                 )
                                                 sa_inst = agent_pool.get_instance(sa_name)
                                                 if sa_inst is not None:
-                                                    with sa_inst._compression_lock:
-                                                        sa_inst.conversation[:] = recov  # Replace in-place under lock
+                                                    sa_inst.rebuild_conversation(recov)  # PR3: centralized API handles full rebuild with cache sync
                                             else:
                                                 logger.warning(
                                                     f"Could not restore agent instance {sa_name} pool — "
@@ -1752,16 +1745,21 @@ def create_app(agents, agent_pool, config=None):
                     if agent_pool:
                         inst = agent_pool.get_instance(instance_name)
                         if inst is not None:
-                            with inst._compression_lock:
-                                while inst.conversation and _get_msg_role(inst.conversation[-1]) in (ASSISTANT, FUNCTION):
-                                    inst.conversation.pop()
+                            # PR3 migration: Use centralized API for retry rollback
+                            # Count trailing assistant/function messages first, then trim once (reviewer optimization)
+                            count_to_trim = 0
+                            while inst.conversation and count_to_trim < len(inst.conversation) and _get_msg_role(inst.conversation[-1 - count_to_trim]) in (ASSISTANT, FUNCTION):
+                                count_to_trim += 1
+                            if count_to_trim > 0:
+                                removed = inst.trim_tail(count_to_trim)
 
                     # Roll back one more (the user message) to allow a clean re-trigger
                     last_user_msg = None
                     inst = agent_pool.get_instance(instance_name)
-                    with inst._compression_lock:
-                        if inst.conversation and _get_msg_role(inst.conversation[-1]) == USER:
-                            last_user_msg = inst.conversation.pop()
+                    if inst is not None and inst.conversation and _get_msg_role(inst.conversation[-1]) == USER:
+                        # PR3 migration: Use centralized API for removing user message
+                        removed = inst.trim_tail(1)
+                        last_user_msg = removed[0] if removed else None
 
                     # Post-unification: use pool instance directly — no legacy fallback needed
                     inst = agent_pool.get_instance(instance_name) if agent_pool else None
@@ -1792,12 +1790,10 @@ def create_app(agents, agent_pool, config=None):
                     if last_user_msg and agent_pool:
                         inst = agent_pool.get_instance(instance_name)
                         if inst is not None:
-                            with inst._compression_lock:
-                                # Use insertion point logic to avoid splitting tool call/response pairs
-                                insert_pos = _find_user_message_insertion_point(inst.conversation)
-                                inst.conversation.insert(insert_pos, last_user_msg)
-                                # Invalidate token count cache — conversation length changed
-                                inst._last_token_count_conversation_length = -1
+                            # PR3 migration: Use centralized API for insert at arbitrary position
+                            # Use insertion point logic to avoid splitting tool call/response pairs
+                            insert_pos = _find_user_message_insertion_point(inst.conversation)
+                            inst.insert_message_at(insert_pos, last_user_msg)
                         else:
                             # Fallback: create the instance first, then enqueue the message
                             create_main_agent_instance(
@@ -1833,13 +1829,7 @@ def create_app(agents, agent_pool, config=None):
                     if agent_pool:
                         inst = agent_pool.get_instance(session['session_name'])
                         if inst is not None:
-                            with inst._compression_lock:
-                                inst.conversation.clear()
-                                # Invalidate token count cache — conversation cleared
-                                inst._last_token_count_conversation_length = -1
-                                # Reset compression tracking fields (Feature 018)
-                                inst._last_force_compress_time = 0.0
-                                inst._force_compress_count = 0
+                            inst.reset_conversation()  # PR3: centralized API handles full reset with cache sync
                             # Create a new logger session so messages go to a new JSONL file (Fix: New Session was appending to old logs)
                             try:
                                 agent_pool._logger.create_new_session(
@@ -2042,10 +2032,10 @@ def create_app(agents, agent_pool, config=None):
                                         template = agent_pool.get_template('Security')  # Template lookup by CLASS name (NOT instance name)
                                         if template and hasattr(template, 'llm'):
                                             cfg = (template.llm.generate_cfg or {}).copy()
-                                            logger.debug(f"[SECURITY] Before update - llm_safe_cfg disabled_tools: {llm_safe_cfg.get('disabled_tools', 'MISSING')}")
+                                            # logger.debug(f"[SECURITY] Before update - llm_safe_cfg disabled_tools: {llm_safe_cfg.get('disabled_tools', 'MISSING')}")
                                             cfg.update(llm_safe_cfg)
                                             sec_instance._generate_cfg_override = cfg
-                                            logger.info(f"[SECURITY] Set _generate_cfg_override for '{sec_state_key}': disabled_tools={cfg.get('disabled_tools', 'NOT SET')}")
+                                            # logger.info(f"[SECURITY] Set _generate_cfg_override for '{sec_state_key}': disabled_tools={cfg.get('disabled_tools', 'NOT SET')}")
                                         else:
                                             logger.warning(f"[SECURITY] Template missing or has no llm attribute for '{sec_state_key}'")
                                             # Fallback: set disabled_tools directly even without template
@@ -2105,8 +2095,8 @@ def create_app(agents, agent_pool, config=None):
                                     app.security_check_semaphore.acquire()
                                     try:
                                         # Log instance state before running (debug level to reduce log noise)
-                                        override_disabled = getattr(sec_instance, '_generate_cfg_override', {}).get('disabled_tools', 'NOT SET')
-                                        logger.debug(f"[SECURITY] Before engine.run - sec_instance._generate_cfg_override['disabled_tools']={override_disabled}")
+                                        # override_disabled = getattr(sec_instance, '_generate_cfg_override', {}).get('disabled_tools', 'NOT SET')
+                                        # logger.debug(f"[SECURITY] Before engine.run - sec_instance._generate_cfg_override['disabled_tools']={override_disabled}")
                                         
                                         # Execute via engine.run() — this handles LLM call, retries, and streaming
                                         for resp in engine.run(sec_instance):
@@ -2391,11 +2381,10 @@ def create_app(agents, agent_pool, config=None):
                             msg.content = new_parsed_content
                         
                         if agent_pool:
-                            # Write back the edited history under lock to prevent data race
+                            # Write back the edited history using centralized API (PR3 migration)
                             inst = agent_pool.get_instance(target_name)
                             if inst is not None:
-                                with inst._compression_lock:
-                                    inst.conversation[:] = history  # In-place replace under lock
+                                inst.rebuild_conversation(history)  # PR3: centralized API handles full rebuild with cache sync
                             
                             logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
                             logger_inst.reset_history(history, rewrite=True)
@@ -2436,11 +2425,10 @@ def create_app(agents, agent_pool, config=None):
                         if 0 <= idx < len(history):
                             history.pop(idx)
                     if agent_pool:
-                        # Write back the pruned history under lock to prevent data race
+                        # Write back the pruned history using centralized API (PR3 migration)
                         inst = agent_pool.get_instance(target_name)
                         if inst is not None:
-                            with inst._compression_lock:
-                                inst.conversation[:] = history  # In-place replace under lock
+                            inst.rebuild_conversation(history)  # PR3: centralized API handles full rebuild with cache sync
                         
                         logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
                         logger_inst.reset_history(history, rewrite=True)
@@ -2679,7 +2667,8 @@ if __name__ == "__main__":
         from agent_cascade.llm.schema import Message, SYSTEM
         maine_inst = agent_pool.get_instance('Maine')
         if maine_inst and not maine_inst.conversation:
-            maine_inst.conversation.append(Message(role=SYSTEM, content=sys_msg_content))
+            # PR3 migration: Use centralized API for system message append at server startup
+            maine_inst.append_messages([Message(role=SYSTEM, content=sys_msg_content)])
     
     app = create_app(agents=[orch_agent], agent_pool=agent_pool)
     

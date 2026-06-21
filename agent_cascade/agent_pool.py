@@ -81,16 +81,14 @@ class _InstanceConversationMapping(dict):
     def __setitem__(self, key: str, value: List[Message]) -> None:
         """Write propagates to instances[name].conversation AND dict storage.
 
-        NOTE: Token count cache is invalidated automatically here when the instance exists.
+        PR3 migration: Uses centralized rebuild_conversation() API for proper cache sync.
         If callers bypass this method (e.g., direct assignment), they must invalidate manually.
         See Fix #2 for details.
         """
         inst = self._pool.instances.get(key)
         if inst is not None:
-            with inst._compression_lock:
-                inst.conversation = list(value)  # defensive copy
-            # Fix #2: Invalidate token count cache — conversation was replaced
-            inst._last_token_count_conversation_length = -1
+            # PR3 migration: Use centralized API for conversation replacement with full cache sync
+            inst.rebuild_conversation(list(value))  # defensive copy, handles all cache invalidation
         super().__setitem__(key, value)
 
     def __delitem__(self, key: str) -> None:
@@ -98,9 +96,7 @@ class _InstanceConversationMapping(dict):
         super().__delitem__(key)
         inst = self._pool.instances.get(key)
         if inst is not None:
-            with inst._compression_lock:
-                inst.conversation.clear()
-            # Conversation cleared — next _setup_turn() will trigger full rebuild
+            inst.reset_conversation()  # PR3: centralized API handles full reset with cache sync
 
     def get(self, key: str, default=None):
         """Get conversation for instance, returning default if not found."""
@@ -118,10 +114,12 @@ class _InstanceConversationMapping(dict):
                 return args[0]
             raise KeyError(key)
 
-        # Copy under lock BEFORE clearing — prevents both data loss and races
+        # Copy conversation data BEFORE clearing — prevents both data loss and races
         with inst._compression_lock:
             value = list(inst.conversation)
-            inst.conversation.clear()
+        
+        # Use centralized API for cache sync (PR3 migration)
+        inst.reset_conversation()  # PR3: centralized API handles full reset with cache sync
 
         # Remove from dict storage only — don't delete the instance
         super().pop(key, None)
@@ -201,8 +199,7 @@ class _InstanceConversationMapping(dict):
         """Clear dict storage and conversations, but don't delete instances."""
         super().clear()
         for inst in self._pool.instances.values():
-            with inst._compression_lock:
-                inst.conversation.clear()
+            inst.reset_conversation()  # PR3: centralized API handles full reset with cache sync
 
 
 class AgentPool:
@@ -642,7 +639,7 @@ class AgentPool:
           2. Dismiss all non-orchestrator sub-agents (with cascade and double-dismiss guard)
           3. Create new logger session for the main orchestrator (so new messages
              go to a fresh JSONL file instead of appending to the old one)
-          4. Clear conversations of all instances
+          4. Clear instance conversations mapping
           5. Clear per-instance state (halted, active_stack, tool args, etc.)
           6. Clear performance caches and WebSocket references
           7. Shutdown and recreate async infrastructure (Phase 4)
@@ -699,18 +696,12 @@ class AgentPool:
                     logger.warning(f"Logger reset failed for {name} (new session may append to old logs): {e}")
                 break
 
-        # ── Step 4: Clear conversations of all instances ─────────────────────
+        # ── Step 4: Clear instance conversations mapping ──────────────────────
         if hasattr(self, '_instance_conversations'):
             self._instance_conversations.clear()
         else:
             for inst in self.instances.values():
-                with inst._compression_lock:
-                    inst.conversation.clear()
-                    # Fix #2: Invalidate token count cache — conversation was cleared
-                    inst._last_token_count_conversation_length = -1
-                    # Reset compression tracking fields (cooldown and overfeeding detection)
-                    inst._last_force_compress_time = 0.0
-                    inst._force_compress_count = 0
+                inst.reset_conversation()  # PR3: centralized API handles full reset with cache sync
         self._instances_version += 1
 
         # ── Step 5: Clear per-instance state ────────────────────────────────
@@ -917,13 +908,7 @@ class AgentPool:
         """
         inst = self.instances.get(instance_name)
         if inst:
-            with inst._compression_lock:
-                inst.conversation.clear()
-                # Invalidate token count cache — conversation cleared
-                inst._last_token_count_conversation_length = -1
-                # Reset compression tracking fields (cooldown and overfeeding detection)
-                inst._last_force_compress_time = 0.0
-                inst._force_compress_count = 0
+            inst.reset_conversation()  # PR3: centralized API handles full reset with cache sync
 
     def capture_snapshots(self) -> Dict[str, int]:
         """Capture current conversation lengths for all instances."""
@@ -941,11 +926,10 @@ class AgentPool:
         for name, target_len in snapshots.items():
             inst = self.instances.get(name)
             if inst:
-                with inst._compression_lock:
-                    if len(inst.conversation) > target_len:
-                        del inst.conversation[target_len:]
-                        # Invalidate token count cache — conversation length changed
-                        inst._last_token_count_conversation_length = -1
+                current_len = len(inst.conversation)
+                if current_len > target_len:
+                    trim_count = current_len - target_len
+                    inst.trim_tail(trim_count)  # PR3: centralized API handles cache sync
                 try:
                     log_inst = self._logger.get_logger(name, inst.agent_class)
                     log_inst.truncate_to(target_len)
@@ -1148,17 +1132,15 @@ class AgentPool:
         # Create or update the instance with the restored conversation
         existing = self.instances.get(instance_name)
         if existing:
+            # PR3 migration: Use centralized API for conversation replacement during session load
+            # All state changes under single lock to maintain atomicity (reviewer feedback)
             with existing._compression_lock:
-                existing.conversation = restored_messages
-                # Invalidate token count cache — conversation replaced
-                existing._last_token_count_conversation_length = -1
+                existing.rebuild_conversation(restored_messages)  # Handles conversation + cache sync
                 existing.agent_class = agent_class
                 # Clear streaming responses to prevent old session's partial messages from appearing
                 # (Bug: when loading a new session, _streaming_responses from previous session persists)
                 existing._streaming_responses = []
-                # Reset cached working sets to force rebuild with new conversation
-                existing._cached_messages = []
-                existing._cached_llm_messages = []
+                # Reset cached working sets config version to force rebuild with new conversation
                 existing._last_config_version = -1
                 # Clear per-instance LLM config overrides from previous session
                 existing._generate_cfg_override = None

@@ -138,6 +138,222 @@ class AgentInstance:
     # false-positive loop detection. This flag suppresses loop detection on the next turn only.
     _suppress_loop_detection_next_turn: bool = field(default=False)     # Cooldown flag for loop detection after compression/rollback
 
+    # ── Centralized Message Mutation API (Phase 3) ───────────────────────
+    # These methods encapsulate ALL conversation mutations, keeping cached lists
+    # in sync and invalidating caches according to the update schema from todo.md:
+    #   - append operations: extend cached lists, invalidate token cache only
+    #   - edit/trim operations: invalidate working set cache (content changed)
+    #   - rebuild/reset operations: full cache invalidation
+    # All methods are thread-safe using _compression_lock.
+    # Must be called after AgentInstance is fully initialized.
+
+    def append_message(self, message: Message) -> None:
+        """Append a single message. Updates cached lists atomically.
+
+        Update Schema Operation: add message/tool response/user msg (append)
+        Cache Behavior:
+            - _cached_messages: EXTEND with new message
+            - _cached_llm_messages: EXTEND with new message
+            - _last_token_count_conversation_length: INVALIDATE (-1)
+            - Working set cache: PRESERVED (no rebuild needed)
+
+        Thread Safety: Uses _compression_lock for atomic update
+        """
+        with self._compression_lock:
+            self.conversation.append(message)
+            self._cached_messages.append(message)
+            self._cached_llm_messages.append(message)
+            self._last_token_count_conversation_length = -1
+
+    def append_messages(self, messages: List[Message]) -> None:
+        """Append multiple messages. Same as append_message but batched for efficiency.
+
+        Update Schema Operation: add message/tool response/user msg (append, batched)
+        Cache Behavior: Same as append_message but for multiple messages
+
+        Thread Safety: Uses _compression_lock for atomic update
+        """
+        if not messages:
+            return
+        with self._compression_lock:
+            self.conversation.extend(messages)
+            self._cached_messages.extend(messages)
+            self._cached_llm_messages.extend(messages)
+            self._last_token_count_conversation_length = -1
+
+    def edit_message_in_place(self, index: int, new_message: Message) -> None:
+        """Replace message at index. Invalidates working set cache (content changed).
+
+        Update Schema Operation: user history edit (edit)
+        Cache Behavior:
+            - _cached_messages: REPLACE at same index
+            - _cached_llm_messages: REPLACE at same index (if within bounds)
+            - _last_token_count_conversation_length: INVALIDATE (-1)
+            - Working set cache: PARTIALLY INVALIDATED (content changed)
+
+        Thread Safety: Uses _compression_lock for atomic update
+        """
+        with self._compression_lock:
+            self.conversation[index] = new_message
+            if index < len(self._cached_messages):
+                self._cached_messages[index] = new_message
+            if index < len(self._cached_llm_messages):
+                self._cached_llm_messages[index] = new_message
+            self._last_token_count_conversation_length = -1
+
+    def insert_message_at_head(self, message: Message) -> None:
+        """Insert message at the beginning (index 0). Invalidates working set cache.
+
+        Used for system message injection. Inserting at head shifts all indices,
+        requiring working set cache invalidation.
+
+        Update Schema Operation: P7 system prompt injection (special case of edit)
+        Cache Behavior:
+            - _cached_messages: CLEAR (indices shifted)
+            - _cached_llm_messages: CLEAR (indices shifted)
+            - _last_token_count_conversation_length: INVALIDATE (-1)
+
+        Thread Safety: Uses _compression_lock for atomic update
+
+        Note: Clears cached lists rather than inserting into them.
+        Inserting at index 0 shifts all indices, requiring a full rebuild on next turn.
+        """
+        with self._compression_lock:
+            self.conversation.insert(0, message)
+            self._last_token_count_conversation_length = -1
+            self._cached_messages.clear()
+            self._cached_llm_messages.clear()
+
+    def trim_tail(self, count: int) -> List[Message]:
+        """Remove last N messages. Returns removed messages. Updates cached lists.
+
+        Update Schema Operation: rollback (edit) / retry (edit)
+        Cache Behavior:
+            - _cached_messages: TRIM tail to match conversation
+            - _cached_llm_messages: TRIM tail to match conversation
+            - _last_token_count_conversation_length: INVALIDATE (-1)
+
+        Args:
+            count: Number of messages to remove from the end
+
+        Returns:
+            List of removed Message objects
+
+        Thread Safety: Uses _compression_lock for atomic update
+        """
+        if count <= 0:
+            return []
+        with self._compression_lock:
+            new_len = max(0, len(self.conversation) - count)
+            removed = list(self.conversation[new_len:])
+            del self.conversation[new_len:]
+            del self._cached_messages[new_len:]
+            del self._cached_llm_messages[new_len:]
+            self._last_token_count_conversation_length = -1
+        return removed
+
+    def insert_message_at(self, index: int, message: Message) -> None:
+        """Insert message at arbitrary position. Invalidates working set cache.
+
+        Used for re-inserting user messages during retry/resume operations.
+        Inserting at arbitrary positions shifts indices, requiring working set cache invalidation.
+
+        Update Schema Operation: retry resume (edit - special case of insert)
+        Cache Behavior:
+            - _cached_messages: CLEAR (indices shifted)
+            - _cached_llm_messages: CLEAR (indices shifted)
+            - _last_token_count_conversation_length: INVALIDATE (-1)
+            - _cached_token_count: RESET to 0
+            - _last_actual_token_count: RESET to 0
+
+        Args:
+            index: Position to insert the message (0-based)
+            message: Message object to insert
+
+        Thread Safety: Uses _compression_lock for atomic update
+
+        Note: Clears cached lists rather than inserting into them.
+        Inserting at arbitrary positions shifts all subsequent indices,
+        requiring a full rebuild on next turn.
+        """
+        with self._compression_lock:
+            # Clamp index to valid range
+            index = max(0, min(index, len(self.conversation)))
+            self.conversation.insert(index, message)
+            self._last_token_count_conversation_length = -1
+            self._cached_messages.clear()
+            self._cached_llm_messages.clear()
+            # Reset token count caches for consistency with rebuild_conversation (reviewer feedback)
+            self._cached_token_count = 0
+            self._last_actual_token_count = 0
+
+    def rebuild_conversation(self, new_messages: List[Message]) -> None:
+        """Replace entire conversation. Full cache invalidation.
+
+        Update Schema Operation: compression (regen) / session load (replace from json) / server startup
+        Cache Behavior:
+            - _cached_messages: REPLACE entirely
+            - _cached_llm_messages: REPLACE entirely
+            - _last_token_count_conversation_length: INVALIDATE (-1)
+            - _cached_token_count: 0
+            - _last_actual_token_count: 0
+
+        IMPORTANT: This method does NOT sync the logger or UI. Callers must handle
+        logger/UI sync separately (e.g., log_inst.update_history(conv)).
+
+        Args:
+            new_messages: Complete replacement conversation
+
+        Thread Safety: Uses _compression_lock for atomic update
+        """
+        with self._compression_lock:
+            self.conversation = list(new_messages)
+            self._cached_messages = list(new_messages)
+            self._cached_llm_messages = list(new_messages)
+            self._cached_token_count = 0
+            self._last_token_count_conversation_length = -1
+            self._last_actual_token_count = 0
+
+    def reset_conversation(self) -> None:
+        """Clear everything. Full cache invalidation.
+
+        Update Schema Operation: new session (reset)
+        Cache Behavior:
+            - _cached_messages: CLEAR
+            - _cached_llm_messages: CLEAR
+            - _last_token_count_conversation_length: INVALIDATE (-1)
+            - _cached_token_count: 0
+            - _last_actual_token_count: 0
+            - _last_force_compress_time: 0.0
+            - _force_compress_count: 0
+
+        Thread Safety: Uses _compression_lock for atomic update
+        """
+        with self._compression_lock:
+            self.conversation.clear()
+            self._cached_messages.clear()
+            self._cached_llm_messages.clear()
+            self._cached_token_count = 0
+            self._last_token_count_conversation_length = -1
+            self._last_actual_token_count = 0
+            if hasattr(self, '_last_force_compress_time'):
+                self._last_force_compress_time = 0.0
+            if hasattr(self, '_force_compress_count'):
+                self._force_compress_count = 0
+
+    def clear_working_set_cache(self) -> None:
+        """Clear working set cache without touching conversation.
+
+        Used when cached lists may be out of sync (e.g., after direct mutation
+        bypassing this API).
+
+        Thread Safety: Uses _compression_lock for atomic update
+        """
+        with self._compression_lock:
+            self._cached_messages.clear()
+            self._cached_llm_messages.clear()
+            self._last_token_count_conversation_length = -1
+
     def _transition(self, new_state: AgentState) -> None:
         """Transition to a new state with validation.
         
