@@ -409,7 +409,8 @@ def _detect_loop_in_instance(
         if loop_info:
             reason, pop_count = loop_info
             # Raise LoopDetectedError so the recovery wrapper handles rollback
-            raise LoopDetectedError(reason=reason, pop_count=pop_count)
+            # Bug #2 fix: Add instance_name to LoopDetectedError for correct rollback target
+            raise LoopDetectedError(reason=reason, agent_name=instance_name, pop_count=pop_count)
     except LoopDetectedError:
         # Re-raise — let run_agent_in_pool_with_recovery handle surgical rollback + retry
         raise

@@ -1184,7 +1184,8 @@ class ExecutionEngine:
             if loop_info:
                 reason, pop_count = loop_info
                 logger.warning(f"Loop detected for {inst_name}: {reason}")
-                raise LoopDetectedError(reason=reason, pop_count=pop_count)
+                # Bug #1 fix: Add agent_name to LoopDetectedError for correct rollback target
+                raise LoopDetectedError(reason=reason, agent_name=inst_name, pop_count=pop_count)
         else:
             # Clear the cooldown flag now that we've skipped loop detection this turn.
             # Next turn will run normal loop detection (no more suppression).
@@ -2784,10 +2785,10 @@ class ExecutionEngine:
                     _last_sub_send = now
 
             # FIX MSG_COUNT_BUG: Removed conv.extend(final_resp) to prevent duplicate messages.
-            # Reason: conv and instance.conversation are the same object reference (from lifecycle_manager.initialize_conversation).
-            # Messages are already added to instance.conversation during engine.run() via _process_response() at line 1935.
-            # Extending again here caused each LLM response to be duplicated in the conversation.
-            # See: .agent_lessons/lessons_msg_count_bug.md for detailed analysis.
+            # Messages are already added to instance.conversation during engine.run() via _process_response().
+            # Note: For new instances, rebuild_conversation() creates a copy of conv, so they are NOT the same
+            # reference — only reused instances share the same list. Extending again would cause duplication
+            # regardless. See: .agent_lessons/lessons_msg_count_bug.md for detailed analysis.
             self._create_completed = True  # Mark for finally-block EXIT log reason tracking
 
             # Item 12: Always emit final sub-agent state after loop completes (Fix #3: lighter snapshot)
@@ -2815,7 +2816,12 @@ class ExecutionEngine:
                 len(conv), len(final_resp) if 'final_resp' in locals() else 0
             )
 
-        return inst, conv
+        # FIX: Return a copy of the actual instance conversation, not the stale `conv` variable.
+        # For new instances, rebuild_conversation() creates a COPY of conv via list(new_messages),
+        # so the original `conv` from initialize_conversation never receives appended messages.
+        # For reused instances, they happen to be the same reference — but using inst.conversation
+        # is correct in both cases. See: investigation report for sub-agent response propagation bug.
+        return inst, list(inst.conversation)
 
     def _create_system_agent(
         self, agent_class: str, instance_name: str,

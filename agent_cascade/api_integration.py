@@ -349,34 +349,57 @@ def run_agent_in_pool_with_recovery(
             return  # Success — no loop detected
 
         except LoopDetectedError as e:
+            # Bug #3 fix: Use agent_name from exception if available, fallback to instance_name for backward compat
+            looped_agent = e.agent_name if e.agent_name else instance_name
+            
             if not auto_rollback_enabled or retry_count >= max_auto_retries:
                 logger.warning(
-                    f"Loop detected for {instance_name}: {e.reason}. "
+                    f"Loop detected for {looped_agent}: {e.reason}. "
                     f"Exceeded retries ({retry_count}/{max_auto_retries}). Stopping."
                 )
                 # Yield error state so UI can display it
                 error_msg = Message(
                     role=ASSISTANT,
-                    content=f"[SYSTEM: Loop detected — {e.reason}]",
+                    content=f"[SYSTEM: Loop detected for {looped_agent} — {e.reason}]",
                 )
                 yield [error_msg]
                 return
 
             logger.warning(
-                f"Loop detected for {instance_name}: {e.reason}. "
+                f"Loop detected for {looped_agent}: {e.reason}. "
                 f"Surgical rollback (Retry {retry_count + 1}/{max_auto_retries})."
             )
 
-            # Surgical rollback + hint injection under per-instance lock for atomicity
-            pool.surgical_rollback(instance_name, e.pop_count, reason=e.reason)
+            # Bug #3 fix: Surgical rollback on the CORRECT agent (the one that actually looped)
+            pool.surgical_rollback(looped_agent, e.pop_count, reason=e.reason)
 
-            # Inject loop avoidance hint (atomic with rollback)
-            hint_msg = Message(
-                role=USER,
-                content=f"[SYSTEM]: A repetitive loop was detected ({e.reason}). "
-                        f"Please try a different approach.",
-            )
-            instance.append_message(hint_msg)  # PR2: centralized mutation API handles cache sync
+            # Bug #3 fix: Get the correct instance for hint injection (not root agent's 'instance')
+            looped_instance = pool.get_instance(looped_agent)
+            if looped_instance:
+                # Inject loop avoidance hint (atomic with rollback)
+                hint_msg = Message(
+                    role=USER,
+                    content=f"[SYSTEM]: A repetitive loop was detected ({e.reason}). "
+                            f"Please try a different approach.",
+                )
+                looped_instance.append_message(hint_msg)  # PR2: centralized mutation API handles cache sync
+            else:
+                # REVIEWER FINDING #2 + Fix #2 from reviewer: If instance not found, hint won't be injected and retry may be wasted
+                # Use error level logging since this indicates a logic issue
+                logger.error(
+                    f"Could not find instance '{looped_agent}' for hint injection after rollback. "
+                    f"Rollback was performed but retry aborted — loop may persist."
+                )
+                # Yield informative error message before breaking (Fix #2 from reviewer)
+                # This ensures the consumer knows something went wrong instead of silent exit
+                error_msg = Message(
+                    role=ASSISTANT,
+                    content=f"[SYSTEM: Rollback performed but loop recovery failed — could not find agent '{looped_agent}' for hint injection]",
+                )
+                yield [error_msg]
+                # Break out of retry loop early if we can't inject the hint
+                # This prevents wasting remaining retries on an agent that never gets the hint
+                break
 
             retry_count += 1
 
