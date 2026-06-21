@@ -10,6 +10,7 @@ Writes to Layer 1 (JSONL file). The pool owns Layer 2 (in-memory working set).
 
 import json
 import os
+import shutil
 import datetime
 from typing import Any, Dict, List, Optional, Union
 
@@ -26,14 +27,19 @@ class AgentInstanceLogger:
     """
 
     def __init__(self, agent_class: str, instance_name: str, log_dir: str,
-                 base_metadata: Optional[Dict] = None):
+                 base_metadata: Optional[Dict] = None, log_path: Optional[str] = None):
         self.agent_class = (agent_class or '').strip().lower()  # Normalize for case-insensitive tracking
         self.instance_name = instance_name
         self.start_time = datetime.datetime.now()
 
-        timestamp = self.start_time.strftime("%Y%m%d_%H%M%S")
-        filename = f"{self.agent_class}_{instance_name}_{timestamp}.jsonl"
-        self.log_path = os.path.join(log_dir, filename)
+        # Use provided log_path if given, otherwise generate a new timestamped filename
+        self._log_path_provided = bool(log_path)  # Track if log_path was externally provided (Fix #2)
+        if log_path:
+            self.log_path = log_path
+        else:
+            timestamp = self.start_time.strftime("%Y%m%d_%H%M%S")
+            filename = f"{self.agent_class}_{instance_name}_{timestamp}.jsonl"
+            self.log_path = os.path.join(log_dir, filename)
 
         self.data = {
             "metadata": {
@@ -58,6 +64,40 @@ class AgentInstanceLogger:
         self._file_handle = None  # Cached file handle to avoid open/write/close per message (Fix #1)
         self._initialized = False  # Belt-and-suspenders guard against duplicate _initial_save() (get_logger lock is primary protection)
         self._initial_save()
+
+    @classmethod
+    def copy_session_file(cls, source_path: str, log_dir: str, agent_class: str, instance_name: str) -> str:
+        """Copy a session file to a new timestamped location.
+        
+        This creates a working copy of an existing session file with a new timestamp,
+        preserving the original file intact. Returns the path to the copied file.
+        
+        Args:
+            source_path: Path to the original session file
+            log_dir: Directory where the copy should be created
+            agent_class: Normalized agent class name (lowercase)
+            instance_name: Agent instance name
+            
+        Returns:
+            Path to the newly created copy
+            
+        Raises:
+            FileNotFoundError: If source_path does not exist
+        """
+        # Guard against missing source file (Fix #3)
+        if not os.path.exists(source_path):
+            raise FileNotFoundError(f"Source session file not found: {source_path}")
+        
+        # Generate a new timestamped filename for this working session
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_filename = f"{agent_class}_{instance_name}_{timestamp}.jsonl"
+        new_log_path = os.path.join(log_dir, new_filename)
+        
+        # Copy the original file to the new path (preserves metadata with copy2)
+        shutil.copy2(source_path, new_log_path)
+        logger.debug(f"Copied session from {source_path} to {new_log_path}")
+        
+        return new_log_path
 
     # ── File handle management ────────────────────────────────────────────
 
@@ -148,8 +188,17 @@ class AgentInstanceLogger:
         a secondary defense for edge cases where multiple instances might access the same file.
         The file-read-then-write sequence is not atomic, but race conditions are unlikely
         in practice since the composite key cache ensures only one logger instance per (instance_name, agent_class).
+        
+        When log_path was externally provided (session load scenario), skip writing metadata here
+        as reset_history(rewrite=True) will handle it. This avoids redundant I/O. (Fix #2)
         """
         if self._initialized:
+            return
+        
+        # Skip initial save when log_path was externally provided (session load path)
+        # The caller will handle file initialization via reset_history/rewrite
+        if getattr(self, '_log_path_provided', False):
+            self._initialized = True
             return
         
         # Defensive check: if file already exists with metadata on first line, skip writing

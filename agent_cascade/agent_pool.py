@@ -1190,13 +1190,60 @@ class AgentPool:
         self._instances_version += 1  # Fix #3: version bump when instances change via load
 
         # Set up logger for the restored session
+        # CRITICAL: Must replace the logger entirely to avoid writing to the wrong file.
+        # get_logger() returns the cached logger from the previous session (same instance_name),
+        # whose log_path still points to the old session's JSONL file. Using update_history()
+        # would append new messages to the old file, corrupting it.
+        
+        # Normalize agent class once (Fix #5 - deduplicate computation)
+        normalized_agent_class = (agent_class or '').strip().lower()
+        key = (instance_name, normalized_agent_class)
+        
         try:
-            log_inst = self._logger.get_logger(instance_name, agent_class)
-            # Clear stale history — update_history() is additive and would merge old+new messages
-            log_inst.data["history"] = []
-            log_inst.update_history(restored_messages)
+            # 1. Close the old logger's file handle (release the old file)
+            with self._logger._lock:
+                if key in self._logger._loggers:
+                    try:
+                        self._logger._loggers[key].close()
+                    except Exception as e:
+                        logger.debug(f"Logger close during session load failed for {instance_name} (non-critical): {e}")
+                # Remove from cache so we can add the new one below
+                del self._logger._loggers[key]
+
+            # 2. Copy original session file to new timestamped path and create logger pointing to the copy
+            from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
+            original_log_path = metadata.get("current_log_path")
+            
+            if original_log_path and Path(original_log_path).exists():
+                # Copy to preserve original, work on a fresh timestamped file with new session context
+                new_log_path = AgentInstanceLogger.copy_session_file(
+                    source_path=original_log_path,
+                    log_dir=str(self._logger.log_dir),
+                    agent_class=normalized_agent_class,
+                    instance_name=instance_name
+                )
+            else:
+                # No original file - let logger create fresh timestamped file
+                new_log_path = None
+            
+            # Create logger pointing to the copy with updated metadata for this working session
+            log_inst = AgentInstanceLogger(
+                agent_class=agent_class,
+                instance_name=instance_name,
+                log_dir=str(self._logger.log_dir),
+                base_metadata=metadata if metadata else None,
+                log_path=new_log_path,  # Point to the copy (or None for fresh)
+            )
+
+            # 3. Rewrite the copy with restored messages (reset_history handles truncation and new metadata)
+            # Pass raw messages - reset_history(rewrite=True) will format them internally (line 397 of agent_instance_logger.py)
+            log_inst.reset_history(restored_messages, rewrite=True)
+            
+            # Cache the new logger instance
+            with self._logger._lock:
+                self._logger._loggers[key] = log_inst
         except Exception as e:
-            logger.debug(f"Logger history sync after log load failed for {instance_name} (non-critical): {e}")
+            logger.debug(f"Logger setup after log load failed for {instance_name} (non-critical): {e}")
 
         return f"Successfully loaded {len(restored_messages)} messages for instance '{instance_name}' ({agent_class}) from {log_source}."
 
