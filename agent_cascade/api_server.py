@@ -74,8 +74,12 @@ from agent_cascade.agent_instance import AgentState, InvalidStateTransition
 
 # Pre-compiled regexes moved to agent_cascade.utils.thinking_block
 
-
-
+# LLM config keys for update_config optimization (defense-in-depth)
+LLM_CONFIG_KEYS = frozenset({
+    'model', 'api_base', 'api_key', 'temperature', 'max_tokens',
+    'max_input_tokens', 'max_output_tokens', 'top_p', 'frequency_penalty',
+    'presence_penalty', 'stop', 'timeout', 'model_type'
+})
 
 
 def _get_msg_role(msg):
@@ -1889,16 +1893,40 @@ def create_app(agents, agent_pool, config=None):
                                 logger.info("[MCP] Eagerly loaded %d tools.", len(mcp_tools))
                             except Exception as e:
                                 logger.warning("[MCP] Eager initialization failed: %s", e)
+                        # Defense-in-depth optimization: only call set_extra_work_folders if values actually changed
+                        # This avoids unnecessary function calls when UI sends full config on any setting change (font size, colors, etc.)
                         if 'work_access_folders_ro' in ui_cfg or 'work_access_folders_rw' in ui_cfg:
                             if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-                                ro = ui_cfg.get('work_access_folders_ro', [])
-                                rw = ui_cfg.get('work_access_folders_rw', [])
-                                agent_pool.operation_manager.set_extra_work_folders(ro, rw)
+                                om = agent_pool.operation_manager
+                                ro_new = [p.strip() for p in ui_cfg.get('work_access_folders_ro', []) if p.strip()]
+                                rw_new = [p.strip() for p in ui_cfg.get('work_access_folders_rw', []) if p.strip()]
+                                # Compare against current state (normalized to strings for comparison)
+                                ro_current = [str(p) for p in om.extra_work_folders_ro]
+                                rw_current = [str(p) for p in om.extra_work_folders_rw]
+                                # Sort and lowercase for order-independent, case-insensitive comparison
+                                # Note: This is intentionally more aggressive than the setter's frozenset comparison.
+                                # On Windows (case-insensitive FS), this prevents unnecessary calls even when casing differs.
+                                ro_sorted = sorted([p.lower() for p in ro_new])
+                                rw_sorted = sorted([p.lower() for p in rw_new])
+                                ro_curr_sorted = sorted([p.lower() for p in ro_current])
+                                rw_curr_sorted = sorted([p.lower() for p in rw_current])
+                                if ro_sorted != ro_curr_sorted or rw_sorted != rw_curr_sorted:
+                                    om.set_extra_work_folders(ro_new, rw_new)
+                                else:
+                                    logger.debug("[update_config] Extra work folders unchanged (RO=%d, RW=%d), skipping set_extra_work_folders", len(ro_new), len(rw_new))
+                        # Defense-in-depth optimization: only call set_base_dir if value actually changed
                         if 'default_workspace' in ui_cfg:
                             if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
                                 new_ws = ui_cfg['default_workspace']
-                                if new_ws:
-                                    agent_pool.operation_manager.set_base_dir(new_ws)
+                                if not new_ws:
+                                    logger.debug("[update_config] Empty default_workspace received, skipping set_base_dir")
+                                else:
+                                    # Compare against current base_dir before calling setter
+                                    new_ws_path = Path(new_ws).resolve()
+                                    if new_ws_path != agent_pool.operation_manager.base_dir:
+                                        agent_pool.operation_manager.set_base_dir(new_ws)
+                                    else:
+                                        logger.debug("[update_config] Base workspace unchanged (%s), skipping set_base_dir", new_ws)
                         # Update idle timeout from UI settings (Bug #3 fix)
                         if 'idle_timeout_seconds' in ui_cfg and agent_pool and hasattr(agent_pool, 'settings'):
                             val = float(ui_cfg['idle_timeout_seconds'])
@@ -1915,10 +1943,18 @@ def create_app(agents, agent_pool, config=None):
                         # Apply auto_continue immediately (takes effect without waiting for next agent run)
                         if 'auto_continue' in ui_cfg and agent_pool and hasattr(agent_pool, 'settings'):
                             agent_pool.settings.auto_continue = bool(ui_cfg['auto_continue'])
-                        # Update API router's default_llm_cfg so sub-agents that query the router
-                        # get the user's current settings (not stale initial_llm_cfg)
+                        # Defense-in-depth optimization: only call update_default_llm_cfg if LLM-related keys changed
+                        # This avoids unnecessary function calls when UI sends full config on non-LLM setting changes (font size, colors, etc.)
                         if agent_pool and hasattr(agent_pool, 'api_router'):
-                            agent_pool.api_router.update_default_llm_cfg(ui_cfg)
+                            # Extract only LLM-relevant keys from ui_cfg to compare
+                            # Note: Only checks keys present in new_llm_cfg (partial update semantics), matching update_default_llm_cfg behavior
+                            new_llm_cfg = {k: v for k, v in ui_cfg.items() if k in LLM_CONFIG_KEYS}
+                            current_llm_cfg = agent_pool.api_router.default_llm_cfg or {}  # Defensive: handle None
+                            # Compare only the LLM-relevant keys
+                            if new_llm_cfg != {k: current_llm_cfg.get(k) for k in new_llm_cfg}:
+                                agent_pool.api_router.update_default_llm_cfg(ui_cfg)
+                            else:
+                                logger.debug("[update_config] LLM config unchanged (%d keys), skipping update_default_llm_cfg", len(new_llm_cfg))
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'update_endpoints':

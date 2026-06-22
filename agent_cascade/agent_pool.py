@@ -9,6 +9,7 @@ delegated to focused managers (LoggerManager, IdleManager, ParallelAgentManager)
 See DESIGN_REWRITE.md §2.2 for design rationale.
 """
 
+import hashlib
 import time
 import threading
 import copy
@@ -1229,11 +1230,87 @@ class AgentPool:
 
         return f"Successfully loaded {len(restored_messages)} messages for instance '{instance_name}' ({agent_class}) from {log_source}."
 
+    def _compute_template_hash(self, template_name: str) -> Optional[str]:
+        """Compute a hash of the template's system message for change detection.
+        
+        Args:
+            template_name: Name of the agent template
+            
+        Returns:
+            SHA256 hex digest of the template content, or None if template not found.
+            
+        Note: This method is NOT thread-safe. For thread-safety, callers should hold
+              an appropriate lock when calling refresh_agents().
+        """
+        try:
+            template = self.templates.get(template_name)
+            if template is None:
+                return None
+            
+            # system_message is a plain str (per agent.py line 69), not a Message object
+            # So we access it directly, not via .content attribute
+            system_msg = getattr(template, 'system_message', '')
+            
+            # Create a deterministic string representation for hashing
+            content_str = f"{template_name}|{system_msg}"
+            return hashlib.sha256(content_str.encode('utf-8')).hexdigest()
+        except Exception as e:
+            logger.debug(f"Error computing hash for template {template_name}: {e}")
+            return None
+    
+    def _get_template_state(self) -> Dict[str, Any]:
+        """Get current state of templates for comparison.
+        
+        Returns:
+            Dictionary mapping template names to their hashes
+        """
+        return {name: self._compute_template_hash(name) for name in self.templates.keys()}
+    
     def refresh_agents(self):
-        """Reload all agent souls and templates from disk."""
+        """Reload all agent souls and templates from disk.
+        
+        Compares before/after state (both template keys and content hashes).
+        Only calls notify_config_changed() if something actually changed on disk.
+        This prevents unnecessary cache invalidation when user clicks "Refresh Agents"
+        but no files were modified.
+        """
+        # Capture current state before reload
+        old_template_keys = set(self.templates.keys())
+        old_template_state = self._get_template_state()
+        
+        # Perform the reload
         self.templates.clear()
         self._discover_agents(str(self.agents_dir))
-        self.notify_config_changed()
+        
+        # Capture new state after reload
+        new_template_keys = set(self.templates.keys())
+        new_template_state = self._get_template_state()
+        
+        # Compare keys (agents added/removed)
+        keys_changed = old_template_keys != new_template_keys
+        
+        # Compare content hashes (agent system prompts edited)
+        # Only compare templates that exist in BOTH old and new states (intersection)
+        all_hashes_match = True
+        common_keys = old_template_keys & new_template_keys  # templates present before AND after reload
+        for key in common_keys:
+            if old_template_state.get(key) != new_template_state.get(key):
+                all_hashes_match = False
+                logger.debug(f"[REFRESH] Template content changed: {key}")
+                break
+        
+        # Only notify if something actually changed
+        if keys_changed or not all_hashes_match:
+            if keys_changed:
+                added = new_template_keys - old_template_keys
+                removed = old_template_keys - new_template_keys
+                logger.info(f"[REFRESH] Templates changed - Added: {added}, Removed: {removed}")
+            else:
+                # Content modification triggers config update, log at info level for visibility
+                logger.info("[REFRESH] Template content modified, triggering config update")
+            self.notify_config_changed()
+        else:
+            logger.debug("[REFRESH] No changes detected in agent templates, skipping notification")
 
     def notify_config_changed(self):
         """Signal that global configuration has changed (workspace dir, templates, etc).

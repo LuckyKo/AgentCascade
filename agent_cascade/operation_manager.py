@@ -192,6 +192,8 @@ class OperationManager:
             if self.agent_pool:
                 self.agent_pool.notify_config_changed()
             return True
+        else:
+            logger.debug("[Workspace] Base dir unchanged (%s), skipping notification", new_path)
         return False
 
     def cleanup_backups(self, agent_name: Optional[str] = None):
@@ -213,29 +215,41 @@ class OperationManager:
 
     def set_extra_work_folders(self, folders_ro: List[str], folders_rw: List[str]):
         """Set extra directories that the agents can access."""
-        self.extra_work_folders_ro = []
-        for folder in folders_ro:
+        # Build new folder lists to compare against existing ones
+        new_folders_ro = []
+        for folder in (folders_ro or []):  # Defensive: handle None input
             if not folder.strip():
                 continue
             try:
                 p = Path(folder.strip()).resolve()
-                self.extra_work_folders_ro.append(p)
+                new_folders_ro.append(p)
             except Exception as e:
                 logger.warning("Failed to resolve extra RO work folder %s: %s", folder, e)
 
-        self.extra_work_folders_rw = []
-        for folder in folders_rw:
+        new_folders_rw = []
+        for folder in (folders_rw or []):  # Defensive: handle None input
             if not folder.strip():
                 continue
             try:
                 p = Path(folder.strip()).resolve()
-                self.extra_work_folders_rw.append(p)
+                new_folders_rw.append(p)
             except Exception as e:
                 logger.warning("Failed to resolve extra RW work folder %s: %s", folder, e)
         
-        logger.info("[Workspace] Tiered folders updated: RO=%d, RW=%d", len(self.extra_work_folders_ro), len(self.extra_work_folders_rw))
-        if self.agent_pool:
-            self.agent_pool.notify_config_changed()
+        # Only update and notify if the folders actually changed
+        # Use set comparison to ignore order differences (same folders in different order = no change)
+        # Convert to frozenset for hashable comparison of Path objects
+        folders_changed = (frozenset(new_folders_ro) != frozenset(self.extra_work_folders_ro) or 
+                          frozenset(new_folders_rw) != frozenset(self.extra_work_folders_rw))
+        
+        if folders_changed:
+            self.extra_work_folders_ro = new_folders_ro
+            self.extra_work_folders_rw = new_folders_rw
+            logger.info("[Workspace] Tiered folders updated: RO=%d, RW=%d", len(self.extra_work_folders_ro), len(self.extra_work_folders_rw))
+            if self.agent_pool:
+                self.agent_pool.notify_config_changed()
+        else:
+            logger.debug("[Workspace] Tiered folders unchanged, skipping config notification")
 
     # ─── Auto-Approval for Agent-Owned Files ──────────────────────────────
 
