@@ -468,10 +468,9 @@ class AgentPool:
         # BUG31 Fix: Clean up api_integration module-level caches to prevent memory leaks
         # and stale data when instances are dismissed and re-created with same name.
         from agent_cascade.api_integration import (
-            _max_tokens_cache, _last_stream_versions,
+            _last_stream_versions,
             _cached_instance_data, _stream_token_stats_cache
         )
-        _max_tokens_cache.pop(instance_name, None)
         _last_stream_versions.pop(instance_name, None)
         _cached_instance_data.pop(instance_name, None)
         _stream_token_stats_cache.pop(instance_name, None)

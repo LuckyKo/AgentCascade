@@ -37,11 +37,6 @@ from .loop_detection import LoopDetectedError
 _token_stats_cache: Dict[tuple, dict] = {}
 _TOKEN_STATS_CACHE_MAXSIZE = 5000
 
-# BUG31 Fix #2: Cache _get_max_tokens_for_instance result per instance name.
-# The max tokens value never changes during a session, so caching avoids expensive lookups.
-# Key: instance_name, Value: max_input_tokens (int)
-_max_tokens_cache: Dict[str, int] = {}
-
 # Fix #3: Version tracker per instance. Incremented each time a message is added.
 # Used to skip serializing instances whose conversation hasn't changed.
 # Key: instance_name, Value: (msg_count, id_of_last_msg)
@@ -61,9 +56,8 @@ _STREAM_TOKEN_STATS_CACHE_MAXSIZE = 100  # Bounded cache (FIFO eviction) to prev
 
 def _clear_performance_caches():
     """Clear all module-level performance caches. Called during session reset."""
-    global _token_stats_cache, _max_tokens_cache, _cached_instance_data, _stream_token_stats_cache
+    global _token_stats_cache, _cached_instance_data, _stream_token_stats_cache
     _token_stats_cache.clear()
-    _max_tokens_cache.clear()
     _cached_instance_data.clear()
     _stream_token_stats_cache.clear()
 
@@ -468,10 +462,8 @@ def build_state_from_pool(
     active_h = pool.slice_history_for_llm(msgs) if msgs else msgs
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
-    # BUG31 Fix #2: Cache result per instance to avoid expensive repeated lookups
-    if instance_name not in _max_tokens_cache:
-        _max_tokens_cache[instance_name] = _get_max_tokens_for_instance(pool, instance)
-    max_tokens = _max_tokens_cache[instance_name]
+    # Direct call without caching to avoid staleness when endpoints change at runtime
+    max_tokens = _get_max_tokens_for_instance(pool, instance)
 
     # Calculate history stats
     try:
@@ -655,10 +647,8 @@ def build_stream_update_from_pool(
         _stream_token_stats_cache[instance_name] = (h_stats, r_stats)
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
-    # BUG31 Fix #2: Cache result per instance to avoid expensive repeated lookups
-    if instance_name not in _max_tokens_cache:
-        _max_tokens_cache[instance_name] = _get_max_tokens_for_instance(pool, instance)
-    max_tokens = _max_tokens_cache[instance_name]
+    # Direct call without caching to avoid staleness when endpoints change at runtime
+    max_tokens = _get_max_tokens_for_instance(pool, instance)
 
     # Build active stack
     active_stack = list(pool._execution.active_stack) if hasattr(pool, '_execution') else []
@@ -1180,10 +1170,8 @@ def _serialize_instance(
     else:
         stats = _token_stats_cache[cache_key]
 
-    # BUG31 Fix #2: Cache max_tokens per instance name to avoid expensive repeated lookups
-    if inst.instance_name not in _max_tokens_cache:
-        _max_tokens_cache[inst.instance_name] = _get_max_tokens_for_instance(pool, inst)
-    max_tokens = _max_tokens_cache[inst.instance_name]
+    # Get max tokens via direct call to avoid staleness when endpoints change at runtime
+    max_tokens = _get_max_tokens_for_instance(pool, inst)
 
     # BUG FIX: history_count must reflect the TOTAL length including unique streaming responses
     # so that startIdx = history_count - messages.length lands exactly on the first message
