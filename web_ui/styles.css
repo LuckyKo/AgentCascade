@@ -1542,6 +1542,10 @@ body {
   max-height: 200px;
   padding: 6px 0;
   transition: box-shadow 0.2s, background 0.2s;
+  /* Preserve whitespace (tabs/spaces) while allowing wrapping */
+  white-space: pre-wrap;
+  /* Allow breaking long words at any point to prevent layout shifts during typing */
+  overflow-wrap: anywhere;
 }
 
 .input-wrapper textarea.drag-over {

@@ -1504,6 +1504,7 @@ function triggerAfkSend() {
   if (state.generating) return;
   
   chatInput.value = msg;
+  autoResize(chatInput);
   sendMessage();
 }
 
@@ -2484,6 +2485,17 @@ window.rejectRequest = function (requestId) {
 // ── Sub-agents ───────────────────────────────────────────────────────────────
 
 function renderSubAgents() {
+  // Preserve chat input focus and cursor position during DOM manipulation.
+  // renderSubAgents rebuilds message panels which can steal focus from #chatInput,
+  // causing the caret to jump while typing or during streaming.
+  const wasFocused = document.activeElement === chatInput;
+  let savedSelStart = null;
+  let savedSelEnd = null;
+  if (wasFocused) {
+    savedSelStart = chatInput.selectionStart;
+    savedSelEnd = chatInput.selectionEnd;
+  }
+
   const sa = state.subAgents;
   
   // Build agent list from subAgents, filtered by closedTabs.
@@ -2618,6 +2630,15 @@ function renderSubAgents() {
 
     // Render sub-agent messages into the panel
     renderSubAgentPanel(panel, sa[name], name);
+  }
+
+  // Restore chat input focus and cursor position if user was typing during render
+  if (wasFocused && savedSelStart !== null) {
+    chatInput.selectionStart = savedSelStart;
+    chatInput.selectionEnd = savedSelEnd;
+    if (document.activeElement !== chatInput) {
+      chatInput.focus();
+    }
   }
 }
 
@@ -3068,8 +3089,21 @@ function updateControls() {
 // ── Auto-resize textarea ─────────────────────────────────────────────────────
 
 function autoResize(el) {
+  if (!el) return;
+
+  // Preserve cursor position before any layout-changing operations.
+  // Setting height='auto' can shift the line the caret is on, causing it to jump.
+  const selStart = el.selectionStart;
+  const selEnd = el.selectionEnd;
+
+  // Always assign explicit pixel height — even if unchanged, this prevents
+  // latent bugs where the textarea ends up with 'auto' and inconsistent sizing.
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+
+  // Restore cursor position after resize completes.
+  el.selectionStart = selStart;
+  el.selectionEnd = selEnd;
 }
 
 function estimateTokens(text) {
@@ -3342,9 +3376,12 @@ function insertImageMarkdown(base64Data, filename) {
   const endPos = chatInput.selectionEnd;
   const text = chatInput.value;
   chatInput.value = text.substring(0, startPos) + markdown + text.substring(endPos);
+  
+  // Resize first, then set selection — setting height='auto' can shift layout
+  // and invalidate caret position if we set selection before resize.
+  autoResize(chatInput);
   chatInput.selectionStart = chatInput.selectionEnd = startPos + markdown.length;
   chatInput.focus();
-  autoResize(chatInput);
 }
 
 function processImageFile(file) {
@@ -3406,14 +3443,16 @@ function processDocFile(file) {
       const header = `--- DOCUMENT: ${file.name} ---`;
       const footer = `--- END DOCUMENT ---`;
       const fullText = `\n${header}\n${data.text}\n${footer}\n`;
-      
+
       const start = chatInput.selectionStart;
       const end = chatInput.selectionEnd;
       const oldVal = chatInput.value;
       chatInput.value = oldVal.substring(0, start) + fullText + oldVal.substring(end);
-      chatInput.focus();
-      chatInput.selectionStart = chatInput.selectionEnd = start + fullText.length;
+
+      // Resize first, then set selection — setting height='auto' can shift layout
       autoResize(chatInput);
+      chatInput.selectionStart = chatInput.selectionEnd = start + fullText.length;
+      chatInput.focus();
     }
     if (statusText) statusText.textContent = '';
   })
@@ -3493,9 +3532,11 @@ function insertAtCursor(text) {
   const end = chatInput.selectionEnd;
   const oldVal = chatInput.value;
   chatInput.value = oldVal.substring(0, start) + text + oldVal.substring(end);
-  chatInput.focus();
-  chatInput.selectionStart = chatInput.selectionEnd = start + text.length;
+
+  // Resize first, then set selection — setting height='auto' can shift layout
   autoResize(chatInput);
+  chatInput.selectionStart = chatInput.selectionEnd = start + text.length;
+  chatInput.focus();
 }
 
 chatInput.addEventListener('paste', (e) => {
@@ -3513,7 +3554,10 @@ chatInput.addEventListener('paste', (e) => {
 
 // ── Event listeners ──────────────────────────────────────────────────────────
 
-chatInput.addEventListener('input', () => autoResize(chatInput));
+// Auto-resize on every input event. The autoResize function preserves cursor position internally.
+chatInput.addEventListener('input', () => {
+  autoResize(chatInput);
+});
 continueBtn.onclick = continueMessage;
 
 chatInput.addEventListener('keydown', (e) => {
