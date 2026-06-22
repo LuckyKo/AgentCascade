@@ -1666,7 +1666,7 @@ class OperationManager:
             return f"ERROR: Approved but execution failed: {str(e)}"
 
     def delete_file(self, path: str, agent_name: str) -> str:
-        """Delete a file — auto-approved for agent-owned files."""
+        """Delete a file or directory — auto-approved for agent-owned files. Creates timestamped backup before deletion."""
         try:
             resolved = self._resolve_path(path, mode="rw")
         except Exception as e:
@@ -1688,19 +1688,66 @@ class OperationManager:
         else:
             justification = ""
 
-
         try:
-            resolved = self._resolve_path(path, mode="rw")
-            if resolved.is_dir():
-                import shutil
-                shutil.rmtree(resolved)
-            else:
-                resolved.unlink()
+            # Determine if it's a directory BEFORE moving (is_dir() won't work after move)
+            is_directory = resolved.is_dir()
+            
+            # Create backup before deletion (same pattern as write_file/edit_file)
+            safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+            backup_dir = self.base_dir / "logs" / "backups" / safe_agent
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate timestamped backup filename with collision detection
+            # Use time.time() for base timestamp, add counter if collision occurs
+            timestamp = int(time.time())
+            counter = 0
+            while True:
+                if counter == 0:
+                    backup_filename = f"{resolved.name}.{timestamp}.bak"
+                else:
+                    backup_filename = f"{resolved.name}.{timestamp}_{counter}.bak"
+                backup_path = backup_dir / backup_filename
+                if not backup_path.exists():
+                    break
+                counter += 1
+            
+            # Move file/directory to backup location (works for both files and directories)
+            # Note: Symlinks are moved as-is (not dereferenced), preserving the link structure
+            try:
+                shutil.move(resolved, backup_path)
+            except Exception as move_err:
+                # Cross-device or other move failure — fall back to copy then delete
+                if is_directory:
+                    shutil.copytree(resolved, backup_path)
+                    shutil.rmtree(resolved)
+                else:
+                    shutil.copy2(resolved, backup_path)
+                    resolved.unlink()
+            
+            # Generate relative path string for the response message
+            try:
+                backup_path_str = str(backup_path.relative_to(self.base_dir))
+            except ValueError:
+                backup_path_str = str(backup_path)
+            
+            # Clean up file ownership tracking
             if str(resolved) in self.file_ownership:
                 del self.file_ownership[str(resolved)]
+            
+            # For directories, also recursively remove any entries under that path from file_ownership
+            if is_directory:
+                # Directory was moved, so check for any nested paths that might be tracked
+                # Add trailing separator to avoid ambiguous matches (e.g., "dir" matching "dir2")
+                resolved_str = str(resolved) + os.sep
+                keys_to_remove = [k for k in self.file_ownership.keys() if k.startswith(resolved_str)]
+                for key in keys_to_remove:
+                    del self.file_ownership[key]
+            
             msg = f"APPROVED: Deleted {path}"
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
+            # Backup is always created at this point, so we can safely append the backup path
+            msg += f". Backup created: {backup_path_str}"
             return msg
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"

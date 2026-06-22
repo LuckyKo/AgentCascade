@@ -616,7 +616,7 @@ class Grep(BaseTool):
 
 
 class DeleteFile(BaseTool):
-    """Delete a file (requires user approval)."""
+    """Delete a file — creates a timestamped backup before deletion (requires user approval)."""
 
     name = 'delete_file'
     description = TOOL_METADATA['delete_file']['description']

@@ -172,8 +172,10 @@ TOOL_METADATA = {
     },
     'delete_file': {
         'description': (
-            'Delete a file. Requires user approval before deletion for any files not '
-            'owned by the current agent. Deleting files you created in this session is auto-approved.'
+            'Delete a file. Before deletion, the file is moved to a backup folder '
+            '(similar to edit_file backups), so it can be restored if needed. '
+            'Requires user approval before deletion for any files not owned by the current agent. '
+            'Deleting files you created in this session is auto-approved.'
         ),
         'parameters': {
             'path': "Path to the file, absolute or relative to the workspace root (e.g., 'temp/scratch.py')"
