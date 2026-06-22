@@ -278,37 +278,19 @@ class AgentInstanceLogger:
     # ── Compression marker insertion ──────────────────────────────────────
 
     def insert_compression_marker(self, summary_msg: Any, tail_count: int):
-        """Insert a compression summary marker into the cumulative log at the
-        correct position — calculated as an offset from the end of the log.
-
+        """DEPRECATED: Insert a compression marker into the log.
+        
+        This method is now a no-op placeholder. Actual logger synchronization
+        after compression is handled by CompressionHandler._sync_logger_after_compression()
+        which calls reset_history(conv, rewrite=True) for all compression paths.
+        
+        Kept for backward compatibility but no longer called in production code.
+        
         Args:
-            summary_msg: The compression summary message (USER role with
-                         ``<context_summary>`` tags).
-            tail_count: Number of tail messages that should appear after the
-                        summary marker in both pool and log.
+            summary_msg: The compression summary message (unused).
+            tail_count: Number of tail messages (unused).
         """
-        formatted = self._format_message(summary_msg)
-        log_history = self.data["history"]
-
-        # --- Derive insertion point from offset-from-end ---
-        insert_pos = len(log_history) - tail_count
-
-        # Safety: Never insert before the SYSTEM message (index 0)
-        if insert_pos == 0 and log_history and log_history[0].get('role') == 'system':
-            insert_pos = 1
-
-        # Clamp to valid range
-        insert_pos = min(insert_pos, len(log_history))
-
-        log_history.insert(insert_pos, formatted)
-
-        logger.info(
-            f"Logger [{self.instance_name}]: Inserted compression marker at "
-            f"index {insert_pos} (log_len={len(log_history)}, tail_count={tail_count})"
-        )
-
-        # Rewrite the entire file since we inserted in the middle
-        self.reset_history(log_history, rewrite=True)
+        pass  # Deprecated - logger sync now handled by handler.py
 
     # ── History sync ──────────────────────────────────────────────────────
 

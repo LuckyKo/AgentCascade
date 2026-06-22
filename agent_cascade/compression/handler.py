@@ -71,6 +71,41 @@ class CompressionHandler:
         """Set engine reference after ExecutionEngine construction completes."""
         self._engine = engine
     
+    # ── Logger Sync Helper (unified for all compression paths) ────────────────
+    
+    def _sync_logger_after_compression(
+        self,
+        instance_name: str,
+        agent_class: str,
+        operation_name: str
+    ) -> None:
+        """Sync logger state to match pool after compression/rollback operations.
+        
+        This is a unified helper for all compression paths (forced compression,
+        compress_context tool, /compress command, /rollback command). Using
+        reset_history() instead of update_history() ensures exact synchronization:
+        - update_history() is ADDITIVE only (can't shrink history)
+        - reset_history(rewrite=True) replaces logger state with pool state
+        
+        Args:
+            instance_name: Name of the agent instance
+            agent_class: Agent class for logger retrieval
+            operation_name: Description for logging (e.g., "forced compression", "/compress command")
+        """
+        try:
+            conv = self.pool.get_conversation(instance_name)
+            log_inst = self.pool.get_logger(instance_name, agent_class)
+            logger.debug(
+                f"Logger sync after {operation_name} for '{instance_name}': "
+                f"pool_len={len(conv) if conv else 0}, using reset_history() for full sync"
+            )
+            log_inst.reset_history(conv, rewrite=True)
+        except Exception as e:
+            logger.error(
+                f"Logger sync after {operation_name} FAILED for '{instance_name}': {e}. "
+                f"Pool may desync — manual intervention required."
+            )
+    
     # ── Forced Compression Methods (extracted from _force_compression) ────────
     
     def check_cooldown(
@@ -277,33 +312,8 @@ class CompressionHandler:
                         except Exception as e:
                             logger.error(f"Recovery attempt failed for '{inst_name}': {e}")
 
-                    # Item 11: Sync the logger's internal data["history"] to match pool state
-                    # Without this, update_history() will treat pool messages not yet seen by
-                    # the logger as "new" and append them, causing duplication.
-                    # FIX: Only sync if there are actually unlogged messages (prevents double-logging)
-                    try:
-                        log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                        # Check if sync is needed - only proceed if pool has more messages than logged
-                        logged_count = len(log_inst.data.get("history", []))
-                        pool_count = len(conv) if conv else 0
-                        if pool_count > logged_count:
-                            logger.debug(
-                                f"Logger sync after compression for '{inst_name}': "
-                                f"pool={pool_count}, logged={logged_count}, syncing {pool_count - logged_count} messages"
-                            )
-                            log_inst.update_history(conv)
-                            # Prevent update_history() from reloading stale file state on next call
-                            log_inst._file_history_synced = True
-                        else:
-                            logger.debug(
-                                f"Logger already synced after compression for '{inst_name}': "
-                                f"pool={pool_count}, logged={logged_count}"
-                            )
-                    except Exception as e:
-                        logger.error(f"Logger sync after forced compression FAILED for '{inst_name}': {e}. "
-                                      f"Pool may desync — manual intervention required. "
-                                      f"Note: Compression notification was injected into instance.conversation "
-                                      f"but not synced to logger history.")
+                    # Item 11: Sync logger state to match pool after forced compression
+                    self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression")
                     # Set cooldown flag to suppress loop detection on next turn after compression
                     instance._suppress_loop_detection_next_turn = True
                     
@@ -388,31 +398,8 @@ class CompressionHandler:
             # Set cooldown flag to suppress loop detection on next turn after compression
             instance._suppress_loop_detection_next_turn = True
 
-            # Sync logger's internal data["history"] to match pool state (Item 11)
-            # Without this, update_history() will treat pool messages not yet seen by
-            # the logger as "new" and append them, causing duplication.
-            # FIX: Only sync if there are actually unlogged messages (prevents double-logging)
-            try:
-                conv = self.pool.get_conversation(target_agent_name)
-                log_inst = self.pool.get_logger(target_agent_name, instance.agent_class)
-                # Check if sync is needed - only proceed if pool has more messages than logged
-                logged_count = len(log_inst.data.get("history", []))
-                pool_count = len(conv) if conv else 0
-                if pool_count > logged_count:
-                    logger.debug(
-                        f"Logger sync after compress_context tool for '{target_agent_name}': "
-                        f"pool={pool_count}, logged={logged_count}, syncing {pool_count - logged_count} messages"
-                    )
-                    log_inst.update_history(conv)
-                    # Prevent update_history() from reloading stale file state on next call
-                    log_inst._file_history_synced = True
-                else:
-                    logger.debug(
-                        f"Logger already synced after compress_context tool for '{target_agent_name}': "
-                        f"pool={pool_count}, logged={logged_count}"
-                    )
-            except Exception as e:
-                logger.error(f"Logger sync after compress_context tool FAILED for '{target_agent_name}': {e}")
+            # Sync logger state to match pool after compress_context tool execution
+            self._sync_logger_after_compression(target_agent_name, instance.agent_class, "compress_context tool")
 
             # Force immediate stream update via existing periodic push mechanism (avoids duplicate broadcasts)
             self.engine.stream_publisher.push_periodic_update(instance.parent_instance or instance.instance_name)
@@ -697,28 +684,8 @@ class CompressionHandler:
             # Set cooldown flag to suppress loop detection on next turn after compression
             instance._suppress_loop_detection_next_turn = True
             
-            # Sync logger's internal data["history"] to match pool state (Item 11)
-            # FIX: Only sync if there are actually unlogged messages (prevents double-logging)
-            try:
-                conv = self.pool.get_conversation(inst_name)
-                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                logged_count = len(log_inst.data.get("history", []))
-                pool_count = len(conv) if conv else 0
-                if pool_count > logged_count:
-                    logger.debug(
-                        f"Logger sync after /compress command for '{inst_name}': "
-                        f"pool={pool_count}, logged={logged_count}, syncing {pool_count - logged_count} messages"
-                    )
-                    log_inst.update_history(conv)
-                    # Prevent update_history() from reloading stale file state on next call
-                    log_inst._file_history_synced = True
-                else:
-                    logger.debug(
-                        f"Logger already synced after /compress command for '{inst_name}': "
-                        f"pool={pool_count}, logged={logged_count}"
-                    )
-            except Exception as e:
-                logger.error(f"Logger sync after /compress FAILED for '{inst_name}': {e}")
+            # Sync logger state to match pool after /compress command execution
+            self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress command")
             
             # Fix Issue #2: Explicit token cache invalidation to handle edge cases
             # where rebuild_working_set is not called (e.g., conv is None or validation fails)
@@ -929,28 +896,8 @@ class CompressionHandler:
             if conv and validate_message_pool(conv, inst_name) and not working_set_rebuilt:
                 self.engine._rebuild_working_set(messages, llm_messages, inst_name)
             
-            # Sync logger's internal data["history"] to match pool state (Item 11 - same as compress handler)
-            # FIX: Only sync if there are actually unlogged messages (prevents double-logging)
-            try:
-                conv = self.pool.get_conversation(inst_name)
-                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                logged_count = len(log_inst.data.get("history", []))
-                pool_count = len(conv) if conv else 0
-                if pool_count > logged_count:
-                    logger.debug(
-                        f"Logger sync after /rollback command for '{inst_name}': "
-                        f"pool={pool_count}, logged={logged_count}, syncing {pool_count - logged_count} messages"
-                    )
-                    log_inst.update_history(conv)
-                    # Prevent update_history() from reloading stale file state on next call
-                    log_inst._file_history_synced = True
-                else:
-                    logger.debug(
-                        f"Logger already synced after /rollback command for '{inst_name}': "
-                        f"pool={pool_count}, logged={logged_count}"
-                    )
-            except Exception as e:
-                logger.error(f"Logger sync after /rollback FAILED for '{inst_name}': {e}")
+            # Sync logger state to match pool after /rollback command execution
+            self._sync_logger_after_compression(inst_name, instance.agent_class, "/rollback command")
             
             # Explicit token cache invalidation to handle edge cases where rebuild_working_set is not called
             # (e.g., conv is None or validation fails). Matches compress handler pattern at lines 644-647.

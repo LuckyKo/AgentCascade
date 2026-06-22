@@ -302,36 +302,9 @@ def compress_context(
 
     # ── 11. Calculate tail count and notify logger ──
     tail_count = len(active_set) - target_discard_count
-
-    try:
-        if target_agent_name in agent_pool.instance_loggers:
-            logger_inst = agent_pool.instance_loggers[target_agent_name]
-            # Guard: only call insert_compression_marker if the logger supports it
-            if hasattr(logger_inst, 'insert_compression_marker'):
-                logger_inst.insert_compression_marker(
-                    summary_msg=marker_message,
-                    tail_count=tail_count,
-                )
-            else:
-                logger.warning(
-                    f"Logger for agent '{target_agent_name}' does not have "
-                    "'insert_compression_marker' method — marker not logged to file"
-                )
-    except Exception as e:
-        # Logger notification failure: pool remains modified — logger can be resynced on next iteration.
-        logger.error(
-            f"Logger notification failed after compression for agent "
-            f"'{target_agent_name}': {e}. Pool remains modified — logger can be resynced on next iteration."
-        )
-        return CompressResult(
-            success=False,
-            summary_text=generated_summary,
-            marker_message=None,
-            messages_discarded=0,
-            tail_count=0,
-            error=f"Logger sync failed after pool mutation: {e}",
-            mode=mode,
-        )
+    # NOTE: Logger sync is now handled by handler.py's _sync_logger_after_compression()
+    # which calls reset_history(conv, rewrite=True) for all compression paths.
+    # The insert_compression_marker() method in agent_instance_logger.py is deprecated.
 
     # ── 12. Log the successful compression event ──
     logger.info(

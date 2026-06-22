@@ -63,9 +63,12 @@ def validate_message_pool(messages: list[Any], agent_name: str) -> bool:
         prev_role = role
         prev_content = content_key
 
-    # Lower threshold from 30% to 10% — 10% duplicate consecutive msgs is suspicious (Issue 7 fix)
-    if len(messages) > 5 and dup_count > len(messages) * 0.1:
-        compression_logger.error(f"[MSG POOL VALIDATION] Excessive duplicates ({dup_count}/{len(messages)}) for agent '{agent_name}'")
+    # FIX 4: Use adaptive threshold instead of fixed value
+    # Shorter conversations shouldn't trigger false positives with a fixed count threshold
+    # Threshold = max(3, 10% of messages) - at least 3 duplicates or 10% whichever is higher
+    adaptive_threshold = max(3, int(len(messages) * 0.1))
+    if len(messages) > 5 and dup_count > adaptive_threshold:
+        compression_logger.error(f"[MSG POOL VALIDATION] Excessive duplicates ({dup_count}/{len(messages)}, threshold={adaptive_threshold}) for agent '{agent_name}'")
         return False
 
     # Check that roles are valid strings (not None or empty after compression)
