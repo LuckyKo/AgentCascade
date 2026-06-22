@@ -57,6 +57,7 @@ NON_LLM_KEYS: tuple[str, ...] = (
     'auto_continue',
     'max_turns',
     'max_parallel_agents',
+    'max_input_tokens',  # Execution control (input truncation threshold) — not an LLM API parameter
     
     # MCP and workspace configuration
     'mcpServers',
