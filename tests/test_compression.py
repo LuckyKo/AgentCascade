@@ -48,6 +48,43 @@ class MockInstance:
     def __init__(self, history):
         self.conversation = list(history)
         self._last_token_count_conversation_length = -1
+    
+    def rebuild_conversation(self, new_history: list) -> None:
+        """Replace conversation with new history (mimics AgentInstance.rebuild_conversation)."""
+        self.conversation = list(new_history)
+        self._last_token_count_conversation_length = -1  # Reset cache like production does
+
+
+class _MockInstanceConversationMapping(dict):
+    """Custom dict that syncs writes to instance_conversations with instances[name].conversation.
+
+    This mimics the behavior of agent_cascade.agent_pool._InstanceConversationMapping,
+    ensuring that when compress_context does `pool.instance_conversations[name] = new_history`,
+    the underlying MockInstance.conversation is also updated via rebuild_conversation().
+    """
+
+    def __init__(self, pool: 'MockAgentPool'):
+        super().__init__()
+        self._pool = pool
+
+    def __getitem__(self, key: str) -> list:
+        """Read from instances[name].conversation."""
+        inst = self._pool.instances.get(key)
+        if inst is not None:
+            return list(inst.conversation)
+        # Fallback to dict storage for entries without instances
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            raise KeyError(key)
+
+    def __setitem__(self, key: str, value: list) -> None:
+        """Write propagates to both instances[name].conversation AND dict storage."""
+        inst = self._pool.instances.get(key)
+        if inst is not None:
+            # Sync to instance.conversation using the centralized API
+            inst.rebuild_conversation(list(value))
+        super().__setitem__(key, value)
 
 
 class MockAgentPool:
@@ -59,13 +96,14 @@ class MockAgentPool:
 
     def __init__(self, history=None):
         self.history = list(history) if history else []
-        self.instance_conversations = {}  # Will be synced below
-        self.instance_loggers = {}  # No logger — avoids notification side-effects
-        # Phase 3: Add instances dict and get_instance for proper pool API access
+        # Phase 3: Create instance first, then use _MockInstanceConversationMapping for sync
         mock_inst = MockInstance(self.history)
         self.instances = {"TestAgent": mock_inst}
-        # Sync instance_conversations to point to the same list as instance.conversation
+        # Use custom mapping that syncs to inst.conversation (mimics production _InstanceConversationMapping)
+        self.instance_conversations = _MockInstanceConversationMapping(self)
+        # Initialize the mapping with current conversation
         self.instance_conversations["TestAgent"] = mock_inst.conversation
+        self.instance_loggers = {}  # No logger — avoids notification side-effects
 
     def get_conversation(self, agent_name):
         """Read from instance.conversation (Phase 3 pattern)."""
@@ -579,7 +617,7 @@ class TestCompressContextFailurePaths:
         )
 
         assert result.success is False
-        assert "optimally compressed" in (result.error or "").lower()
+        assert "not enough messages to compress" in (result.error or "").lower()
 
 
 # ──────────────────────────────────────────────
@@ -1106,7 +1144,7 @@ class TestTokenGuard:
             )
 
         assert result.success is False
-        assert "optimally compressed" in (result.error or "").lower()
+        assert "not enough messages to compress" in (result.error or "").lower()
 
     def test_compresses_when_small_but_many_tokens(self):
         """<3 messages but >=200 tokens → compression proceeds past the token guard.

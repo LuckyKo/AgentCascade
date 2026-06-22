@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent_cascade.agents import Assistant
-from agent_cascade.llm.schema import Message
+from agent_cascade.llm.schema import Message, USER
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.settings import DEFAULT_WORKSPACE
@@ -1641,18 +1641,19 @@ class AgentPool:
         inst = self.instances.get(instance_name)
         return inst.is_terminated if inst else False
 
-    def find_last_marker(self, history: List[Message]) -> int:
+    @staticmethod
+    def find_last_marker(history: List[Message]) -> int:
         """Find the index of the last COMPRESSION_MARKER message in a conversation.
 
+        Only considers messages with role=USER (compression markers are user messages).
         Returns -1 if no marker is found.
         """
         for i in range(len(history) - 1, -1, -1):
-            content = (
-                history[i].get('content', '')
-                if isinstance(history[i], dict)
-                else getattr(history[i], 'content', '')
-            )
-            if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+            msg = history[i]
+            role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+            content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+            # Only consider USER messages (compression markers are always user role)
+            if role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                 return i
         return -1
 
