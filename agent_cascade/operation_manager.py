@@ -204,9 +204,9 @@ class OperationManager:
         Otherwise, performs global cleanup across all agents.
 
         - .bak files are archived into backup_archive.zip (per-agent or global)
-        - Existing timestamped archives are included in the new archive as nested zips
+        - Existing archive is renamed with a timestamp before being overwritten
+        - Timestamped archives are included in the new archive as nested zips then cleaned up
         - Only .bak files and old archives are deleted; directory structure is preserved
-        - If archiving fails, no files are deleted (wrapped in try/except)
 
         Args:
             agent_name: Optional agent name to clean up. If None, cleans all agents.
@@ -227,7 +227,6 @@ class OperationManager:
 
                 # Archive path for this agent
                 archive_path = agent_backup_dir / 'backup_archive.zip'
-                temp_archive = archive_path.with_suffix('.tmp')
 
                 # Collect all .bak files in this agent's directory
                 bak_files = list(agent_backup_dir.glob('*.bak'))
@@ -235,23 +234,21 @@ class OperationManager:
                 if not bak_files:
                     logger.debug("No .bak files to archive for agent %s", agent_name)
                 else:
-                    # Write to temp file first, then rename atomically on success
-                    with zipfile.ZipFile(temp_archive, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    # If archive exists, rename it with timestamp before overwriting
+                    if archive_path.exists():
+                        timestamp = int(time.time())
+                        archive_path.rename(archive_path.with_name(f'backup_archive.{timestamp}.zip'))
+
+                    # Collect existing timestamped archives (used for both archiving and cleanup)
+                    old_zips = list(agent_backup_dir.glob('backup_archive.*.zip'))
+
+                    # Write directly to the zip file
+                    with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                         for bak_file in bak_files:
                             zf.write(bak_file, arcname=bak_file.name)
-                        # Include existing archive if present (preserves history)
-                        if archive_path.exists():
-                            zf.write(archive_path, arcname='backup_archive.zip')
-
-                    # Append any old timestamped archives to the temp file
-                    old_zips = list(agent_backup_dir.glob('backup_archive.*.zip'))
-                    if old_zips:
-                        with zipfile.ZipFile(temp_archive, 'a', zipfile.ZIP_DEFLATED) as zf:
-                            for old_zip in old_zips:
-                                zf.write(old_zip, arcname=old_zip.name)
-
-                    # Atomically rename temp to final location (preserves old archive if this fails)
-                    temp_archive.rename(archive_path)
+                        # Include existing timestamped archives (preserves history)
+                        for old_zip in old_zips:
+                            zf.write(old_zip, arcname=old_zip.name)
 
                     logger.debug("Archived %d .bak files to %s", len(bak_files), archive_path)
 
@@ -273,7 +270,6 @@ class OperationManager:
             else:
                 # Global cleanup - archive all agents' backups into one zip
                 archive_path = backup_base / 'backup_archive.zip'
-                temp_archive = archive_path.with_suffix('.tmp')
 
                 # Collect all .bak files recursively
                 bak_files = list(backup_base.rglob('*.bak'))
@@ -281,25 +277,23 @@ class OperationManager:
                 if not bak_files:
                     logger.debug("No .bak files to archive globally")
                 else:
-                    # Write to temp file first, then rename atomically on success
-                    with zipfile.ZipFile(temp_archive, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    # If archive exists, rename it with timestamp before overwriting
+                    if archive_path.exists():
+                        timestamp = int(time.time())
+                        archive_path.rename(archive_path.with_name(f'backup_archive.{timestamp}.zip'))
+
+                    # Collect existing timestamped archives (used for both archiving and cleanup)
+                    old_zips = list(backup_base.glob('backup_archive.*.zip'))
+
+                    # Write directly to the zip file
+                    with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                         for bak_file in bak_files:
                             # Preserve agent subdirectory structure in the archive
                             arcname = str(bak_file.relative_to(backup_base))
                             zf.write(bak_file, arcname=arcname)
-                        # Include existing archive if present (preserves history)
-                        if archive_path.exists():
-                            zf.write(archive_path, arcname='backup_archive.zip')
-
-                    # Append any old timestamped archives at base level to the temp file
-                    old_zips = list(backup_base.glob('backup_archive.*.zip'))
-                    if old_zips:
-                        with zipfile.ZipFile(temp_archive, 'a', zipfile.ZIP_DEFLATED) as zf:
-                            for old_zip in old_zips:
-                                zf.write(old_zip, arcname=old_zip.name)
-
-                    # Atomically rename temp to final location (preserves old archive if this fails)
-                    temp_archive.rename(archive_path)
+                        # Include existing timestamped archives at base level (preserves history)
+                        for old_zip in old_zips:
+                            zf.write(old_zip, arcname=old_zip.name)
 
                     logger.debug("Archived %d .bak files globally to %s", len(bak_files), archive_path)
 
@@ -320,13 +314,6 @@ class OperationManager:
 
         except Exception as e:
             logger.warning("Failed to clean up backups: %s", e)
-        finally:
-            # Clean up temp archive file if it was left behind
-            try:
-                if 'temp_archive' in locals() and temp_archive.exists():
-                    temp_archive.unlink()
-            except Exception:
-                pass  # non-critical cleanup
 
     def set_extra_work_folders(self, folders_ro: List[str], folders_rw: List[str]):
         """Set extra directories that the agents can access."""
