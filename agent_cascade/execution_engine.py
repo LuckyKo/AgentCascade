@@ -536,6 +536,46 @@ class ExecutionEngine:
             raise
 
     # ── Unified injection helpers ──────────────────────────────────────────
+    
+    def _append_to_working_sets(
+        self,
+        instance: AgentInstance,
+        msg: Message
+    ) -> None:
+        """Append a message to all working sets atomically using centralized API.
+        
+        This helper ensures cache consistency by using instance.append_message() which
+        updates conversation, _cached_messages, and _cached_llm_messages atomically.
+        
+        Args:
+            instance: AgentInstance to update
+            msg: Message to append
+        
+        Note: The centralized instance.append_message() handles all cache sync automatically.
+        """
+        # Use centralized API which handles ALL cache sync atomically under lock
+        # Note: Reentrant lock — caller typically holds _compression_lock, append_message acquires it again
+        instance.append_message(msg)  # Updates conversation, _cached_messages, _cached_llm_messages
+        
+    def _append_to_working_sets_batch(
+        self,
+        instance: AgentInstance,
+        msgs: List[Message]
+    ) -> None:
+        """Append multiple messages to all working sets atomically using centralized API.
+        
+        Batch version of _append_to_working_sets for efficiency.
+        
+        Args:
+            instance: AgentInstance to update
+            msgs: List of messages to append
+        
+        Note: The centralized instance.append_messages() handles all cache sync automatically.
+        """
+        if not msgs:
+            return  # Skip lock acquisition entirely for empty batches (Fix #5 from reviewer)
+        # Use centralized API which handles ALL cache sync atomically under lock
+        instance.append_messages(msgs)  # Updates conversation, _cached_messages, _cached_llm_messages
 
     def _drain_and_inject(
         self,
@@ -587,24 +627,25 @@ class ExecutionEngine:
 
         with instance._compression_lock:
             for msg in processed_messages:
-                # Append to all working lists atomically under the compression_lock.
-                # This ensures cached lists and instance.conversation stay in sync,
-                # preventing silent cache rebuilds on next turn (Fix 1).
-                messages.append(msg)
-                llm_messages.append(msg)
+                # Append to response accumulator (separate list for local use)
                 response.append(msg)
-                instance.append_message(msg)  # PR2: centralized mutation API handles cache sync
-                
-                # Mark activity since we're bypassing pool.add_message() which used to do this (Fix 4)
-                self.pool._mark_activity(inst_name)
+                # Use helper which handles cache sync atomically via centralized API
+                # Note: Reentrant lock — outer _compression_lock held here, inner acquired by append_message()
+                self._append_to_working_sets(instance, msg)
+        
+        # Mark activity OUTSIDE the lock to reduce hold time (Fix #1 from reviewer)
+        # Call once per message, not in a nested loop
+        for _ in processed_messages:
+            self.pool._mark_activity(inst_name)
 
-            # Log messages outside the lock to minimize hold time (logging can be slow)
-            for msg in processed_messages:
-                try:
-                    log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                    log_inst.log_message(msg)
-                except Exception as e:
-                    logger.debug(f"Logging failed for {inst_name} (non-critical): {e}")
+        # Log messages outside the lock to minimize hold time (logging can be slow)
+        # Independent loop - each message logged exactly once
+        for msg in processed_messages:
+            try:
+                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                log_inst.log_message(msg)
+            except Exception as e:
+                logger.debug(f"Logging failed for {inst_name} (non-critical): {e}")
 
         return True
 
@@ -789,7 +830,8 @@ class ExecutionEngine:
                     role=ASSISTANT,
                     content="\n\n[SYSTEM: Turn limit reached. Ask me to continue if incomplete.]",
                 )
-                response.append(msg)
+                self._append_to_working_sets(instance, msg)
+                response.append(msg)  # Stream turn limit to UI
                 yield response
 
         except LoopDetectedError:
@@ -1745,9 +1787,9 @@ class ExecutionEngine:
                 role=USER,
                 content="[SYSTEM]: Your previous response was cut off. Continue from where you left off."
             )
-            messages.append(cont_msg)
-            llm_messages.append(cont_msg)
-            instance.append_message(cont_msg)  # PR2: centralized mutation API handles cache sync
+            # Cache consistency: append_message() handles _cached_messages/_cached_llm_messages sync;
+            # manual messages.append() would cause double-append (see cache_bug_investigation_report.md)
+            self._append_to_working_sets(instance, cont_msg)
             return True
         
         return False
@@ -1865,11 +1907,10 @@ class ExecutionEngine:
                         'tool_success': False,
                     },
                 )
-                messages.append(fn_msg)
-                llm_messages.append(fn_msg)
-                response.append(fn_msg)  # Stream denial to UI
-                
-                instance.append_message(fn_msg)  # PR2: centralized mutation API handles cache sync
+                # Cache consistency: append_message() handles _cached_messages/_cached_llm_messages sync;
+                # manual messages.append() would cause double-append (see cache_bug_investigation_report.md)
+                self._append_to_working_sets(instance, fn_msg)
+                response.append(fn_msg)  # Stream denial to UI (separate list for streaming)
                 
                 # Track as executed for orphan handling (it was processed, just denied)
                 executed_tools.append(tool_name)
@@ -1984,10 +2025,10 @@ class ExecutionEngine:
                     'tool_success': _tool_success,
                 },
             )
-            messages.append(fn_msg)
-            llm_messages.append(fn_msg)
-            response.append(fn_msg)  # Stream tool result to UI (was missing)
-            instance.append_message(fn_msg)  # PR2: centralized mutation API
+            # Cache consistency: append_message() handles _cached_messages/_cached_llm_messages sync;
+            # manual messages.append() would cause double-append (see cache_bug_investigation_report.md)
+            self._append_to_working_sets(instance, fn_msg)
+            response.append(fn_msg)  # Stream tool result to UI (separate list for streaming)
             
             # Track executed tool for orphan handling
             executed_tools.append(tool_name)
@@ -2098,11 +2139,10 @@ class ExecutionEngine:
                             'tool_success': False,
                         },
                     )
-                    messages.append(fn_msg)
-                    llm_messages.append(fn_msg)
-                    response.append(fn_msg)  # Stream to UI
-                    
-                    instance.append_message(fn_msg)  # PR2: centralized mutation API handles cache sync
+                    # Cache consistency: append_message() handles _cached_messages/_cached_llm_messages sync;
+                    # manual messages.append() would cause double-append (see cache_bug_investigation_report.md)
+                    self._append_to_working_sets(instance, fn_msg)
+                    response.append(fn_msg)  # Stream to UI (separate list for streaming)
                     
                     # Track as executed for consistency (matching primary loop pattern)
                     executed_tools.append(tool_name)
@@ -2141,11 +2181,10 @@ class ExecutionEngine:
         # Extracted to _log_messages_to_jsonl() - Phase 3.3
         self._log_messages_to_jsonl(instance, inst_name, turn_output)
 
-        # Append to all working sets  
-        response.extend(turn_output)
-        messages.extend(turn_output)
-        llm_messages.extend(turn_output)
-        instance.append_messages(turn_output)  # PR2: centralized mutation API handles cache sync
+        # Cache consistency: append_messages() handles _cached_messages/_cached_llm_messages sync;
+        # manual messages.extend() would cause double-append (see cache_bug_investigation_report.md)
+        self._append_to_working_sets_batch(instance, turn_output)
+        response.extend(turn_output)  # Separate list for streaming/accumulation
         # Streaming UI Content Update Fix: Clear _streaming_responses after Phase 4 commits messages
         instance._streaming_responses = []
         
