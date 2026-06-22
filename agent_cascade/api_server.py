@@ -1303,6 +1303,14 @@ def create_app(agents, agent_pool, config=None):
                                     system_message_content=sys_content,
                                 )
                         
+                        # FIX Major #4: Clear any stale continue state for fresh turn
+                        inst = agent_pool.get_instance(instance_name)  # Re-get for fresh turn (may differ from continue handler's instance ref)
+                        if inst is not None:
+                            with inst._compression_lock:
+                                if inst._continue_saved_msg is not None:
+                                    logger.debug(f"[CONTINUE_FIX] Cleared stale _continue_saved_msg for {instance_name} on new message")
+                                    inst._continue_saved_msg = None
+                        
                         # Enqueue the user message — same queue drained during turn loop via _drain_and_inject
                         agent_pool.enqueue_message(instance_name, parsed_content)
 
@@ -1368,6 +1376,22 @@ def create_app(agents, agent_pool, config=None):
                     if inst is None:
                         await broadcast({'type': 'error', 'message': 'No agent instance found to continue'})
                         continue
+                    
+                    # FIX: Option B - Pop trailing assistant message before deepcopying history.
+                    # This prevents duplication because when Continue is clicked, the engine sends 
+                    # the full conversation (including last assistant message) to LLM, which then 
+                    # generates a NEW assistant message that gets appended separately. By popping 
+                    # it first and merging after LLM responds, we get a single concatenated message.
+                    saved_assistant_msg = None
+                    with inst._compression_lock:
+                        if inst.conversation:
+                            last_msg = inst.conversation[-1]
+                            last_role = _get_msg_role(last_msg)
+                            if last_role == ASSISTANT:
+                                saved_assistant_msg = inst.conversation.pop()
+                                # Store on instance for merging in execution_engine._process_response
+                                inst._continue_saved_msg = saved_assistant_msg
+                    
                     history_copy = copy.deepcopy(inst.conversation)
 
                     thread = threading.Thread(
@@ -1403,6 +1427,12 @@ def create_app(agents, agent_pool, config=None):
                                         # Use _transition() instead of direct assignment for proper validation (Finding #1)
                                         instance._transition(AgentState.IDLE)
                                         logger.info(f"Stop: Transitioned {inst_name} from {current_state.name} to IDLE")
+                                
+                                # FIX Critical #1: Clear any pending continue merge state on stop
+                                with instance._compression_lock:
+                                    if instance._continue_saved_msg is not None:
+                                        logger.debug(f"[CONTINUE_FIX] Stop handler cleared _continue_saved_msg for {inst_name}")
+                                        instance._continue_saved_msg = None
                             except InvalidStateTransition as e:
                                 logger.warning(f"Invalid state transition for {inst_name}: {e}")
                             except Exception as e:

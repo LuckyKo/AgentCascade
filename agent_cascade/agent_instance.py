@@ -138,6 +138,12 @@ class AgentInstance:
     # false-positive loop detection. This flag suppresses loop detection on the next turn only.
     _suppress_loop_detection_next_turn: bool = field(default=False)     # Cooldown flag for loop detection after compression/rollback
 
+    # ── Continue Button Message Merge (Fix Duplication Bug Option B) ───────────
+    # When Continue is clicked, the last assistant message is popped from conversation
+    # and stored here temporarily. After LLM generates its response, this content is
+    # merged with the new response to create a single concatenated message.
+    _continue_saved_msg: Optional[Message] = field(default=None)  # Temporary storage for Continue button merge
+
     # ── Centralized Message Mutation API (Phase 3) ───────────────────────
     # These methods encapsulate ALL conversation mutations, keeping cached lists
     # in sync and invalidating caches according to the update schema from todo.md:

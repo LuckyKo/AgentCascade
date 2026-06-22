@@ -846,6 +846,15 @@ class ExecutionEngine:
         finally:
             # C4 fix: Always clean up — transition to IDLE regardless of how we exit
             
+            # FIX Critical #2: Clear any pending continue merge state on exception/early exit
+            with instance._compression_lock:
+                if instance._continue_saved_msg is not None:
+                    logger.debug(
+                        f"[CONTINUE_FIX] Continue saved message not merged (merge path skipped) for {instance.instance_name}. "
+                        f"Content is in conversation; this is expected on early exit."
+                    )
+                    instance._continue_saved_msg = None
+            
             # SLOT_TIMEOUT FIX: Log slot state before release for debugging
             if hasattr(instance, '_slot_release'):
                 logger.debug(
@@ -2187,6 +2196,48 @@ class ExecutionEngine:
         response.extend(turn_output)  # Separate list for streaming/accumulation
         # Streaming UI Content Update Fix: Clear _streaming_responses after Phase 4 commits messages
         instance._streaming_responses = []
+        
+        # FIX: Option B - Merge continue-saved assistant message if present.
+        # When Continue is clicked, the last assistant message was popped from conversation 
+        # in api_server.py continue handler and stored as _continue_saved_msg. We now merge
+        # it with the newly generated assistant message to create a single concatenated message.
+        
+        # FIX Minor #5: Fast-check before lock acquisition to avoid unnecessary lock overhead
+        if instance._continue_saved_msg is not None:
+            with instance._compression_lock:
+                saved = instance._continue_saved_msg
+                # Clear immediately under lock to prevent another thread from setting it again
+                instance._continue_saved_msg = None
+            
+            if saved:
+                # Find the last assistant message in turn_output (most recent generation) and merge content
+                merged = False
+                for msg in reversed(turn_output):
+                    role = _msg_field(msg, 'role', '')
+                    if role == ASSISTANT:
+                        old_content = _msg_field(saved, 'content', '') or ''
+                        new_content = _msg_field(msg, 'content', '') or ''
+                        merged_content = old_content + new_content
+                        
+                        # Update the message with merged content (handle both dict and Message object)
+                        if isinstance(msg, dict):
+                            msg['content'] = merged_content
+                        else:
+                            msg.content = merged_content
+                        
+                        logger.debug(f"[CONTINUE_FIX] Merged continue-saved assistant message ({len(old_content)} chars) with new response ({len(new_content)} chars)")
+                        merged = True
+                        break
+                
+                if not merged:
+                    # Fallback: saved message was popped from conversation by continue handler.
+                    # If we can't merge it, re-append it to prevent data loss.
+                    logger.warning(
+                        f"[CONTINUE_FIX] Could not merge continue-saved message for {inst_name}: "
+                        f"no assistant message found in turn_output. Re-appending as separate message."
+                    )
+                    with instance._compression_lock:
+                        instance.append_message(saved)
         
         # Extract ground-truth usage info from LLM response (ground-truth token tracking)
         # This replaces manual token counting with actual API-reported values
