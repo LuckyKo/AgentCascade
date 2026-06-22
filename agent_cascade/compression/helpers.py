@@ -102,8 +102,8 @@ def extract_instance_output(messages: list[Any], instance_name: str, was_termina
     """
     Extract text output from a sub-agent's conversation messages.
 
-    Only includes text generated AFTER the last tool call ended — i.e., the
-    agent's final summary/response that should be returned to the caller.
+    Returns the content of the last message in the conversation, which represents
+    the agent's final output for the current invocation.
 
     Args:
         messages: List of Message objects or dicts (mixed types).
@@ -114,40 +114,33 @@ def extract_instance_output(messages: list[Any], instance_name: str, was_termina
         The extracted text, or a warning message if no output was found.
     """
 
-    # Find the last tool-call (function) message index
-    last_tool_idx = -1
-    for i, msg in enumerate(messages):
-        if isinstance(msg, dict):
-            role_check = msg.get('role') == FUNCTION or msg.get('function_call')
-        else:
-            role_check = getattr(msg, 'role', None) == FUNCTION or getattr(msg, 'function_call', None)
+    if not messages:
+        if was_terminated:
+            return f"Sub-agent {instance_name} was terminated by user."
+        return f"Sub-agent {instance_name} finished but provided no text output."
 
-        if role_check:
-            last_tool_idx = i
+    # Get the last message in the conversation
+    last_msg = messages[-1]
 
-    # Only look at messages after the last tool call
-    relevant_msgs = messages[last_tool_idx + 1:] if last_tool_idx != -1 else messages
+    if isinstance(last_msg, dict):
+        msg_role = last_msg.get('role', '')
+    else:
+        msg_role = getattr(last_msg, 'role', '')
 
-    collected_text = []
-    for msg in relevant_msgs:
-        if isinstance(msg, dict):
-            msg_role = msg.get('role', '')
-        else:
-            msg_role = getattr(msg, 'role', '')
+    # Guard: if the last message is a tool result (function role), the agent
+    # likely terminated incorrectly without producing a final text response.
+    if msg_role == FUNCTION:
+        return (f"WARNING: Sub-agent {instance_name} terminated with a tool result "
+                f"(no final text output). Check log for details: "
+                f"{instance_name}.log")
 
-        if msg_role == ASSISTANT:
-            text = extract_text_from_message(msg, add_upload_info=False)
-            if text:
-                collected_text.append(text)
-
-    result_str = "\n\n".join(collected_text).strip()
+    result_str = extract_text_from_message(last_msg, add_upload_info=False).strip()
 
     if not result_str:
         if was_terminated:
-            return f"Sub-agent {instance_name} was terminated by user."
-        if last_tool_idx != -1:
-            return f"WARNING: Sub-agent {instance_name} performed tool calls but provided no final summary."
-        return f"Sub-agent {instance_name} finished but provided no text output."
+            return (f"Sub-agent {instance_name} was terminated by user. "
+                    f"Check log for details: {instance_name}.log")
+        return f"WARNING: Sub-agent {instance_name} produced no text output in its final message (role={msg_role})."
 
     return result_str
 
