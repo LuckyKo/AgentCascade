@@ -183,7 +183,8 @@ TOOL_METADATA = {
     },
     'copy_file': {
         'description': (
-            'Copy a file or directory to a new location. This is auto-approved if the destination is new. '
+            'Copy a file or directory to a new location. If the destination already exists, '
+            'a timestamped backup is created before overwriting. This is auto-approved if the destination is new. '
             'You become the owner of the copied file, allowing you to edit it freely without user approval.'
         ),
         'parameters': {
@@ -193,7 +194,8 @@ TOOL_METADATA = {
     },
     'move_file': {
         'description': (
-            'Move a file or directory to a new location. Requires user approval for any files not owned '
+            'Move a file or directory to a new location. If the destination already exists, '
+            'a timestamped backup is created before overwriting. Requires user approval for any files not owned '
             'by the current agent. Moving files you created in this session is auto-approved.'
         ),
         'parameters': {

@@ -1779,7 +1779,38 @@ class OperationManager:
 
         try:
             dest_path = self._resolve_path(destination, mode="rw")
-            import shutil
+            
+            # Backup if overwriting (same pattern as delete_file, with collision detection)
+            backup_path_str = ""
+            if dest_path.exists():
+                safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+                backup_dir = self.base_dir / "logs" / "backups" / safe_agent
+                backup_dir.mkdir(parents=True, exist_ok=True)
+
+                # Collision detection with counter
+                timestamp = int(time.time())
+                counter = 0
+                while True:
+                    if counter == 0:
+                        backup_filename = f"{dest_path.name}.{timestamp}.bak"
+                    else:
+                        backup_filename = f"{dest_path.name}.{timestamp}_{counter}.bak"
+                    backup_path = backup_dir / backup_filename
+                    if not backup_path.exists():
+                        break
+                    counter += 1
+
+                # For directories: use shutil.copytree, for files: use shutil.copy2
+                if dest_path.is_dir():
+                    shutil.copytree(dest_path, backup_path)
+                else:
+                    shutil.copy2(dest_path, backup_path)
+
+                try:
+                    backup_path_str = str(backup_path.relative_to(self.base_dir))
+                except ValueError:
+                    backup_path_str = str(backup_path)
+
             if src_path.is_dir():
                 shutil.copytree(src_path, dest_path, dirs_exist_ok=True)
             else:
@@ -1789,6 +1820,8 @@ class OperationManager:
             msg = f"APPROVED: Copied {source} to {destination}"
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
+            if backup_path_str:
+                msg += f". Backup created: {backup_path_str}"
             return msg
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
@@ -1820,7 +1853,44 @@ class OperationManager:
 
         try:
             dest_path = self._resolve_path(destination, mode="rw")
-            import shutil
+            
+            # Backup if overwriting (same pattern as delete_file, with collision detection)
+            backup_path_str = ""
+            if dest_path.exists():
+                safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+                backup_dir = self.base_dir / "logs" / "backups" / safe_agent
+                backup_dir.mkdir(parents=True, exist_ok=True)
+
+                # Collision detection with counter
+                timestamp = int(time.time())
+                counter = 0
+                while True:
+                    if counter == 0:
+                        backup_filename = f"{dest_path.name}.{timestamp}.bak"
+                    else:
+                        backup_filename = f"{dest_path.name}.{timestamp}_{counter}.bak"
+                    backup_path = backup_dir / backup_filename
+                    if not backup_path.exists():
+                        break
+                    counter += 1
+
+                # For directories: use shutil.copytree, for files: use shutil.copy2
+                if dest_path.is_dir():
+                    shutil.copytree(dest_path, backup_path)
+                else:
+                    shutil.copy2(dest_path, backup_path)
+
+                try:
+                    backup_path_str = str(backup_path.relative_to(self.base_dir))
+                except ValueError:
+                    backup_path_str = str(backup_path)
+
+                # Remove existing destination so shutil.move can proceed
+                if dest_path.is_dir():
+                    shutil.rmtree(dest_path)
+                else:
+                    dest_path.unlink()
+
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(src_path, dest_path)
             if str(src_path) in self.file_ownership:
@@ -1829,6 +1899,8 @@ class OperationManager:
             msg = f"APPROVED: Moved {source} to {destination}"
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
+            if backup_path_str:
+                msg += f". Backup created: {backup_path_str}"
             return msg
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"

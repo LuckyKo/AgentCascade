@@ -646,7 +646,7 @@ class DeleteFile(BaseTool):
 
 
 class CopyFile(BaseTool):
-    """Copy a file or directory."""
+    """Copy a file or directory — creates timestamped backup before overwriting existing destination."""
 
     name = 'copy_file'
     description = TOOL_METADATA['copy_file']['description']
@@ -681,7 +681,7 @@ class CopyFile(BaseTool):
 
 
 class MoveFile(BaseTool):
-    """Move a file or directory (requires user approval)."""
+    """Move a file or directory — creates timestamped backup before overwriting existing destination (requires user approval)."""
 
     name = 'move_file'
     description = TOOL_METADATA['move_file']['description']
