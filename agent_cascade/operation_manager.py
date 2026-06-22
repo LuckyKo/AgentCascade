@@ -1780,28 +1780,37 @@ class OperationManager:
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
 
-    def re_indent(self, path: str, agent_name: str, lines: str, indent: int, indent_type: str, mode: str = "min") -> str:
+    def re_indent(self, path: str, agent_name: str, lines: str, indent: int, indent_type: str, mode: str = "shift") -> str:
         """Re-indents a block of code in a file.
         
-        Algorithm:
+        Algorithm for 'shift' and 'flat' modes:
         1. Count leading whitespace characters for each non-blank line (native units)
         2. Determine base to trim based on mode:
-           - 'min': minimum leading whitespace among non-blank lines
+           - 'shift': minimum leading whitespace among non-blank lines
            - 'flat': all leading whitespace from each line individually
         3. Trim that amount from each line, preserving relative indentation differences
         4. Prepend new indentation of `indent` units in the target type
         
+        Algorithm for 'convert' mode:
+        1. For each line, calculate visual column position (tabs = indent columns, spaces = 1 column)
+        2. Find minimum visual column among non-blank lines (base to trim)
+        3. For each line, compute new visual column = (original - min) + indent
+        4. Convert back to target type: tabs = visual_col // indent, trailing spaces = visual_col % indent
+        
         Examples:
-        - Block with indents 4,6,8 spaces, mode='min', indent=8 → result: 8,10,12 spaces
+        - Block with indents 4,6,8 spaces, mode='shift', indent=8 → result: 8,10,12 spaces
         - Same block, mode='flat', indent=8 → all lines get exactly 8 spaces (relative offsets lost)
+        - Block with 1,2,3 tabs converted to spaces with mode='convert', indent=4 → 4,8,12 spaces
         
         Args:
             path: Relative or absolute path to the file.
             agent_name: Name of the agent calling the tool (for ownership and approval tracking).
             lines: Line range string, 1-based inclusive (e.g. '1:10', '5:', ':20').
-            indent: Number of spaces or tabs to indent as the new base level.
+            indent: For shift/flat modes: number of spaces or tabs for base indent. 
+                    For convert mode: serves dual purpose as BOTH the target base indent AND the tab width in spaces (1 tab = indent columns).
             indent_type: Indentation character type: 'space' or 'tab'.
-            mode: Alignment mode: 'min' (default) or 'flat'.
+            mode: Alignment mode: 'shift' (default, preserves relative indentation), 'flat' (flattens to uniform indent), 
+                  or 'convert' (converts between tabs/spaces using visual column alignment).
         """
         try:
             resolved = self._resolve_path(path, mode="rw")
@@ -1858,19 +1867,40 @@ class OperationManager:
             """Return the number of leading whitespace characters."""
             return len(line) - len(line.lstrip(' \t'))
 
-        # Extract leading whitespace counts and stripped content for each line
+        # Helper to count visual column position of leading whitespace (for convert mode)
+        def count_visual_columns(line: str, tab_width: int) -> int:
+            """Count visual column position of leading whitespace.
+            Each tab = tab_width columns, each space = 1 column."""
+            count = 0
+            for ch in line:
+                if ch == '\t':
+                    count += tab_width
+                elif ch == ' ':
+                    count += 1
+                else:
+                    break
+            return count
+
+        # Extract leading whitespace counts, visual columns, and stripped content for each line
         ws_info_list = []  # List of (ws_count, stripped_content) or None for blank lines
-        
+        ws_info_visual = []  # List of (visual_col, stripped_content) or None for blank lines
+
         for line in block_lines:
             if not line.strip():
                 ws_info_list.append(None)
+                ws_info_visual.append(None)
             else:
                 ws_count = count_leading_ws(line)
+                visual_col = count_visual_columns(line, indent)
                 stripped = line.lstrip(' \t')
                 ws_info_list.append((ws_count, stripped))
+                ws_info_visual.append((visual_col, stripped))
 
         # Collect whitespace counts from non-blank lines only
         ws_counts = [info[0] for info in ws_info_list if info is not None]
+
+        # Compute minimum visual column directly (for convert mode)
+        min_visual_col = min((info[0] for info in ws_info_visual if info is not None), default=0)
 
         # Perform re-indentation
         if not ws_counts:
@@ -1878,16 +1908,22 @@ class OperationManager:
             base_trim = 0  # FIX 1: Initialize for feedback message when all lines are blank
         else:
             # Determine base trim amount based on mode
-            if mode == 'min':
+            if mode == 'shift':
                 base_trim = min(ws_counts)
             elif mode == 'flat':
                 base_trim = None  # Special case handled per-line
+            elif mode == 'convert':
+                base_trim = min_visual_col
             else:
-                return f"ERROR: Invalid mode '{mode}'. Choose 'min' or 'flat'."
+                return f"ERROR: Invalid mode '{mode}'. Choose 'shift', 'flat', or 'convert'."
 
             # FIX 2: Validate indent is non-negative
             if indent < 0:
                 return f"ERROR: indent must be non-negative, got {indent}."
+            
+            # Additional validation for convert mode with tabs (prevents ZeroDivisionError)
+            if mode == 'convert' and indent_type == 'tab' and indent == 0:
+                return "ERROR: indent must be > 0 when indent_type='tab' in convert mode (used as tab width)."
 
             new_block_lines = []
             
@@ -1907,15 +1943,30 @@ class OperationManager:
                 
                 ws_count, stripped_content = info
                 
-                # Calculate relative offset after trimming base
+                # Calculate relative offset after trimming base based on mode
                 if mode == 'flat':
                     # Trim all leading whitespace - every line starts fresh at indent level
                     relative_offset = 0
-                else:
-                    # Preserve relative indentation from the minimum
+                elif mode == 'convert':
+                    # Convert mode: use visual column calculation (precomputed in ws_info_visual)
+                    visual_col, _ = ws_info_visual[i]  # Use precomputed value instead of recomputing
+                    relative_offset = visual_col - base_trim
+                    total_visual_columns = indent + relative_offset
+                    
+                    if indent_type == 'tab':
+                        num_tabs = total_visual_columns // indent  # indent here is tab_width
+                        remainder_spaces = total_visual_columns % indent
+                        new_ws = '\t' * num_tabs + ' ' * remainder_spaces
+                    else:  # space
+                        new_ws = ' ' * total_visual_columns
+                    
+                    new_block_lines.append(new_ws + stripped_content)
+                    continue
+                else:  # mode == 'shift'
+                    # Preserve relative indentation from the minimum (character-based)
                     relative_offset = ws_count - base_trim
                 
-                # Build new indentation string in target type
+                # Build new indentation string in target type for shift mode
                 total_indent_units = indent + relative_offset
                 
                 if indent_type == 'tab':
@@ -1988,7 +2039,10 @@ class OperationManager:
             display_start = start + 1
             if mode == 'flat':
                 res_msg = f"APPROVED: Re-indented lines {display_start}:{end} in {path}. Block had varying indents (trimmed all), now flattened to {indent} {indent_type}s."
-            else:
+            elif mode == 'convert':
+                # More user-friendly message explaining visual column alignment
+                res_msg = f"APPROVED: Converted lines {display_start}:{end} in {path}. Used visual column alignment with tab width={indent}. Minimum indent was {base_trim} columns, re-aligned and converted to {indent_type}s."
+            else:  # shift mode
                 res_msg = f"APPROVED: Re-indented lines {display_start}:{end} in {path}. Block had base indent of {base_trim} {original_ws_unit}s, now indented to {indent} {indent_type}s."
             
             if justification:
