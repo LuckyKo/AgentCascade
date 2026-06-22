@@ -3573,6 +3573,23 @@ chatInput.addEventListener('keydown', (e) => {
   }
 });
 
+// ── Keep focus in chatInput when clicking anywhere in the input area ──────────
+// Clicking buttons, toggles, or empty space should not steal focus from #chatInput.
+// We defer focus to the task queue (setTimeout 0) so it runs AFTER all synchronous
+// click handlers have finished, including any that call chatInput.focus() themselves
+// (e.g., insertImageMarkdown, insertAtCursor). This preserves button functionality
+// while ensuring focus returns to the textarea for immediate typing.
+const inputArea = document.querySelector('.input-area');
+if (inputArea) {
+  inputArea.addEventListener('click', (e) => {
+    // Don't steal focus from checkbox toggles (AFK, Auto-Ask) — let them toggle normally
+    if (e.target.type === 'checkbox' || e.target.closest('label:has(input[type="checkbox"])')) return;
+    if (document.activeElement !== chatInput) {
+      setTimeout(() => chatInput.focus(), 0);
+    }
+  });
+}
+
 sendBtn.addEventListener('click', sendMessage);
 if (stopBtn) stopBtn.addEventListener('click', () => send({ type: 'stop' }));
 
