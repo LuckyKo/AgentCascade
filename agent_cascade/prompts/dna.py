@@ -143,6 +143,19 @@ TOOL_METADATA = {
             'justification': 'Why you need to edit this file'
         }
     },
+    're_indent': {
+        'description': (
+            'Re-indents a specific block of code in a file. '
+            'It allows shifting or flattening indentation to a given number of spaces/tabs.'
+        ),
+        'parameters': {
+            'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
+            'lines': "Line range to re-indent, 1-based inclusive (e.g., '1:10', '5:', ':20').",
+            'indent': "Integer representing the number of spaces or tabs.",
+            'indent_type': "Indentation character type: 'space' or 'tab'.",
+            'mode': "Optional: Re-alignment mode. Can be 'min' (default, preserves relative indentation from smallest indent) or 'flat' (flattens entire block to target indent)."
+        }
+    },
     'list_dir': {
         'description': (
             'Lists the names of files and subdirectories directly within a specified directory path.'

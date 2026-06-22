@@ -713,3 +713,80 @@ class MoveFile(BaseTool):
         source = params['source']
         destination = params['destination']
         return self.agent_pool.operation_manager.move_file(source, destination, self.agent_name)
+
+
+class ReIndent(BaseTool):
+    """Re-indents a block of code in a file."""
+
+    name = 're_indent'
+    description = TOOL_METADATA['re_indent']['description']
+    parameters = {
+        'type': 'object',
+        'properties': {
+            'path': {
+                'type': 'string',
+                'description': TOOL_METADATA['re_indent']['parameters']['path']
+            },
+            'lines': {
+                'type': 'string',
+                'description': TOOL_METADATA['re_indent']['parameters']['lines']
+            },
+            'indent': {
+                'type': 'integer',
+                'description': TOOL_METADATA['re_indent']['parameters']['indent']
+            },
+            'indent_type': {
+                'type': 'string',
+                'enum': ['space', 'tab'],
+                'description': TOOL_METADATA['re_indent']['parameters']['indent_type']
+            },
+            'mode': {
+                'type': 'string',
+                'enum': ['min', 'flat'],
+                'default': 'min',
+                'description': TOOL_METADATA['re_indent']['parameters']['mode']
+            }
+        },
+        'required': ['path', 'lines', 'indent', 'indent_type'],
+    }
+
+    def __init__(self, cfg=None, **kwargs):
+        try:
+            super().__init__(cfg)
+        except (ValueError, TypeError):
+            super().__init__()
+        self.agent_pool = kwargs.get('agent_pool')
+        self.agent_name = kwargs.get('agent_name')
+
+    def call(self, params: str, **kwargs) -> str:
+        params_json = self._verify_json_format_args(params)
+        path = params_json.get('path')
+        lines = params_json.get('lines')
+        indent = params_json.get('indent')
+        type_ = params_json.get('indent_type')
+        mode = params_json.get('mode', 'min')
+
+        if not path:
+            return "ERROR: Missing 'path'."
+        if lines is None:
+            return "ERROR: Missing 'lines' (1-based line range like '1:10')."
+        if indent is None:
+            return "ERROR: Missing 'indent' (integer value)."
+        if not type_:
+            return "ERROR: Missing 'indent_type' ('space' or 'tab')."
+
+        # FIX 7: Explicit validation for type_ and mode
+        if type_ not in ('space', 'tab'):
+            return "ERROR: 'indent_type' must be 'space' or 'tab'."
+        if mode not in ('min', 'flat'):
+            return "ERROR: 'mode' must be 'min' or 'flat'."
+
+        return self.agent_pool.operation_manager.re_indent(
+            path=path,
+            agent_name=self.agent_name,
+            lines=lines,
+            indent=indent,
+            indent_type=type_,  # FIX 6: Changed from type= to indent_type=
+            mode=mode,
+        )
+

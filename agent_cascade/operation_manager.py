@@ -1780,6 +1780,225 @@ class OperationManager:
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
 
+    def re_indent(self, path: str, agent_name: str, lines: str, indent: int, indent_type: str, mode: str = "min") -> str:
+        """Re-indents a block of code in a file.
+        
+        Algorithm:
+        1. Count leading whitespace characters for each non-blank line (native units)
+        2. Determine base to trim based on mode:
+           - 'min': minimum leading whitespace among non-blank lines
+           - 'flat': all leading whitespace from each line individually
+        3. Trim that amount from each line, preserving relative indentation differences
+        4. Prepend new indentation of `indent` units in the target type
+        
+        Examples:
+        - Block with indents 4,6,8 spaces, mode='min', indent=8 → result: 8,10,12 spaces
+        - Same block, mode='flat', indent=8 → all lines get exactly 8 spaces (relative offsets lost)
+        
+        Args:
+            path: Relative or absolute path to the file.
+            agent_name: Name of the agent calling the tool (for ownership and approval tracking).
+            lines: Line range string, 1-based inclusive (e.g. '1:10', '5:', ':20').
+            indent: Number of spaces or tabs to indent as the new base level.
+            indent_type: Indentation character type: 'space' or 'tab'.
+            mode: Alignment mode: 'min' (default) or 'flat'.
+        """
+        try:
+            resolved = self._resolve_path(path, mode="rw")
+        except Exception as e:
+            return f"ERROR: {str(e)}"
+
+        if not resolved.exists():
+            return f"File not found for re-indentation: {path}"
+
+        try:
+            file_content = resolved.read_text(encoding='utf-8')
+        except Exception as e:
+            return f"ERROR: Failed to read file: {str(e)}"
+
+        file_lines = file_content.splitlines(keepends=True)
+        total_lines = len(file_lines)
+
+        # Parse lines range (1-based inclusive, like read_file)
+        try:
+            parts = lines.split(':')
+            if len(parts) != 2:
+                raise ValueError("lines must be in 'start:end' format")
+            start_str, end_str = parts
+            # Default to line 1 for empty start (1-based), total_lines for empty end
+            start = int(start_str) if start_str.strip() else 1
+            end = int(end_str) if end_str.strip() else total_lines
+
+            # FIX 3: Validate 1-based line numbers before conversion
+            if start < 1:
+                return f"ERROR: Line numbers must be >= 1. Got start={start}. Use 1-based format like '1:10'."
+            if end < 1:
+                return f"ERROR: Line numbers must be >= 1. Got end={end}. Use 1-based format like '1:10'."
+
+            # Convert from 1-based to 0-based indexing for internal use
+            start = start - 1
+            
+            # Handle negative indices (counting from end)
+            if start < 0:
+                start += total_lines
+            if end < 0:
+                end += total_lines
+
+            start = max(0, min(start, total_lines))
+            end = max(0, min(end, total_lines))
+            if start >= end:
+                return f"ERROR: Invalid lines range: {lines} (start={start+1}, end={end}). Start must be less than end."
+        except Exception as e:
+            return f"ERROR: Invalid lines format '{lines}': {str(e)}. Use 1-based line range (e.g., '1:10')."
+
+        block_lines = file_lines[start:end]
+
+        # Helper to count leading whitespace characters in a line
+        def count_leading_ws(line: str) -> int:
+            """Return the number of leading whitespace characters."""
+            return len(line) - len(line.lstrip(' \t'))
+
+        # Extract leading whitespace counts and stripped content for each line
+        ws_info_list = []  # List of (ws_count, stripped_content) or None for blank lines
+        
+        for line in block_lines:
+            if not line.strip():
+                ws_info_list.append(None)
+            else:
+                ws_count = count_leading_ws(line)
+                stripped = line.lstrip(' \t')
+                ws_info_list.append((ws_count, stripped))
+
+        # Collect whitespace counts from non-blank lines only
+        ws_counts = [info[0] for info in ws_info_list if info is not None]
+
+        # Perform re-indentation
+        if not ws_counts:
+            new_block_lines = block_lines
+            base_trim = 0  # FIX 1: Initialize for feedback message when all lines are blank
+        else:
+            # Determine base trim amount based on mode
+            if mode == 'min':
+                base_trim = min(ws_counts)
+            elif mode == 'flat':
+                base_trim = None  # Special case handled per-line
+            else:
+                return f"ERROR: Invalid mode '{mode}'. Choose 'min' or 'flat'."
+
+            # FIX 2: Validate indent is non-negative
+            if indent < 0:
+                return f"ERROR: indent must be non-negative, got {indent}."
+
+            new_block_lines = []
+            
+            for i, info in enumerate(ws_info_list):
+                if info is None:
+                    # Blank line - preserve only the line ending
+                    original_line = block_lines[i]
+                    suffix = ""
+                    if original_line.endswith('\r\n'):
+                        suffix = '\r\n'
+                    elif original_line.endswith('\n'):
+                        suffix = '\n'
+                    elif original_line.endswith('\r'):
+                        suffix = '\r'
+                    new_block_lines.append(suffix)
+                    continue
+                
+                ws_count, stripped_content = info
+                
+                # Calculate relative offset after trimming base
+                if mode == 'flat':
+                    # Trim all leading whitespace - every line starts fresh at indent level
+                    relative_offset = 0
+                else:
+                    # Preserve relative indentation from the minimum
+                    relative_offset = ws_count - base_trim
+                
+                # Build new indentation string in target type
+                total_indent_units = indent + relative_offset
+                
+                if indent_type == 'tab':
+                    new_ws = '\t' * total_indent_units
+                else:  # indent_type == 'space'
+                    new_ws = ' ' * total_indent_units
+                
+                new_block_lines.append(new_ws + stripped_content)
+
+        # Track original whitespace unit for feedback message (FIX 3)
+        if ws_counts:
+            # FIX 4: Improved detection - check if ANY leading whitespace contains tabs
+            first_non_blank_line = None
+            for line in block_lines:
+                if line.strip():
+                    first_non_blank_line = line
+                    break
+            if first_non_blank_line:
+                first_ws_len = len(first_non_blank_line) - len(first_non_blank_line.lstrip(' \t'))
+                leading_ws = first_non_blank_line[:first_ws_len]
+                original_ws_unit = 'tab' if '\t' in leading_ws else 'space'
+            else:
+                original_ws_unit = 'unknown'
+        else:
+            original_ws_unit = 'unknown'
+
+        # Security/User Approval check
+        description = f"Re-indent block in: {path} (lines: {lines}, indent: {indent}, type: {indent_type}, mode: {mode})"
+        tool_args = {'path': path, 'lines': lines, 'indent': indent, 'indent_type': indent_type, 'mode': mode}  # FIX 2: Use indent_type for consistency
+
+        if not self._is_auto_approved(path, agent_name):
+            approved, reason = self.request_user_approval(
+                agent_name=agent_name,
+                tool_name='re_indent',
+                tool_args=tool_args,
+                description=description,
+            )
+            if not approved:
+                return f"REJECTED BY USER: {reason}"
+            justification = reason
+        else:
+            justification = ""
+
+        # Perform the actual write and backup
+        try:
+            # FIX 1: Re-read file to avoid race condition after user approval delay
+            resolved = self._resolve_path(path, mode="rw")
+            file_content = resolved.read_text(encoding='utf-8')
+            file_lines = file_content.splitlines(keepends=True)
+            
+            safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+            backup_dir = self.base_dir / "logs" / "backups" / safe_agent
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
+            shutil.copy2(resolved, backup_path)
+            try:
+                backup_path_str = str(backup_path.relative_to(self.base_dir))
+            except ValueError:
+                backup_path_str = str(backup_path)
+
+            new_file_lines = list(file_lines)
+            new_file_lines[start:end] = new_block_lines
+            new_content = "".join(new_file_lines)
+            resolved.write_text(new_content, encoding='utf-8')
+
+            self.file_ownership[str(resolved)] = agent_name
+
+            # FIX 3: Improved feedback message with details about what happened
+            # Display 1-based line numbers (start is 0-based internally, so add 1)
+            display_start = start + 1
+            if mode == 'flat':
+                res_msg = f"APPROVED: Re-indented lines {display_start}:{end} in {path}. Block had varying indents (trimmed all), now flattened to {indent} {indent_type}s."
+            else:
+                res_msg = f"APPROVED: Re-indented lines {display_start}:{end} in {path}. Block had base indent of {base_trim} {original_ws_unit}s, now indented to {indent} {indent_type}s."
+            
+            if justification:
+                res_msg += f"\nSecurity Justification: {justification}"
+            if backup_path_str:
+                res_msg += f" (Backup saved to: {backup_path_str})"
+            return res_msg
+        except Exception as e:
+            return f"ERROR: Approved but execution failed: {str(e)}"
+
     def delete_file(self, path: str, agent_name: str) -> str:
         """Delete a file or directory — auto-approved for agent-owned files. Creates timestamped backup before deletion."""
         try:

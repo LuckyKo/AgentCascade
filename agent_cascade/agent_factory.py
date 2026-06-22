@@ -11,7 +11,7 @@ from agent_cascade.log import logger
 from agent_cascade.tools.code_interpreter import CodeInterpreter
 from agent_cascade.tools.custom import (
     ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep,
-    DeleteFile, CopyFile, MoveFile, DismissAgent, ListAgents, ShellCmd, SystemInfo,
+    DeleteFile, CopyFile, MoveFile, ReIndent, DismissAgent, ListAgents, ShellCmd, SystemInfo,
     ReadLogs, Calculate, CodeMap, ForgetLast,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
@@ -65,6 +65,11 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
     edit_tool.agent_pool = agent_pool
     edit_tool.agent_name = agent_name
     agent.function_map['edit_file'] = edit_tool
+
+    re_indent_tool = ReIndent()
+    re_indent_tool.agent_pool = agent_pool
+    re_indent_tool.agent_name = agent_name
+    agent.function_map['re_indent'] = re_indent_tool
 
     delete_tool = DeleteFile()
     delete_tool.agent_pool = agent_pool
