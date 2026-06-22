@@ -386,6 +386,7 @@ def create_app(agents, agent_pool, config=None):
             # Use the standardized logger to ensure append-only behavior
             logger_inst = agent_pool.get_logger(name, 'Orchestrator')
             logger_inst.update_history(history)
+            logger_inst._file_history_synced = True
             
             # Also sync to instance_summaries for the UI if history was compressed
             for msg in reversed(history):

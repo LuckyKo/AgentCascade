@@ -1009,6 +1009,7 @@ class ExecutionEngine:
                             with instance._compression_lock:
                                 conv_snapshot = list(instance.conversation)
                             log_inst.update_history(conv_snapshot)
+                            log_inst._file_history_synced = True
                         except Exception as e:
                             logger.warning(f"Failed to persist system message update for {inst_name}: {e}")
                     else:

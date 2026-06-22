@@ -292,6 +292,8 @@ class CompressionHandler:
                                 f"pool={pool_count}, logged={logged_count}, syncing {pool_count - logged_count} messages"
                             )
                             log_inst.update_history(conv)
+                            # Prevent update_history() from reloading stale file state on next call
+                            log_inst._file_history_synced = True
                         else:
                             logger.debug(
                                 f"Logger already synced after compression for '{inst_name}': "
@@ -402,6 +404,8 @@ class CompressionHandler:
                         f"pool={pool_count}, logged={logged_count}, syncing {pool_count - logged_count} messages"
                     )
                     log_inst.update_history(conv)
+                    # Prevent update_history() from reloading stale file state on next call
+                    log_inst._file_history_synced = True
                 else:
                     logger.debug(
                         f"Logger already synced after compress_context tool for '{target_agent_name}': "
@@ -706,6 +710,8 @@ class CompressionHandler:
                         f"pool={pool_count}, logged={logged_count}, syncing {pool_count - logged_count} messages"
                     )
                     log_inst.update_history(conv)
+                    # Prevent update_history() from reloading stale file state on next call
+                    log_inst._file_history_synced = True
                 else:
                     logger.debug(
                         f"Logger already synced after /compress command for '{inst_name}': "
@@ -936,6 +942,8 @@ class CompressionHandler:
                         f"pool={pool_count}, logged={logged_count}, syncing {pool_count - logged_count} messages"
                     )
                     log_inst.update_history(conv)
+                    # Prevent update_history() from reloading stale file state on next call
+                    log_inst._file_history_synced = True
                 else:
                     logger.debug(
                         f"Logger already synced after /rollback command for '{inst_name}': "

@@ -326,12 +326,9 @@ class AgentInstanceLogger:
         across pool mutations. DO NOT change this matching logic without ensuring the logger
         sync after compression events also uses timestamp-based identity.
         """
-        # FIX: Ensure internal state matches file before comparing/appending.
-        # If self.data["history"] is empty but the file has content, load from file first.
-        # This prevents duplicate appends during startup when the logger's internal state
-        # may be out of sync with the file (e.g., after session load or WebSocket reconnection).
-        # One-shot guard (_file_history_synced) prevents double-load under concurrent access.
-        if not self._file_history_synced and not self.data["history"] and os.path.exists(self.log_path):
+        # FIX: Always load from file when _file_history_synced=False (not just when memory is empty).
+        # This prevents stale comparison baseline after compression.
+        if not self._file_history_synced and os.path.exists(self.log_path):
             self.load_history_from_file()
             self._file_history_synced = True
         
@@ -471,8 +468,12 @@ class AgentInstanceLogger:
             # Update internal tracking
             self.data["history"] = [self._format_message(msg) for msg in new_history]
             
-            # Fix #1: Reset the sync guard flag after file modification so future update_history() calls can properly sync again
-            self._file_history_synced = False
+            # ARCHITECTURAL FIX: After rewrite=True, both file AND data["history"] ARE in sync.
+            # Set _file_history_synced = True to reflect this accurate state. This prevents the
+            # next update_history() call from loading from file unnecessarily (which would clear
+            # and reload, potentially causing issues). The flag should only be False when we know
+            # the internal state is out of sync with the file.
+            self._file_history_synced = True
             
             return True
 

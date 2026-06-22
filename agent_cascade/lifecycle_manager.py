@@ -404,6 +404,7 @@ class AgentLifecycleManager:
                 try:
                     log_inst = self.pool.get_logger(instance_name, agent_class)
                     log_inst.update_history(conv)
+                    log_inst._file_history_synced = True
                 except Exception as e:
                     logger.debug(f"Logger sync via update_history for {instance_name} failed (non-critical): {e}")
         else:
