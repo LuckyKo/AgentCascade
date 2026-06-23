@@ -265,32 +265,63 @@ def compress_context(
     # NOTE: This is single-threaded by design — forced compression halts all other agents
     # before running, so no concurrent pool mutations can occur during this block.
     
-    try:
-        # NOTE: get_conversation() returns a copy of inst.conversation (see agent_pool.py:1124).
-        # We replace via instance_conversations[name] = new_history which copies into inst.conversation.
-        history = agent_pool.get_conversation(target_agent_name)
-        insert_pos = active_start_idx + target_discard_count
+    # NOTE: get_conversation() returns a copy of inst.conversation (see agent_pool.py:1124).
+    history = agent_pool.get_conversation(target_agent_name)
+    insert_pos = active_start_idx + target_discard_count
 
-        # Safety check: insert position must be after the SYSTEM message
-        if insert_pos < 1:
-            raise RuntimeError(
-                f"Insert position {insert_pos} would overwrite or precede SYSTEM message — "
-                f"pool state corrupted for agent '{target_agent_name}'"
+    # ── Defensive guard: verify cut boundary doesn't split tool-call pairs ──
+    from agent_cascade.compression.helpers import (
+        _has_pending_tool_calls,
+        _get_function_call_ids,
+        _get_function_result_id,
+    )
+
+    while insert_pos < len(history):
+        msg = history[insert_pos]
+        if _has_pending_tool_calls(msg):
+            logger.debug(
+                f"Compression boundary adjustment: including ASSISTANT with tool call "
+                f"at position {insert_pos} for agent '{target_agent_name}'"
             )
+            insert_pos += 1
+        else:
+            # Also check for orphaned FUNCTION results at the boundary.
+            # If a FUNCTION message's matching ASSISTANT was already compressed,
+            # skip it to avoid dangling results in the tail.
+            fn_role = getattr(msg, 'role', '') if not isinstance(msg, dict) else msg.get('role', '')
+            if fn_role == FUNCTION:
+                fn_id = _get_function_result_id(msg)
+                if fn_id:
+                    # Search backwards for the matching ASSISTANT in discarded range
+                    found_assistant = False
+                    for j in range(insert_pos - 1, active_start_idx - 1, -1):
+                        aid_list = _get_function_call_ids(history[j])
+                        if fn_id in aid_list:
+                            found_assistant = True
+                            break
+                    if not found_assistant:
+                        # Orphaned FUNCTION — its ASSISTANT was already compressed
+                        logger.debug(
+                            f"Compression boundary adjustment: skipping orphaned "
+                            f"FUNCTION result at position {insert_pos} for agent '{target_agent_name}'"
+                        )
+                        insert_pos += 1
+                        continue
+            break
 
-        # ── Pool memory structure vs JSONL log file ──
-        # Pool memory (in-memory conversation): discarded messages are REMOVED and replaced by marker.
-        #   Example: [SYS][U0][COMP1][U2][A2]  — marker sits where U1,A1 were
-        # JSONL log file: ALL original messages preserved, marker APPENDED after them.
-        #   Example: [SYS][U0][U1][A1][COMP1][U2][A2]
-        # Working set build (agent_pool.py) stacks all markers + tail after last marker.
-        # Marker position must mirror same distance from tail in both structures.
-        #
-        # Atomic mutation via copy-and-replace: build new list and assign.
-        # This ensures that if an exception occurs, the pool is untouched.
+    actual_discard = insert_pos - active_start_idx
+
+    # Safety check: insert position must be after the SYSTEM message
+    if insert_pos < 1:
+        raise RuntimeError(
+            f"Insert position {insert_pos} would overwrite or precede SYSTEM message — "
+            f"pool state corrupted for agent '{target_agent_name}'"
+        )
+
+    # Atomic mutation via copy-and-replace: build new list and assign.
+    try:
         new_history = history[:active_start_idx] + [marker_message] + history[insert_pos:]
         agent_pool.instance_conversations[target_agent_name] = new_history
-
     except Exception as e:
         # Fail-safe: pool mutation failed — this shouldn't happen but protect against it
         logger.error(f"Pool mutation during compression failed: {e}")
@@ -323,14 +354,15 @@ def compress_context(
         )
 
     # ── 11. Calculate tail count and notify logger ──
-    tail_count = len(active_set) - target_discard_count
+    effective_discard = actual_discard
+    tail_count = len(active_set) - effective_discard
     # NOTE: Logger sync is now handled by handler.py's _sync_logger_after_compression()
     # which calls reset_history(conv, rewrite=True) for all compression paths.
     # The insert_compression_marker() method in agent_instance_logger.py is deprecated.
 
     # ── 12. Log the successful compression event ──
     logger.info(
-        f"Clean-trim compression: Discarded {target_discard_count} messages "
+        f"Clean-trim compression: Discarded {effective_discard} messages "
         f"for agent '{target_agent_name}'. Tail count: {tail_count}."
     )
 
@@ -338,7 +370,7 @@ def compress_context(
         success=True,
         summary_text=generated_summary,
         marker_message=marker_message,
-        messages_discarded=target_discard_count,
+        messages_discarded=effective_discard,
         tail_count=tail_count,
         error=None,
         mode=mode,
