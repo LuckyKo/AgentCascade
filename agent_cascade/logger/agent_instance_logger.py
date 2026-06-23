@@ -422,7 +422,9 @@ class AgentInstanceLogger:
     def reset_history(self, new_history: List[Any], rewrite: bool = False):
         """Update internal tracking after a compression event or manual edit.
 
-        If rewrite=True, the log file is truncated and rewritten from scratch.
+        If rewrite=True, the log file is rewritten with only the NEWEST marker inserted
+        at a position mirroring its tail distance from pool memory. All original messages
+        in the JSONL are preserved (not replaced by markers).
         Otherwise, we append a compression baseline to the end of the log.
         """
         if rewrite:
@@ -433,25 +435,55 @@ class AgentInstanceLogger:
                 self._file_handle = None
 
             try:
-                # 1. Prepare all lines (metadata + history)
-                lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
-                for msg in new_history:
-                    lines.append(json.dumps(self._format_message(msg), ensure_ascii=False) + '\n')
+                # COMPRESSION_MARKER imported at module level (line 18)
 
-                # 2. Write to file (overwrite)
+                # ── Read existing log messages ──
+                existing_msgs = list(self.data["history"])  # Current JSONL state in memory
+
+                # ── Find the LAST (newest) marker in pool — only this one is new ──
+                # Role check matches load_session_from_log: markers must be USER role
+                from agent_cascade.llm.schema import USER as USER_ROLE
+                last_marker_idx = -1
+                for i in range(len(new_history) - 1, -1, -1):
+                    msg = new_history[i]
+                    role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                    content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                    if role == USER_ROLE and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                        last_marker_idx = i
+                        break
+
+                # ── Build result: existing log + marker inserted at mirrored tail offset ──
+                if last_marker_idx >= 0:
+                    tail_dist = len(new_history) - last_marker_idx  # msgs after marker in pool
+                    formatted_marker = self._format_message(new_history[last_marker_idx])
+
+                    insert_pos = len(existing_msgs) - tail_dist + 1
+                    insert_pos = max(0, min(insert_pos, len(existing_msgs)))
+                    
+                    result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
+                else:
+                    # No markers — just use pool state directly
+                    result_msgs = [self._format_message(m) for m in new_history]
+
+                # ── Write to file (overwrite) ──
+                lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
+                for msg in result_msgs:
+                    lines.append(json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) + '\n')
+
                 with open(self.log_path, 'w', encoding='utf-8') as f:
                     f.writelines(lines)
 
-                logger.info(f"Rewrote agent log {self.log_path} with {len(new_history)} messages.")
+                logger.info(f"Rewrote agent log {self.log_path} with {len(result_msgs)} messages.")
             except Exception as e:
                 logger.error(f"Failed to rewrite agent log {self.log_path}: {e}")
                 return False
 
-            # Update internal tracking
+            # Update internal tracking — pool state (active set) for in-memory history
             self.data["history"] = [self._format_message(msg) for msg in new_history]
             
-            # ARCHITECTURAL FIX: After rewrite=True, both file AND data["history"] ARE in sync.
-            # Set _file_history_synced = True to reflect this accurate state. This prevents the
+            # After rewrite=True: JSONL file has all originals + marker at mirrored position.
+            # data["history"] has pool state (smaller). Both yield identical working sets.
+            # Set _file_history_synced = True to prevent unnecessary reloads on the next update_history().
             # next update_history() call from loading from file unnecessarily (which would clear
             # and reload, potentially causing issues). The flag should only be False when we know
             # the internal state is out of sync with the file.

@@ -264,6 +264,14 @@ def compress_context(
                 f"pool state corrupted for agent '{target_agent_name}'"
             )
 
+        # ── Pool memory structure vs JSONL log file ──
+        # Pool memory (in-memory conversation): discarded messages are REMOVED and replaced by marker.
+        #   Example: [SYS][U0][COMP1][U2][A2]  — marker sits where U1,A1 were
+        # JSONL log file: ALL original messages preserved, marker APPENDED after them.
+        #   Example: [SYS][U0][U1][A1][COMP1][U2][A2]
+        # Working set build (agent_pool.py) stacks all markers + tail after last marker.
+        # Marker position must mirror same distance from tail in both structures.
+        #
         # Atomic mutation via copy-and-replace: build new list and assign.
         # This ensures that if an exception occurs, the pool is untouched.
         new_history = history[:active_start_idx] + [marker_message] + history[insert_pos:]

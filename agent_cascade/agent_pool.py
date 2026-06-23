@@ -1439,6 +1439,14 @@ class AgentPool:
 
         latest_marker = self.find_last_marker(conv)
 
+        # active_start_idx points right after the last compression marker (or after SYS if none).
+        # This ensures new markers are stacked immediately after existing ones, preserving
+        # the tail distance from the end of conversation.
+        #
+        # With multiple compressions: [SYS][COMP1][COMP2|active_start]|U3|A3|U4|A4]
+        # find_last_marker returns index of COMP2, so active_start_idx = COMP2 + 1.
+        # New markers are inserted right after all existing ones (stacking behavior).
+        
         # active_start_idx: where the "active" (post-marker) window starts
         if latest_marker >= 0:
             active_start_idx = latest_marker + 1  # Skip past marker — markers are not part of active set
@@ -1482,8 +1490,8 @@ class AgentPool:
         first_role = history[0].get('role') if isinstance(history[0], dict) else getattr(history[0], 'role', '')
         expected_start = 1 if first_role == SYS_ROLE else 0
 
+        # Redundant len() check removed: early return at line 1484 guarantees marker_indices is non-empty
         markers_stacked = (
-            len(marker_indices) > 0 and
             marker_indices[0] == expected_start and
             marker_indices[-1] == expected_start + len(marker_indices) - 1
         )
