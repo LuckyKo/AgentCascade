@@ -161,33 +161,20 @@ class ForgetLast(BaseTool):
                 f"(< {max_chars} chars). Nothing to truncate."
             )
         
-        # Write back truncated messages to the pool (mutate original conversation)
+        # Sync truncated messages back to the pool (get_conversation returns a shallow copy,
+        # so in-place mutations on history[] already affect inst.conversation — just invalidate caches)
         inst = self.agent_pool.get_instance(agent_name)
         if inst:
             with inst._compression_lock:
-                # Copy truncated messages back into the pool
-                for i, (pool_msg, hist_msg) in enumerate(zip(inst.conversation, history)):
-                    # Only update content of function messages we identified
-                    if i in indices_to_truncate:
-                        pool_content = self._get_content(pool_msg)
-                        new_content = self._get_content(hist_msg)
-                        if pool_content != new_content:
-                            self._set_content(pool_msg, new_content)
                 # Invalidate token count cache — content changed
                 inst._cached_token_count = 0
                 inst._last_token_count_conversation_length = -1
         
-        # Sync to log file using reset_history(rewrite=True)
+        # Sync to log file using update_history (lightweight timestamp-based sync)
         if agent_name in self.agent_pool.instance_loggers:
             logger_inst = self.agent_pool.instance_loggers[agent_name]
             try:
-                # Pass raw history — reset_history calls _format_message internally
-                log_write_success = logger_inst.reset_history(history, rewrite=True)
-                if not log_write_success:
-                    return (
-                        f"Truncated {truncated_count} tool response(s), saving ~{total_chars_saved} chars, "
-                        f"but FAILED to update the log file. Pool and log may be inconsistent."
-                    )
+                logger_inst.update_history(history)
         
             except Exception as e:
                 return (
