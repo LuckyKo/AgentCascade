@@ -7,13 +7,10 @@ from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.settings import DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS
 from agent_cascade.compression import rebuild_working_set
 
-# Marker text for truncated content
-FORGOTTEN_MARKER = "[TRUNCATED] "
-
 logger = logging.getLogger(__name__)
 
 
-@register_tool('forget_last', allow_overwrite=True)
+@register_tool("forget_last", allow_overwrite=True)
 class ForgetLast(BaseTool):
     """Truncates the output of the last N tool call responses in the agent's conversation history.
     
@@ -142,11 +139,11 @@ class ForgetLast(BaseTool):
             if original_len <= max_chars:
                 continue  # Already short enough
             
-            # Truncate with marker — clean format: [TRUNCATED] <first N chars> ... (X more chars)
+            # Truncate with marker — format: <first N chars> ... [TRUNCATED] Forget_last trimmed ~X characters.
+            chars_trimmed = original_len - max_chars
             new_content = (
-                FORGOTTEN_MARKER
-                + original_content[:max_chars]
-                + f" ... ({original_len - max_chars} more chars)"
+                original_content[:max_chars]
+                + f" ... [TRUNCATED] Forget_last trimmed ~{chars_trimmed} characters."
             )
             
             # Update in-place in the history list
