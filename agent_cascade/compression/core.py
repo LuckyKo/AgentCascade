@@ -5,6 +5,7 @@ from agent_cascade.compression.helpers import (
     compute_discard_count,
     build_marker_message,
 )
+from agent_cascade.llm.schema import FUNCTION
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
 from agent_cascade.utils.utils import extract_text_from_message
 
