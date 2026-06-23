@@ -410,7 +410,10 @@ Context compression is how Agent Cascade manages conversations that grow beyond 
 
 ```
 Step 1: Compression Triggered
-  Token usage >95% (auto) or agent calls compress_context tool
+  Three trigger paths:
+    a) Auto-trigger: token usage exceeds 95% of context window
+    b) Agent tool call: agent invokes compress_context() during conversation
+    c) Supervisor command: user types /compress in the chat interface to manually trigger compression for any active agent instance
 
 Step 2: Acquire Per-Agent Lock
   inst._compression_lock prevents concurrent conversation mutation
@@ -421,8 +424,8 @@ Step 3: Generate Summary
 
 Step 4: Insert Marker
   A COMPRESSION_MARKER message is inserted at the cut position
-  In memory: [SYS][COMP1: "Summarized X"][tail]
-  In JSONL:  [SYS][U1][A1][COMP1][U2][A2]  ← marker at original position
+  In memory: [SYS][U0(first user message)][COMP1: "Summarized X"][tail]
+  In JSONL:  [SYS][U0][U1][A1][COMP1][U2][A2]  ← marker at original position
 
 Step 5: Trim Working Set
   Discarded messages removed from in-memory conversation

@@ -1451,10 +1451,12 @@ class AgentPool:
         if latest_marker >= 0:
             active_start_idx = latest_marker + 1  # Skip past marker — markers are not part of active set
         else:
-            # Skip system message at index 0 if present
+            # Skip system message at index 0 AND first user message (U0) to protect it from compression.
+            # U0 contains the initial prompt/context and should always be preserved per SYSTEM_DOCS §5.2.
+            # When no system message, we still skip past the first message (U0).
             from agent_cascade.llm.schema import SYSTEM as SYS_ROLE
             first_role = conv[0].get('role') if isinstance(conv[0], dict) else getattr(conv[0], 'role', '')
-            active_start_idx = 1 if first_role == SYS_ROLE else 0
+            active_start_idx = 2 if first_role == SYS_ROLE else 1
 
         active_set = conv[active_start_idx:]
         return active_start_idx, active_set, latest_marker

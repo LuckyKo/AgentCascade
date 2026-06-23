@@ -13,7 +13,7 @@ def compute_discard_count(active_set, fraction, force):
     Algorithm:
     1. Start with fraction-based count: int(len(active_set) * fraction)
     2. If not force: keep at least 2 tail messages (clamp discard to len-2)
-    3. If force: ensure at least 1 message is discarded
+    3. If force: ensure at least 1 message is discarded AND keep at least 2 tail messages
 
     Args:
         active_set: List of active (uncompressed) messages eligible for compression.
@@ -28,8 +28,8 @@ def compute_discard_count(active_set, fraction, force):
         # Keep at least 2 tail messages for agent continuity
         discard = max(0, min(discard, len(active_set) - 2))
     else:
-        # Force mode: compress at least 1 message even from small sets
-        discard = max(1, discard)
+        # Force mode: compress at least 1 but keep at least 2 tail messages to prevent over-compression
+        discard = max(1, min(discard, len(active_set) - 2))
     return discard
 
 

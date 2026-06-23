@@ -128,7 +128,21 @@ def compress_context(
     except Exception:
         pass  # If we can't determine the limit, proceed with original count
 
-    # ── 4. Guard: Not enough to compress (unless force=True) ──
+    # ── 4a. Guard: Active set too small for safe compression (any mode) ──
+    # Always keep at least 3 messages in active set so compression leaves ≥2 tail messages.
+    if len(active_set) < 3:
+        return CompressResult(
+            success=False,
+            summary_text=None,
+            marker_message=None,
+            messages_discarded=0,
+            tail_count=len(active_set),
+            error=f"Active set too small ({len(active_set)} messages) for safe compression. "
+                  f"Need at least 3 to preserve ≥2 tail messages.",
+            mode=mode,
+        )
+
+    # ── 4b. Guard: Not enough to compress (unless force=True) ──
     # Combines the "already optimally compressed" check with the "not enough to discard" check.
     # If fewer than 3 messages AND under 200 tokens, OR if nothing to discard — defer.
     if not force:

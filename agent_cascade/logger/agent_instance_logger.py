@@ -438,7 +438,21 @@ class AgentInstanceLogger:
                 # COMPRESSION_MARKER imported at module level (line 18)
 
                 # ── Read existing log messages ──
-                existing_msgs = list(self.data["history"])  # Current JSONL state in memory
+                # Read from in-memory history; fall back to file if empty (session reload path)
+                existing_msgs = list(self.data["history"])
+                if not existing_msgs and self.log_path and os.path.exists(self.log_path):
+                    with open(self.log_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                item = json.loads(line)
+                                if isinstance(item, dict) and "metadata" not in item:
+                                    existing_msgs.append(item)
+                            except json.JSONDecodeError:
+                                logger.warning(f"Skipping malformed JSON line in {self.log_path}")
+                                continue
 
                 # ── Find the LAST (newest) marker in pool — only this one is new ──
                 # Role check matches load_session_from_log: markers must be USER role
@@ -454,10 +468,10 @@ class AgentInstanceLogger:
 
                 # ── Build result: existing log + marker inserted at mirrored tail offset ──
                 if last_marker_idx >= 0:
-                    tail_dist = len(new_history) - last_marker_idx  # msgs after marker in pool
+                    actual_tail_count = len(new_history) - last_marker_idx - 1  # Messages AFTER marker (not including marker itself)
                     formatted_marker = self._format_message(new_history[last_marker_idx])
 
-                    insert_pos = len(existing_msgs) - tail_dist + 1
+                    insert_pos = len(existing_msgs) - actual_tail_count  # Mirror tail distance in JSONL
                     insert_pos = max(0, min(insert_pos, len(existing_msgs)))
                     
                     result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
@@ -481,12 +495,9 @@ class AgentInstanceLogger:
             # Update internal tracking — pool state (active set) for in-memory history
             self.data["history"] = [self._format_message(msg) for msg in new_history]
             
-            # After rewrite=True: JSONL file has all originals + marker at mirrored position.
-            # data["history"] has pool state (smaller). Both yield identical working sets.
-            # Set _file_history_synced = True to prevent unnecessary reloads on the next update_history().
-            # next update_history() call from loading from file unnecessarily (which would clear
-            # and reload, potentially causing issues). The flag should only be False when we know
-            # the internal state is out of sync with the file.
+            # After rewrite=True: JSONL has all originals + marker at mirrored position.
+            # data["history"] has pool state (smaller working set). Both yield identical
+            # working sets. Set flag to prevent unnecessary file reload on next update_history().
             self._file_history_synced = True
             
             return True
