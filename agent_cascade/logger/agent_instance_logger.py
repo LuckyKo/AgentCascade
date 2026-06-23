@@ -450,6 +450,10 @@ class AgentInstanceLogger:
                             try:
                                 item = json.loads(line)
                                 if isinstance(item, dict) and "metadata" not in item:
+                                    # Skip old compression markers to prevent accumulation
+                                    content = item.get('content', '')
+                                    if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                                        continue
                                     existing_msgs.append(item)
                             except json.JSONDecodeError:
                                 logger.warning(f"Skipping malformed JSON line in {self.log_path}")
