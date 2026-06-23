@@ -438,9 +438,10 @@ class AgentInstanceLogger:
                 # COMPRESSION_MARKER imported at module level (line 18)
 
                 # ── Read existing log messages ──
-                # Read from in-memory history; fall back to file if empty (session reload path)
-                existing_msgs = list(self.data["history"])
-                if not existing_msgs and self.log_path and os.path.exists(self.log_path):
+                # Always read from file on rewrite=True to get full history.
+                # self.data["history"] may be stale (pool working set is smaller after compression).
+                existing_msgs = []
+                if self.log_path and os.path.exists(self.log_path):
                     with open(self.log_path, 'r', encoding='utf-8') as f:
                         for line in f:
                             line = line.strip()
