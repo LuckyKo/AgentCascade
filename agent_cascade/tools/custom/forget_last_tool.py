@@ -98,7 +98,7 @@ class ForgetLast(BaseTool):
         if not self.agent_pool or not agent_name:
             return "Error: ForgetLast tool requires agent_pool and agent_name to be set."
         
-        # Get the conversation history (mutable reference)
+        # Get the conversation history (returns a copy — we need to write back)
         history = self.agent_pool.get_conversation(agent_name)
         if not history:
             return "Error: No conversation history found."
@@ -126,7 +126,7 @@ class ForgetLast(BaseTool):
             if name:
                 tool_names.append(name)
         
-        # Truncate content of identified messages (in-place mutation)
+        # Truncate content of identified messages (in-place mutation on the copy)
         truncated_count = 0
         total_chars_saved = 0
         
@@ -161,8 +161,23 @@ class ForgetLast(BaseTool):
                 f"(< {max_chars} chars). Nothing to truncate."
             )
         
+        # Write back truncated messages to the pool (mutate original conversation)
+        inst = self.agent_pool.get_instance(agent_name)
+        if inst:
+            with inst._compression_lock:
+                # Copy truncated messages back into the pool
+                for i, (pool_msg, hist_msg) in enumerate(zip(inst.conversation, history)):
+                    # Only update content of function messages we identified
+                    if i in indices_to_truncate:
+                        pool_content = self._get_content(pool_msg)
+                        new_content = self._get_content(hist_msg)
+                        if pool_content != new_content:
+                            self._set_content(pool_msg, new_content)
+                # Invalidate token count cache — content changed
+                inst._cached_token_count = 0
+                inst._last_token_count_conversation_length = -1
+        
         # Sync to log file using reset_history(rewrite=True)
-        # Following the pattern: LOG FIRST, then pool is already updated (in-place mutation)
         if agent_name in self.agent_pool.instance_loggers:
             logger_inst = self.agent_pool.instance_loggers[agent_name]
             try:
