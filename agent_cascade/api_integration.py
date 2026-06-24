@@ -1303,6 +1303,20 @@ def _apply_ui_config(
     if 'max_input_tokens' not in llm_safe:
         llm_cfg_copy.pop('max_input_tokens', None)
 
+    # Normalize and inject disabled_tools BEFORE assigning the override — this ensures the
+    # instance._generate_cfg_override is always complete (no race window where another thread
+    # could read a partial config missing disabled_tools).
+    from agent_cascade.utils.disabled_tools import (
+        normalize_disabled_tools, validate_tool_names,
+    )
+    from agent_cascade.tools.base import TOOL_REGISTRY
+
+    if 'disabled_tools' in sanitized and sanitized['disabled_tools'] is not None:
+        raw_dt = sanitized['disabled_tools']
+        normalized = normalize_disabled_tools(raw_dt)  # Returns set
+        validate_tool_names(normalized, known_tools=set(TOOL_REGISTRY.keys()))
+        llm_cfg_copy['disabled_tools'] = list(normalized)  # Convert back to list for storage
+
     instance._generate_cfg_override = llm_cfg_copy
 
     # Apply max_turns to instance (extracted from NON_LLM_KEYS, applied separately)
@@ -1314,25 +1328,11 @@ def _apply_ui_config(
     if 'auto_continue' in ui_cfg and hasattr(pool, 'settings'):
         pool.settings.auto_continue = bool(ui_cfg['auto_continue'])
 
-    # Update agent_pool.llm_cfg and disabled_tools under thread-safe lock
+    # Update agent_pool.llm_cfg under thread-safe lock
     # (pool is passed as a parameter to this function — no need to look it up)
     if hasattr(pool, 'llm_cfg'):
         try:
             with pool._execution._state_lock:  # Thread-safe write to shared config
-                # Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
-                from agent_cascade.utils.disabled_tools import (
-                    normalize_disabled_tools, validate_tool_names,
-                )
-                from agent_cascade.tools.base import TOOL_REGISTRY
-
-                # Re-apply disabled_tools under lock to prevent race with concurrent reads
-                if 'disabled_tools' in sanitized and sanitized['disabled_tools'] is not None:
-                    raw_dt = sanitized['disabled_tools']
-                    normalized = normalize_disabled_tools(raw_dt)  # Returns set
-                    validate_tool_names(normalized, known_tools=set(TOOL_REGISTRY.keys()))
-                    cfg = copy.deepcopy(instance._generate_cfg_override or {})
-                    cfg['disabled_tools'] = list(normalized)  # Convert back to list for storage
-                    instance._generate_cfg_override = cfg
 
                 for _key in (
                     'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',

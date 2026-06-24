@@ -134,12 +134,6 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     filtered_out = all_tool_names & disabled
     active_tool_names = all_tool_names - disabled
 
-    # Check specifically for shell_cmd — warn if Security agent has it enabled
-    atype_lower = agent_type.lower() if agent_type else ''
-    is_security_agent = (atype_lower == 'security')
-    if 'shell_cmd' in all_tool_names and is_security_agent and 'shell_cmd' not in disabled:
-        logger.warning(f"[{inst_name}] CRITICAL: shell_cmd is NOT disabled for Security agent!")
-
     return [func.function for name, func in func_map.items() if name not in disabled]
 
 

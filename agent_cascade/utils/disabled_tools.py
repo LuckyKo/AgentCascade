@@ -55,7 +55,9 @@ def normalize_disabled_tools(raw: Optional[Union[Dict, List, Set, tuple]]) -> Se
     if isinstance(raw, dict):
         # Flatten all per-agent values into one set
         result: Set[str] = set()
-        for tools in raw.values():
+        for key, tools in raw.items():
+            if not isinstance(tools, (dict, list, tuple, set, frozenset)):
+                logger.warning("disabled_tools value for key %r is type %r — ignoring", key, type(tools).__name__)
             result |= normalize_disabled_tools(tools)
         return result
     if raw is not None:
@@ -169,6 +171,3 @@ def merge_disabled_tools(parent: Set[str], child: Set[str]) -> Set[str]:
         Merged set of disabled tool names.
     """
     return parent | child
-
-
-# ── Backward-compat alias removed: agent_cascade.utils defines its own\n#     merge_disabled_tools_for_auto_agent() for UI config format (dict/list).\n#     This set-based version is used by lifecycle_manager.py directly.
