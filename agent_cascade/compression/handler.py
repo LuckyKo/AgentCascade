@@ -704,6 +704,8 @@ class CompressionHandler:
                         logger.info(f"Recovered message pool after /compress for '{inst_name}' ({len(recov)} messages)")
                         self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                         working_set_rebuilt = True
+                        # FIX 5: Sync logger after recovery to reflect recovered state
+                        self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress recovery")
                     else:
                         notification_text = f"[SYSTEM] Compression corrupted pool: Compression applied but message pool validation failed and recovery unsuccessful."
                         notif_msg = Message(role=USER, content=notification_text)
@@ -909,6 +911,8 @@ class CompressionHandler:
                         logger.info(f"Recovered message pool after /rollback for '{inst_name}' ({len(recov)} messages)")
                         self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                         working_set_rebuilt = True
+                        # FIX 5: Sync logger after recovery to reflect recovered state
+                        self._sync_logger_after_compression(inst_name, instance.agent_class, "/rollback recovery")
                     else:
                         notification_text = f"[SYSTEM] Rollback corrupted pool: Rollback applied but message pool validation failed and recovery unsuccessful."
                         notif_msg = Message(role=USER, content=notification_text)
