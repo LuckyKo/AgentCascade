@@ -101,8 +101,12 @@ class CompressionHandler:
                 for m in instance.conversation
             )
             
+            # Also check pending queue for undelivered duplicates (prevents double-queue on rapid compression)
+            pending_queue = getattr(instance, '_pending_notifications', None)
+            if pending_queue and notification_text in pending_queue:
+                notification_exists = True
+            
             if not notification_exists:
-                pending_queue = getattr(instance, '_pending_notifications', None)
                 if pending_queue is None:
                     instance._pending_notifications: List[str] = []
                     pending_queue = instance._pending_notifications
@@ -158,9 +162,11 @@ class CompressionHandler:
         # Bug 2 fix: hold lock while reading/writing shared _pending_notifications
         with instance._compression_lock:
             pending = getattr(instance, '_pending_notifications', None)
-            if pending and isinstance(text, str):
-                notif_block = "\n\n".join(n for n in pending)
-                text = f"{notif_block}\n{text}"
+            if pending:
+                if isinstance(text, str):
+                    notif_block = "\n\n".join(n for n in pending)
+                    text = f"{notif_block}\n{text}"
+                # Always clear the queue — notification was "attempted" even if text is non-string
                 instance._pending_notifications = []
         return text
     
