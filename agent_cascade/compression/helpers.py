@@ -114,40 +114,91 @@ def _get_function_result_id(msg):
 
 
 def _count_tool_responses(msg) -> int:
-    """
-    Count how many FUNCTION response messages follow an ASSISTANT's tool calls.
-
-    For legacy mode (single function_call), returns 1.
-    For native tool_calls array, returns len(tool_calls).
-    For streaming mode (tool_index in extra), returns 1 per call.
-    Returns 0 if the message has no tool calls.
-
-    Args:
-        msg: A Message object, dict, or any object with role attributes.
-
-    Returns:
-        Number of FUNCTION response messages expected for this ASSISTANT's tool calls.
-    """
+    """Count how many FUNCTION response messages follow an ASSISTANT's tool calls."""
     if msg is None:
         return 0
 
     is_dict = isinstance(msg, dict)
-
-    # Standard OpenAI format: check tool_calls array (direct attribute or dict key)
     tc = msg.get('tool_calls') if is_dict else getattr(msg, 'tool_calls', None)
     if isinstance(tc, list) and len(tc) > 0:
         return len(tc)
-
-    # Legacy mode: single function_call → exactly 1 FUNCTION response
     fc = msg.get('function_call') if is_dict else getattr(msg, 'function_call', None)
     if fc is not None:
         return 1
-
-    # Native OpenAI streaming mode: tool_index in extra dict (set by oai.py)
     extra = msg.get('extra') if is_dict else getattr(msg, 'extra', None)
-    if isinstance(extra, dict):
-        if 'tool_index' in extra:
-            return 1
+    if isinstance(extra, dict) and 'tool_index' in extra:
+        return 1
+    return 0
+
+
+def _refine_tool_call_boundary(active_set, discard, max_discard):
+    """
+    Advance the discard boundary past any split ASSISTANT→FUNCTION tool-call pairs.
+    
+    Strategy: identify all "protected ranges" (contiguous blocks of matching
+    A...A F...F chains) and then advance the split point past any range it falls in.
+    
+    Handles three patterns:
+    1. Sequential: [A(fc), F] — assistant followed by function result
+    2. Batched: [A(fc), A(fc), F, F] — multiple assistants then their results
+    3. Interleaved: [A(fc), F, A(fc), F] — alternating pairs
+    
+    Args:
+        active_set: List of messages being compressed.
+        discard: Current discard count (cut point).
+        max_discard: Maximum allowed discard count.
+    
+    Returns:
+        Refined discard count that doesn't split tool-call chains.
+    """
+    # Helper to get role from a message (works with both dict and object)
+    def _get_role(msg):
+        return msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+    
+    # ── Advance past A+F chains at the boundary ──
+    while discard < max_discard:
+        msg = active_set[discard]
+        
+        if _has_pending_tool_calls(msg):
+            # Collect function IDs from ALL consecutive As starting here (beyond max too)
+            fc_id_set = set()
+            scan = discard
+            while scan < len(active_set) and _has_pending_tool_calls(active_set[scan]):
+                for fid in _get_function_call_ids(active_set[scan]):
+                    fc_id_set.add(fid)
+                scan += 1
+            
+            # Advance past consecutive As (up to max_discard)
+            while discard < max_discard and _has_pending_tool_calls(active_set[discard]):
+                discard += 1
+            
+            # Then advance past FUNCTION results matching our collected IDs,
+            # plus any extra consecutive Fs that share the same block
+            while discard < len(active_set):
+                m = active_set[discard]
+                if _get_role(m) != FUNCTION:
+                    break
+                res_id = _get_function_result_id(m)
+                # Include this F if it matches one of our consumed As,
+                # or if we're still within max_discard (same block)
+                if discard < max_discard or (res_id and res_id in fc_id_set):
+                    discard += 1
+                else:
+                    break
+        elif _get_role(active_set[discard]) == FUNCTION:
+            # Landed on a function result — advance past all consecutive F results
+            while discard < max_discard:
+                m = active_set[discard]
+                if _get_role(m) != FUNCTION:
+                    break
+                discard += 1
+        else:
+            # Plain message (USER, ASSISTANT without tool calls) — clean boundary
+            break
+    
+    # Clamp to max_discard — refinement cannot exceed the keep zone
+    return min(discard, max_discard)
+
 
 def compute_discard_count(active_set, fraction, force):
     """
@@ -165,7 +216,8 @@ def compute_discard_count(active_set, fraction, force):
         force: If True, bypass the "keep 2 tail" guard and compress at least 1 message.
 
     Returns:
-        Number of messages to discard from the active set.
+        Number of messages to discard from the active set, or -1 if compression
+        is not valid at this ratio (tool chains extend past the keep zone with no clean split).
     """
     discard = int(len(active_set) * fraction)
     if not force:
@@ -175,44 +227,49 @@ def compute_discard_count(active_set, fraction, force):
         # Force mode: compress at least 1 but keep at least 2 tail messages to prevent over-compression
         discard = max(1, min(discard, len(active_set) - 2))
 
+    # Early guard for empty active set
+    if not active_set:
+        return 0
+    
     # ── Refine: avoid splitting ASSISTANT(tool_call) → FUNCTION(result) pairs ──
-    # Scan forward from the cut point. For each ASSISTANT with tool calls, collect
-    # its function_id(s). Then skip ahead until all matching FUNCTION responses found.
-    # This handles ANY pattern: [A,F,A,F], [A,A,A,F,F,F], or mixed interleaved/batched.
-    max_discard = max(0, len(active_set) - 2 if not force else len(active_set) - 1)
-
-    pending_ids = []
-    while discard < max_discard:
-        msg = active_set[discard]
-        role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-
-        # Collect function_id from ASSISTANT messages with tool calls
-        fc_ids = _get_function_call_ids(msg)
-        if fc_ids:
-            pending_ids.extend(fc_ids)
-            discard += 1
-            # Advance past matching FUNCTION responses for these tool calls
-            while len(pending_ids) > 0 and discard < max_discard:
-                fn_msg = active_set[discard]
-                fn_role = fn_msg.get('role', '') if isinstance(fn_msg, dict) else getattr(fn_msg, 'role', '')
-                # Also collect IDs from any new ASSISTANTs we encounter (batched pattern [A,A,F,F])
-                more_ids = _get_function_call_ids(fn_msg)
-                if more_ids:
-                    pending_ids.extend(more_ids)
-                    discard += 1
-                elif fn_role == FUNCTION:
-                    fn_id = _get_function_result_id(fn_msg)
-                    if fn_id and fn_id in pending_ids:
-                        pending_ids.remove(fn_id)
-                        discard += 1
-                    else:
-                        break  # Orphaned FUNCTION result — stop scanning
-                else:
-                    break  # Non-FUNCTION, non-ASSISTANT message — stop scanning
-        else:
+    tail_keep = 2 if not force else 1
+    max_discard = len(active_set) - tail_keep
+    
+    discard = _refine_tool_call_boundary(active_set, discard, max_discard)
+    
+    # Post-refinement validation: check for splits in the tail and advance if found
+    # This catches cases where a large batched chain [A,A,...A,F,F,...F] was split by max_discard
+    while discard < len(active_set):
+        found_split = False
+        for i in range(discard, len(active_set)):
+            m = active_set[i]
+            if isinstance(m, dict):
+                role = m.get('role', '')
+            else:
+                role = getattr(m, 'role', '')
+            if role == FUNCTION:
+                fnid = _get_function_result_id(m)
+                if fnid:
+                    # Search backward for matching ASSISTANT
+                    for j in range(i - 1, -1, -1):
+                        aids = _get_function_call_ids(active_set[j])
+                        if fnid in aids:
+                            if j < discard:
+                                # Split found: advance past this F
+                                discard += 1
+                                found_split = True
+                                break
+                    if found_split:
+                        break
+        
+        if not found_split:
             break
-
-    return min(discard, max_discard)
+    
+    # If discard landed in the keep zone (last tail_keep messages), compression at this ratio is invalid
+    if discard > len(active_set) - tail_keep:
+        return -1  # Signal: tool chains extend past max_discard with no clean split
+    
+    return discard
 
 
 def build_marker_message(summary_text, fraction):

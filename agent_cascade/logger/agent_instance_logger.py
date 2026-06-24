@@ -60,6 +60,9 @@ class AgentInstanceLogger:
                 self.data["metadata"][k] = v
             if "original_log_path" not in self.data["metadata"] and "current_log_path" in base_metadata:
                 self.data["metadata"]["original_log_path"] = base_metadata["current_log_path"]
+            # BUG FIX (Bug 3): Re-assert current_log_path after merge so it points to the new copy,
+            # not the original file that was overwritten by base_metadata above
+            self.data["metadata"]["current_log_path"] = self.log_path
 
         self._file_handle = None  # Cached file handle to avoid open/write/close per message (Fix #1)
         self._initialized = False  # Belt-and-suspenders guard against duplicate _initial_save() (get_logger lock is primary protection)
@@ -481,8 +484,13 @@ class AgentInstanceLogger:
                     
                     result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
                 else:
-                    # No markers — just use pool state directly
-                    result_msgs = [self._format_message(m) for m in new_history]
+                    # No markers — prefer new_history (pool state), but fall back to existing_msgs from file
+                    if new_history:
+                        result_msgs = [self._format_message(m) for m in new_history]
+                    elif existing_msgs:
+                        result_msgs = [self._format_message(m) for m in existing_msgs]  # File has content, pool is empty → use file as source of truth
+                    else:
+                        result_msgs = []  # Both empty — nothing to write
 
                 # ── Write to file (overwrite) ──
                 lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']

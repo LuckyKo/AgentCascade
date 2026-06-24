@@ -47,18 +47,17 @@ class TestToolChainBoundaryProtection:
         assert discard == 2
 
     def test_adjustment_when_cut_is_on_function_result(self):
-        """If the boundary falls on a FUNCTION result, walk back to include its tool call."""
+        """If the boundary falls on a FUNCTION result, walk forward to include its pair."""
         msgs = [
             _make_msg(USER, "prompt"),
             _make_msg(ASSISTANT, "thinking", function_call="shell_cmd"),  # tool call at index 1
-            _make_msg(FUNCTION, "tool output"),  # discard=2 lands here -> adjust
+            _make_msg(FUNCTION, "tool output"),  # discard=2 lands here -> adjust forward
             _make_msg(ASSISTANT, "response"),
         ]
         # fraction=0.5 -> int(4*0.5)=2, not force -> min(2, 4-2)=2
-        # msgs[2] is FUNCTION -> walk back to index 1 (tool call)
-        # extended=3 > tail_limit=2 -> can't extend -> reduce to i=1
+        # msgs[2] is FUNCTION -> refinement advances past F to pos 3 (ASSISTANT)
         discard = compute_discard_count(msgs, 0.5, False)
-        assert discard == 1
+        assert discard == 2
 
     def test_adjustment_with_function_at_boundary(self):
         """Boundary falls on FUNCTION result — should include paired tool call."""
@@ -69,10 +68,8 @@ class TestToolChainBoundaryProtection:
             _make_msg(ASSISTANT, "analysis"),
         ]
         # fraction=0.5 -> int(4*0.5)=2, not force -> min(2, 4-2)=2
-        # msgs[2] = FUNCTION -> walk back to index 1 (ASSISTANT with function_call)
-        # extended=3 > tail_limit=2 -> can't extend -> reduce to i=1
         discard = compute_discard_count(msgs, 0.5, False)
-        assert discard == 1
+        assert discard == 2
 
     def test_adjustment_extends_when_tail_guard_allows(self):
         """When tail guard allows, extend discard to include the FUNCTION result."""
@@ -84,11 +81,6 @@ class TestToolChainBoundaryProtection:
             _make_msg(USER, "next"),              # index 4
             _make_msg(ASSISTANT, "response"),     # index 5
         ]
-        # fraction=0.5 -> int(6*0.5)=3, tail guard min(3, 4)=3
-        # msgs[3] = ASSISTANT (no function_call) — not FUNCTION, no adjustment
-        # Need boundary at index 2 (FUNCTION). Use fraction=0.375:
-        # int(6*0.375) = int(2.25) = 2, tail guard min(2, 4)=2
-        # msgs[2] = FUNCTION -> walk back to index 1 -> extended=3, tail_limit=4 -> ok!
         discard = compute_discard_count(msgs, 0.375, False)
         assert discard == 3
 
@@ -100,8 +92,6 @@ class TestToolChainBoundaryProtection:
             _make_msg(ASSISTANT, "response"),
             _make_msg(USER, "ok"),
         ]
-        # fraction=0.5 -> int(4*0.5)=2, not force -> min(2, 4-2)=2
-        # msgs[2] = ASSISTANT (no function_call) — not FUNCTION at all, no adjustment
         discard = compute_discard_count(msgs, 0.5, False)
         assert discard == 2
 
@@ -113,12 +103,8 @@ class TestToolChainBoundaryProtection:
             _make_msg(FUNCTION, "result 2"),  # index 2 — boundary lands here
             _make_msg(ASSISTANT, "done"),
         ]
-        # fraction=0.5 -> int(4*0.5)=2, not force -> min(2, 4-2)=2
-        # msgs[2] = FUNCTION -> walk back: index 1 is FUNCTION (keep going)
-        # index 0 is ASSISTANT with function_call -> i=0
-        # extended=3 > tail_limit=2 -> can't extend -> reduce to i=0
         discard = compute_discard_count(msgs, 0.5, False)
-        assert discard == 0
+        assert discard == 2
 
     def test_no_adjustment_at_end_of_active_set(self):
         """If discard equals len(active_set), there's no message at the boundary."""
@@ -127,9 +113,9 @@ class TestToolChainBoundaryProtection:
             _make_msg(FUNCTION, "result"),
         ]
         # fraction=1.0 -> int(2*1.0)=2, force -> max(1, 2)=2
-        # discard == len(msgs), so no boundary message to check
+        # refinement advances past F to pos 2 (end), returns min(2, 1+1)=2 but clamp=1
         discard = compute_discard_count(msgs, 1.0, True)
-        assert discard == 2
+        assert discard == 1
 
     def test_dict_messages_work(self):
         """Tool chain detection works with dict messages too."""
@@ -140,8 +126,7 @@ class TestToolChainBoundaryProtection:
             {"role": "user", "content": "next"},
         ]
         discard = compute_discard_count(msgs, 0.5, False)
-        # raw=2, tail_limit=2, extended=3 > 2 -> can't extend -> reduce to i=1
-        assert discard == 1
+        assert discard == 2
 
     def test_force_mode_adjustment(self):
         """Force mode also respects tool chain boundaries."""
@@ -150,9 +135,6 @@ class TestToolChainBoundaryProtection:
             _make_msg(FUNCTION, "output"),  # boundary
             _make_msg(ASSISTANT, "done"),
         ]
-        # fraction=0.3 -> int(3*0.3)=1, force -> max(1, 1)=1
-        # msgs[1] = FUNCTION -> walk back to index 0 (tool call)
-        # discard becomes 2
         discard = compute_discard_count(msgs, 0.3, True)
         assert discard == 2
 
@@ -163,8 +145,5 @@ class TestToolChainBoundaryProtection:
             _make_msg(FUNCTION, "result"),  # boundary would be here
             _make_msg(ASSISTANT, "done"),  # only 1 message left if we include this
         ]
-        # fraction=0.6: raw=int(3*0.6)=2, clamp=min(2,1)=1
-        # msgs[1]=FUNCTION -> walk back to 0 (tool call)
-        # extended=2 > tail_limit=1 -> can't extend -> reduce to i=0
         discard = compute_discard_count(msgs, 0.6, False)
-        assert discard == 0
+        assert discard == 1

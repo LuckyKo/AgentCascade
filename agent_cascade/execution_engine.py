@@ -2799,9 +2799,12 @@ class ExecutionEngine:
             instance_name, agent_class, caller, nest_depth, force_fresh
         )
         
+        # BUG FIX (Bug 2): Extract log_file from args and pass through the chain
+        log_file = args.get('log_file')
+
         # Phase 4.1: Delegate to lifecycle manager for instance creation/reuse
         inst, is_reuse = self.lifecycle.find_or_create_instance(
-            agent_class, instance_name, caller, nest_depth, force_fresh
+            agent_class, instance_name, caller, nest_depth, force_fresh, log_file=log_file
         )
 
         # Phase 4.1: Delegate to lifecycle manager for system message building

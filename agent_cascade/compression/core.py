@@ -107,6 +107,17 @@ def compress_context(
     # ── 3. Calculate discard count ──
     target_discard_count = compute_discard_count(active_set, fraction, force)
 
+    # Check for error signal: -1 means tool chains extend past max_discard with no clean split
+    if target_discard_count == -1:
+        return CompressResult(
+            summary_text=None,
+            marker_message=None,
+            messages_discarded=0,
+            tail_count=len(active_set),
+            error="Compression not possible at this ratio — tool-call chains extend past the keep zone",
+            mode=mode,
+        )
+
     # ── 3b. Cap discard count so compression agent can actually process the messages ──
     # If the compression agent has a known context window, don't feed it more than it can handle.
     # Estimate ~500 tokens per message; reserve 60% of the agent's context for input (40% for system prompt,

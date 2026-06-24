@@ -1132,10 +1132,12 @@ class AgentPool:
         # Create or update the instance with the restored conversation
         existing = self.instances.get(instance_name)
         if existing:
-            # PR3 migration: Use centralized API for conversation replacement during session load
-            # All state changes under single lock to maintain atomicity (reviewer feedback)
+            # FIX 3: Wrap ALL shared state modifications under _compression_lock (reentrant RLock)
             with existing._compression_lock:
+                # PR3 migration: Use centralized API for conversation replacement during session load
                 existing.rebuild_conversation(restored_messages)  # Handles conversation + cache sync
+                
+                # Reset state fields under lock to prevent races
                 existing.agent_class = agent_class
                 # Clear streaming responses to prevent old session's partial messages from appearing
                 # (Bug: when loading a new session, _streaming_responses from previous session persists)
@@ -1154,6 +1156,9 @@ class AgentPool:
                 # Reset state to IDLE for loaded sessions (they're not actively running)
                 from agent_cascade.agent_instance import AgentState
                 existing.state = AgentState.IDLE
+            
+            # FIX 2: Increment version so instance_conversations mapping stays in sync
+            self._instances_version += 1
         else:
             now = time.monotonic()
             new_inst = AgentInstance(
@@ -1169,8 +1174,6 @@ class AgentPool:
             )
             self.instances[instance_name] = new_inst
 
-        self._instances_version += 1  # Fix #3: version bump when instances change via load
-
         # Set up logger for the restored session
         # CRITICAL: Must replace the logger entirely to avoid writing to the wrong file.
         # get_logger() returns the cached logger from the previous session (same instance_name),
@@ -1180,7 +1183,8 @@ class AgentPool:
         # Normalize agent class once (Fix #5 - deduplicate computation)
         normalized_agent_class = (agent_class or '').strip().lower()
         key = (instance_name, normalized_agent_class)
-        
+
+        logger_setup_ok = True  # Track success of logger setup operations
         try:
             # 1. Close the old logger's file handle (release the old file)
             with self._logger._lock:
@@ -1189,8 +1193,8 @@ class AgentPool:
                         self._logger._loggers[key].close()
                     except Exception as e:
                         logger.debug(f"Logger close during session load failed for {instance_name} (non-critical): {e}")
-                # Remove from cache so we can add the new one below
-                del self._logger._loggers[key]
+                # Remove from cache so we can add the new one below (safe pop avoids KeyError)
+                self._logger._loggers.pop(key, None)
 
             # 2. Copy original session file to new timestamped path and create logger pointing to the copy
             from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
@@ -1218,14 +1222,24 @@ class AgentPool:
             )
 
             # 3. Rewrite the copy with restored messages (reset_history handles truncation and new metadata)
-            # Pass raw messages - reset_history(rewrite=True) will format them internally (line 397 of agent_instance_logger.py)
-            log_inst.reset_history(restored_messages, rewrite=True)
+            # BUG FIX: Pass cleaned_messages (full history from JSONL) instead of restored_messages (partial working set).
+            # This ensures reset_history has complete marker context for accurate insert_pos calculation,
+            # preventing permanent loss of pre-marker history when copy fails or file is inaccessible.
+            log_inst.reset_history(cleaned_messages, rewrite=True)
             
             # Cache the new logger instance
             with self._logger._lock:
                 self._logger._loggers[key] = log_inst
         except Exception as e:
             logger.debug(f"Logger setup after log load failed for {instance_name} (non-critical): {e}")
+            logger_setup_ok = False
+
+        # FIX 5: Set _session_restored flag AFTER all operations succeed, under lock.
+        # This ensures the flag is only True if conversation + logger were both set up correctly.
+        inst = self.instances.get(instance_name)
+        if inst is not None and logger_setup_ok:
+            with inst._compression_lock:
+                inst._session_restored = True
 
         return f"Successfully loaded {len(restored_messages)} messages for instance '{instance_name}' ({agent_class}) from {log_source}."
 
