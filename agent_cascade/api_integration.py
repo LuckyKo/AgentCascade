@@ -1296,6 +1296,13 @@ def _apply_ui_config(
     import copy as _copy
     llm_cfg_copy = _copy.deepcopy(template.llm.generate_cfg)
     llm_cfg_copy.update(llm_safe)
+
+    # Remove max_input_tokens from override if user didn't explicitly set it in the UI.
+    # Otherwise apply_ui_config copies the template's value into the override, which then
+    # short-circuits _resolve_max_tokens() and prevents the API Router from being consulted.
+    if 'max_input_tokens' not in llm_safe:
+        llm_cfg_copy.pop('max_input_tokens', None)
+
     instance._generate_cfg_override = llm_cfg_copy
 
     # Apply max_turns to instance (extracted from NON_LLM_KEYS, applied separately)
