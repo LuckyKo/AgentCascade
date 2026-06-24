@@ -625,6 +625,12 @@ class ExecutionEngine:
         if not processed_messages:
             return True
 
+        # Drain pending compression notifications into the first USER message (in-tool-response pattern)
+        if self.compression_handler and processed_messages:
+            first_msg = processed_messages[0]
+            if isinstance(first_msg.content, str):
+                first_msg.content = self.compression_handler._drain_pending_into_user_message(instance, first_msg.content)
+
         with instance._compression_lock:
             for msg in processed_messages:
                 # Append to response accumulator (separate list for local use)
@@ -1737,21 +1743,25 @@ class ExecutionEngine:
             # First time logging — log all pre-existing messages (system + user).
             # turn_output has NOT been appended yet, so no risk of duplication.
             for msg in conv:
-                if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
+                content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                if (isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg)) and str(content).strip():
                     log_inst.log_message(msg)
         elif already_logged_count < len(conv):
             # Partial sync — log only messages added since last sync (e.g., user messages
             # from add_message() on subsequent turns that weren't logged to JSONL).
             # turn_output has NOT been appended yet, so no risk of duplicating it.
             for msg in conv[already_logged_count:]:
-                if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
+                content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                if (isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg)) and str(content).strip():
                     log_inst.log_message(msg)
 
         # Persist turn_output messages to JSONL log file (P1: LoggerManager migration)
         try:
-            # Log turn_output messages from this LLM call
+            # Log turn_output messages from this LLM call (skip empty-content messages)
             for msg in turn_output:
-                log_inst.log_message(msg)
+                content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                if str(content).strip():
+                    log_inst.log_message(msg)
         except Exception as e:
             logger.debug(f"Logging message to file failed for {inst_name} (non-critical): {e}")
 
@@ -2022,6 +2032,10 @@ class ExecutionEngine:
                 conv = self.pool.get_conversation(inst_name)
                 if conv and not validate_message_pool(conv, inst_name):
                     logger.error(f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
+
+            # Drain pending compression notifications into this tool result (in-tool-response pattern)
+            if self.compression_handler:
+                tool_result = self.compression_handler._drain_pending_into_tool_result(instance, tool_result)
 
             # Build function result message — include function_id and tool_success per OpenAI spec
             # function_id was extracted BEFORE _execute_tool call above

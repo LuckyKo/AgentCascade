@@ -420,16 +420,16 @@ Step 2: Acquire Per-Agent Lock
 
 Step 3: Generate Summary
   Compress older messages into a human-readable summary
-  Cut position calculated from tail distance (tool chains stay together)
+  Cut position calculated from tail distance (tool chains stay together) and passed over to the logger to insert the marker relative to tail
 
 Step 4: Insert Marker
-  A COMPRESSION_MARKER message is inserted at the cut position
+  A COMPRESSION_MARKER message is inserted at the cut position in agent pool, `tail - cut_offset_from_tail` in JSON log
   In memory: [SYS][U0(first user message)][COMP1: "Summarized X"][tail]
   In JSONL:  [SYS][U0][U1][A1][COMP1][U2][A2]  ← marker at original position
 
 Step 5: Trim Working Set
   Discarded messages removed from in-memory conversation
-  Only compressed summary + recent tail remain visible to LLM
+  Only first user message + compressed summaries + recent tail remain visible to LLM
 
 Step 6: Release Lock
   Agent continues with reduced working set
@@ -452,6 +452,9 @@ After 2nd compress:  Memory: [SYS][U0][COMP1...][COMP2: "Summarized U2,A2"][U3][
                        
 Working set feeds to LLM: [SYS][U0][COMP1...][COMP2...][recent messages...]
 ```
+
+NOTE: Agent memory and JSONL are NOT in full sync. the logs retain the full conversation history at all times. The rule is that the tail end past the last marker MUST be in sync at all times.
+
 
 **On Session Reload (crash recovery):** The system performs a single forward pass through the JSONL file, finds all compression markers, stacks them in order, and takes the tail after the last marker. This produces the same working set that would exist in memory — no backward scanning or complex reconstruction needed.
 

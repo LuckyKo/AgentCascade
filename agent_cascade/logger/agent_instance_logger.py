@@ -455,7 +455,7 @@ class AgentInstanceLogger:
                                 if isinstance(item, dict) and "metadata" not in item:
                                     # Skip old compression markers to prevent accumulation
                                     content = item.get('content', '')
-                                    if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                                    if isinstance(content, str) and COMPRESSION_MARKER in content:
                                         continue
                                     existing_msgs.append(item)
                             except json.JSONDecodeError:
@@ -470,7 +470,7 @@ class AgentInstanceLogger:
                     msg = new_history[i]
                     role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
                     content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                    if role == USER_ROLE and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                    if role == USER_ROLE and isinstance(content, str) and COMPRESSION_MARKER in content:
                         last_marker_idx = i
                         break
 

@@ -71,6 +71,99 @@ class CompressionHandler:
         """Set engine reference after ExecutionEngine construction completes."""
         self._engine = engine
     
+    # ── Notification Helper with Pending Queue ────────────────────────────────
+    
+    def _inject_compression_notification(
+        self,
+        instance: 'AgentInstance',
+        notification_text: str,
+        inst_name: str,
+    ) -> None:
+        """Push a compression notification into the pending queue for in-tool-response injection.
+        
+        After forced compression the pool has [SYS][U0][MARKER=USER][tail...].
+        A separate USER notification would create consecutive USER messages (API violation).
+        The notification is queued and drained into the next tool response's FUNCTION content,
+        or into the next _drain_and_inject USER message. If no such messages fire,
+        the notification is simply not delivered — that's acceptable.
+        
+        Dedup guard: checks if the exact notification text already exists in the conversation.
+        
+        Args:
+            instance: Agent instance with conversation pool access
+            notification_text: The [SYSTEM] notification string to inject
+            inst_name: Instance name for logging
+        """
+        with instance._compression_lock:
+            # Dedup guard — check if notification appears as a complete line (avoids substring false positives)
+            notification_exists = any(
+                notification_text in str(_msg_content(m)).split('\n')
+                for m in instance.conversation
+            )
+            
+            if not notification_exists:
+                pending_queue = getattr(instance, '_pending_notifications', None)
+                if pending_queue is None:
+                    instance._pending_notifications: List[str] = []
+                    pending_queue = instance._pending_notifications
+                pending_queue.append(notification_text)
+                logger.info(f"Compression notification queued for injection into '{inst_name}'")
+            else:
+                logger.debug(f"Compression notification already exists in conversation for '{inst_name}' — skipping")
+
+    def _drain_pending_into_tool_result(
+        self,
+        instance: 'AgentInstance',
+        tool_result: str,
+    ) -> str:
+        """Drain pending notifications into a tool result string.
+        
+        Called from execution_engine before constructing the FUNCTION message.
+        If there are pending notifications, they are appended to tool_result and queue cleared.
+        
+        Args:
+            instance: Agent instance with _pending_notifications attribute
+            tool_result: The tool's raw output string (or any object convertible to str)
+        Returns:
+            tool_result with notifications appended (or unchanged if no pending)
+        """
+        # Bug 2 fix: hold lock while reading/writing shared _pending_notifications
+        # Bug 6 fix: convert non-string tool results to string before draining
+        with instance._compression_lock:
+            pending = getattr(instance, '_pending_notifications', None)
+            if pending:
+                if not isinstance(tool_result, str):
+                    tool_result = str(tool_result)
+                notif_block = "\n\n".join(n for n in pending)
+                tool_result = f"{tool_result}\n\n{notif_block}"
+                instance._pending_notifications = []
+        return tool_result
+
+    def _drain_pending_into_user_message(
+        self,
+        instance: 'AgentInstance',
+        text: str,
+    ) -> str:
+        """Drain pending notifications into a USER message's content string.
+        
+        Called from execution_engine before constructing the first USER message in _drain_and_inject.
+        If there are pending notifications, they are prepended to text and queue cleared.
+        
+        Args:
+            instance: Agent instance with _pending_notifications attribute
+            text: The user message's raw content string
+        Returns:
+            text with notifications prepended (or unchanged if no pending)
+        """
+        # Bug 2 fix: hold lock while reading/writing shared _pending_notifications
+        with instance._compression_lock:
+            pending = getattr(instance, '_pending_notifications', None)
+            if pending and isinstance(text, str):
+                notif_block = "\n\n".join(n for n in pending)
+                text = f"{notif_block}\n{text}"
+                instance._pending_notifications = []
+        return text
+    
     # ── Logger Sync Helper (unified for all compression paths) ────────────────
     
     def _sync_logger_after_compression(
@@ -177,13 +270,8 @@ class CompressionHandler:
                 f"{instance._force_compress_count} forced compressions exceeded limit of {max_attempts}. "
                 f"Context keeps filling faster than compression can reduce it. Terminating agent."
             )
-            # Append notification as a new Message object (not mutating last message content)
             notification_text = f"[SYSTEM] Overfeeding — {instance._force_compress_count} compressions without relief. Terminating."
-            notif_msg = Message(role=USER, content=notification_text)
-            instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-            llm_messages.append(notif_msg)  # Keep local list update for streaming
-            if response is not None:
-                response.append(notif_msg)  # Keep local list update for streaming
+            self._inject_compression_notification(instance, notification_text, inst_name)
             self.pool.halt_instance(inst_name)
             return True
         
@@ -236,6 +324,7 @@ class CompressionHandler:
             if result.success:
                 # Rebuild working set from compressed pool state (includes token cache invalidation)
                 self.engine._rebuild_working_set(messages, llm_messages, inst_name)
+                
                 # Use summary_text directly from CompressResult (P2 fix — no fragile tag parsing)
                 instance.compression_summary = result.summary_text
                 # Update latest_marker_index to point to the new marker in the conversation (P2 fix)
@@ -247,73 +336,45 @@ class CompressionHandler:
                         if isinstance(c, str) and '<context_summary>' in c:
                             instance.latest_marker_index = idx
 
-                    # Inject system notification as a USER message into the pool so the agent sees it.
-                    # This ensures the notification persists across turn loop iterations and is visible
-                    # to the LLM on the next call (not just appended to local llm_messages which gets lost).
+                    # ── Inject compression feedback into last message (in-tool-response pattern) ──
+                    # Appending to the last message's content avoids creating a separate USER message
+                    # which would violate OpenAI API alternation rules (consecutive USER messages after marker).
                     notification_text = (
                         f"[SYSTEM] Context exceeded {usage_pct:.1f}%. "
                         f"Forced compression applied. Continue your work — context has been preserved."
                     )
-                    
-                    # ── Dedup Guard: Prevent duplicate forced compression notifications ────────────────
-                    # When forced compression runs multiple times (e.g., after consecutive turns hitting the threshold),
-                    # the same "Forced compression triggered" notification message gets appended to the conversation 
-                    # multiple times. This creates duplicate system messages that pollute the conversation history.
-                    # Check if notification already exists before appending — ENTIRE check+append under lock (TOCTOU fix).
-                    with instance._compression_lock:
-                        notification_exists = any(
-                            m.role == USER and isinstance(m.content, str) and notification_text == m.content
-                            for m in instance.conversation
-                        )
-                        
-                        if not notification_exists:
-                            # Only append and log if notification doesn't exist
-                            notification_msg = Message(role=USER, content=notification_text)
-                            instance.append_message(notification_msg)  # PR2: centralized mutation API handles cache sync
-                            messages.append(notification_msg)  # Keep local list update for streaming
-                            llm_messages.append(notification_msg)  # Keep local list update for streaming
-                            if response is not None:
-                                response.append(notification_msg)  # Keep local list update for streaming
-                            logger.info(f"Compression notification injected into conversation pool for '{inst_name}'")
-                        else:
-                            logger.debug(f"Compression notification already exists in conversation for '{inst_name}' — skipping. Conv length: {len(instance.conversation)}")
-
+                    self._inject_compression_notification(instance, notification_text, inst_name)
 
                     # Re-fetch conv after notification append so validation includes the notification message
                     conv = self.pool.get_conversation(inst_name)
+
+                    # ── FIX: Sync logger BEFORE validation ──
+                    # Ensures that if recovery is needed, the logger has clean compressed state.
+                    self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression")
 
                     # Item 10: Validate message pool after forced compression (now includes notification)
                     from agent_cascade.utils.pool_validation import validate_message_pool
                     if not validate_message_pool(conv, inst_name):
                         logger.error(f"[MSG POOL VALIDATION] Pool invalid after forced compression for '{inst_name}'. Attempting recovery from log...")
-                        # Recovery: reload from the logger's history (which is unaffected)
+                        # Recovery: reload from the logger's history (now synced with compressed state)
                         try:
                             recov = self.pool.get_logger(inst_name, instance.agent_class).data.get('history', [])
                             if recov and validate_message_pool(recov, inst_name):
-                                # Phase 3: Write directly to instance.conversation instead of via bridge
-                                instance.rebuild_conversation(list(recov))  # PR2: centralized API handles full cache sync
+                                instance.rebuild_conversation(list(recov))
                                 self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                                 logger.info(f"Recovered message pool from log for '{inst_name}' ({len(recov)} messages)")
                                 conv = recov
-                                # Set cooldown flag after successful recovery (compression occurred)
-                                instance._suppress_loop_detection_next_turn = True
+                                # Sync logger again after recovery to reflect recovered state
+                                self._sync_logger_after_compression(inst_name, instance.agent_class, "recovery")
                             else:
                                 logger.error("Recovery from log also failed — message pool may be corrupted")
-                                # Append notification as a new Message object (not mutating last message content)
                                 notification_text = f"[SYSTEM] Compression corrupted pool: Forced compression and recovery both failed for {inst_name}. Agent halted to prevent corruption."
-                                notif_msg = Message(role=USER, content=notification_text)
-                                instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-                                messages.append(notif_msg)  # Keep local list update for streaming
-                                llm_messages.append(notif_msg)  # Keep local list update for streaming
-                                if response is not None:
-                                    response.append(notif_msg)  # Keep local list update for streaming
+                                self._inject_compression_notification(instance, notification_text, inst_name)
                                 # Halt this instance to prevent further execution with corrupted state
                                 self.pool.halt_instance(inst_name)
                         except Exception as e:
                             logger.error(f"Recovery attempt failed for '{inst_name}': {e}")
 
-                    # Item 11: Sync logger state to match pool after forced compression
-                    self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression")
                     # Set cooldown flag to suppress loop detection on next turn after compression
                     instance._suppress_loop_detection_next_turn = True
                     
@@ -322,16 +383,8 @@ class CompressionHandler:
             
             else:  # Compression failed or returned error
                 logger.error(f"Forced compression failed for {inst_name}: {result.error}")
-                # Append notification as a new Message object (not mutating last message content)
                 notification_text = f"[SYSTEM] Context exceeded {usage_pct:.1f}%, but automatic compression failed."
-                notif_msg = Message(role=USER, content=notification_text)
-                instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-                messages.append(notif_msg)  # Keep local list update for streaming
-                llm_messages.append(notif_msg)  # Keep local list update for streaming
-                if response is not None:
-                    response.append(notif_msg)  # Keep local list update for streaming
-
-            return True  # Continue loop — don't make LLM call this turn
+                self._inject_compression_notification(instance, notification_text, inst_name)
 
         except Exception as e:
             logger.error(f"Forced compression raised exception for {inst_name}: {e}")
@@ -567,15 +620,9 @@ class CompressionHandler:
                 )
             except Exception as e:
                 logger.error(f"User approval request failed for {inst_name}: {e}")
-                # Append notification as a new Message object (not mutating last message content)
                 if instance is not None and llm_messages is not None:
                     notification_text = f"[SYSTEM] Compression command failed: Compression approval request failed: {e}"
-                    notif_msg = Message(role=USER, content=notification_text)
-                    instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-                    messages.append(notif_msg)  # Keep local list update for streaming
-                    llm_messages.append(notif_msg)  # Keep local list update for streaming
-                    if response is not None:
-                        response.append(notif_msg)  # Keep local list update for streaming
+                    self._inject_compression_notification(instance, notification_text, inst_name)
                 return False
         else:
             # No operation_manager — auto-approve (standalone mode)
@@ -583,15 +630,9 @@ class CompressionHandler:
         
         if not approved:
             logger.info(f"/compress rejected by user for {inst_name}: {rejection_reason}")
-            # Append notification as a new Message object (not mutating last message content)
             if instance is not None and llm_messages is not None:
                 notification_text = f"[SYSTEM] Compression cancelled: Compression cancelled by user. Reason: {rejection_reason}"
-                notif_msg = Message(role=USER, content=notification_text)
-                instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-                messages.append(notif_msg)  # Keep local list update for streaming
-                llm_messages.append(notif_msg)  # Keep local list update for streaming
-                if response is not None:
-                    response.append(notif_msg)  # Keep local list update for streaming
+                self._inject_compression_notification(instance, notification_text, inst_name)
         
         return approved  # FIX Bug #2: Return actual approval status
     
@@ -641,18 +682,17 @@ class CompressionHandler:
             result_str = str(result) if result else ""
             if result_str.startswith("Compression failed"):
                 logger.warning(f"/compress silently failed for {inst_name}: {result}")
-                # Append notification as a new Message object (not mutating last message content)
                 notification_text = f"[SYSTEM] Compression command failed: Compression failed for {inst_name}: {result}"
-                notif_msg = Message(role=USER, content=notification_text)
-                instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-                messages.append(notif_msg)  # Keep local list update for streaming
-                llm_messages.append(notif_msg)  # Keep local list update for streaming
-                if response is not None:
-                    response.append(notif_msg)  # Keep local list update for streaming
+                self._inject_compression_notification(instance, notification_text, inst_name)
                 return True
             
             # Validate message pool after compression (Item 10)
             conv = self.pool.get_conversation(inst_name)
+
+            # ── FIX: Sync logger BEFORE validation ──
+            # Ensures that if recovery is needed, the logger has clean compressed state.
+            self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress command")
+
             working_set_rebuilt = False
             from agent_cascade.utils.pool_validation import validate_message_pool
             if conv and not validate_message_pool(conv, inst_name):
@@ -665,14 +705,11 @@ class CompressionHandler:
                         self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                         working_set_rebuilt = True
                     else:
-                        # Append notification as a new Message object (not mutating last message content)
                         notification_text = f"[SYSTEM] Compression corrupted pool: Compression applied but message pool validation failed and recovery unsuccessful."
                         notif_msg = Message(role=USER, content=notification_text)
-                        instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-                        messages.append(notif_msg)  # Keep local list update for streaming
-                        llm_messages.append(notif_msg)  # Keep local list update for streaming
+                        instance.append_message(notif_msg)
                         if response is not None:
-                            response.append(notif_msg)  # Keep local list update for streaming
+                            response.append(notif_msg)
                 except Exception as e:
                     logger.error(f"Recovery after /compress failed for '{inst_name}': {e}")
             
@@ -684,23 +721,16 @@ class CompressionHandler:
             # Set cooldown flag to suppress loop detection on next turn after compression
             instance._suppress_loop_detection_next_turn = True
             
-            # Sync logger state to match pool after /compress command execution
-            self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress command")
-            
             # Fix Issue #2: Explicit token cache invalidation to handle edge cases
             # where rebuild_working_set is not called (e.g., conv is None or validation fails)
             from agent_cascade.execution_engine import _invalidate_token_cache
             _invalidate_token_cache(instance)
             
-            # Append notification as a new Message object (not mutating last message content)
-            # This ensures the serialization cache version key changes and notification gets yielded
             notification_text = f"[SYSTEM] Compression applied successfully for {inst_name}."
             notif_msg = Message(role=USER, content=notification_text)
-            instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-            messages.append(notif_msg)  # Keep local list update for streaming
-            llm_messages.append(notif_msg)  # Keep local list update for streaming
+            instance.append_message(notif_msg)
             if response is not None:
-                response.append(notif_msg)  # Keep local list update for streaming
+                response.append(notif_msg)
             
             # Force immediate stream update via existing periodic push mechanism (avoids duplicate broadcasts)
             self.engine.stream_publisher.push_periodic_update(instance.parent_instance or inst_name)
@@ -709,14 +739,11 @@ class CompressionHandler:
             
         except Exception as e:
             logger.error(f"/compress apply failed for {inst_name}: {e}")
-            # Append notification as a new Message object (not mutating last message content)
             notification_text = f"[SYSTEM] Compression command failed: Compression apply failed for {inst_name}: {e}"
             notif_msg = Message(role=USER, content=notification_text)
-            instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-            messages.append(notif_msg)  # Keep local list update for streaming
-            llm_messages.append(notif_msg)  # Keep local list update for streaming
+            instance.append_message(notif_msg)
             if response is not None:
-                response.append(notif_msg)  # Keep local list update for streaming
+                response.append(notif_msg)
             return True
     
     def handle_compress_command(
@@ -748,7 +775,6 @@ class CompressionHandler:
         result = self.generate_compression_preview(instance, messages, fraction)
         summary, reason = result if result else (None, None)
         if not summary:
-            # Append notification as a new Message object (not mutating last message content)
             if reason == 'tool_unavailable':
                 notification_text = f"[SYSTEM] Compression tool unavailable: Compression command issued but compress_context tool is unavailable for {inst_name}."
             elif reason == 'preview_failed':
@@ -757,11 +783,9 @@ class CompressionHandler:
                 notification_text = f"[SYSTEM] Compression command failed: Compression preview encountered an error for {inst_name}. Cannot compress."
             
             notif_msg = Message(role=USER, content=notification_text)
-            instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-            messages.append(notif_msg)  # Keep local list update for streaming
-            llm_messages.append(notif_msg)  # Keep local list update for streaming
+            instance.append_message(notif_msg)
             if response is not None:
-                response.append(notif_msg)  # Keep local list update for streaming
+                response.append(notif_msg)
             return True
         
         # Step 3: Apply compression (skip user approval — proceed directly like WebSocket path)
@@ -869,6 +893,11 @@ class CompressionHandler:
             
             # Validate message pool after rollback (Item 10 - same as compress handler lines 602-626)
             conv = self.pool.get_conversation(inst_name)
+
+            # ── FIX: Sync logger BEFORE validation ──
+            # Ensures that if recovery is needed, the logger has clean compressed state.
+            self._sync_logger_after_compression(inst_name, instance.agent_class, "/rollback command")
+
             working_set_rebuilt = False
             from agent_cascade.utils.pool_validation import validate_message_pool
             if conv and not validate_message_pool(conv, inst_name):
@@ -881,23 +910,17 @@ class CompressionHandler:
                         self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                         working_set_rebuilt = True
                     else:
-                        # Append notification as a new Message object (not mutating last message content)
                         notification_text = f"[SYSTEM] Rollback corrupted pool: Rollback applied but message pool validation failed and recovery unsuccessful."
                         notif_msg = Message(role=USER, content=notification_text)
-                        instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-                        messages.append(notif_msg)  # Keep local list update for streaming
-                        llm_messages.append(notif_msg)  # Keep local list update for streaming
+                        instance.append_message(notif_msg)
                         if response is not None:
-                            response.append(notif_msg)  # Keep local list update for streaming
+                            response.append(notif_msg)
                 except Exception as e:
                     logger.error(f"Recovery after /rollback failed for '{inst_name}': {e}")
             
             # Rebuild working set after successful validation (if not already rebuilt in recovery path)
             if conv and validate_message_pool(conv, inst_name) and not working_set_rebuilt:
                 self.engine._rebuild_working_set(messages, llm_messages, inst_name)
-            
-            # Sync logger state to match pool after /rollback command execution
-            self._sync_logger_after_compression(inst_name, instance.agent_class, "/rollback command")
             
             # Explicit token cache invalidation to handle edge cases where rebuild_working_set is not called
             # (e.g., conv is None or validation fails). Matches compress handler pattern at lines 644-647.
@@ -907,14 +930,11 @@ class CompressionHandler:
             # Suppress loop detection on next turn to prevent false positives from abrupt state change
             instance._suppress_loop_detection_next_turn = True
             
-            # Append notification as a new Message object (not mutating last message content)
             notification_text = f"[SYSTEM] Rollback applied: Rolled back {actual_count} message(s) for {inst_name}."
             notif_msg = Message(role=USER, content=notification_text)
-            instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-            messages.append(notif_msg)  # Keep local list update for streaming
-            llm_messages.append(notif_msg)  # Keep local list update for streaming
+            instance.append_message(notif_msg)
             if response is not None:
-                response.append(notif_msg)  # Keep local list update for streaming
+                response.append(notif_msg)
             
             logger.info(f"/rollback command executed for {inst_name}: rolled back {actual_count} message(s)")
             return True
@@ -924,9 +944,7 @@ class CompressionHandler:
             # Append notification as a new Message object (not mutating last message content)
             notification_text = f"[SYSTEM] Rollback command failed: Rollback failed for {inst_name}: {e}"
             notif_msg = Message(role=USER, content=notification_text)
-            instance.append_message(notif_msg)  # PR2: centralized mutation API handles cache sync
-            messages.append(notif_msg)  # Keep local list update for streaming
-            llm_messages.append(notif_msg)  # Keep local list update for streaming
+            instance.append_message(notif_msg)  # Updates conversation + _cached_messages (= messages/llm_messages) atomically
             if response is not None:
                 response.append(notif_msg)  # Keep local list update for streaming
             return True
