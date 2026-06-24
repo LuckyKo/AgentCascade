@@ -3,7 +3,7 @@ import tempfile
 import os
 import atexit
 import sys
-from agent_cascade.tools.base import BaseTool
+from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_READ_FILE_MAX_LINES, DEFAULT_TOOL_RESULT_MAX_CHARS
 from agent_cascade.prompts.dna import TOOL_METADATA
 
@@ -32,6 +32,7 @@ _gtk_common_paths = [
 ]
 
 
+@register_tool('read_file')
 class ReadFile(BaseTool):
     """Reads and returns the content of a specified file. Handles text, images, and PDF files."""
 
@@ -202,6 +203,7 @@ class ReadFile(BaseTool):
             return f"Error reading file: {str(e)}"
 
 
+@register_tool('view_image')
 class ViewImage(BaseTool):
     """View an image file from the workspace."""
 
@@ -343,6 +345,7 @@ class ViewImage(BaseTool):
                     pass  # non-critical cleanup failure
 
 
+@register_tool('write_file')
 class WriteFile(BaseTool):
     """Writes content to a specified file in the local filesystem."""
 
@@ -411,6 +414,7 @@ class WriteFile(BaseTool):
         )
 
 
+@register_tool('edit_file')
 class EditFile(BaseTool):
     """Replaces text within a file."""
 
@@ -507,6 +511,7 @@ class EditFile(BaseTool):
         )
 
 
+@register_tool('list_dir')
 class ListDir(BaseTool):
     """Lists the names of files and subdirectories directly within a specified directory path."""
 
@@ -536,6 +541,7 @@ class ListDir(BaseTool):
         return self.agent_pool.operation_manager.list_directory(path)
 
 
+@register_tool('grep')
 class Grep(BaseTool):
     """Search for text patterns in files."""
 
@@ -615,6 +621,7 @@ class Grep(BaseTool):
         )
 
 
+@register_tool('delete_file')
 class DeleteFile(BaseTool):
     """Delete a file — creates a timestamped backup before deletion (requires user approval)."""
 
@@ -645,6 +652,7 @@ class DeleteFile(BaseTool):
         return self.agent_pool.operation_manager.delete_file(path, self.agent_name)
 
 
+@register_tool('copy_file')
 class CopyFile(BaseTool):
     """Copy a file or directory — creates timestamped backup before overwriting existing destination."""
 
@@ -680,6 +688,7 @@ class CopyFile(BaseTool):
         return self.agent_pool.operation_manager.copy_file(source, destination, self.agent_name)
 
 
+@register_tool('move_file')
 class MoveFile(BaseTool):
     """Move a file or directory — creates timestamped backup before overwriting existing destination (requires user approval)."""
 
@@ -715,6 +724,7 @@ class MoveFile(BaseTool):
         return self.agent_pool.operation_manager.move_file(source, destination, self.agent_name)
 
 
+@register_tool('re_indent')
 class ReIndent(BaseTool):
     """Re-indents a block of code in a file."""
 
