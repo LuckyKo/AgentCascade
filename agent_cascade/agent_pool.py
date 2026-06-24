@@ -1109,14 +1109,22 @@ class AgentPool:
             if start > len(start_tag) - 1 and end > start:
                 self.instance_summaries[instance_name] = summary_text[start:end].strip()  # Latest wins
 
-        # Build working set per design spec
+        # Build working set per design spec §5.2 line 427: [SYS][U0(first user message)][COMP1...][tail]
         if last_marker_index >= 0:
-            # [SYSTEM if present] + [all markers stacked] + [tail after last marker, no event markers]
+            # Extract SYSTEM message (first in list)
             system_msg = None
             if cleaned_messages and cleaned_messages[0].get(ROLE) == SYSTEM:
                 system_msg = cleaned_messages[0]
+            
+            # Per design doc §5.2 line 427: always preserve first USER message (U0)
+            first_user_msg = None
+            for msg in cleaned_messages:
+                if msg.get(ROLE) == USER and not _is_compression_marker(msg):
+                    first_user_msg = msg
+                    break
+            
             tail = cleaned_messages[last_marker_index + 1:]
-            working_set = ([system_msg] if system_msg else []) + markers + tail
+            working_set = ([system_msg] if system_msg else []) + ([first_user_msg] if first_user_msg else []) + markers + tail
         else:
             # No compression — full history is the working set
             working_set = cleaned_messages
