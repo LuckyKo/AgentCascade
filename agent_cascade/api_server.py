@@ -123,6 +123,28 @@ def _parse_multimodal_content(text):
 
 
 
+def _validate_disabled_tools(ui_cfg: Dict[str, Any]) -> None:
+    """Validate disabled_tools in a generate_cfg dict against the tool registry.
+
+    Extracted to eliminate duplicate validation blocks in both 'message' and
+    'continue' WebSocket handlers (Fix #5 from second review).
+
+    Args:
+        ui_cfg: The ``generate_cfg`` dictionary from the client message.
+    """
+    from agent_cascade.utils.disabled_tools import normalize_disabled_tools, validate_tool_names
+    from agent_cascade.tools.base import TOOL_REGISTRY
+
+    if 'disabled_tools' in ui_cfg and ui_cfg['disabled_tools']:
+        dt = ui_cfg['disabled_tools']
+        known = set(TOOL_REGISTRY.keys())
+        if isinstance(dt, dict):
+            for tools in dt.values():
+                validate_tool_names(normalize_disabled_tools(tools), known_tools=known)
+        else:
+            validate_tool_names(normalize_disabled_tools(dt), known_tools=known)
+
+
 def detect_loop(messages: List[dict]) -> Optional[Tuple[str, int]]:
     """
     Detect if the agent is stuck in a loop.
@@ -1271,20 +1293,7 @@ def create_app(agents, agent_pool, config=None):
                     if 'session_name' in data:
                         session['session_name'] = data['session_name']
                     if 'generate_cfg' in data:
-                        # Validate disabled_tools at API boundary — see agent_cascade.utils.disabled_tools
-                        from agent_cascade.utils.disabled_tools import normalize_disabled_tools, validate_tool_names
-                        from agent_cascade.tools.base import TOOL_REGISTRY
-
-                        ui_cfg = data['generate_cfg']
-                        if 'disabled_tools' in ui_cfg and ui_cfg['disabled_tools']:
-                            dt = ui_cfg['disabled_tools']
-                            known = set(TOOL_REGISTRY.keys())
-                            if isinstance(dt, dict):
-                                for tools in dt.values():
-                                    validate_tool_names(normalize_disabled_tools(tools), known_tools=known)
-                            else:
-                                validate_tool_names(normalize_disabled_tools(dt), known_tools=known)
-
+                        _validate_disabled_tools(data['generate_cfg'])
                         session['generate_cfg'] = data['generate_cfg']
 
                     # Add user message to the pool instance's conversation (unified path).
@@ -1366,19 +1375,7 @@ def create_app(agents, agent_pool, config=None):
                     if 'session_name' in data:
                         session['session_name'] = data['session_name']
                     if 'generate_cfg' in data:
-                        # Validate disabled_tools at API boundary — see agent_cascade.utils.disabled_tools
-                        from agent_cascade.utils.disabled_tools import normalize_disabled_tools, validate_tool_names
-
-                        ui_cfg = data['generate_cfg']
-                        if 'disabled_tools' in ui_cfg and ui_cfg['disabled_tools']:
-                            dt = ui_cfg['disabled_tools']
-                            known = set(TOOL_REGISTRY.keys())
-                            if isinstance(dt, dict):
-                                for tools in dt.values():
-                                    validate_tool_names(normalize_disabled_tools(tools), known_tools=known)
-                            else:
-                                validate_tool_names(normalize_disabled_tools(dt), known_tools=known)
-
+                        _validate_disabled_tools(data['generate_cfg'])
                         session['generate_cfg'] = data['generate_cfg']
 
                     # Resolve the target instance (prefer target_agent from frontend, fallback to session)

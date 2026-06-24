@@ -1320,12 +1320,16 @@ def _apply_ui_config(
         try:
             with pool._execution._state_lock:  # Thread-safe write to shared config
                 # Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
-                from agent_cascade.utils.disabled_tools import normalize_disabled_tools
+                from agent_cascade.utils.disabled_tools import (
+                    normalize_disabled_tools, validate_tool_names,
+                )
+                from agent_cascade.tools.base import TOOL_REGISTRY
 
                 # Re-apply disabled_tools under lock to prevent race with concurrent reads
                 if 'disabled_tools' in sanitized and sanitized['disabled_tools'] is not None:
                     raw_dt = sanitized['disabled_tools']
                     normalized = normalize_disabled_tools(raw_dt)  # Returns set
+                    validate_tool_names(normalized, known_tools=set(TOOL_REGISTRY.keys()))
                     cfg = copy.deepcopy(instance._generate_cfg_override or {})
                     cfg['disabled_tools'] = list(normalized)  # Convert back to list for storage
                     instance._generate_cfg_override = cfg

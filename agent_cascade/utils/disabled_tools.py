@@ -73,9 +73,9 @@ def resolve_disabled_tools_for_agent(
 
     Resolution order (layers are accumulated top-down):
       1. Instance override  — ``instance._generate_cfg_override['disabled_tools']``
-         If this layer finds disabled tools, Layer 2 is **skipped** (not merged).
+         Always merged into the result set.
       2. Template config   — ``template.llm.generate_cfg['disabled_tools']``
-         Used only when Layer 1 produced no results (guard: ``if not disabled``).
+         Always merged with Layer 1 (union of both sources).
       3. Agent-class defaults — Security / Compressor defense-in-depth
          **Always applied** regardless of Layers 1–2.
 
@@ -110,8 +110,8 @@ def resolve_disabled_tools_for_agent(
     if instance_override and 'disabled_tools' in instance_override:
         disabled |= _extract(instance_override['disabled_tools'], agent_name, agent_type)
 
-    # ── Layer 2: Template config (fallback when override has nothing) ───────
-    if not disabled and template_cfg and 'disabled_tools' in template_cfg:
+    # ── Layer 2: Template config (always merged with instance override) ─────
+    if template_cfg and 'disabled_tools' in template_cfg:
         disabled |= _extract(template_cfg['disabled_tools'], agent_name, agent_type)
 
     # ── Layer 3: Agent-class defaults (defense-in-depth, ALWAYS applied) ────
@@ -130,15 +130,19 @@ def validate_tool_names(
     """Validate tool names against the registry. Warns on unknown names.
 
     Args:
-        tool_names:  Set of tool-name strings to validate.
+        tool_names:  Set of tool-name strings to validate (None returns empty set).
         known_tools: Optional set of known tool names (if omitted validation
                      is skipped — no warning emitted).
 
     Returns:
-        The same set passed in (validation is advisory only).
+        A new set of validated tool names (never the same object as input,
+        preventing callers from mutating the original). Returns ``set()`` for
+        empty or None input.
     """
-    if not tool_names or known_tools is None:
-        return tool_names
+    if not tool_names:
+        return set()
+    if known_tools is None:
+        return set(tool_names)
 
     unknown = tool_names - known_tools
     if unknown:
@@ -148,7 +152,7 @@ def validate_tool_names(
             sorted(unknown),
         )
 
-    return tool_names
+    return set(tool_names)  # Always return a copy to prevent mutation of the input set
 
 
 def merge_disabled_tools(parent: Set[str], child: Set[str]) -> Set[str]:
@@ -167,5 +171,4 @@ def merge_disabled_tools(parent: Set[str], child: Set[str]) -> Set[str]:
     return parent | child
 
 
-# ── Backward-compat alias (legacy callers in api_server.py) ────────────────
-merge_disabled_tools_for_auto_agent = merge_disabled_tools
+# ── Backward-compat alias removed: agent_cascade.utils defines its own\n#     merge_disabled_tools_for_auto_agent() for UI config format (dict/list).\n#     This set-based version is used by lifecycle_manager.py directly.
