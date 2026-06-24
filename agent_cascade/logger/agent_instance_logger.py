@@ -235,6 +235,7 @@ class AgentInstanceLogger:
         """Append a single message to history and file."""
         self.update_timestamp()
         formatted_msg = self._format_message(message)
+        
         self.data["history"].append(formatted_msg)
         self._append_line(formatted_msg)
 

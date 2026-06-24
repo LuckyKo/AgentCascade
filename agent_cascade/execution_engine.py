@@ -1753,8 +1753,13 @@ class ExecutionEngine:
         try:
             if already_logged_count < len(conv):
                 for msg in conv[already_logged_count:]:
-                    content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                    if str(content).strip():
+                    # Check both text content and function_call to avoid skipping
+                    # assistant messages that have tool calls but empty content.
+                    # Skipping such messages breaks the count-based delta sync,
+                    # causing duplicate entries on the next logging pass.
+                    has_content = bool(str(_msg_field(msg, 'content', '')).strip())
+                    has_function_call = bool(_msg_field(msg, 'function_call'))
+                    if has_content or has_function_call:
                         log_inst.log_message(msg)
         except Exception as e:
             logger.debug(f"Logging message to file failed for {inst_name} (non-critical): {e}")
