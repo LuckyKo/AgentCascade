@@ -550,8 +550,8 @@ class AgentLifecycleManager:
                 # Defense-in-depth: For Security and Compressor agents, always ensure default disabled tools are set
                 # This ensures these system agents never get more tools than intended, even if caller has no disabled_tools
                 from agent_cascade.constants import DEFAULT_SECURITY_DISABLED_TOOLS, DEFAULT_COMPRESSOR_DISABLED_TOOLS
-                if agent_class in ('Security', 'Compressor'):
-                    defaults = DEFAULT_COMPRESSOR_DISABLED_TOOLS if agent_class == 'Compressor' else DEFAULT_SECURITY_DISABLED_TOOLS
+                if agent_class.lower() in ('security', 'compressor'):
+                    defaults = DEFAULT_COMPRESSOR_DISABLED_TOOLS if agent_class.lower() == 'compressor' else DEFAULT_SECURITY_DISABLED_TOOLS
                     # Get current cfg (may have been set by max_input_tokens or caller_disabled_tools above)
                     current_cfg = copy.deepcopy(instance._generate_cfg_override) if instance._generate_cfg_override else {}
                     existing_disabled_in_cfg = current_cfg.get('disabled_tools')

@@ -144,8 +144,11 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     # tools than intended.
     
     # Check BOTH template.agent_type AND instance.agent_class for defense-in-depth
-    is_security_agent = (agent_class == 'Security' or instance_agent_class == 'Security')
-    is_compressor_agent = (agent_class == 'Compressor' or instance_agent_class == 'Compressor')
+    # Use case-insensitive comparison since agent_class may come lowercased from tool_dispatcher
+    ac_lower = agent_class.lower() if agent_class else ''
+    iac_lower = instance_agent_class.lower() if instance_agent_class else ''
+    is_security_agent = (ac_lower == 'security' or iac_lower == 'security')
+    is_compressor_agent = (ac_lower == 'compressor' or iac_lower == 'compressor')
     
     if is_security_agent:
         disabled = disabled | DEFAULT_SECURITY_DISABLED_TOOLS
