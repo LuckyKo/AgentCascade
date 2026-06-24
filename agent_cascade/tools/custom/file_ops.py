@@ -32,7 +32,7 @@ _gtk_common_paths = [
 ]
 
 
-@register_tool('read_file')
+@register_tool('read_file', allow_overwrite=True)
 class ReadFile(BaseTool):
     """Reads and returns the content of a specified file. Handles text, images, and PDF files."""
 
@@ -203,7 +203,7 @@ class ReadFile(BaseTool):
             return f"Error reading file: {str(e)}"
 
 
-@register_tool('view_image')
+@register_tool('view_image', allow_overwrite=True)
 class ViewImage(BaseTool):
     """View an image file from the workspace."""
 
@@ -345,7 +345,7 @@ class ViewImage(BaseTool):
                     pass  # non-critical cleanup failure
 
 
-@register_tool('write_file')
+@register_tool('write_file', allow_overwrite=True)
 class WriteFile(BaseTool):
     """Writes content to a specified file in the local filesystem."""
 
@@ -414,7 +414,7 @@ class WriteFile(BaseTool):
         )
 
 
-@register_tool('edit_file')
+@register_tool('edit_file', allow_overwrite=True)
 class EditFile(BaseTool):
     """Replaces text within a file."""
 
@@ -511,7 +511,7 @@ class EditFile(BaseTool):
         )
 
 
-@register_tool('list_dir')
+@register_tool('list_dir', allow_overwrite=True)
 class ListDir(BaseTool):
     """Lists the names of files and subdirectories directly within a specified directory path."""
 
@@ -541,7 +541,7 @@ class ListDir(BaseTool):
         return self.agent_pool.operation_manager.list_directory(path)
 
 
-@register_tool('grep')
+@register_tool('grep', allow_overwrite=True)
 class Grep(BaseTool):
     """Search for text patterns in files."""
 
@@ -621,7 +621,7 @@ class Grep(BaseTool):
         )
 
 
-@register_tool('delete_file')
+@register_tool('delete_file', allow_overwrite=True)
 class DeleteFile(BaseTool):
     """Delete a file — creates a timestamped backup before deletion (requires user approval)."""
 
@@ -652,7 +652,7 @@ class DeleteFile(BaseTool):
         return self.agent_pool.operation_manager.delete_file(path, self.agent_name)
 
 
-@register_tool('copy_file')
+@register_tool('copy_file', allow_overwrite=True)
 class CopyFile(BaseTool):
     """Copy a file or directory — creates timestamped backup before overwriting existing destination."""
 
@@ -688,7 +688,7 @@ class CopyFile(BaseTool):
         return self.agent_pool.operation_manager.copy_file(source, destination, self.agent_name)
 
 
-@register_tool('move_file')
+@register_tool('move_file', allow_overwrite=True)
 class MoveFile(BaseTool):
     """Move a file or directory — creates timestamped backup before overwriting existing destination (requires user approval)."""
 
@@ -724,7 +724,7 @@ class MoveFile(BaseTool):
         return self.agent_pool.operation_manager.move_file(source, destination, self.agent_name)
 
 
-@register_tool('re_indent')
+@register_tool('re_indent', allow_overwrite=True)
 class ReIndent(BaseTool):
     """Re-indents a block of code in a file."""
 

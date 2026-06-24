@@ -4,7 +4,7 @@ from pathlib import Path
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 
-@register_tool('read_logs')
+@register_tool('read_logs', allow_overwrite=True)
 class ReadLogs(BaseTool):
     """Read agent log files with middle-point truncation."""
 

@@ -2,7 +2,7 @@ import subprocess
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 
-@register_tool('shell_cmd')
+@register_tool('shell_cmd', allow_overwrite=True)
 class ShellCmd(BaseTool):
     """Execute a shell command (auto-approved for safe read-only commands like find/dir/ls, requires user approval for everything else)."""
 
