@@ -1726,45 +1726,36 @@ class ExecutionEngine:
     ) -> None:
         """Persist messages to JSONL log file.
         
-        Logs pre-existing messages that weren't logged yet, then logs turn_output messages.
-        This must happen BEFORE instance.conversation.extend(turn_output) so the initial
-        sync only sees messages that existed before this LLM call (system + user).
+        Single clean pass: compare logger history length with conversation length,
+        then log only the delta (new messages not yet in the log). Treats ALL message
+        types uniformly — no special cases for FUNCTION role.
+        
+        Design principle: Logging is a count-based delta sync. The logger's data["history"]
+        list should always match instance.conversation in both order and content.
+        Any message added to conv (via append_message or _append_to_working_sets) will
+        be picked up by this delta on the next call.
         
         Args:
             instance: AgentInstance for logger lookup and conversation access
             inst_name: Instance name for logging
-            turn_output: Messages from LLM to log
+            turn_output: Messages from LLM to log (always logged regardless of conv sync)
         """
-        # Persist pre-existing messages to JSONL before appending turn_output
         log_inst = self.pool.get_logger(inst_name, instance.agent_class)
 
         already_logged_count = len(log_inst.data.get("history", []))
         with instance._compression_lock:
             conv = instance.conversation
         
-        if already_logged_count == 0 and conv:
-            # First time logging — log all pre-existing messages (system + user).
-            # turn_output has NOT been appended yet, so no risk of duplication.
-            for msg in conv:
-                content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                if (isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg)) and str(content).strip():
-                    log_inst.log_message(msg)
-        elif already_logged_count < len(conv):
-            # Partial sync — log only messages added since last sync (e.g., user messages
-            # from add_message() on subsequent turns that weren't logged to JSONL).
-            # turn_output has NOT been appended yet, so no risk of duplicating it.
-            for msg in conv[already_logged_count:]:
-                content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                if (isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg)) and str(content).strip():
-                    log_inst.log_message(msg)
-
-        # Persist turn_output messages to JSONL log file (P1: LoggerManager migration)
+        # Log delta: any messages in conv that aren't yet in the logger history.
+        # This covers ALL message types uniformly (system, user, assistant, function).
+        # turn_output is already in conv by the time this runs (appended before logging),
+        # so it's naturally included in the delta — no separate loop needed.
         try:
-            # Log turn_output messages from this LLM call (skip empty-content messages)
-            for msg in turn_output:
-                content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                if str(content).strip():
-                    log_inst.log_message(msg)
+            if already_logged_count < len(conv):
+                for msg in conv[already_logged_count:]:
+                    content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                    if str(content).strip():
+                        log_inst.log_message(msg)
         except Exception as e:
             logger.debug(f"Logging message to file failed for {inst_name} (non-critical): {e}")
 
@@ -1937,13 +1928,6 @@ class ExecutionEngine:
                 # Track as executed for orphan handling (it was processed, just denied)
                 executed_tools.append(tool_name)
                 
-                # Log the function result to JSONL
-                try:
-                    log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                    log_inst.log_message(fn_msg)
-                except Exception:
-                    pass  # Logging must never block tool execution
-                
                 used_any_tool = True
                 continue  # Skip actual tool execution
             
@@ -2059,13 +2043,6 @@ class ExecutionEngine:
             # Track executed tool for orphan handling
             executed_tools.append(tool_name)
 
-            # Log the function result to JSONL (was missing)
-            try:
-                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                log_inst.log_message(fn_msg)
-            except Exception:
-                pass  # Logging must never block tool execution
-
         # ── Handle orphaned tool calls from early break ───────────────────────────────
         # If halt/stop was detected mid-loop, remaining tools in turn_output don't have FUNCTION results.
         # Add placeholder FUNCTION messages to prevent API Error 400 (orphaned tool_call_id's).
@@ -2173,13 +2150,6 @@ class ExecutionEngine:
                     # Track as executed for consistency (matching primary loop pattern)
                     executed_tools.append(tool_name)
                     
-                    # Log the function result to JSONL (matching primary loop pattern)
-                    try:
-                        log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                        log_inst.log_message(fn_msg)
-                    except Exception:
-                        pass  # Logging must never block tool execution
-                    
                     tools_processed += 1
                 
                 if tools_processed > 0:
@@ -2203,9 +2173,6 @@ class ExecutionEngine:
         
         # Extracted to _normalize_turn_output() - Phase 3.3 (FIX #3: now only normalizes)
         self._normalize_turn_output(turn_output)
-
-        # Extracted to _log_messages_to_jsonl() - Phase 3.3
-        self._log_messages_to_jsonl(instance, inst_name, turn_output)
 
         # Cache consistency: append_messages() handles _cached_messages/_cached_llm_messages sync;
         # manual messages.extend() would cause double-append (see cache_bug_investigation_report.md)
@@ -2277,6 +2244,11 @@ class ExecutionEngine:
 
         # Extracted to _execute_detected_tools() - Phase 3.3
         used_any_tool = self._execute_detected_tools(instance, inst_name, turn_output, messages, llm_messages, response)
+
+        # Log ALL messages (turn_output + fn_msgs from tools) in a single delta pass.
+        # Called AFTER tool execution so FUNCTION results are already in conv and get
+        # picked up by the count-based delta sync — no risk of duplicate logging.
+        self._log_messages_to_jsonl(instance, inst_name, turn_output)
 
         # ── Post-tool urgent injection ───────────────────────────────────
         # Inject urgent messages AFTER all tools complete to avoid orphaned tool_call_id's
