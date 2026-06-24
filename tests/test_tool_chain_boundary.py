@@ -13,11 +13,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent.absolute()))
 from agent_cascade.compression.helpers import compute_discard_count
 
 
-def _make_msg(role, content="text", function_call=None):
+def _make_msg(role, content="text", function_call=None, extra=None):
+    """Create a test message with optional function_call and extra dict.
+
+    When function_call is provided but no extra dict is given, an extra dict
+    is auto-created containing a synthetic function_id derived from the call name.
+    This ensures proper ID-based matching between ASSISTANT→FUNCTION pairs.
+    """
     if role == ASSISTANT and function_call:
         # function_call must be a dict with 'name' key for Message validation
-        return Message(role=role, content=content, function_call={'name': function_call, 'arguments': '{}'})
-    return Message(role=role, content=content)
+        fc = {'name': function_call, 'arguments': '{}'}
+        if extra is None:
+            # Auto-generate function_id so FUNCTION results can match via ID
+            extra = {'function_id': f"call_{function_call}"}
+        return Message(role=role, content=content, function_call=fc, extra=extra)
+    return Message(role=role, content=content, extra=extra or None)
 
 
 class TestToolChainBoundaryProtection:
@@ -50,14 +60,16 @@ class TestToolChainBoundaryProtection:
         """If the boundary falls on a FUNCTION result, walk forward to include its pair."""
         msgs = [
             _make_msg(USER, "prompt"),
-            _make_msg(ASSISTANT, "thinking", function_call="shell_cmd"),  # tool call at index 1
-            _make_msg(FUNCTION, "tool output"),  # discard=2 lands here -> adjust forward
+            _make_msg(ASSISTANT, "thinking", function_call="shell_cmd"),  # tool call at index 1, extra={'function_id': 'call_shell_cmd'}
+            _make_msg(FUNCTION, "tool output", extra={'function_id': 'call_shell_cmd'}),  # matches ASSISTANT above
             _make_msg(ASSISTANT, "response"),
         ]
         # fraction=0.5 -> int(4*0.5)=2, not force -> min(2, 4-2)=2
-        # msgs[2] is FUNCTION -> refinement advances past F to pos 3 (ASSISTANT)
+        # msgs[2] is FUNCTION with matching function_id -> post-validation finds split
+        # (A at pos 1 discarded, F at pos 2 kept) -> advances discard to 3 which exceeds keep zone
+        # returns -1 (no valid compression without splitting the pair)
         discard = compute_discard_count(msgs, 0.5, False)
-        assert discard == 2
+        assert discard == -1
 
     def test_adjustment_with_function_at_boundary(self):
         """Boundary falls on FUNCTION result — should include paired tool call."""
@@ -132,7 +144,7 @@ class TestToolChainBoundaryProtection:
         """Force mode also respects tool chain boundaries."""
         msgs = [
             _make_msg(ASSISTANT, "thinking", function_call="shell_cmd"),
-            _make_msg(FUNCTION, "output"),  # boundary
+            _make_msg(FUNCTION, "output", extra={'function_id': 'call_shell_cmd'}),  # boundary, matches ASSISTANT above
             _make_msg(ASSISTANT, "done"),
         ]
         discard = compute_discard_count(msgs, 0.3, True)

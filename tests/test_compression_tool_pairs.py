@@ -263,7 +263,7 @@ class TestComputeDiscardCountToolPairs:
         count = compute_discard_count(active, fraction=0.5, force=True)
         # int(6*0.5)=3; max(1, 3)=3; position 3 is F1 → refinement advances past A2+F2 chain
         # returns -1 because tool chains extend past keep zone (only 3 pairs, no clean split)
-        assert count >= -1 and count <= len(active) - 1
+        assert count == -1
 
     def test_preserves_tail_messages(self):
         """Tail messages are preserved even with tool-call pairs."""
@@ -577,6 +577,8 @@ class TestBruteForceRegression:
             active = conv[2:]
             for frac_int in [30, 50, 70]:
                 discard = compute_discard_count(active, frac_int / 100, force=False)
+                if discard == -1:
+                    continue  # -1 sentinel means no valid compression; skip validation
                 self._validate_no_splits(active, discard)
 
     def test_brute_force_sequential_with_markers(self):
@@ -597,6 +599,8 @@ class TestBruteForceRegression:
                 active = conv[asi:]
                 frac = rng.uniform(0.3, 0.7)
                 discard = compute_discard_count(active, frac, force=False)
+                if discard == -1:
+                    continue  # -1 sentinel means no valid compression; skip validation
                 self._validate_no_splits(active, discard)
                 # Insert marker
                 marker = {"role": USER, "content": "MARKER"}
@@ -609,6 +613,8 @@ class TestBruteForceRegression:
             active = conv[2:]
             for frac_int in [30, 50, 70]:
                 discard = compute_discard_count(active, frac_int / 100, force=True)
+                if discard == -1:
+                    continue  # -1 sentinel means no valid compression; skip validation
                 self._validate_no_splits(active, discard)
 
 
