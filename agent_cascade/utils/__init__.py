@@ -20,11 +20,19 @@ This package provides utility functions used across the agent_cascade module.
 
 from __future__ import annotations
 
+# Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
+from agent_cascade.utils.disabled_tools import (
+    normalize_disabled_tools,
+    resolve_disabled_tools_for_agent,
+    validate_tool_names,
+    merge_disabled_tools,
+)
+
 
 def merge_disabled_tools_for_auto_agent(
-    existing_disabled: list[str] | dict[str, list[str]] | None,
-    agent_key: str,
-    default_disabled_tools: frozenset[str],
+    existing_disabled: list[str] | dict[str, list[str]] | None = None,
+    agent_key: str = "",
+    default_disabled_tools: frozenset[str] | set[str] | list[str] = (),
 ) -> list[str] | dict[str, list[str]]:
     """Merge default disabled tools for an auto-launched agent.
     

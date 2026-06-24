@@ -22,7 +22,8 @@ import time
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 from enum import Enum, auto
 
-from agent_cascade.constants import DEFAULT_SECURITY_DISABLED_TOOLS, DEFAULT_COMPRESSOR_DISABLED_TOOLS
+# Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
+from agent_cascade.constants import NON_LLM_KEYS
 from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
 )
@@ -82,100 +83,63 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     Build the list of active function schemas from a template's function_map,
     filtering out any tools disabled via the template's LLM generate_cfg.
 
-    Mirrors Agent._get_active_functions() from the main branch so that tool
-    filtering works correctly for all agents — including the orchestrator which
-    no longer has a class-specific _get_active_functions method.
+    Uses the centralized disabled_tools resolver for all resolution logic.
+    Defense-in-depth (Security/Compressor defaults) is built into the resolver.
 
     Args:
         template: The agent template with function_map and llm.generate_cfg.
         instance: Optional AgentInstance — if provided, its _generate_cfg_override
                   takes precedence over the template config for disabled_tools.
+
+    Returns:
+        List of active function schema dicts (tool definitions for the LLM).
     """
+    # Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
+    from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
+
     inst_name = getattr(instance, 'instance_name', 'UNKNOWN') if instance else 'NO_INSTANCE'
-    agent_class = getattr(template, 'agent_type', getattr(template, 'name', 'UNKNOWN'))
-    
-    # Also check instance.agent_class for defense-in-depth
-    instance_agent_class = getattr(instance, 'agent_class', None) if instance else None
-    
-    # logger.debug(f"[{inst_name}] _get_active_functions_from_template: agent_class='{agent_class}', instance.agent_class={instance_agent_class}")
-    
-    # Read disabled_tools from instance override first, then fall back to template
-    if instance is not None and instance._generate_cfg_override is not None:
-        raw_disabled = instance._generate_cfg_override.get('disabled_tools')
-        if raw_disabled is None:
-            # Override exists but lacks 'disabled_tools' key — fall back to template
-            llm = getattr(template, 'llm', None)
-            if llm is None:
-                logger.warning(f"[{inst_name}] template.llm is None, using empty disabled_tools")
-                raw_disabled = []
-            else:
-                raw_disabled = getattr(llm, 'generate_cfg', {}).get('disabled_tools', [])
-        # elif not raw_disabled:  # Empty — nothing to log
-    else:
-        # Defensive: template.llm may be None for templates without LLM config
-        llm = getattr(template, 'llm', None)
-        if llm is None:
-            logger.warning(f"[{inst_name}] template.llm is None, using empty disabled_tools")
-            raw_disabled = []
-        else:
-            raw_disabled = getattr(llm, 'generate_cfg', {}).get('disabled_tools', [])
 
-    # Handle both dict format (per-agent: {"Maine": ["tool1"]}) and flat list format
-    if isinstance(raw_disabled, dict):
-        disabled_map = raw_disabled
-        agent_name = getattr(template, 'name', None)
-        disabled = set(disabled_map.get(agent_name, []))  # Mirrors main branch — safe even when name is None
-        if agent_name:
-            slug = agent_name.lower().replace(' ', '_')
-            disabled.update(disabled_map.get(slug, []))
+    # Gather inputs for the centralized resolver
+    instance_override = (getattr(instance, '_generate_cfg_override', None)
+                        if instance is not None else None)
+    template_cfg = (getattr(template.llm, 'generate_cfg', None)
+                    if getattr(template, 'llm', None) is not None else {})
 
-        agent_type = getattr(template, 'agent_type', None)
-        if agent_type and agent_type in disabled_map:
-            disabled.update(disabled_map[agent_type])
-    elif isinstance(raw_disabled, (list, tuple)):
-        disabled = set(raw_disabled)
-    else:
-        disabled = set()
+    agent_name = getattr(template, 'name', '') or ''
+    agent_type = getattr(template, 'agent_type', '') or ''
 
-    # ── Agent-class-based default disabled tools (defense-in-depth) ──────────────
-    # Regardless of whether upstream code set _generate_cfg_override, always apply
-    # the agent-type-specific defaults.  This is the ultimate safety net: even if
-    # every other layer fails, Security and Compressor agents will never get more
-    # tools than intended.
-    
-    # Check BOTH template.agent_type AND instance.agent_class for defense-in-depth
-    # Use case-insensitive comparison since agent_class may come lowercased from tool_dispatcher
-    ac_lower = agent_class.lower() if agent_class else ''
-    iac_lower = instance_agent_class.lower() if instance_agent_class else ''
-    is_security_agent = (ac_lower == 'security' or iac_lower == 'security')
-    is_compressor_agent = (ac_lower == 'compressor' or iac_lower == 'compressor')
-    
-    if is_security_agent:
-        disabled = disabled | DEFAULT_SECURITY_DISABLED_TOOLS
-        # logger.debug(f"[{inst_name}] Applied Security-agent defaults: {len(DEFAULT_SECURITY_DISABLED_TOOLS)} tools added")
-    elif is_compressor_agent:
-        disabled = disabled | DEFAULT_COMPRESSOR_DISABLED_TOOLS
-        # logger.debug(f"[{inst_name}] Applied Compressor-agent defaults: {len(DEFAULT_COMPRESSOR_DISABLED_TOOLS)} tools added")
+    # Also check instance.agent_class for defense-in-depth: the resolver uses
+    # agent_type for class-default enforcement.  If template lacks agent_type
+    # but the instance has a known type (security/compressor), pass it through.
+    if not agent_type and instance is not None:
+        iac = getattr(instance, 'agent_class', None)
+        if iac:
+            agent_type = iac
 
-    # logger.debug(f"[{inst_name}] _get_active_functions_from_template: disabled_tools={disabled}")
+    disabled = resolve_disabled_tools_for_agent(
+        instance_override=instance_override,
+        template_cfg=template_cfg,
+        agent_name=agent_name,
+        agent_type=agent_type,
+    )
 
     # Defensive: template.function_map may be None for templates without tools
     func_map = getattr(template, 'function_map', None)
     if not func_map:
         logger.info(f"[{inst_name}] _get_active_functions_from_template: No function_map, returning empty list")
         return []
-    
+
     # Build the active functions list and log what's being filtered out
     all_tool_names = set(func_map.keys())
     filtered_out = all_tool_names & disabled
     active_tool_names = all_tool_names - disabled
-    
-    # logger.debug(f"[{inst_name}] _get_active_functions_from_template: {len(all_tool_names)} tools total, {len(filtered_out)} filtered, {len(active_tool_names)} active")
-    
+
     # Check specifically for shell_cmd — warn if Security agent has it enabled
+    atype_lower = agent_type.lower() if agent_type else ''
+    is_security_agent = (atype_lower == 'security')
     if 'shell_cmd' in all_tool_names and is_security_agent and 'shell_cmd' not in disabled:
         logger.warning(f"[{inst_name}] CRITICAL: shell_cmd is NOT disabled for Security agent!")
-    
+
     return [func.function for name, func in func_map.items() if name not in disabled]
 
 
@@ -295,24 +259,15 @@ def _build_resources_block(pool, template, instance=None) -> str:
 
     res = "\n\n--- CURRENT AVAILABLE RESOURCES (Auto-Injected) ---\n"
 
-    # Determine disabled tools for this agent's class
-    disabled_tools = []
-    # Check instance override first, then fall back to template config
-    if instance is not None and instance._generate_cfg_override is not None:
-        raw_disabled = instance._generate_cfg_override.get('disabled_tools')
-        if raw_disabled is None:
-            # Override exists but lacks 'disabled_tools' key — fall back to template
-            raw_disabled = getattr(getattr(template, 'llm', None), 'generate_cfg', {}).get('disabled_tools', [])
-    else:
-        raw_disabled = getattr(getattr(template, 'llm', None), 'generate_cfg', {}).get('disabled_tools', [])
-    if isinstance(raw_disabled, dict):
-        agent_key = getattr(template, 'agent_type', None) or getattr(template, 'name', '')
-        slug = agent_key.lower().replace(' ', '_') if agent_key else ''
-        disabled_tools = list(set(
-            raw_disabled.get(agent_key, []) + raw_disabled.get(slug, [])
-        ))
-    elif isinstance(raw_disabled, (list, tuple)):
-        disabled_tools = list(set(raw_disabled))
+    # Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
+    from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
+
+    disabled_tools = resolve_disabled_tools_for_agent(
+        instance_override=getattr(instance, '_generate_cfg_override', None),
+        template_cfg=getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {},
+        agent_name=getattr(template, 'name', ''),
+        agent_type=getattr(template, 'agent_type', ''),
+    )
 
     can_call_agents = 'call_agent' in template.function_map and 'call_agent' not in disabled_tools
 
@@ -1843,33 +1798,28 @@ class ExecutionEngine:
         
         # ── Hoist template lookup outside loop (performance optimization) ────────
         # Template and disabled tool list don't change during the loop.
-        # Also check instance._generate_cfg_override for defense-in-depth.
+        # Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
+        from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
+
         _primary_template = self.pool.get_template(instance.agent_class)
-        _primary_disabled_tools = set()
-        _primary_function_map = {}
+        _primary_disabled_tools: set[str] = set()
+        _primary_function_map: dict = {}
         if _primary_template:
-            # Start with template's disabled tools
-            _primary_disabled_tools = _primary_template._get_disabled_tool_names()
-            
-            # Also check instance override for defense-in-depth
-            # This mirrors the logic in _get_active_functions_from_template()
-            if hasattr(instance, '_generate_cfg_override') and instance._generate_cfg_override:
-                inst_disabled = instance._generate_cfg_override.get('disabled_tools', {})
-                if isinstance(inst_disabled, dict):
-                    agent_name = getattr(_primary_template, 'name', None)
-                    if agent_name and agent_name in inst_disabled:
-                        _primary_disabled_tools.update(inst_disabled[agent_name])
-                    # Also check slugified name for robustness
-                    if agent_name:
-                        slug = agent_name.lower().replace(' ', '_')
-                        if slug in inst_disabled:
-                            _primary_disabled_tools.update(inst_disabled[slug])
-                    agent_type = getattr(_primary_template, 'agent_type', None)
-                    if agent_type and agent_type in inst_disabled:
-                        _primary_disabled_tools.update(inst_disabled[agent_type])
-                elif isinstance(inst_disabled, (list, tuple)):
-                    _primary_disabled_tools.update(inst_disabled)
-            
+            # Use the centralized resolver instead of duplicating inline logic
+            agent_name = getattr(_primary_template, 'name', '') or ''
+            agent_type = getattr(_primary_template, 'agent_type', '') or ''
+            instance_override = (getattr(instance, '_generate_cfg_override', None)
+                                if hasattr(instance, '_generate_cfg_override') else None)
+            template_cfg = (getattr(_primary_template.llm, 'generate_cfg', None)
+                            if getattr(_primary_template, 'llm', None) is not None else {})
+
+            _primary_disabled_tools = resolve_disabled_tools_for_agent(
+                instance_override=instance_override,
+                template_cfg=template_cfg,
+                agent_name=agent_name,
+                agent_type=agent_type,
+            )
+
             _primary_function_map = getattr(_primary_template, 'function_map', {})
         
         for out in turn_output:
@@ -2057,32 +2007,28 @@ class ExecutionEngine:
             
             # ── Hoist template lookup outside compression lock ──────────────────
             # Template and disabled tool list don't change during the loop.
+            # Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
+            from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
+
             _orphan_template = self.pool.get_template(instance.agent_class)
-            _orphan_disabled_tools = set()
-            _orphan_function_map = {}
+            _orphan_disabled_tools: set[str] = set()
+            _orphan_function_map: dict = {}
             if _orphan_template:
-                # Start with template's disabled tools
-                _orphan_disabled_tools = _orphan_template._get_disabled_tool_names()
-                
-                # Also check instance override for defense-in-depth
-                # This mirrors the logic in _get_active_functions_from_template()
-                if hasattr(instance, '_generate_cfg_override') and instance._generate_cfg_override:
-                    inst_disabled = instance._generate_cfg_override.get('disabled_tools', {})
-                    if isinstance(inst_disabled, dict):
-                        agent_name = getattr(_orphan_template, 'name', None)
-                        if agent_name and agent_name in inst_disabled:
-                            _orphan_disabled_tools.update(inst_disabled[agent_name])
-                        # Also check slugified name for robustness
-                        if agent_name:
-                            slug = agent_name.lower().replace(' ', '_')
-                            if slug in inst_disabled:
-                                _orphan_disabled_tools.update(inst_disabled[slug])
-                        agent_type = getattr(_orphan_template, 'agent_type', None)
-                        if agent_type and agent_type in inst_disabled:
-                            _orphan_disabled_tools.update(inst_disabled[agent_type])
-                    elif isinstance(inst_disabled, (list, tuple)):
-                        _orphan_disabled_tools.update(inst_disabled)
-                
+                # Use the centralized resolver instead of duplicating inline logic
+                agent_name = getattr(_orphan_template, 'name', '') or ''
+                agent_type = getattr(_orphan_template, 'agent_type', '') or ''
+                instance_override = (getattr(instance, '_generate_cfg_override', None)
+                                    if hasattr(instance, '_generate_cfg_override') else None)
+                template_cfg = (getattr(_orphan_template.llm, 'generate_cfg', None)
+                                if getattr(_orphan_template, 'llm', None) is not None else {})
+
+                _orphan_disabled_tools = resolve_disabled_tools_for_agent(
+                    instance_override=instance_override,
+                    template_cfg=template_cfg,
+                    agent_name=agent_name,
+                    agent_type=agent_type,
+                )
+
                 _orphan_function_map = getattr(_orphan_template, 'function_map', {})
             
             with instance._compression_lock:  # FIX #1: Batch lock acquisition for all placeholder appends

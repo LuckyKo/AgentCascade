@@ -26,6 +26,14 @@ ALL_USER_APPROVAL_TOOLS: frozenset[str] = frozenset({
 })
 
 
+# ── Agent-class default disabled tools (defense-in-depth) ────────────────────
+# These frozensets are the authoritative source for Security and Compressor tool
+# restrictions.  They are enforced automatically by the centralized resolver:
+#     agent_cascade.utils.disabled_tools.resolve_disabled_tools_for_agent()
+# Do NOT duplicate these constants in inline code — the resolver applies them
+# as a final safety net regardless of upstream config overrides.
+
+
 # Default disabled tools for Security agent.
 # Security agent performs read-only analysis, so it should not use user-approval tools.
 DEFAULT_SECURITY_DISABLED_TOOLS: frozenset[str] = ALL_USER_APPROVAL_TOOLS

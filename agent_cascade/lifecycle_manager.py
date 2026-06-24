@@ -535,46 +535,36 @@ class AgentLifecycleManager:
                     cfg['max_input_tokens'] = propagated_max
                     instance._generate_cfg_override = cfg
 
-                # Propagate disabled_tools — merge with any existing instance override (not overwrite)
-                caller_disabled_tools = llm_cfg.get('disabled_tools')
-                if caller_disabled_tools:
-                    cfg = copy.deepcopy(instance._generate_cfg_override) if instance._generate_cfg_override else (target_template.llm.generate_cfg or {}).copy()
-                    existing_disabled = cfg.get('disabled_tools', [])
-                    if isinstance(existing_disabled, list):
-                        # Merge: combine existing with caller's disabled tools (deduplicated)
-                        cfg['disabled_tools'] = list(set(existing_disabled + list(caller_disabled_tools)))
-                    else:
-                        cfg['disabled_tools'] = list(caller_disabled_tools)
-                    instance._generate_cfg_override = cfg
-                
-                # Defense-in-depth: For Security and Compressor agents, always ensure default disabled tools are set
-                # This ensures these system agents never get more tools than intended, even if caller has no disabled_tools
-                from agent_cascade.constants import DEFAULT_SECURITY_DISABLED_TOOLS, DEFAULT_COMPRESSOR_DISABLED_TOOLS
-                if agent_class.lower() in ('security', 'compressor'):
-                    defaults = DEFAULT_COMPRESSOR_DISABLED_TOOLS if agent_class.lower() == 'compressor' else DEFAULT_SECURITY_DISABLED_TOOLS
-                    # Get current cfg (may have been set by max_input_tokens or caller_disabled_tools above)
-                    current_cfg = copy.deepcopy(instance._generate_cfg_override) if instance._generate_cfg_override else {}
-                    existing_disabled_in_cfg = current_cfg.get('disabled_tools')
-                    
-                    # Merge with defaults - handle both dict and list formats correctly
-                    if existing_disabled_in_cfg:
-                        if isinstance(existing_disabled_in_cfg, dict):
-                            # Dict format: merge defaults into each agent's entry AND add/update the current agent_class entry
-                            for k, v in existing_disabled_in_cfg.items():
-                                if isinstance(v, (list, tuple)):
-                                    existing_disabled_in_cfg[k] = list(set(list(v) + list(defaults)))
-                            # Ensure the current agent class has defaults merged
-                            existing_disabled_in_cfg[agent_class] = list(set(
-                                (existing_disabled_in_cfg.get(agent_class, []) or []) + list(defaults)
-                            ))
-                            current_cfg['disabled_tools'] = existing_disabled_in_cfg
-                        else:
-                            # List format: merge with defaults
-                            current_cfg['disabled_tools'] = list(set(list(existing_disabled_in_cfg) + list(defaults)))
-                    else:
-                        # No existing disabled_tools - set defaults directly (sorted for deterministic ordering)
-                        current_cfg['disabled_tools'] = sorted(defaults)
-                    
-                    instance._generate_cfg_override = current_cfg
+                # Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
+                from agent_cascade.utils.disabled_tools import (
+                    resolve_disabled_tools_for_agent,
+                    normalize_disabled_tools,
+                    merge_disabled_tools,
+                )
+
+                # Resolve caller's full disabled set (includes class defaults via resolver)
+                caller_type = getattr(caller_template, 'agent_type', '') or ''
+                caller_name = getattr(caller_template, 'name', '') or ''
+                caller_disabled = resolve_disabled_tools_for_agent(
+                    instance_override=getattr(caller_inst, '_generate_cfg_override', None),
+                    template_cfg=getattr(caller_template.llm, 'generate_cfg', None),
+                    agent_name=caller_name,
+                    agent_type=caller_type,
+                )
+
+                # Propagate caller's disabled tools into child instance override.
+                # Merge with any existing disabled_tools already on the child config.
+                cfg = (copy.deepcopy(instance._generate_cfg_override)
+                       if instance._generate_cfg_override
+                       else (target_template.llm.generate_cfg or {}).copy())
+
+                existing_disabled = normalize_disabled_tools(cfg.get('disabled_tools'))
+                merged = merge_disabled_tools(existing_disabled, caller_disabled)
+                cfg['disabled_tools'] = list(merged)  # store as list for JSON serialization
+                instance._generate_cfg_override = cfg
+
+                # Defense-in-depth for Security/Compressor is handled INSIDE
+                # resolve_disabled_tools_for_agent() — when the child agent later
+                # resolves its disabled tools it will automatically include class defaults.
         except Exception as e:
             logger.debug(f"Settings propagation from {caller} to instance failed (non-critical): {e}")

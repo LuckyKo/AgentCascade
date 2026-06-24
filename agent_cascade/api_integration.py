@@ -1319,13 +1319,16 @@ def _apply_ui_config(
     if hasattr(pool, 'llm_cfg'):
         try:
             with pool._execution._state_lock:  # Thread-safe write to shared config
+                # Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
+                from agent_cascade.utils.disabled_tools import normalize_disabled_tools
+
                 # Re-apply disabled_tools under lock to prevent race with concurrent reads
                 if 'disabled_tools' in sanitized and sanitized['disabled_tools'] is not None:
-                    dt = sanitized['disabled_tools']
-                    if isinstance(dt, (list, dict)):
-                        cfg = dict(instance._generate_cfg_override or {})
-                        cfg['disabled_tools'] = dt
-                        instance._generate_cfg_override = cfg
+                    raw_dt = sanitized['disabled_tools']
+                    normalized = normalize_disabled_tools(raw_dt)  # Returns set
+                    cfg = copy.deepcopy(instance._generate_cfg_override or {})
+                    cfg['disabled_tools'] = list(normalized)  # Convert back to list for storage
+                    instance._generate_cfg_override = cfg
 
                 for _key in (
                     'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',

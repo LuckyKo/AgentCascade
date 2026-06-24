@@ -188,43 +188,32 @@ class Agent(ABC):
 
     def _get_active_functions(self) -> list:
         """Return function schemas for tools not disabled by the current config.
-        
-        This is the single source of truth for tool filtering. All agent
-        subclasses should call this instead of manually reading disabled_tools.
+
+        Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
         """
-        disabled_map = getattr(self.llm, 'generate_cfg', {}).get('disabled_tools', {})
-        
-        # Check both display name and slugified name for robustness
-        disabled = set(disabled_map.get(self.name, []))
-        if self.name:
-            slug = self.name.lower().replace(' ', '_')
-            if slug in disabled_map:
-                disabled.update(disabled_map[slug])
-        
-        # Also check agent_type if available
-        agent_type = getattr(self, 'agent_type', None)
-        if agent_type and agent_type in disabled_map:
-            disabled.update(disabled_map[agent_type])
-            
+        from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
+
+        disabled = resolve_disabled_tools_for_agent(
+            instance_override=None,  # This method is for template-level queries
+            template_cfg=getattr(self.llm, 'generate_cfg', None),
+            agent_name=self.name,
+            agent_type=getattr(self, 'agent_type', ''),
+        )
         return [func.function for name, func in self.function_map.items() if name not in disabled]
 
     def _get_disabled_tool_names(self) -> set:
-        """Return the set of currently disabled tool names for this agent."""
-        disabled_map = getattr(self.llm, 'generate_cfg', {}).get('disabled_tools', {})
-        
-        # Check both display name and slugified name for robustness
-        disabled = set(disabled_map.get(self.name, []))
-        if self.name:
-            slug = self.name.lower().replace(' ', '_')
-            if slug in disabled_map:
-                disabled.update(disabled_map[slug])
+        """Return the set of currently disabled tool names for this agent.
 
-        # Also check agent_type if available
-        agent_type = getattr(self, 'agent_type', None)
-        if agent_type and agent_type in disabled_map:
-            disabled.update(disabled_map[agent_type])
-            
-        return disabled
+        Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
+        """
+        from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
+
+        return resolve_disabled_tools_for_agent(
+            instance_override=None,  # This method is for template-level queries
+            template_cfg=getattr(self.llm, 'generate_cfg', None),
+            agent_name=self.name,
+            agent_type=getattr(self, 'agent_type', ''),
+        )
 
     def _call_tool(self, tool_name: str, tool_args: Union[str, dict] = '{}', **kwargs) -> Union[str, List[ContentItem]]:
         """The interface of calling tools for the agent.

@@ -1271,6 +1271,20 @@ def create_app(agents, agent_pool, config=None):
                     if 'session_name' in data:
                         session['session_name'] = data['session_name']
                     if 'generate_cfg' in data:
+                        # Validate disabled_tools at API boundary — see agent_cascade.utils.disabled_tools
+                        from agent_cascade.utils.disabled_tools import normalize_disabled_tools, validate_tool_names
+                        from agent_cascade.tools.base import TOOL_REGISTRY
+
+                        ui_cfg = data['generate_cfg']
+                        if 'disabled_tools' in ui_cfg and ui_cfg['disabled_tools']:
+                            dt = ui_cfg['disabled_tools']
+                            known = set(TOOL_REGISTRY.keys())
+                            if isinstance(dt, dict):
+                                for tools in dt.values():
+                                    validate_tool_names(normalize_disabled_tools(tools), known_tools=known)
+                            else:
+                                validate_tool_names(normalize_disabled_tools(dt), known_tools=known)
+
                         session['generate_cfg'] = data['generate_cfg']
 
                     # Add user message to the pool instance's conversation (unified path).
@@ -1352,6 +1366,19 @@ def create_app(agents, agent_pool, config=None):
                     if 'session_name' in data:
                         session['session_name'] = data['session_name']
                     if 'generate_cfg' in data:
+                        # Validate disabled_tools at API boundary — see agent_cascade.utils.disabled_tools
+                        from agent_cascade.utils.disabled_tools import normalize_disabled_tools, validate_tool_names
+
+                        ui_cfg = data['generate_cfg']
+                        if 'disabled_tools' in ui_cfg and ui_cfg['disabled_tools']:
+                            dt = ui_cfg['disabled_tools']
+                            known = set(TOOL_REGISTRY.keys())
+                            if isinstance(dt, dict):
+                                for tools in dt.values():
+                                    validate_tool_names(normalize_disabled_tools(tools), known_tools=known)
+                            else:
+                                validate_tool_names(normalize_disabled_tools(dt), known_tools=known)
+
                         session['generate_cfg'] = data['generate_cfg']
 
                     # Resolve the target instance (prefer target_agent from frontend, fallback to session)
