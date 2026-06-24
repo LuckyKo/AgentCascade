@@ -104,6 +104,9 @@ def resolve_disabled_tools_for_agent(
             slug = name.lower().replace(' ', '_')
             s |= normalize_disabled_tools(dt.get(slug, []))
             s |= normalize_disabled_tools(dt.get(atype, []))
+            # Also try lowercase type — UI often sends {"coder": [...]} but atype may be "Coder"
+            if atype:
+                s |= normalize_disabled_tools(dt.get(atype.lower(), []))
             return s
         else:
             return normalize_disabled_tools(dt)

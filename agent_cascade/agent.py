@@ -195,7 +195,7 @@ class Agent(ABC):
 
         disabled = resolve_disabled_tools_for_agent(
             instance_override=None,  # This method is for template-level queries
-            template_cfg=getattr(self.llm, 'generate_cfg', None),
+            template_cfg=(getattr(self.llm, 'generate_cfg', None) or {}),
             agent_name=self.name,
             agent_type=getattr(self, 'agent_type', ''),
         )

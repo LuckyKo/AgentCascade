@@ -1303,9 +1303,10 @@ def _apply_ui_config(
     if 'max_input_tokens' not in llm_safe:
         llm_cfg_copy.pop('max_input_tokens', None)
 
-    # Normalize and inject disabled_tools BEFORE assigning the override — this ensures the
-    # instance._generate_cfg_override is always complete (no race window where another thread
-    # could read a partial config missing disabled_tools).
+    # Validate and normalize disabled_tools from the UI before storing in the override.
+    # If the UI sent a dict (per-agent format like {"coder": [...]}), preserve it —
+    # the centralized resolver at resolve_disabled_tools_for_agent() handles dict lookups.
+    # If it was a flat list, validate tool names and store as list.
     from agent_cascade.utils.disabled_tools import (
         normalize_disabled_tools, validate_tool_names,
     )
@@ -1313,9 +1314,24 @@ def _apply_ui_config(
 
     if 'disabled_tools' in sanitized and sanitized['disabled_tools'] is not None:
         raw_dt = sanitized['disabled_tools']
-        normalized = normalize_disabled_tools(raw_dt)  # Returns set
-        validate_tool_names(normalized, known_tools=set(TOOL_REGISTRY.keys()))
-        llm_cfg_copy['disabled_tools'] = list(normalized)  # Convert back to list for storage
+        if isinstance(raw_dt, dict):
+            # Preserve per-agent structure — the resolver handles dict lookups.
+            # Validate each agent's tool list individually.
+            validated_dict = {}
+            known_tools = set(TOOL_REGISTRY.keys())
+            for agent_key, agent_tools in raw_dt.items():
+                normalized = normalize_disabled_tools(agent_tools)
+                validate_tool_names(normalized, known_tools=known_tools)
+                # Store as list if it was a list/tuple, otherwise keep original format
+                if isinstance(agent_tools, (list, tuple)):
+                    validated_dict[agent_key] = list(normalized)
+                else:
+                    validated_dict[agent_key] = normalized
+            llm_cfg_copy['disabled_tools'] = validated_dict
+        else:
+            normalized = normalize_disabled_tools(raw_dt)
+            validate_tool_names(normalized, known_tools=set(TOOL_REGISTRY.keys()))
+            llm_cfg_copy['disabled_tools'] = list(normalized)  # Convert back to list for storage
 
     instance._generate_cfg_override = llm_cfg_copy
 
@@ -1343,7 +1359,7 @@ def _apply_ui_config(
 
         except AttributeError:
             # pool._execution or _state_lock doesn't exist — skip safely
-            logger.debug("Execution engine not available for disabled_tools update")
+            logger.debug("Execution engine not available for pool config update")
         except Exception as e:
             # Lock access should always work, but don't let it break generation
             logger.exception("Unexpected error updating pool.llm_cfg: %s", e)

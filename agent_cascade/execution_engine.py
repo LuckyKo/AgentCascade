@@ -102,7 +102,7 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     # Gather inputs for the centralized resolver
     instance_override = (getattr(instance, '_generate_cfg_override', None)
                         if instance is not None else None)
-    template_cfg = (getattr(template.llm, 'generate_cfg', None)
+    template_cfg = (getattr(template.llm, 'generate_cfg', None) or {}
                     if getattr(template, 'llm', None) is not None else {})
 
     agent_name = getattr(template, 'name', '') or ''
