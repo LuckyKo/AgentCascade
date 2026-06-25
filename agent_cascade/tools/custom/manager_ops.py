@@ -163,6 +163,14 @@ You are a specialized agent instance.
                     internal_retries += 1
                     if internal_retries > max_internal_retries:
                         logger.warning(f"Sub-agent {instance_name} hit internal retry limit for loop: {e.reason}")
+                        # Recalculate pop_count based on current conversation state since messages accumulated during retries
+                        try:
+                            from agent_cascade.loop_detection import detect_loop as _detect_loop
+                            fresh_info = _detect_loop(messages)
+                            if fresh_info:
+                                e.pop_count = fresh_info[1]
+                        except Exception:
+                            pass  # Use original pop_count on failure — still valid enough for rollback
                         raise e  # Finally kick back to main if it keeps failing
                     
                     logger.warning(f"Sub-agent {instance_name} detected loop: {e.reason}. Performing internal retry ({internal_retries}/{max_internal_retries}).")

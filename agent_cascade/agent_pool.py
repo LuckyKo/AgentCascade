@@ -1790,6 +1790,7 @@ class AgentPool:
 
         inst = self.instances.get(instance_name)
         if not inst:
+            logger.warning(f"Surgical rollback for '{instance_name}' failed — instance not found in pool" + (f" ({reason})" if reason else ""))
             return 0
 
         with inst._compression_lock:

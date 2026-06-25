@@ -26,7 +26,7 @@ from agent_cascade.llm.schema import (
 from agent_cascade.log import logger
 
 from .agent_pool import AgentPool
-from .loop_detection import detect_loop as _detect_loop_func, LoopDetectedError
+from .loop_detection import LoopDetectedError
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -210,10 +210,6 @@ def run_agent_thread_unified(
                         loop,
                     )
                     last_send = now
-                        
-                # ── Loop detection (throttled to every 10 ticks) ─────────
-                if tick_num % 10 == 0:
-                    _detect_loop_in_instance(pool, instance_name, turn_output)
 
             tick_num += 1
 
@@ -371,47 +367,4 @@ def get_token_usage_percentage(
     return (stats['history_tokens'] / max_tokens) * 100.0
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# 4. Loop Detection During Streaming
-# ═══════════════════════════════════════════════════════════════════════
-
-def _detect_loop_in_instance(
-    pool: AgentPool,
-    instance_name: str,
-    responses: List[Message],
-) -> None:
-    """Check for loops in the agent's conversation during streaming (throttled).
-
-    This is called every 10 ticks from run_agent_thread_unified. It reads
-    the conversation directly from the pool and checks for repetitive patterns.
-
-    NOTE: Loop detection also happens inside ExecutionEngine._pre_llm_checks().
-    This is a secondary check for the streaming path — it catches loops while
-    the agent is still generating, before they propagate to the engine.
-
-    If a loop IS detected during streaming, we raise LoopDetectedError which
-    will be caught by run_agent_in_pool_with_recovery and trigger surgical
-    rollback + retry.
-    """
-    instance = pool.get_instance(instance_name)
-    if instance is None:
-        return
-
-    # Get the full working set. After ExecutionEngine yields, turn_output messages
-    # have already been appended to instance.conversation (Phase 4 of engine.run).
-    # So we just use the conversation directly — no need to concatenate responses.
-    with instance._compression_lock:
-        all_msgs = list(instance.conversation)
-
-    try:
-        loop_info = _detect_loop_func(all_msgs)
-        if loop_info:
-            reason, pop_count = loop_info
-            # Raise LoopDetectedError so the recovery wrapper handles rollback
-            # Bug #2 fix: Add instance_name to LoopDetectedError for correct rollback target
-            raise LoopDetectedError(reason=reason, agent_name=instance_name, pop_count=pop_count)
-    except LoopDetectedError:
-        # Re-raise — let run_agent_in_pool_with_recovery handle surgical rollback + retry
-        raise
-    except Exception as e:
-        logger.debug(f"Loop detection failed for {instance_name}: {e}")
+# ── Loop detection now handled by canonical detect_loop in loop_detection.py ──

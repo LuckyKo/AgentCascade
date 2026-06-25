@@ -49,7 +49,7 @@ from .lifecycle_manager import AgentLifecycleManager
 from .compression.handler import CompressionHandler
 from .tool_dispatcher import ToolDispatcher
 from .stream_publisher import StreamPublisher
-from .loop_detection import LoopDetectedError
+from .loop_detection import detect_loop as _canonical_detect_loop, LoopDetectedError
 
 
 # ── SleepAction Enum (Phase 3.1) ───────────────────────────────────────────────
@@ -1198,7 +1198,7 @@ class ExecutionEngine:
         # immediately following compression via _suppress_loop_detection_next_turn flag.
         # Thread safety: Python GIL ensures atomic reads/writes for simple boolean attributes.
         if not getattr(instance, '_suppress_loop_detection_next_turn', False):
-            loop_info = self._detect_loop(messages)
+            loop_info = _canonical_detect_loop(messages)
             if loop_info:
                 reason, pop_count = loop_info
                 logger.warning(f"Loop detected for {inst_name}: {reason}")
@@ -3029,80 +3029,7 @@ class ExecutionEngine:
             )
             return max(total_chars // 4, 100)
 
-    def _detect_loop(self, messages: List[Message]):
-        """Detect repetitive patterns in recent conversation. Returns (reason, pop_count) or None."""
-        if len(messages) < 6:
-            return None
-
-        # Extract features from non-system messages
-        def get_feature(m):
-            if hasattr(m, 'model_dump'):
-                m = m.model_dump()
-            elif not isinstance(m, dict):
-                m = {
-                    'role': getattr(m, 'role', ''),
-                    'content': getattr(m, 'content', ''),
-                    'reasoning_content': getattr(m, 'reasoning_content', getattr(m, 'thought', '')),
-                    'function_call': getattr(m, 'function_call', None),
-                }
-
-            role = m.get('role')
-            content = str(m.get('content', '') or '')
-            reasoning = str(m.get('reasoning_content', '') or m.get('thought', ''))
-            text_feature = f"{reasoning}\n{content}" if reasoning else (content or reasoning)
-
-            fc = m.get('function_call')
-            if fc:
-                name = fc.get('name') if isinstance(fc, dict) else getattr(fc, 'name', '')
-                args = fc.get('arguments') if isinstance(fc, dict) else getattr(fc, 'arguments', '')
-                return f"{role}:{name}:{args}"
-
-            return f"{role}:{text_feature[:3000]}"
-
-        # Check last 40 messages for repeated patterns
-        window = messages[-40:]
-        features = []
-        feature_to_window_idx = []
-        for i, m in enumerate(window):
-            role = m.get('role') if isinstance(m, dict) else getattr(m, 'role', '')
-            if role != SYSTEM:
-                features.append(get_feature(m))
-                feature_to_window_idx.append(i)
-
-        if len(features) < 4:
-            return None
-
-        # Generic loop detection: pattern of length L repeating K times
-        for L in range(1, 21):
-            K = 3 if L < 5 else 2
-            if len(features) < L * K:
-                continue
-
-            for i in range(len(features) - (L * K), -1, -1):
-                pattern = features[i : i + L]
-                is_loop = True
-                for k in range(1, K):
-                    if features[i + k * L : i + (k + 1) * L] != pattern:
-                        is_loop = False
-                        break
-
-                if is_loop and features[-L:] == pattern:
-                    roles = [p.split(':')[0] for p in pattern]
-                    # Skip false positives: single-function/single-user patterns
-                    if L == 1 and roles[0] in (FUNCTION, USER):
-                        continue
-                    # Skip FUNCTION-only sequences with no ASSISTANT messages interspersed.
-                    # A real agent loop involves the agent making decisions between tool calls.
-                    # Consecutive FUNCTION messages are from parallel execution / batch overflow.
-                    if roles and all(role == FUNCTION for role in roles):
-                        continue
-
-                    second_rep_window_idx = feature_to_window_idx[i + L]
-                    pop_count = len(window) - second_rep_window_idx
-                    reason = f"Detected repeated sequence loop ({', '.join(roles)} repeating {K} times)"
-                    return reason, pop_count
-
-        return None
+    # ── _detect_loop removed — now uses canonical detect_loop from loop_detection.py ──
 
     def _detect_tool(self, message: Message) -> Tuple[bool, str, Any, str]:
         """Detect if a message contains a tool call. Returns (use_tool, tool_name, tool_args, text)."""
