@@ -12,7 +12,7 @@ from agent_cascade.tools.code_interpreter import CodeInterpreter
 from agent_cascade.tools.custom import (
     ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep,
     DeleteFile, CopyFile, MoveFile, ReIndent, DismissAgent, ListAgents, ShellCmd, SystemInfo,
-    ReadLogs, Calculate, CodeMap, ForgetLast,
+    ReadLogs, Calculate, CodeMap, ForgetLast, SyntaxCheck,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
 from agent_cascade.soul_loader import create_agent_from_soul
@@ -147,6 +147,11 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
     
     # ── Calculation Tool ──
     agent.function_map['calculate'] = Calculate()
+
+    # ── Syntax Check Tool (generic, multi-language) ──
+    syntax_check_tool = SyntaxCheck()
+    syntax_check_tool.agent_pool = agent_pool
+    agent.function_map['syntax_check'] = syntax_check_tool
 
     # ── User approval system notice ──
     agent.system_message += """

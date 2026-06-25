@@ -10,6 +10,7 @@ from .read_logs import ReadLogs
 from .calculation import Calculate
 from .code_map import CodeMap
 from .forget_last_tool import ForgetLast
+from .syntax_check import SyntaxCheck
 
 __all__ = [
     'ReadFile',
@@ -31,4 +32,5 @@ __all__ = [
     'Calculate',
     'CodeMap',
     'ForgetLast',
+    'SyntaxCheck',
 ]

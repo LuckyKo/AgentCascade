@@ -400,6 +400,19 @@ TOOL_METADATA = {
         'parameters': {
             'count': 'Number of recent tool call responses to truncate. Counts backwards from the most recent function result, skipping non-function messages. Default is 1.',
         }
+    },
+    'syntax_check': {
+        'description': (
+            'Check a file for syntax errors without executing it. '
+            'Auto-detects the language from the file extension and applies the '
+            'appropriate syntax checker. Works with Python, JavaScript, TypeScript, '
+            'JSON, YAML, TOML, XML, HTML, CSS, C, C++, C#, Java, Go, Rust, and more. '
+            'Returns "Valid (<language>)" or a detailed error message. '
+            'Similar to python_compiler but works for all common languages.'
+        ),
+        'parameters': {
+            'path': 'Path to the file to check, absolute or relative to the workspace root.'
+        }
     }
 }
 

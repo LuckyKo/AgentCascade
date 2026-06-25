@@ -60,11 +60,14 @@ class ReadLogs(BaseTool):
         start_index = params.get('start_index', None)
         nr_of_entries = params.get('nr_of_entries', 20)
 
-        if not self.agent_pool:
-            return "Error: agent_pool not available."
-
-        base_dir = self.agent_pool.operation_manager.base_dir
-        file_path = base_dir / log_file
+        if self.agent_pool and hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
+            try:
+                file_path = self.agent_pool.operation_manager._resolve_path(log_file, mode="ro")
+            except ValueError as e:
+                return f"Error: {str(e)}"
+        else:
+            from agent_cascade.settings import DEFAULT_WORKSPACE
+            file_path = Path(DEFAULT_WORKSPACE) / log_file
 
         if not file_path.exists() or not file_path.is_file():
             return f"Error: Log file '{log_file}' not found."

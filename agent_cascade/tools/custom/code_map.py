@@ -43,9 +43,12 @@ class CodeMap(BaseTool):
         rel_path = params['path']
         force_as = params.get('force_as', '').lower()
 
-        # Resolve absolute path
+        # Resolve absolute path with validation (same pattern as file_ops.py)
         if self.agent_pool and hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
-            abs_path = self.agent_pool.operation_manager.base_dir / rel_path
+            try:
+                abs_path = self.agent_pool.operation_manager._resolve_path(rel_path, mode="ro")
+            except ValueError as e:
+                return f"Error: {str(e)}"
         else:
             from agent_cascade.settings import DEFAULT_WORKSPACE
             abs_path = Path(DEFAULT_WORKSPACE) / rel_path
