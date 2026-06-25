@@ -552,6 +552,21 @@ class AgentLifecycleManager:
                     agent_type=caller_type,
                 )
 
+                # Also resolve disabled tools FOR THE CHILD AGENT from the caller's per-agent dict.
+                # The caller's _generate_cfg_override may contain a dict like
+                # {'Compressor': [...], 'Coder': [...]} — we need to look up the child's entry.
+                target_name = getattr(target_template, 'name', '') or agent_class
+                target_type = getattr(target_template, 'agent_type', '') or ''
+                # Fallback to instance's agent_class for defense-in-depth (matches execution_engine.py)
+                if not target_type:
+                    target_type = getattr(instance, 'agent_class', '') or ''
+                child_disabled_from_caller_cfg = resolve_disabled_tools_for_agent(
+                    instance_override=getattr(caller_inst, '_generate_cfg_override', None),
+                    template_cfg=getattr(caller_template.llm, 'generate_cfg', None),
+                    agent_name=target_name,
+                    agent_type=target_type,
+                )
+
                 # Propagate caller's disabled tools into child instance override.
                 # Merge with any existing disabled_tools already on the child config.
                 cfg = (copy.deepcopy(instance._generate_cfg_override)
@@ -560,11 +575,13 @@ class AgentLifecycleManager:
 
                 existing_disabled = normalize_disabled_tools(cfg.get('disabled_tools'))
                 merged = merge_disabled_tools(existing_disabled, caller_disabled)
+                # Also merge child-specific disabled tools extracted from caller's per-agent dict.
+                # This ensures entries like {'Compressor': [...]} are properly applied to the child.
+                merged = merge_disabled_tools(merged, child_disabled_from_caller_cfg)
                 cfg['disabled_tools'] = list(merged)  # store as list for JSON serialization
                 instance._generate_cfg_override = cfg
 
-                # Defense-in-depth for Security/Compressor is handled INSIDE
-                # resolve_disabled_tools_for_agent() — when the child agent later
-                # resolves its disabled tools it will automatically include class defaults.
+                # Defense-in-depth defaults (Security/Compressor) are applied both here via the
+                # child lookup above AND again at runtime during engine.run() — idempotent by design.
         except Exception as e:
             logger.debug(f"Settings propagation from {caller} to instance failed (non-critical): {e}")
