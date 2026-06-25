@@ -149,6 +149,11 @@ class AgentInstance:
     # merged with the new response to create a single concatenated message.
     _continue_saved_msg: Optional[Message] = field(default=None)  # Temporary storage for Continue button merge
 
+    # ── Compression-Specific Notification Queue ───────────────────────────────
+    # Used by compression/handler.py to queue notifications during forced compression.
+    # These are drained and surfaced after compression completes.
+    _pending_notifications: List[str] = field(default_factory=list)  # Compression notification queue
+
     # ── Generic Tool Warning Queue ────────────────────────────────────────────
     # Separate from _pending_notifications (compression-specific). Used by tools
     # like path resolution to queue warnings that are drained into tool results.

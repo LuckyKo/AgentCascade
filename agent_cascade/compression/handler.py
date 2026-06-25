@@ -102,15 +102,11 @@ class CompressionHandler:
             )
             
             # Also check pending queue for undelivered duplicates (prevents double-queue on rapid compression)
-            pending_queue = getattr(instance, '_pending_notifications', None)
-            if pending_queue and notification_text in pending_queue:
+            if notification_text in instance._pending_notifications:
                 notification_exists = True
             
             if not notification_exists:
-                if pending_queue is None:
-                    instance._pending_notifications: List[str] = []
-                    pending_queue = instance._pending_notifications
-                pending_queue.append(notification_text)
+                instance._pending_notifications.append(notification_text)
                 logger.info(f"Compression notification queued for injection into '{inst_name}'")
             else:
                 logger.debug(f"Compression notification already exists in conversation for '{inst_name}' — skipping")
@@ -134,7 +130,7 @@ class CompressionHandler:
         # Bug 2 fix: hold lock while reading/writing shared _pending_notifications
         # Bug 6 fix: convert non-string tool results to string before draining
         with instance._compression_lock:
-            pending = getattr(instance, '_pending_notifications', None)
+            pending = instance._pending_notifications
             if pending:
                 if not isinstance(tool_result, str):
                     tool_result = str(tool_result)
@@ -161,7 +157,7 @@ class CompressionHandler:
         """
         # Bug 2 fix: hold lock while reading/writing shared _pending_notifications
         with instance._compression_lock:
-            pending = getattr(instance, '_pending_notifications', None)
+            pending = instance._pending_notifications
             if pending:
                 if isinstance(text, str):
                     notif_block = "\n\n".join(n for n in pending)
