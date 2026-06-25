@@ -110,6 +110,7 @@ def compress_context(
     # Check for error signal: -1 means tool chains extend past max_discard with no clean split
     if target_discard_count == -1:
         return CompressResult(
+            success=False,
             summary_text=None,
             marker_message=None,
             messages_discarded=0,
