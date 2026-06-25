@@ -5,7 +5,6 @@ This provides full AgentInstance lifecycle (state tracking, WebUI visibility, AP
 """
 import logging
 import time as _time
-import copy
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 from agent_cascade.llm.schema import SYSTEM, USER
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
@@ -159,39 +158,53 @@ def invoke_compression_agent(
         # Note: propagate_settings() already ran inside _create_system_agent(), but we intentionally replace its
         # disabled_tools result with ui_cfg + defense-in-depth defaults to ensure auto-launched agents never get
         # more tools than intended. If session is unavailable, defaults are still applied for safety.
-        from agent_cascade.constants import NON_LLM_KEYS, DEFAULT_COMPRESSOR_DISABLED_TOOLS
+        from agent_cascade.constants import DEFAULT_COMPRESSOR_DISABLED_TOOLS
         from agent_cascade.utils import merge_disabled_tools_for_auto_agent
         
-        if hasattr(agent_pool, 'operation_manager'):
-            session = getattr(agent_pool.operation_manager, '_current_session', None)
-            if session:
-                template = agent_pool.get_template('Compressor')
-                if template and hasattr(template, 'llm'):
-                    cfg = (template.llm.generate_cfg or {}).copy()
-                    ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
-                    llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
-                    # Add disabled_tools back — needed for tool filtering but must not leak to LLM API
-                    if 'disabled_tools' in ui_cfg:
-                        llm_safe_cfg['disabled_tools'] = ui_cfg['disabled_tools']
-                    # Defense-in-depth: disable user-approval tools for auto-launched Compressor agent
-                    existing_disabled = llm_safe_cfg.get('disabled_tools', [])
-                    llm_safe_cfg['disabled_tools'] = merge_disabled_tools_for_auto_agent(
-                        existing_disabled, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS
-                    )
-                    cfg.update(llm_safe_cfg)
-                    comp_instance._generate_cfg_override = cfg
+        # Get user's disabled_tools config from the caller agent instance.
+        # The caller's _generate_cfg_override contains the user's UI-disabled tools,
+        # which were set by _apply_ui_config. We read it directly here to get the
+        # original UI settings before propagate_settings() merged them.
+        template = agent_pool.get_template('Compressor')
+        cfg = (template.llm.generate_cfg or {}).copy() if template and hasattr(template, 'llm') else {}
+        
+        caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
+        ui_disabled_tools = None
+        
+        if caller_inst and hasattr(caller_inst, '_generate_cfg_override') and caller_inst._generate_cfg_override:
+            raw_dt = caller_inst._generate_cfg_override.get('disabled_tools')
+            if raw_dt:
+                # Could be a dict (per-agent format) or a flat list
+                if isinstance(raw_dt, dict):
+                    # Look up Compressor-specific disabled tools from per-agent dict.
+                    # Try exact match first, then case-insensitive fallback for robustness.
+                    ui_disabled_tools = raw_dt.get('Compressor', []) or []
+                    if not ui_disabled_tools:
+                        for key in raw_dt:
+                            if key.lower() == 'compressor':
+                                ui_disabled_tools = raw_dt[key] or []
+                                break
+                elif isinstance(raw_dt, (list, tuple)):
+                    # Flat list applies to all agents
+                    ui_disabled_tools = list(raw_dt)
+        
+        # Merge with defense-in-depth defaults
+        if ui_disabled_tools:
+            merged = merge_disabled_tools_for_auto_agent(
+                ui_disabled_tools, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS
+            )
         else:
-            # Defense-in-depth: even without operation_manager/session, apply defaults
-            template = agent_pool.get_template('Compressor')
-            if template and hasattr(template, 'llm'):
-                cfg = (template.llm.generate_cfg or {}).copy()
-                cfg['disabled_tools'] = sorted(DEFAULT_COMPRESSOR_DISABLED_TOOLS)  # Sort for deterministic ordering
-                comp_instance._generate_cfg_override = cfg
-            else:
-                logger.warning(
-                    "[COMPRESSION] Could not apply defense-in-depth disabled_tools for Compressor — "
-                    "template not available or missing llm attribute. Agent may have unrestricted tools."
-                )
+            merged = merge_disabled_tools_for_auto_agent(None, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS)
+        
+        cfg['disabled_tools'] = merged
+        
+        if template and hasattr(template, 'llm'):
+            comp_instance._generate_cfg_override = cfg
+        else:
+            logger.warning(
+                "[COMPRESSION] Could not apply defense-in-depth disabled_tools for Compressor — "
+                "template not available or missing llm attribute. Agent may have unrestricted tools."
+            )
         
         # Execute via engine.run() — handles LLM call, retries, streaming
         final_msgs = []
@@ -204,14 +217,14 @@ def invoke_compression_agent(
             # on the SAME thread as the caller. The caller holds the shared sequential slot.
             # This path skips acquisition entirely — the caller retains the slot.
             
-            # Get the caller instance from the pool (for logging/debugging)
-            caller_inst = agent_pool.get_instance(caller_name) if caller_name else None
+            # Get the caller instance from the pool (for slot status logging only)
+            caller_for_slot = agent_pool.get_instance(caller_name) if caller_name else None
             
             # Set skip flag so engine.run() bypasses slot acquisition
             comp_instance._skip_slot_acquire = True
             logger.debug(
                 f"[COMPRESSION_SLOT_BYPASS] Skipping slot acquire for Compressor - "
-                f"caller={caller_name}, caller_holds_slot={(getattr(caller_inst, '_slot_release', None) is not None) if caller_inst else False}"
+                f"caller={caller_name}, caller_holds_slot={(getattr(caller_for_slot, '_slot_release', None) is not None) if caller_for_slot else False}"
             )
             
             for resp in engine.run(comp_instance):
