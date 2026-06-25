@@ -169,6 +169,41 @@ class CompressionHandler:
                 # Always clear the queue — notification was "attempted" even if text is non-string
                 instance._pending_notifications = []
         return text
+
+    def _drain_tool_warnings(
+        self,
+        instance: 'AgentInstance',
+        text: str,
+        prepend: bool = False,
+    ) -> str:
+        """Drain generic tool warnings into a text string.
+
+        Called from execution_engine before constructing FUNCTION or USER messages.
+        If there are pending tool warnings (e.g., path resolution from extra folders),
+        they are appended to the result and queue cleared.
+
+        Args:
+            instance: Agent instance with _tool_warnings attribute
+            text: The raw content string (or any object convertible to str)
+            prepend: If True, warnings are prepended (for USER messages).
+                     If False (default), warnings are appended (for tool results).
+        Returns:
+            text with warnings added (or unchanged if no pending)
+        """
+        # Copy and clear the warnings list under lock, then do string ops outside the lock
+        with instance._compression_lock:
+            warnings = list(instance._tool_warnings)  # Guaranteed dataclass field (default_factory=list)
+            instance._tool_warnings = []
+
+        if warnings:
+            if not isinstance(text, str):
+                text = str(text)
+            warning_block = "\n\n".join(str(w) for w in warnings)
+            if prepend:
+                text = f"[TOOL WARNINGS]\n{warning_block}\n\n{text}"
+            else:
+                text = f"{text}\n\n[TOOL WARNINGS]\n{warning_block}"
+        return text
     
     # ── Logger Sync Helper (unified for all compression paths) ────────────────
     

@@ -27,6 +27,10 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
+
+# Thread-local storage for current instance name during tool execution.
+# Set by execution_engine before each tool call so _resolve_path can queue warnings.
+_thread_locals = threading.local()
 from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_HEURISTIC_MATCH_THRESHOLD
 from agent_cascade.log import logger
 from agent_cascade.tool_utils import (
@@ -124,6 +128,62 @@ def _check_tool_availability():
     grep_available = (grep_path is not None) and (os.name != 'nt')
     
     return rg_available, grep_available
+
+
+def _queue_tool_warning(pool, instance_name: Optional[str], warning_text: str) -> None:
+    """Queue a tool warning for the given agent instance.
+
+    Appends *warning_text* to the instance's _tool_warnings list so it can be
+    drained into the next tool response by execution_engine. Thread-safe via
+    the instance's _compression_lock (reentrant RLock). Dedup guard prevents
+    identical warnings from being queued multiple times in one drain cycle.
+
+    Args:
+        pool: AgentPool for looking up instances (or None — best-effort).
+        instance_name: Agent instance name (None → no-op).
+        warning_text: Warning string to queue.
+    """
+    if not instance_name or not pool:
+        return
+
+    try:
+        inst = pool.get_instance(instance_name)
+        if inst is not None:
+            with inst._compression_lock:
+                # Dedup guard — skip if exact same warning already queued (field is typed List[str])
+                if warning_text in inst._tool_warnings:
+                    return
+                inst._tool_warnings.append(warning_text)
+    except Exception:
+        # Non-critical — warnings are best-effort hints for the agent
+        logger.debug(f"Failed to queue tool warning for '{instance_name}'")
+        pass
+
+
+def _get_current_instance_name() -> Optional[str]:
+    """Get the current agent instance name from thread-local storage.
+
+    Set by execution_engine before each tool call via set_current_instance_name().
+    Returns None if not set (e.g., called outside tool execution context).
+    """
+    return getattr(_thread_locals, 'instance_name', None)
+
+
+def clear_current_instance_name() -> None:
+    """Clear the current instance name from thread-local storage.
+
+    Called after draining warnings to prevent stale references in subsequent calls.
+    """
+    _thread_locals.instance_name = None
+
+
+def set_current_instance_name(name: str) -> None:
+    """Set the current agent instance name in thread-local storage.
+
+    Called by execution_engine before each tool call so that _resolve_path
+    can queue warnings to the correct instance.
+    """
+    _thread_locals.instance_name = name
 
 
 class OperationManager:
@@ -483,8 +543,23 @@ class OperationManager:
         """Check if *path* is inside *container* using the cached containment check."""
         return _path_is_contained_cached(str(path), str(container))
 
-    def _resolve_path(self, path: str, mode: str = "ro") -> Path:
-        """Resolve a path to be within the allowed directories (security)."""
+    def _resolve_path(self, path: str, mode: str = "ro", instance_name: Optional[str] = None) -> Path:
+        """Resolve a path to be within the allowed directories (security).
+
+        Args:
+            path: The path string to resolve.
+            mode: Access mode — "ro" for read-only, "rw" for read-write.
+            instance_name: Agent instance name for queuing warnings when paths
+                resolve from extra work folders instead of base_dir. If None,
+                falls back to the thread-local current instance name.
+
+        Returns:
+            Resolved Path object within allowed directories.
+        """
+        # Resolve instance name: explicit param > thread-local > None
+        if instance_name is None:
+            instance_name = _get_current_instance_name()
+
         # Handle virtual /workspace/ prefix
         clean_path = path
         if clean_path.startswith('/workspace/'):
@@ -493,16 +568,33 @@ class OperationManager:
             clean_path = clean_path[len('workspace/'):]
         elif clean_path == '/workspace' or clean_path == 'workspace':
             clean_path = '.'
-        
-        # If the path is already absolute (e.g., an agent passing 
+
+        # If the path is already absolute (e.g., an agent passing
         # "N:\work\WD\AgentCascade" to access an extra work folder), use it directly
         # instead of joining with base_dir — on Windows, Path(base) / abs_path
         # replaces base entirely, which can cause security check mismatches.
         if Path(clean_path).is_absolute():
             resolved = Path(clean_path).resolve()
         else:
+            # Try base_dir first
             resolved = (self.base_dir / clean_path).resolve()
-        
+
+            # If not found in base_dir, try extra work folders (RW then RO)
+            if not resolved.exists():
+                for extra in self.extra_work_folders_rw:
+                    candidate = (extra / clean_path).resolve()
+                    if candidate.exists():
+                        _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' was not found in workspace. Resolved from extra RW folder ({extra}): {candidate}")
+                        resolved = candidate
+                        break
+                else:
+                    for extra in self.extra_work_folders_ro:
+                        candidate = (extra / clean_path).resolve()
+                        if candidate.exists():
+                            _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' was not found in workspace. Resolved from extra RO folder ({extra}): {candidate}")
+                            resolved = candidate
+                            break
+
         # 1. Base directory is always RW (and thus RO)
         if self._path_is_contained(resolved, self.base_dir):
             return resolved

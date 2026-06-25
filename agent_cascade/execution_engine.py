@@ -50,6 +50,7 @@ from .compression.handler import CompressionHandler
 from .tool_dispatcher import ToolDispatcher
 from .stream_publisher import StreamPublisher
 from .loop_detection import detect_loop as _canonical_detect_loop, LoopDetectedError
+from .operation_manager import set_current_instance_name, clear_current_instance_name
 
 
 # ── SleepAction Enum (Phase 3.1) ───────────────────────────────────────────────
@@ -589,6 +590,8 @@ class ExecutionEngine:
             first_msg = processed_messages[0]
             if isinstance(first_msg.content, str):
                 first_msg.content = self.compression_handler._drain_pending_into_user_message(instance, first_msg.content)
+                # Also drain generic tool warnings into USER messages (prepended)
+                first_msg.content = self.compression_handler._drain_tool_warnings(instance, first_msg.content, prepend=True)
 
         with instance._compression_lock:
             for msg in processed_messages:
@@ -1906,6 +1909,9 @@ class ExecutionEngine:
             function_id = extra_data.get('function_id')
 
             try:
+                # Set current instance name in thread-local for _resolve_path warnings
+                set_current_instance_name(inst_name)
+
                 try:
                     # Phase 4.3: Delegate to ToolDispatcher
                     tool_result = self.tool_dispatcher.execute_tool(
@@ -1966,6 +1972,18 @@ class ExecutionEngine:
                 except Exception:
                     pass
 
+                # Drain pending compression notifications and tool warnings (always runs even on exceptions)
+                # Only drain when tool_result is defined to avoid errors from early failures
+                if self.compression_handler:
+                    try:
+                        tool_result = self.compression_handler._drain_pending_into_tool_result(instance, tool_result)
+                        tool_result = self.compression_handler._drain_tool_warnings(instance, tool_result)
+                    except Exception:
+                        pass  # Don't let drain failures interfere with normal flow
+
+                # Clear thread-local instance name after draining to prevent stale references across concurrent calls
+                clear_current_instance_name()
+
             # Track compress_context execution
             if tool_name == 'compress_context':
                 inst = self.pool.get_instance(inst_name)
@@ -1975,10 +1993,6 @@ class ExecutionEngine:
                 conv = self.pool.get_conversation(inst_name)
                 if conv and not validate_message_pool(conv, inst_name):
                     logger.error(f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
-
-            # Drain pending compression notifications into this tool result (in-tool-response pattern)
-            if self.compression_handler:
-                tool_result = self.compression_handler._drain_pending_into_tool_result(instance, tool_result)
 
             # Build function result message — include function_id and tool_success per OpenAI spec
             # function_id was extracted BEFORE _execute_tool call above

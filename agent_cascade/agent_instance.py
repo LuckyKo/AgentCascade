@@ -149,6 +149,11 @@ class AgentInstance:
     # merged with the new response to create a single concatenated message.
     _continue_saved_msg: Optional[Message] = field(default=None)  # Temporary storage for Continue button merge
 
+    # ── Generic Tool Warning Queue ────────────────────────────────────────────
+    # Separate from _pending_notifications (compression-specific). Used by tools
+    # like path resolution to queue warnings that are drained into tool results.
+    _tool_warnings: List[str] = field(default_factory=list)  # Generic warning queue for tool responses
+
     # ── Centralized Message Mutation API (Phase 3) ───────────────────────
     # These methods encapsulate ALL conversation mutations, keeping cached lists
     # in sync and invalidating caches according to the update schema from todo.md:
