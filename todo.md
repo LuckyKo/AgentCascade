@@ -21,7 +21,6 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] make cmd_shell pop open a console window in the back so the user can inspect or interact with it if needed.
 [ ] improve list_dir tool to be as useful and even more than any shell command
 [ ] add a banner above the user chat entry that shows queued messages (with an X to dismiss each one individually)
-[ ] implement generic syntax_check tool, a global tool that auto-detects code type and verifies syntax for all kinds of common used languages (similar to python_compile). takes as argument path to file only, autodetects language and returns Valid or the error. **[DONE]**
 [ ] change USE_PREV_ARG system to a argument and (certain) tool output caching system. all tool arguments and certain outputs (like the result of a call_agent) longer than a certain threshold (line 1000 chars) get cached in a pool and can be inserted with {**USE_CHACHED_ENTRY_N**} in other tool arguments. system_info will display the truncated state of the cache pool. we'll use a rolling index to overwrite old entries in the pool with new ones. the system will use a toggle on/off in settings.
 
 # Message stack update rules:
