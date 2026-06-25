@@ -154,7 +154,7 @@ class TestComputeDiscardCountToolPairs:
     """Test that discard count respects ASSISTANT→FUNCTION pair boundaries."""
 
     def test_no_adjustment_when_cut_is_clean(self):
-        """Cut falls on ASSISTANT with tool call → includes its FUNCTION response too."""
+        """Cut falls on first ASSISTANT of a pair → safe split point (rule 3)."""
         # [A0, F0, A1, F1, A2, F2, A3, F3]  fraction=0.5 → discard=4
         active = [
             _make_assistant_with_fc("A0"), _make_function_result("F0"),
@@ -163,9 +163,9 @@ class TestComputeDiscardCountToolPairs:
             _make_assistant_with_fc("A3"), _make_function_result("F3"),
         ]
         count = compute_discard_count(active, fraction=0.5, force=False)
-        # int(8*0.5)=4; min(4, 6)=4; position 4 is A2 (has tool_call call_2)
-        # function_id matching finds F2 at pos 5 → discard advances past both A2 and F2 = 6
-        assert count == 6
+        # int(8*0.5)=4; min(4, 6)=4; position 4 is A2 (first of pair, prev=F1)
+        # Rule 3: first A of independent pair is safe split point → discard stays at 4
+        assert count == 4
 
     def test_adjusts_for_single_pair_at_boundary(self):
         """Cut lands on ASSISTANT with function_call → include its FUNCTION response."""
@@ -180,7 +180,7 @@ class TestComputeDiscardCountToolPairs:
         assert count == 4
 
     def test_adjusts_for_pair_split_at_exact_boundary(self):
-        """Cut lands on ASSISTANT with function_call → discard includes its pair."""
+        """Cut lands on first ASSISTANT of a pair → safe split point (rule 3)."""
         # [A0, F0, A1, F1, A2]  fraction=0.5 → discard=2 (lands on A1)
         active = [
             _make_assistant_with_fc("A0"), _make_function_result("F0"),
@@ -188,10 +188,9 @@ class TestComputeDiscardCountToolPairs:
             _make_assistant_with_fc("A2"),
         ]
         count = compute_discard_count(active, fraction=0.5, force=False)
-        # int(5*0.5)=2; min(2, 3)=2; position 2 is A1 (has tool_call call_1)
-        # refinement advances past F1 → discard=4, but that's > max_discard=3
-        # post-validation finds split at pos 3 (F1 matches A1 discarded) → returns -1
-        assert count == -1  # Compression not possible without splitting the pair
+        # int(5*0.5)=2; min(2, 3)=2; position 2 is A1 (first of pair, prev=F0)
+        # Rule 3: first A of independent pair is safe split point → discard stays at 2
+        assert count == 2
 
     def test_adjusts_for_multiple_consecutive_pairs(self):
         """Multiple consecutive ASSISTANT→FUNCTION chains at boundary."""
@@ -202,9 +201,9 @@ class TestComputeDiscardCountToolPairs:
             _make_assistant_with_fc("A2"), _make_function_result("F2"),
         ]
         count = compute_discard_count(active, fraction=0.4, force=False)
-        # int(6*0.4)=2; min(2, 4)=2; position 2 is A1 (has tool_call call_2)
-        # function_id matching finds F1 at pos 3 → discard advances past both = 4
-        assert count == 4
+        # int(6*0.4)=2; min(2, 4)=2; position 2 is A1 (first of pair, prev=F0)
+        # Rule 3: first A of independent pair is safe split point → discard stays at 2
+        assert count == 2
 
     def test_native_tool_calls_adjustment(self):
         """Native mode: tool_index in extra dict triggers adjustment."""
@@ -261,9 +260,10 @@ class TestComputeDiscardCountToolPairs:
             _make_assistant_with_fc("A2"), _make_function_result("F2"),
         ]
         count = compute_discard_count(active, fraction=0.5, force=True)
-        # int(6*0.5)=3; max(1, 3)=3; position 3 is F1 → refinement advances past A2+F2 chain
-        # returns -1 because tool chains extend past keep zone (only 3 pairs, no clean split)
-        assert count == -1
+        # int(6*0.5)=3; max(1, min(3, 4))=3; position 3 is F1 (rule 1: skip past Fs)
+        # Pos 3 is F → discard advances to 4. Pos 4 is A2 (first of pair, rule 3 safe).
+        # discard=4 ≤ max_discard=4 → valid split at 4
+        assert count == 4
 
     def test_preserves_tail_messages(self):
         """Tail messages are preserved even with tool-call pairs."""
@@ -498,10 +498,11 @@ class TestEdgeCases:
             _make_assistant_with_fc("A2"), _make_function_result("F2"),
             _make_assistant_with_fc("A3"), _make_function_result("F3"),
         ]
-        # fraction=0.4 → int(8*0.4)=3; position 3 is F1 → include it, continue scanning
-        # position 4 is A2 (has tool_call) → advance past A2 and F2 → 6
+        # fraction=0.4 → int(8*0.4)=3; position 3 is F1 (rule 1: skip past Fs)
+        # Pos 3 is F, pos 4 is A2 → discard advances to 4.
+        # Pos 4 is A2 (first of pair, prev=F1, rule 3 safe) → discard stays at 4
         count = compute_discard_count(active, fraction=0.4, force=False)
-        assert count == 6
+        assert count == 4
 
 
 # ──────────────────────────────────────────────

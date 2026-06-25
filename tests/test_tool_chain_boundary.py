@@ -72,7 +72,7 @@ class TestToolChainBoundaryProtection:
         assert discard == -1
 
     def test_adjustment_with_function_at_boundary(self):
-        """Boundary falls on FUNCTION result — should include paired tool call."""
+        """Boundary falls on FUNCTION result — no clean split exists, returns -1."""
         msgs = [
             _make_msg(USER, "hello"),
             _make_msg(ASSISTANT, "thinking", function_call="read_file"),  # tool call at index 1
@@ -81,7 +81,7 @@ class TestToolChainBoundaryProtection:
         ]
         # fraction=0.5 -> int(4*0.5)=2, not force -> min(2, 4-2)=2
         discard = compute_discard_count(msgs, 0.5, False)
-        assert discard == 2
+        assert discard == -1
 
     def test_adjustment_extends_when_tail_guard_allows(self):
         """When tail guard allows, extend discard to include the FUNCTION result."""
@@ -108,7 +108,7 @@ class TestToolChainBoundaryProtection:
         assert discard == 2
 
     def test_adjustment_with_consecutive_function_results(self):
-        """Multiple consecutive FUNCTION results before the tool call."""
+        """Multiple consecutive FUNCTION results — no clean split exists, returns -1."""
         msgs = [
             _make_msg(ASSISTANT, "thinking", function_call="read_file"),  # tool call at index 0
             _make_msg(FUNCTION, "result 1"),  # index 1
@@ -116,21 +116,21 @@ class TestToolChainBoundaryProtection:
             _make_msg(ASSISTANT, "done"),
         ]
         discard = compute_discard_count(msgs, 0.5, False)
-        assert discard == 2
+        assert discard == -1
 
     def test_no_adjustment_at_end_of_active_set(self):
-        """If discard equals len(active_set), there's no message at the boundary."""
+        """With only an A→F pair and tail_keep=2, no valid compression exists."""
         msgs = [
             _make_msg(ASSISTANT, "thinking", function_call="read_file"),
             _make_msg(FUNCTION, "result"),
         ]
         # fraction=1.0 -> int(2*1.0)=2, force -> max(1, 2)=2
-        # refinement advances past F to pos 2 (end), returns min(2, 1+1)=2 but clamp=1
+        # refinement advances past F to pos 2 (end), returns unclamped value exceeding keep zone
         discard = compute_discard_count(msgs, 1.0, True)
-        assert discard == 1
+        assert discard == -1
 
     def test_dict_messages_work(self):
-        """Tool chain detection works with dict messages too."""
+        """Tool chain detection works with dict messages — returns -1 when no clean split."""
         msgs = [
             {"role": "user", "content": "hello"},
             {"role": "assistant", "content": "thinking", "function_call": {"name": "read_file"}},  # tool call at index 1
@@ -138,24 +138,24 @@ class TestToolChainBoundaryProtection:
             {"role": "user", "content": "next"},
         ]
         discard = compute_discard_count(msgs, 0.5, False)
-        assert discard == 2
+        assert discard == -1
 
     def test_force_mode_adjustment(self):
-        """Force mode also respects tool chain boundaries."""
+        """Force mode also returns -1 when tool chain boundary has no clean split."""
         msgs = [
             _make_msg(ASSISTANT, "thinking", function_call="shell_cmd"),
             _make_msg(FUNCTION, "output", extra={'function_id': 'call_shell_cmd'}),  # boundary, matches ASSISTANT above
             _make_msg(ASSISTANT, "done"),
         ]
         discard = compute_discard_count(msgs, 0.3, True)
-        assert discard == 2
+        assert discard == -1
 
     def test_adjustment_respects_tail_guard(self):
-        """When tail guard prevents extension, reduce discard to exclude FUNCTION result."""
+        """Returns -1 when tail guard prevents valid compression at tool boundary."""
         msgs = [
             _make_msg(ASSISTANT, "thinking", function_call="read_file"),
             _make_msg(FUNCTION, "result"),  # boundary would be here
             _make_msg(ASSISTANT, "done"),  # only 1 message left if we include this
         ]
         discard = compute_discard_count(msgs, 0.6, False)
-        assert discard == 1
+        assert discard == -1

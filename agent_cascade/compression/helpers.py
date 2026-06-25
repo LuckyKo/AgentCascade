@@ -134,70 +134,57 @@ def _count_tool_responses(msg) -> int:
 def _refine_tool_call_boundary(active_set, discard, max_discard):
     """
     Advance the discard boundary past any split ASSISTANT→FUNCTION tool-call pairs.
-    
-    Strategy: identify all "protected ranges" (contiguous blocks of matching
-    A...A F...F chains) and then advance the split point past any range it falls in.
-    
-    Handles three patterns:
-    1. Sequential: [A(fc), F] — assistant followed by function result
-    2. Batched: [A(fc), A(fc), F, F] — multiple assistants then their results
-    3. Interleaved: [A(fc), F, A(fc), F] — alternating pairs
-    
+
+    Key insight: the split happens BEFORE msg[discard]. So msg[discard] is the first
+    message in the keep zone. The first A of any pair/chain is always safe (its Fs
+    follow it in the keep zone). Only intermediate As in a batched chain and orphaned
+    Fs are unsafe.
+
+    Rules (no ID matching needed):
+      1) Landed on FUNCTION — skip past consecutive FUNCTIONs (their matching A is
+         already discarded, so these Fs would be orphans if we kept them split).
+      2) Landed on ASSISTANT with tool calls AND the previous message is also an
+         ASSISTANT with tool calls — this is an intermediate A in a batched chain
+         [A(tc), A(tc), F, F], unsafe. Skip past the remaining As then their Fs.
+      3) Everything else (first A of a pair/chain, plain messages) — safe split point.
+
     Args:
         active_set: List of messages being compressed.
         discard: Current discard count (cut point).
         max_discard: Maximum allowed discard count.
-    
+
     Returns:
         Refined discard count that doesn't split tool-call chains.
     """
     # Helper to get role from a message (works with both dict and object)
     def _get_role(msg):
         return msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-    
-    # ── Advance past A+F chains at the boundary ──
-    while discard < max_discard:
+
+    # Use <= so we also check the position at exactly max_discard — if it's an unsafe
+    # boundary (FUNCTION or intermediate A), we advance past it even though that will
+    # exceed max_discard. The caller's post-validation will then detect the keep zone breach.
+    while discard <= max_discard:
         msg = active_set[discard]
-        
-        if _has_pending_tool_calls(msg):
-            # Collect function IDs from ALL consecutive As starting here (beyond max too)
-            fc_id_set = set()
-            scan = discard
-            while scan < len(active_set) and _has_pending_tool_calls(active_set[scan]):
-                for fid in _get_function_call_ids(active_set[scan]):
-                    fc_id_set.add(fid)
-                scan += 1
-            
-            # Advance past consecutive As (up to max_discard)
-            while discard < max_discard and _has_pending_tool_calls(active_set[discard]):
+
+        if _get_role(msg) == FUNCTION:
+            # Rule 1: landed on FUNCTION — skip past consecutive Fs
+            while discard < len(active_set) and _get_role(active_set[discard]) == FUNCTION:
                 discard += 1
-            
-            # Then advance past FUNCTION results matching our collected IDs,
-            # plus any extra consecutive Fs that share the same block
-            while discard < len(active_set):
-                m = active_set[discard]
-                if _get_role(m) != FUNCTION:
-                    break
-                res_id = _get_function_result_id(m)
-                # Include this F if it matches one of our consumed As,
-                # or if we're still within max_discard (same block)
-                if discard < max_discard or (res_id and res_id in fc_id_set):
-                    discard += 1
-                else:
-                    break
-        elif _get_role(active_set[discard]) == FUNCTION:
-            # Landed on a function result — advance past all consecutive F results
-            while discard < max_discard:
-                m = active_set[discard]
-                if _get_role(m) != FUNCTION:
-                    break
+
+        elif _has_pending_tool_calls(msg) and discard > 0 and _has_pending_tool_calls(active_set[discard - 1]):
+            # Rule 2: landed on intermediate A in a batched chain — skip past remaining As then their Fs
+            while discard < len(active_set) and _has_pending_tool_calls(active_set[discard]):
                 discard += 1
+            while discard < len(active_set) and _get_role(active_set[discard]) == FUNCTION:
+                discard += 1
+
         else:
-            # Plain message (USER, ASSISTANT without tool calls) — clean boundary
+            # Rule 3: safe split point (first A of pair/chain, or plain message)
             break
-    
-    # Clamp to max_discard — refinement cannot exceed the keep zone
-    return min(discard, max_discard)
+
+    # Return the unclamped value — the caller will clamp and check if refinement
+    # pushed past max_discard (which triggers post-validation).
+    return discard
 
 
 def compute_discard_count(active_set, fraction, force):
@@ -232,42 +219,19 @@ def compute_discard_count(active_set, fraction, force):
         return 0
     
     # ── Refine: avoid splitting ASSISTANT(tool_call) → FUNCTION(result) pairs ──
-    tail_keep = 2 if not force else 1
+    # Always keep at least 2 tail messages regardless of mode. In force mode the
+    # difference is only that we guarantee at least 1 discard (above), not that
+    # we squeeze more out of the tail.
+    tail_keep = 2
     max_discard = len(active_set) - tail_keep
     
+    # Refinement advances discard forward when it encounters unsafe boundaries.
+    # If final discard exceeds max_discard, compression is invalid at this ratio.
     discard = _refine_tool_call_boundary(active_set, discard, max_discard)
-    
-    # Post-refinement validation: check for splits in the tail and advance if found
-    # This catches cases where a large batched chain [A,A,...A,F,F,...F] was split by max_discard
-    while discard < len(active_set):
-        found_split = False
-        for i in range(discard, len(active_set)):
-            m = active_set[i]
-            if isinstance(m, dict):
-                role = m.get('role', '')
-            else:
-                role = getattr(m, 'role', '')
-            if role == FUNCTION:
-                fnid = _get_function_result_id(m)
-                if fnid:
-                    # Search backward for matching ASSISTANT
-                    for j in range(i - 1, -1, -1):
-                        aids = _get_function_call_ids(active_set[j])
-                        if fnid in aids:
-                            if j < discard:
-                                # Split found: advance past this F
-                                discard += 1
-                                found_split = True
-                                break
-                    if found_split:
-                        break
-        
-        if not found_split:
-            break
-    
-    # If discard landed in the keep zone (last tail_keep messages), compression at this ratio is invalid
+
+    # If discard went past the keep zone boundary (len - 2), no clean split exists
     if discard > len(active_set) - tail_keep:
-        return -1  # Signal: tool chains extend past max_discard with no clean split
+        return -1  # Signal: tool chains extend past the keep zone with no clean split
     
     return discard
 
