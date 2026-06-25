@@ -50,8 +50,15 @@ class CodeMap(BaseTool):
             except ValueError as e:
                 return f"Error: {str(e)}"
         else:
+            # Fallback if no agent_pool (same pattern as read_file)
             from agent_cascade.settings import DEFAULT_WORKSPACE
-            abs_path = Path(DEFAULT_WORKSPACE) / rel_path
+            base_dir = Path(DEFAULT_WORKSPACE)
+            if Path(rel_path).is_absolute():
+                abs_path = Path(rel_path).resolve()
+            else:
+                abs_path = (base_dir / rel_path).resolve()
+            if not str(abs_path).startswith(str(base_dir.resolve())):
+                return f"Path '{rel_path}' is outside the allowed directory"
 
         if not abs_path.exists():
             return f"Error: File not found at {rel_path}"

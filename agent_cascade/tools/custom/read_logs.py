@@ -66,8 +66,15 @@ class ReadLogs(BaseTool):
             except ValueError as e:
                 return f"Error: {str(e)}"
         else:
+            # Fallback if no agent_pool (same pattern as read_file)
             from agent_cascade.settings import DEFAULT_WORKSPACE
-            file_path = Path(DEFAULT_WORKSPACE) / log_file
+            base_dir = Path(DEFAULT_WORKSPACE)
+            if Path(log_file).is_absolute():
+                file_path = Path(log_file).resolve()
+            else:
+                file_path = (base_dir / log_file).resolve()
+            if not str(file_path).startswith(str(base_dir.resolve())):
+                return f"Path '{log_file}' is outside the allowed directory"
 
         if not file_path.exists() or not file_path.is_file():
             return f"Error: Log file '{log_file}' not found."
