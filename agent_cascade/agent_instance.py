@@ -357,10 +357,8 @@ class AgentInstance:
             self._cached_token_count = 0
             self._last_token_count_conversation_length = -1
             self._last_actual_token_count = 0
-            if hasattr(self, '_last_force_compress_time'):
-                self._last_force_compress_time = 0.0
-            if hasattr(self, '_force_compress_count'):
-                self._force_compress_count = 0
+            self._last_force_compress_time = 0.0
+            self._force_compress_count = 0
 
     def clear_working_set_cache(self) -> None:
         """Clear working set cache without touching conversation.

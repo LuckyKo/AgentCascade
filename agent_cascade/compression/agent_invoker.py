@@ -280,8 +280,8 @@ def invoke_compression_agent(
         raise RuntimeError(f"Exception occurred while generating summary: {e}") from e
     finally:
         # Always clean up compression agent state when done
-        if comp_state_key in agent_pool.instance_state:
-            with agent_pool._execution._state_lock:
+        with agent_pool._execution._state_lock:
+            if comp_state_key in agent_pool.instance_state:
                 agent_pool.instance_state[comp_state_key]['active'] = False
                 try:
                     agent_pool.active_stack_remove(comp_state_key)

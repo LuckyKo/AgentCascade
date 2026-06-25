@@ -1161,6 +1161,10 @@ class AgentPool:
                 existing._slot_release = None
                 # Reset loop detection suppression flag (one-turn cooldown shouldn't persist)
                 existing._suppress_loop_detection_next_turn = False
+                # Clear pending notifications from previous session
+                existing._pending_notifications = []
+                # Clear tool warnings from previous session
+                existing._tool_warnings = []
                 # Reset state to IDLE for loaded sessions (they're not actively running)
                 from agent_cascade.agent_instance import AgentState
                 existing.state = AgentState.IDLE
