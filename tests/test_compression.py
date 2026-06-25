@@ -227,11 +227,11 @@ class TestComputeDiscardCount:
         assert count == 8
 
     def test_fraction_one_force(self):
-        """fraction=1.0 with force=True → discards all."""
+        """fraction=1.0 with force=True → discards all but keeps 2 tail messages."""
         active = list(range(10))
         count = compute_discard_count(active, fraction=1.0, force=True)
-        # int(10*1.0) = 10; max(1, 10) = 10
-        assert count == 10
+        # int(10*1.0)=10; min(10, len-2=8)=8; max(1, 8)=8 — keeps ≥2 tail even in force mode
+        assert count == 8
 
     def test_small_active_set_no_force(self):
         """Small active set without force → discard 1 (since len-2=1)."""
@@ -617,7 +617,9 @@ class TestCompressContextFailurePaths:
         )
 
         assert result.success is False
-        assert "not enough messages to compress" in (result.error or "").lower()
+        # Error message changed to be more specific about active set size
+        assert "too small" in (result.error or "").lower() and \
+               "at least 3" in (result.error or "").lower(), f"Got: {result.error}"
 
 
 # ──────────────────────────────────────────────
@@ -1144,22 +1146,25 @@ class TestTokenGuard:
             )
 
         assert result.success is False
-        assert "not enough messages to compress" in (result.error or "").lower()
+        # Error message changed: active set too small guard fires before token check
+        assert "too small" in (result.error or "").lower() and \
+               "at least 3" in (result.error or "").lower(), f"Got: {result.error}"
 
     def test_compresses_when_small_but_many_tokens(self):
-        """<3 messages but >=200 tokens → compression proceeds past the token guard.
+        """Small active set with ≥3 messages → compression proceeds past the token guard.
 
-        With only 2 active messages, compute_discard_count returns 0 without force,
-        so we use force=True to demonstrate the token guard is bypassed.
+        The 'too small' guard fires first (<3 active messages), so we need ≥3 active msgs.
+        With 3 active messages and many tokens, force=True ensures discard_count ≥ 1.
         """
         pool = MockAgentPool(history=[
             _make_msg(SYSTEM, "System"),
-            _make_msg(USER, "x" * 100),  # Long content
+            _make_msg(USER, "x" * 100),   # Long content
             _make_msg("assistant", "y" * 100),
+            _make_msg(USER, "z" * 50),    # Extra message → 3 active messages (≥3 guard passes)
         ])
 
         with patch("agent_cascade.utils.tokenization_qwen.count_tokens") as mock_count:
-            mock_count.return_value = 150  # 2 msgs * 150 = 300 >= 200
+            mock_count.return_value = 150  # Each msg counts as 150 tokens
 
             with patch("agent_cascade.compression.core.invoke_compression_agent") as mock_invoke:
                 mock_invoke.return_value = "Summary"
@@ -1169,10 +1174,9 @@ class TestTokenGuard:
                     target_agent_name="TestAgent",
                     fraction=0.5,
                     mode="auto",
-                    force=True,  # Needed because only 2 msgs → discard_count=0 without force
+                    force=True,  # Needed because small set → discard_count could be 0 without force
                 )
 
-        # Should succeed because tokens >= 200 (token guard bypassed) and force=True
         assert result.success is True
 
 

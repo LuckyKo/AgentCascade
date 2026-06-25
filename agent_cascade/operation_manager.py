@@ -748,12 +748,9 @@ class OperationManager:
                                 else:
                                     line_num = line_num_data
                                 
-                                # Extract matched text from submatches (this is the key fix!)
-                                submatches = data.get('submatches', [])
-                                if submatches:
-                                    match_text = submatches[0].get('match', {}).get('text', '')
-                                else:
-                                    match_text = data.get('lines', {}).get('text', '')
+                                # Use full line text to preserve whitespace (M3 fix)
+                                # submatches only contains the matched portion, which strips leading/trailing whitespace
+                                match_text = data.get('lines', {}).get('text', '')
                                 
                                 normalized_path = file_path.replace('\\', '/')
                                 

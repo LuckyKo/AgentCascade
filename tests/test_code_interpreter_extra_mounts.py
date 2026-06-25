@@ -445,8 +445,15 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
         # Mock subprocess.run to simulate Docker success + container running check
         def mock_subprocess_run(*args, **kwargs):
             cmd = args[0] if args else kwargs.get('args', [])
+            # docker rm -f — clean up leftover containers (called before docker run)
+            if isinstance(cmd, list) and 'docker' in cmd and 'rm' in cmd:
+                return type('Result', (), {
+                    'returncode': 0,
+                    'stdout': '',
+                    'stderr': ''
+                })()
             # docker run — success
-            if isinstance(cmd, list) and 'docker' in cmd and 'run' in cmd:
+            elif isinstance(cmd, list) and 'docker' in cmd and 'run' in cmd:
                 return type('Result', (), {
                     'returncode': 0,
                     'stdout': 'abc123_container_id',
@@ -494,7 +501,14 @@ class TestPathMappingWrittenAfterDockerSuccess(unittest.TestCase):
         # Mock subprocess.run: docker run succeeds, but docker ps fails (container not running)
         def mock_subprocess_run(*args, **kwargs):
             cmd = args[0] if args else kwargs.get('args', [])
-            if isinstance(cmd, list) and 'docker' in cmd and 'run' in cmd:
+            # docker rm -f — clean up leftover containers (called before docker run)
+            if isinstance(cmd, list) and 'docker' in cmd and 'rm' in cmd:
+                return type('Result', (), {
+                    'returncode': 0,
+                    'stdout': '',
+                    'stderr': ''
+                })()
+            elif isinstance(cmd, list) and 'docker' in cmd and 'run' in cmd:
                 return type('Result', (), {
                     'returncode': 0,
                     'stdout': 'abc123_container_id',

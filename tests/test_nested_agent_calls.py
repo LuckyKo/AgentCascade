@@ -207,10 +207,12 @@ class TestBuildResourcesBlockFallback:
         
         result = _build_resources_block(mock_pool, tmpl, instance=inst)
         
-        # override_tool should NOT appear (disabled by instance override)
+        # Both tools are disabled: resolve_disabled_tools_for_agent unions all layers.
+        # Instance override disables override_tool, template config disables template_tool.
         assert "override_tool" not in result
-        # template_tool SHOULD appear (only template disables it, but override takes precedence)
-        assert "template_tool" in result
+        assert "template_tool" not in result
+        # call_agent should appear (not disabled by either layer)
+        assert "call_agent" in result
 
     def test_no_llm_no_override(self):
         """Template with no llm and no instance override should work fine."""
@@ -375,63 +377,99 @@ class TestDisabledToolsMergeOnSettingsPropagation:
 # ──────────────────────────────────────────────
 
 class TestExecuteAgentSyncExceptionHandling:
-    """Test that _execute_agent_sync returns clean error strings instead of raising."""
+    """Test that _create_and_run_agent handles exceptions with proper cleanup (replaces old _execute_agent_sync tests)."""
 
-    def test_create_and_run_raises_returns_error_string(self):
-        """When _create_and_run_agent raises, _execute_agent_sync should return an error string."""
+    def test_create_and_run_raises_cleans_up_active_stack(self):
+        """When _create_and_run_agent's internal execution raises, the active stack should be cleaned up."""
         from agent_cascade.execution_engine import ExecutionEngine
 
         mock_pool = MagicMock()
         mock_pool.templates = {"test_agent": MagicMock()}
         mock_pool.stopped = False
+        mock_pool.is_instance_terminated = MagicMock(return_value=False)
+        
+        # Set up active_stack tracking
+        mock_execution = MagicMock()
+        mock_execution.active_stack = []
+        mock_execution._state_lock = MagicMock()
+        mock_execution._state_lock.__enter__ = MagicMock(return_value=None)
+        mock_execution._state_lock.__exit__ = MagicMock(return_value=False)
+        mock_pool._execution = mock_execution
         
         engine = ExecutionEngine(mock_pool)
         
-        # Patch _create_and_run_agent to raise
-        with patch.object(engine, '_create_and_run_agent', side_effect=ValueError("Test error")):
-            result = engine._execute_agent_sync(
-                agent_class="test_agent",
-                instance_name="worker1",
-                args={"task": "do something"},
-                caller_history=[],
-                caller="main",
-                nest_depth=0,
-            )
+        # Mock lifecycle manager and stream publisher
+        engine.lifecycle = MagicMock()
+        engine.lifecycle.find_or_create_instance = MagicMock(return_value=(MagicMock(), False))
+        engine.lifecycle.build_system_message = MagicMock(return_value=MagicMock())
+        engine.lifecycle.build_task_message = MagicMock(return_value=MagicMock())
+        engine.lifecycle.initialize_conversation = MagicMock(return_value=[])
+        engine.lifecycle.propagate_settings = MagicMock(return_value=None)
+        engine.stream_publisher = MagicMock()
         
-        # Should return a clean error string, not raise
-        assert isinstance(result, str)
-        assert "Error running agent 'worker1'" in result
-        assert "Test error" in result
+        # Patch engine.run() to raise an exception mid-execution
+        with patch.object(engine, 'run', side_effect=ValueError("Test error")):
+            with pytest.raises(ValueError, match="Test error"):
+                engine._create_and_run_agent(
+                    agent_class="test_agent",
+                    instance_name="worker1",
+                    args={"task": "do something"},
+                    caller="main",
+                    nest_depth=0,
+                )
+        
+        # Verify active stack was cleaned up (worker1 should not be in active_stack)
+        assert not any(name == "worker1" for name, _ in mock_execution.active_stack), \
+            "Active stack should be cleaned up on exception"
 
     def test_endpoint_slot_released_on_exception(self):
-        """Endpoint slot should be released even when _create_and_run_agent raises."""
+        """Endpoint slot should be released even when engine.run() raises."""
         from agent_cascade.execution_engine import ExecutionEngine
 
         mock_pool = MagicMock()
         mock_pool.templates = {"test_agent": MagicMock()}
+        mock_pool.stopped = False
+        mock_pool.is_instance_terminated = MagicMock(return_value=False)
         
         release_called = []
         def fake_acquire(*args):
             return lambda: release_called.append(True)
         
         mock_execution = MagicMock()
+        mock_execution.active_stack = []
+        mock_execution._state_lock = MagicMock()
+        mock_execution._state_lock.__enter__ = MagicMock(return_value=None)
+        mock_execution._state_lock.__exit__ = MagicMock(return_value=False)
         mock_execution._acquire_slot = fake_acquire
         mock_pool._execution = mock_execution
         
         engine = ExecutionEngine(mock_pool)
         
-        with patch.object(engine, '_create_and_run_agent', side_effect=RuntimeError("fail")):
-            engine._execute_agent_sync(
-                agent_class="test_agent",
-                instance_name="worker1",
-                args={"task": "do something"},
-                caller_history=[],
-                caller="main",
-                nest_depth=0,
-            )
+        # Mock lifecycle manager and stream publisher
+        engine.lifecycle = MagicMock()
+        mock_inst = MagicMock()
+        mock_inst._nest_depth = 0
+        engine.lifecycle.find_or_create_instance = MagicMock(return_value=(mock_inst, False))
+        engine.lifecycle.build_system_message = MagicMock(return_value=MagicMock())
+        engine.lifecycle.build_task_message = MagicMock(return_value=MagicMock())
+        engine.lifecycle.initialize_conversation = MagicMock(return_value=[])
+        engine.lifecycle.propagate_settings = MagicMock(return_value=None)
+        engine.stream_publisher = MagicMock()
         
-        # Verify endpoint slot was released despite exception
-        assert len(release_called) == 1
+        # Patch engine.run() to raise an exception mid-execution
+        with patch.object(engine, 'run', side_effect=RuntimeError("fail")):
+            with pytest.raises(RuntimeError, match="fail"):
+                engine._create_and_run_agent(
+                    agent_class="test_agent",
+                    instance_name="worker1",
+                    args={"task": "do something"},
+                    caller="main",
+                    nest_depth=0,
+                )
+        
+        # Verify active stack was cleaned up despite exception
+        assert not any(name == "worker1" for name, _ in mock_execution.active_stack), \
+            "Active stack should be cleaned up on exception"
 
 
 # ──────────────────────────────────────────────

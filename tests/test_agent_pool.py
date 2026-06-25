@@ -119,7 +119,7 @@ class TestDismissal:
                 len(agent_pool.get_conversation("ghost")) == 0
 
     def test_dismiss_active_agent_sets_stop_flag(self, agent_pool):
-        """Dismissing an active agent should set the stopped flag."""
+        """Dismissing an active agent should remove it from the pool (Bug5 Fix #1: no global stop flag)."""
         from agent_cascade.agent_instance import AgentInstance, AgentState
         import time
         inst = AgentInstance(
@@ -137,7 +137,9 @@ class TestDismissal:
         agent_pool.instances["busy_agent"] = inst
         assert not agent_pool.stopped
         agent_pool.dismiss_instance("busy_agent")
-        assert agent_pool.stopped is True
+        # Bug5 Fix: dismiss_instance no longer sets global stopped flag — it only removes the instance
+        assert "busy_agent" not in agent_pool.instances, \
+            "dismiss_instance should remove the active agent from the pool"
 
     def test_dismiss_fires_callbacks(self, agent_pool):
         """Dismiss callbacks should be fired via _fire_on_dismissed."""

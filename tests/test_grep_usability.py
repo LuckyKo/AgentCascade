@@ -21,7 +21,7 @@ def test_smart_case_logic():
     print("[PASS] test_smart_case_logic")
 
 def test_list_dir_no_emoji():
-    """Test that list_directory output uses ASCII markers, not emoji."""
+    """Test that list_directory output uses clean formatting without emoji."""
     from agent_cascade.operation_manager import OperationManager
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "subdir").mkdir()
@@ -32,8 +32,9 @@ def test_list_dir_no_emoji():
         assert "\U0001f4c2" not in result, "Should not contain open-folder emoji"
         assert "\U0001f4c4" not in result, "Should not contain page emoji"
         assert "\U0001f4dd" not in result, "Should not contain memo emoji"
-        assert "[dir]" in result, "Should use [dir] marker"
-        assert "[file]" in result, "Should use [file] marker"
+        # New format uses "Directories:" / "Files:" headers with trailing slashes for dirs
+        assert "subdir/" in result, f"Directory should appear with trailing slash: {result}"
+        assert "test.txt" in result, f"File name should appear: {result}"
     print("[PASS] test_list_dir_no_emoji")
 
 def test_grep_path_normalization():

@@ -55,10 +55,15 @@ class TestImportChain:
 
     def test_import_from_package_init(self):
         """Key exports are available directly from agent_cascade package."""
+        # __init__.py exports: Agent, MultiAgentHub
+        # Other classes live in submodules — verify they're importable there too
         from agent_cascade import (  # noqa: F401
-            Agent, MultiAgentHub, APIRouter, TelemetryCollector,
-            OperationManager, load_orchestrator_agent, load_agent_template,
+            Agent, MultiAgentHub,
         )
+        from agent_cascade.api_router import APIRouter  # noqa: F401
+        from agent_cascade.telemetry import TelemetryCollector  # noqa: F401
+        from agent_cascade.operation_manager import OperationManager  # noqa: F401
+        from agent_cascade.agent_factory import load_orchestrator_agent, load_agent_template  # noqa: F401
         assert Agent is not None
 
     def test_import_agent_cascade_tools(self):
