@@ -105,6 +105,10 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     template_cfg = (getattr(template.llm, 'generate_cfg', None) or {}
                     if getattr(template, 'llm', None) is not None else {})
 
+    logger.debug(
+        f"[EXEC_DT] Checkpoint 4 [{inst_name}] instance_override disabled_tools={instance_override.get('disabled_tools')!r if isinstance(instance_override, (dict, type(None))) and instance_override else instance_override}"
+    )
+
     agent_name = getattr(template, 'name', '') or ''
     agent_type = getattr(template, 'agent_type', '') or ''
 
@@ -123,6 +127,10 @@ def _get_active_functions_from_template(template, instance=None) -> list:
         agent_type=agent_type,
     )
 
+    logger.debug(
+        f"[EXEC_DT] Checkpoint 5 [{inst_name}] resolve_disabled_tools returned disabled set={sorted(disabled) if disabled else '(empty)'}"
+    )
+
     # Defensive: template.function_map may be None for templates without tools
     func_map = getattr(template, 'function_map', None)
     if not func_map:
@@ -133,6 +141,10 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     all_tool_names = set(func_map.keys())
     filtered_out = all_tool_names & disabled
     active_tool_names = all_tool_names - disabled
+
+    logger.debug(
+        f"[EXEC_DT] Checkpoint 6 [{inst_name}] filtered_out={sorted(filtered_out)}, active_tools={sorted(active_tool_names)}"
+    )
 
     return [func.function for name, func in func_map.items() if name not in disabled]
 

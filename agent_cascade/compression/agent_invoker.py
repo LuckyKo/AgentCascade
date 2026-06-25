@@ -173,6 +173,9 @@ def invoke_compression_agent(
         
         if caller_inst and hasattr(caller_inst, '_generate_cfg_override') and caller_inst._generate_cfg_override:
             raw_dt = caller_inst._generate_cfg_override.get('disabled_tools')
+            logger.debug(
+                f"[COMPRESSION_DT] Checkpoint 1 — raw_dt type={type(raw_dt).__name__}, value={raw_dt!r}"
+            )
             if raw_dt:
                 # Could be a dict (per-agent format) or a flat list
                 if isinstance(raw_dt, dict):
@@ -187,6 +190,9 @@ def invoke_compression_agent(
                 elif isinstance(raw_dt, (list, tuple)):
                     # Flat list applies to all agents
                     ui_disabled_tools = list(raw_dt)
+            logger.debug(
+                f"[COMPRESSION_DT] Checkpoint 1b — ui_disabled_tools={ui_disabled_tools!r}"
+            )
         
         # Merge with defense-in-depth defaults
         if ui_disabled_tools:
@@ -196,7 +202,15 @@ def invoke_compression_agent(
         else:
             merged = merge_disabled_tools_for_auto_agent(None, 'Compressor', DEFAULT_COMPRESSOR_DISABLED_TOOLS)
         
+        logger.debug(
+            f"[COMPRESSION_DT] Checkpoint 2 — merged disabled_tools={merged!r}"
+        )
+        
         cfg['disabled_tools'] = merged
+        
+        logger.debug(
+            f"[COMPRESSION_DT] Checkpoint 3 — cfg['disabled_tools'] set to {cfg['disabled_tools']!r}, full cfg keys={list(cfg.keys())}"
+        )
         
         if template and hasattr(template, 'llm'):
             comp_instance._generate_cfg_override = cfg
