@@ -1577,11 +1577,24 @@ class ExecutionEngine:
             
             # Dynamic endpoint selection based on agent's actual token requirements
             allocated_tokens = None
-            if instance._generate_cfg_override is not None and 'max_input_tokens' in instance._generate_cfg_override:
-                val = instance._generate_cfg_override['max_input_tokens']
+            override = getattr(instance, '_generate_cfg_override', None)
+            if override is not None and 'max_input_tokens' in override:
+                val = override['max_input_tokens']
                 if isinstance(val, int) and val > 0:
                     allocated_tokens = val
-            elif getattr(llm, 'generate_cfg', None) and 'max_input_tokens' in llm.generate_cfg:
+            
+            # Prefer live API router data over stale template config (fixes max_tokens not updating on live config changes)
+            if allocated_tokens is None:
+                agent_type_for_tokens = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
+                try:
+                    val = self.pool.api_router.get_effective_max_tokens(agent_type_for_tokens)
+                    if isinstance(val, int) and val > 0:
+                        allocated_tokens = val
+                except Exception:
+                    pass  # Fall through to template fallback below
+            
+            # Template config as last resort (only used if no override and router unavailable/empty)
+            if allocated_tokens is None and getattr(llm, 'generate_cfg', None) and 'max_input_tokens' in llm.generate_cfg:
                 val = llm.generate_cfg['max_input_tokens']
                 if isinstance(val, int) and val > 0:
                     allocated_tokens = val
