@@ -1568,8 +1568,9 @@ class ExecutionEngine:
             merged.update(llm.generate_cfg)              # Layer 1: template defaults
         if endpoint_cfg:
             merged.update(endpoint_cfg)                   # Layer 2: endpoint config (if provided)
-        if instance._generate_cfg_override is not None:
-            merged.update(instance._generate_cfg_override)  # Layer 3: user override
+        override = getattr(instance, '_generate_cfg_override', None)
+        if override is not None:
+            merged.update(override)                       # Layer 3: user override
         return merged
 
     @staticmethod
