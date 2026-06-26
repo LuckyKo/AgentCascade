@@ -1110,17 +1110,27 @@ class APIRouter:
         between frontend and backend updates.
         """
         with self._lock:
-            self.endpoints.clear()
+            # Parse endpoints into a temporary dict first — don't clear existing endpoints yet.
+            # This prevents leaving the router in a corrupted (empty) state if parsing fails mid-way.
+            new_endpoints = {}
             for ep_data in data.get('endpoints', []):
-                ep = APIEndpoint.from_dict(ep_data)
-                self.endpoints[ep.id] = ep
+                try:
+                    ep = APIEndpoint.from_dict(ep_data)
+                    new_endpoints[ep.id] = ep
+                except Exception as e:
+                    logger.error(f"[APIRouter.from_dict] Failed to parse endpoint data: {e}")
+            
+            # Swap atomically only after all parsing succeeds
+            self.endpoints.clear()
+            self.endpoints.update(new_endpoints)
             
             # Normalize agent_priorities to remove case-insensitive duplicates
             raw_priorities = data.get('agent_priorities', {})
             self.agent_priorities = self._normalize_agent_priorities(raw_priorities)
             
+            ep_ids = list(self.endpoints.keys())
             logger.info(f"[APIRouter.from_dict] Updated: {len(self.endpoints)} endpoints "
-                       f"({[ep.id for ep in self.endpoints.values()]}) with "
+                       f"({ep_ids}) with "
                        f"{len(self.agent_priorities)} priority mappings: "
                        f"{dict(self.agent_priorities)}")
             self._save()
