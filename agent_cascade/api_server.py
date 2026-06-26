@@ -1911,7 +1911,8 @@ def create_app(agents, agent_pool, config=None):
                             current_llm_cfg = agent_pool.api_router.default_llm_cfg or {}  # Defensive: handle None
                             # Compare only the LLM-relevant keys
                             if new_llm_cfg != {k: current_llm_cfg.get(k) for k in new_llm_cfg}:
-                                agent_pool.api_router.update_default_llm_cfg(ui_cfg)
+                                # BUG FIX: Pass only LLM-relevant keys to prevent polluting default_llm_cfg with non-LLM settings
+                                agent_pool.api_router.update_default_llm_cfg(new_llm_cfg)
                             else:
                                 logger.debug("[update_config] LLM config unchanged (%d keys), skipping update_default_llm_cfg", len(new_llm_cfg))
                     await broadcast({'type': 'state', **build_state()})
@@ -1919,6 +1920,9 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'update_endpoints':
                     # Bulk update all endpoints and priorities from UI
                     if agent_pool and hasattr(agent_pool, 'api_router'):
+                        ep_count = len(data.get('endpoints', []))
+                        ap_count = len(data.get('agent_priorities', {}))
+                        logger.info(f"[update_endpoints] Received: {ep_count} endpoints, {ap_count} agent priority mappings")
                         agent_pool.api_router.from_dict(data)
                     await broadcast({'type': 'state', **build_state()})
 
@@ -1926,6 +1930,8 @@ def create_app(agents, agent_pool, config=None):
                     # Update just the agent-type → endpoint priority mappings
                     if agent_pool and hasattr(agent_pool, 'api_router'):
                         priorities = data.get('agent_priorities', {})
+                        logger.info(f"[update_api_priorities] Received {len(priorities)} priority mappings: "
+                                   f"{list(priorities.keys())}")
                         for agent_type, endpoint_ids in priorities.items():
                             agent_pool.api_router.set_agent_priorities(agent_type, endpoint_ids)
                     await broadcast({'type': 'state', **build_state()})

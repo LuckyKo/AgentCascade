@@ -597,10 +597,20 @@ class APIRouter:
             
             # Validate that all IDs exist
             valid_ids = [eid for eid in endpoint_ids if eid in self.endpoints]
+            filtered_count = len(endpoint_ids) - len(valid_ids)
+            
             if valid_ids:
                 self.agent_priorities[canonical] = valid_ids
+                logger.info(f"[APIRouter.set_agent_priorities] {canonical} → {valid_ids} "
+                           f"({'filtered ' + str(filtered_count) + ' invalid IDs, ' if filtered_count else ''}"
+                           f"canonical key: {canonical})")
             elif canonical in self.agent_priorities:
                 del self.agent_priorities[canonical]
+                logger.info(f"[APIRouter.set_agent_priorities] Removed priorities for {canonical} "
+                           f"(all {len(endpoint_ids)} IDs were invalid)")
+            else:
+                logger.debug(f"[APIRouter.set_agent_priorities] No action for {agent_type} "
+                            f"(no valid IDs, no existing priorities)")
             self._save()
 
     def get_agent_priorities(self, agent_type: str) -> List[str]:
@@ -1109,11 +1119,29 @@ class APIRouter:
             raw_priorities = data.get('agent_priorities', {})
             self.agent_priorities = self._normalize_agent_priorities(raw_priorities)
             
+            logger.info(f"[APIRouter.from_dict] Updated: {len(self.endpoints)} endpoints "
+                       f"({[ep.id for ep in self.endpoints.values()]}) with "
+                       f"{len(self.agent_priorities)} priority mappings: "
+                       f"{dict(self.agent_priorities)}")
             self._save()
 
     def update_default_llm_cfg(self, new_cfg: dict):
-        """Update the default fallback config (from General Settings changes)."""
+        """
+        Update the default fallback config (from General Settings changes).
+        
+        Note: This is a partial update — only keys present in new_cfg are updated.
+        Keys removed from the UI will persist in default_llm_cfg until explicitly overwritten.
+        """
         with self._lock:
+            # Defensive: ensure default_llm_cfg is not None
+            if self.default_llm_cfg is None:
+                self.default_llm_cfg = {}
+            
+            # Log which keys are being updated (for debugging config propagation issues)
+            # Only keys present in new_cfg are checked; keys removed from the UI persist in default_llm_cfg
+            changed_keys = [k for k in new_cfg if k not in self.default_llm_cfg or self.default_llm_cfg[k] != new_cfg[k]]
+            if changed_keys:
+                logger.info(f"[APIRouter.update_default_llm_cfg] Updating {len(changed_keys)} keys: {changed_keys}")
             self.default_llm_cfg.update(new_cfg)
 
     def is_waiting(self, agent_name: str) -> bool:
