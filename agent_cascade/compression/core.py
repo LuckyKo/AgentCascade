@@ -329,48 +329,6 @@ def compress_context(
     history = agent_pool.get_conversation(target_agent_name)
     insert_pos = active_start_idx + target_discard_count
 
-    # ── Defensive guard: verify cut boundary doesn't split tool-call pairs ──
-    from agent_cascade.compression.helpers import (
-        _has_pending_tool_calls,
-        _get_function_call_ids,
-        _get_function_result_id,
-    )
-
-    while insert_pos < len(history):
-        msg = history[insert_pos]
-        if _has_pending_tool_calls(msg):
-            logger.debug(
-                f"Compression boundary adjustment: including ASSISTANT with tool call "
-                f"at position {insert_pos} for agent '{target_agent_name}'"
-            )
-            insert_pos += 1
-        else:
-            # Also check for orphaned FUNCTION results at the boundary.
-            # If a FUNCTION message's matching ASSISTANT was already compressed,
-            # skip it to avoid dangling results in the tail.
-            fn_role = getattr(msg, 'role', '') if not isinstance(msg, dict) else msg.get('role', '')
-            if fn_role == FUNCTION:
-                fn_id = _get_function_result_id(msg)
-                if fn_id:
-                    # Search backwards for the matching ASSISTANT in discarded range
-                    found_assistant = False
-                    for j in range(insert_pos - 1, active_start_idx - 1, -1):
-                        aid_list = _get_function_call_ids(history[j])
-                        if fn_id in aid_list:
-                            found_assistant = True
-                            break
-                    if not found_assistant:
-                        # Orphaned FUNCTION — its ASSISTANT was already compressed
-                        logger.debug(
-                            f"Compression boundary adjustment: skipping orphaned "
-                            f"FUNCTION result at position {insert_pos} for agent '{target_agent_name}'"
-                        )
-                        insert_pos += 1
-                        continue
-            break
-
-    actual_discard = insert_pos - active_start_idx
-
     # Safety check: insert position must be after the SYSTEM message
     if insert_pos < 1:
         raise RuntimeError(
@@ -414,15 +372,14 @@ def compress_context(
         )
 
     # ── 11. Calculate tail count and notify logger ──
-    effective_discard = actual_discard
-    tail_count = len(active_set) - effective_discard
+    tail_count = len(active_set) - target_discard_count
     # NOTE: Logger sync is now handled by handler.py's _sync_logger_after_compression()
     # which calls reset_history(conv, rewrite=True) for all compression paths.
     # The insert_compression_marker() method in agent_instance_logger.py is deprecated.
 
     # ── 12. Log the successful compression event ──
     logger.info(
-        f"Clean-trim compression: Discarded {effective_discard} messages "
+        f"Clean-trim compression: Discarded {target_discard_count} messages "
         f"for agent '{target_agent_name}'. Tail count: {tail_count}."
     )
 
@@ -430,7 +387,7 @@ def compress_context(
         success=True,
         summary_text=generated_summary,
         marker_message=marker_message,
-        messages_discarded=effective_discard,
+        messages_discarded=target_discard_count,
         tail_count=tail_count,
         error=None,
         mode=mode,
