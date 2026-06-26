@@ -44,6 +44,8 @@ DEFAULT_RAG_SEARCHERS: List[str] = ast.literal_eval(
 # Settings for compression (Feature 020)
 DEFAULT_COMPRESSION_COOLDOWN_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_DEFAULT_COMPRESSION_COOLDOWN_SECONDS', 2.0))  # Minimum seconds between forced compressions to prevent thrashing
+DEFAULT_COMPRESSION_MAX_ATTEMPTS: int = int(os.getenv(
+    'QWEN_AGENT_COMPRESSION_MAX_ATTEMPTS', 100))  # Safety net max forced compressions before terminating (true overfeeding detected in core.py)
 
 # Settings for forget_last tool (Feature 021)
 DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS: int = int(os.getenv(

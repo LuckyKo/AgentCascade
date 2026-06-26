@@ -8,6 +8,8 @@ from agent_cascade.compression.helpers import (
 from agent_cascade.llm.schema import FUNCTION
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
 from agent_cascade.utils.utils import extract_text_from_message
+from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
+from agent_cascade.llm.schema import Message
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +90,6 @@ def compress_context(
 
     # ── 2. Guard: Already optimally compressed (<3 messages AND <200 tokens) ──
     try:
-        from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
-        from agent_cascade.llm.schema import Message
-
         total_tokens = 0
         for msg in active_set:
             if isinstance(msg, dict):
@@ -123,10 +122,11 @@ def compress_context(
     # If the compression agent has a known context window, don't feed it more than it can handle.
     # Estimate ~500 tokens per message; reserve 60% of the agent's context for input (40% for system prompt,
     # existing summary, and output generation).
+    max_tokens = None
+    available_for_messages = None
     try:
         comp_agent = agent_pool.get_agent('Compressor')
         if comp_agent:
-            max_tokens = None
             if hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'generate_cfg'):
                 max_tokens = comp_agent.llm.generate_cfg.get('max_input_tokens')
             elif hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'cfg'):
@@ -193,6 +193,43 @@ def compress_context(
         # First compression: just send the messages we are about to compress
         target_messages = active_set[:target_discard_count]
 
+    # ── 6b. ACTUAL token count check: verify target messages fit in compressor's context window ──
+    # This is the TRUE overfeeding detection — counts real tokens instead of using rough estimates.
+    if available_for_messages is not None:
+        try:
+            target_token_count = 0
+            for msg in target_messages:
+                if isinstance(msg, dict):
+                    wrapped = Message(**msg)
+                else:
+                    wrapped = msg
+                content = extract_text_from_message(wrapped, add_upload_info=True)
+                tokens = qwen_count(content)
+                target_token_count += tokens
+
+            # Estimate prompt overhead (system prompt ~50 tokens + compression prompt template ~100 tokens)
+            prompt_overhead_tokens = 150
+
+            # Note: summary marker message is already included in target_messages, no need to count separately
+            total_estimated = target_token_count + prompt_overhead_tokens
+            if total_estimated > available_for_messages:
+                return CompressResult(
+                    success=False,
+                    summary_text=None,
+                    marker_message=None,
+                    messages_discarded=0,
+                    tail_count=len(active_set),
+                    error=(
+                        f"True overfeeding detected: target messages are {target_token_count} tokens "
+                        f"(+~{prompt_overhead_tokens} prompt overhead = ~{total_estimated} total). "
+                        f"Compressor context window allows only ~{available_for_messages} tokens. "
+                        f"Agent context is filling faster than compression can reduce it."
+                    ),
+                    mode=mode,
+                )
+        except Exception as e:
+            logger.debug(f"Token counting for overfeeding check failed (non-fatal): {e}")
+
     # ── 7. Get existing summary text from pool for compounding ──
     existing_summary = None
     if latest_summary_idx != -1:
@@ -200,8 +237,6 @@ def compress_context(
         summary_msg = history[latest_summary_idx]
         
         # Use extract_text_from_message to handle both string and multi-modal list content
-        from agent_cascade.llm.schema import Message
-        
         if isinstance(summary_msg, dict):
             wrapped_msg = Message(**summary_msg)
         else:

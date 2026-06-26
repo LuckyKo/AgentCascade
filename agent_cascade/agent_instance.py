@@ -14,7 +14,7 @@ from enum import Enum, auto
 from typing import Callable, List, Optional
 
 from agent_cascade.llm.schema import Message
-from agent_cascade.settings import DEFAULT_COMPRESSION_COOLDOWN_SECONDS
+from agent_cascade.settings import DEFAULT_COMPRESSION_COOLDOWN_SECONDS, DEFAULT_COMPRESSION_MAX_ATTEMPTS
 
 
 class AgentState(Enum):
@@ -450,7 +450,7 @@ class PoolSettings:
     compression_warning_threshold: float = 85.0  # Warn at X% usage
     compression_timeout: float = 120.0        # Max seconds for compression to complete
     compression_force_cooldown: float = DEFAULT_COMPRESSION_COOLDOWN_SECONDS  # Minimum seconds between forced compressions (prevent thrashing)
-    compression_max_attempts: int = 3         # Max forced compressions before considering overfeeding
+    compression_max_attempts: int = DEFAULT_COMPRESSION_MAX_ATTEMPTS  # Safety net max forced compressions (overridable via env var)
     security_check_timeout: float = 120.0     # Max seconds for security advisor
     max_auto_rollbacks: int = 3               # Max loop recovery retries
     max_nesting_depth: int = 10               # Max depth of nested agent calls (prevent infinite chains)

@@ -288,7 +288,9 @@ class CompressionHandler:
     ) -> bool:
         """Check if overfeeding threshold exceeded.
         
-        Extracted from _check_overfeeding() - Phase 3.5
+        Safety-net only: terminates after max_attempts forced compressions (default 100).
+        TRUE overfeeding is detected in core.py via actual token counting of messages
+        sent to the compressor — when tokens exceed the compressor's context window.
         
         Args:
             instance: Agent instance
@@ -299,15 +301,18 @@ class CompressionHandler:
             True if overfeeding detected (terminate agent)
         """
         inst_name = instance.instance_name
-        max_attempts = getattr(self.pool.settings, 'compression_max_attempts', 3)
+        max_attempts = getattr(self.pool.settings, 'compression_max_attempts', 100)
         
         if instance._force_compress_count >= max_attempts:
-            logger.error(
-                f"Overfeeding detected for {inst_name}: "
+            logger.warning(
+                f"Overfeeding safety net triggered for {inst_name}: "
                 f"{instance._force_compress_count} forced compressions exceeded limit of {max_attempts}. "
                 f"Context keeps filling faster than compression can reduce it. Terminating agent."
             )
-            notification_text = f"[SYSTEM] Overfeeding — {instance._force_compress_count} compressions without relief. Terminating."
+            notification_text = (
+                f"[SYSTEM] Overfeeding — {instance._force_compress_count} compressions without relief. "
+                f"Terminating."
+            )
             self._inject_compression_notification(instance, notification_text, inst_name)
             self.pool.halt_instance(inst_name)
             return True
