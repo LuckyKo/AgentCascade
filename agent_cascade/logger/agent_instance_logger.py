@@ -469,7 +469,7 @@ class AgentInstanceLogger:
                     msg = new_history[i]
                     role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
                     content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                    if role == USER_ROLE and isinstance(content, str) and COMPRESSION_MARKER in content:
+                    if role == USER_ROLE and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                         last_marker_idx = i
                         break
 
