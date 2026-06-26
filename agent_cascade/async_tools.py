@@ -166,13 +166,16 @@ class AsyncToolRegistry:
             
             return has_pending_tools
     
-    def shutdown(self):
+    def shutdown(self, wait: bool = True):
         """Shutdown the executor.
         
         Call during pool teardown to cleanly stop background tool execution.
-        Waits for all pending tasks to complete before returning.
+        
+        Args:
+            wait: If True, wait for all pending tasks to complete before returning.
+                  If False, return immediately (useful for "quick stop" scenarios).
         """
-        self._executor.shutdown(wait=True)
+        self._executor.shutdown(wait=wait)
 
 
 class AsyncResultBuffer:

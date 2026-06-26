@@ -666,6 +666,9 @@ class ExecutionEngine:
         # Capture run generation to detect if a newer execution has superseded this one.
         # When user clicks Stop then Resume, pool._run_generation is incremented and
         # the old thread exits here instead of continuing with stale state.
+        # NOTE: The shared ExecutionEngine's _my_generation can be overwritten by sub-agents
+        # via _create_and_run_agent(). However, pool.stopped provides defense-in-depth,
+        # so even if _my_generation is clobbered, the stop signal will still be detected.
         self._my_generation = self.pool._run_generation
         
         # Clear truncation state at the start of each agent turn to prevent stale markers
@@ -1499,7 +1502,7 @@ class ExecutionEngine:
                             instance._streaming_responses = []
                         try:
                             gen.close()  # Explicitly close generator → triggers finally blocks → releases HTTP connection + semaphore immediately
-                        except (RuntimeError, GeneratorExit):
+                        except RuntimeError:
                             pass  # Already closed/exhausted
                         yield None  # Signal UI that stop was detected mid-stream
                         break
@@ -1517,7 +1520,7 @@ class ExecutionEngine:
                             instance._streaming_responses = []
                         try:
                             gen.close()  # Explicitly close generator → triggers finally blocks → releases HTTP connection + semaphore immediately
-                        except (RuntimeError, GeneratorExit):
+                        except RuntimeError:
                             pass  # Already closed/exhausted
                         yield None  # Signal UI that stop was detected mid-stream
                         break
@@ -2501,7 +2504,11 @@ class ExecutionEngine:
             True to continue the turn loop, False to break (agent complete).
         """
         inst_name = instance.instance_name
-        
+
+        # Check stop immediately after LLM response — prevents unnecessary post-turn processing
+        if self._is_stopped(inst_name):
+            return False  # Stop detected — break from loop
+
         # 1. Check for unexecuted tool calls
         if self._check_for_tool_calls_in_output(instance, response):
             return True  # Tool was called — continue the loop (tool result will be in next turn)
@@ -2624,6 +2631,10 @@ class ExecutionEngine:
             - yield_value=[] means yield empty list (signals waiting state)
         """
         inst_name = instance.instance_name
+
+        # Check stop immediately — a SLEEPING agent should not wait up to 300s for wakeup
+        if self._is_stopped(inst_name):
+            return SleepAction.BREAK_LOOP, None
 
         # Drain async tool results ONLY — user messages do NOT wake sleeping agents
         async_results = self.pool.drain_async_results(inst_name)

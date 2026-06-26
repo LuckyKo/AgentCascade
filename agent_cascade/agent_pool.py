@@ -368,7 +368,7 @@ class AgentPool:
             except Exception as e:
                 logger.debug(f"Idle manager shutdown failed (non-critical): {e}")
             try:
-                self._async_registry.shutdown()
+                self._async_registry.shutdown(wait=False)  # Quick stop — don't block waiting for tasks
             except Exception as e:
                 logger.debug(f"Async registry shutdown failed (non-critical): {e}")
         else:
