@@ -334,6 +334,8 @@ class AgentInstance:
             self._cached_token_count = 0
             self._last_token_count_conversation_length = -1
             self._last_actual_token_count = 0
+            self._pending_notifications = []
+            self._tool_warnings = []
 
     def reset_conversation(self) -> None:
         """Clear everything. Full cache invalidation.
@@ -359,6 +361,8 @@ class AgentInstance:
             self._last_actual_token_count = 0
             self._last_force_compress_time = 0.0
             self._force_compress_count = 0
+            self._pending_notifications = []
+            self._tool_warnings = []
 
     def clear_working_set_cache(self) -> None:
         """Clear working set cache without touching conversation.

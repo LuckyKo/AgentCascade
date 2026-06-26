@@ -819,8 +819,11 @@ def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int, a
 
         # ******* trunk this turn *******
         if len(indexed_messages1) == 1:
-            assert is_last_turn
-            # very long user
+            if not is_last_turn:
+                # Single-message non-last turn: happens with notification-injected consecutive USER messages.
+                # Truncate the message to fit the budget instead of asserting.
+                logger.debug("Truncating single-message non-last turn")
+            # very long user — only one message in the turn
             idx, msg = indexed_messages1[0]
             msg = _truncate_message(msg=msg, max_tokens=message_tokens1[idx] - exceedance, keep_both_sides=True)
             return [msg], 0

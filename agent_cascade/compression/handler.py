@@ -95,9 +95,9 @@ class CompressionHandler:
             inst_name: Instance name for logging
         """
         with instance._compression_lock:
-            # Dedup guard — check if notification appears as a complete line (avoids substring false positives)
+            # Dedup guard — check if notification text exists in conversation messages
             notification_exists = any(
-                notification_text in str(_msg_content(m)).split('\n')
+                notification_text in str(_msg_content(m))
                 for m in instance.conversation
             )
             
