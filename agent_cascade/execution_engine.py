@@ -1581,7 +1581,7 @@ class ExecutionEngine:
                 val = instance._generate_cfg_override['max_input_tokens']
                 if isinstance(val, int) and val > 0:
                     allocated_tokens = val
-            elif hasattr(llm, 'generate_cfg') and 'max_input_tokens' in llm.generate_cfg:
+            elif getattr(llm, 'generate_cfg', None) and 'max_input_tokens' in llm.generate_cfg:
                 val = llm.generate_cfg['max_input_tokens']
                 if isinstance(val, int) and val > 0:
                     allocated_tokens = val
