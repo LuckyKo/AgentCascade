@@ -1370,26 +1370,13 @@ def create_app(agents, agent_pool, config=None):
                         # Halt threads and unblock pending approvals (non-destructive — preserves sessions)
                         agent_pool.stop_session()
                     
-                    # FIX 1 & 2: Clean up endpoint slots and active stack after stop_session()
+                    # FIX 1 & 2: Clean up active stack and halted state after stop_session()
                     if agent_pool:
                         try:
-                            # CRIT-1 FIX: Only release slots for TERMINATED instances, NOT IDLE.
-                            # IDLE instances may be in the middle of _reacquire_caller_slot() and we'd 
-                            # release their newly acquired slot. TERMINATED instances are done executing.
                             from agent_cascade.agent_instance import AgentState as InstanceAgentState
                             
-                            # MAJOR-2 FIX: Acquire pool lock during instance iteration to protect from concurrent creation/deletion
-                            with agent_pool._execution._state_lock:
-                                for inst_name, instance in list(agent_pool.instances.items()):
-                                    with instance._state_lock:
-                                        if instance.state == InstanceAgentState.TERMINATED:
-                                            if hasattr(instance, '_slot_release') and instance._slot_release is not None:
-                                                try:
-                                                    logger.debug(f"[STOP_SLOT_CLEANUP] Releasing slot for TERMINATED '{inst_name}'")
-                                                    instance._slot_release()
-                                                    instance._slot_release = None
-                                                except Exception as e:
-                                                    logger.warning(f"[STOP_SLOT_CLEANUP] Failed to release slot for '{inst_name}': {e}")
+                            # Slot release is handled by stop_session() — no need to duplicate here.
+                            # Just clean up active_stack and _halted_instances.
                             
                             # CRIT-3 FIX: Use active_stack[:] = [...] to mutate list in place, not replace it.
                             # Other code may hold references to the old list; mutation ensures all refs see updates.

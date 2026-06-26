@@ -663,6 +663,11 @@ class ExecutionEngine:
                 )
         self._current_instance = instance  # Fix #2: set for token count cache lookups
         
+        # Capture run generation to detect if a newer execution has superseded this one.
+        # When user clicks Stop then Resume, pool._run_generation is incremented and
+        # the old thread exits here instead of continuing with stale state.
+        self._my_generation = self.pool._run_generation
+        
         # Clear truncation state at the start of each agent turn to prevent stale markers
         clear_truncation_state()
         
@@ -775,8 +780,9 @@ class ExecutionEngine:
                     else:
                         logger.warning(f"[MSG_VALIDATION] Skipping non-Message in LLM response for {instance.instance_name}: type={type(msg).__name__}, value={str(msg)[:100]}")
 
-                if self.pool.stopped or self.pool.is_instance_halted(instance.instance_name) or self.pool.is_instance_terminated(instance.instance_name):
-                    logger.debug("halted/stopped - %s", instance.instance_name)
+                # Check generation change (old run superseded by newer one) alongside stop/halt
+                if self._is_stopped(instance.instance_name):
+                    logger.debug("halted/stopped/superseded - %s", instance.instance_name)
                     # Sleep to prevent tight loop when halted (Issue #6 fix)
                     time.sleep(0.5)
                     yield response
@@ -1059,7 +1065,23 @@ class ExecutionEngine:
             True if any stop condition met (skip LLM call), False otherwise.
         """
         inst_name = instance.instance_name
+        return self._is_stopped(inst_name)
+
+    def _is_stopped(self, inst_name: str) -> bool:
+        """Check if pool is stopped, run superseded, or instance halted/terminated.
+        
+        Centralized stop condition check used throughout execution_engine.py to avoid
+        duplicated 4-condition checks across 8+ locations. Returns True immediately
+        on any stop signal for fast-path efficiency.
+        
+        Args:
+            inst_name: Instance name to check halt/termination status
+            
+        Returns:
+            True if any stop condition met, False otherwise.
+        """
         return (self.pool.stopped or 
+                self._my_generation != self.pool._run_generation or
                 self.pool.is_instance_halted(inst_name) or 
                 self.pool.is_instance_terminated(inst_name))
 
@@ -1464,8 +1486,23 @@ class ExecutionEngine:
                 # Streaming UI Content Update Fix: Track partial LLM content for UI updates every ~100ms
                 last_streaming_update_time = time.monotonic()
                 
-                for output in self._execute_llm_call(instance, template, llm_messages, active_functions):
+                gen = self._execute_llm_call(instance, template, llm_messages, active_functions)
+                for output in gen:
                     last_output = output
+                    
+                    # Check stop/halt mid-stream FIRST (before any work) — ensures fastest response to stop.
+                    # Also checks generation change (old run superseded by newer one on resume).
+                    # This is defense-in-depth: _check_stop_conditions() runs before the LLM call, but stop
+                    # can also be triggered DURING the streaming call itself (while chunks are arriving).
+                    if self._is_stopped(inst_name):
+                        with instance._compression_lock:
+                            instance._streaming_responses = []
+                        try:
+                            gen.close()  # Explicitly close generator → triggers finally blocks → releases HTTP connection + semaphore immediately
+                        except (RuntimeError, GeneratorExit):
+                            pass  # Already closed/exhausted
+                        yield None  # Signal UI that stop was detected mid-stream
+                        break
                     
                     # Update _streaming_responses every ~100ms with deep copy of partial content
                     current_time = time.monotonic()
@@ -1473,13 +1510,20 @@ class ExecutionEngine:
                         with instance._compression_lock:
                             self._update_streaming_responses(instance, last_output)
                             last_streaming_update_time = current_time
-                        yield None
                     
-                    # Check stop/halt mid-stream
-                    if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
+                    # Re-check stop/halt after UI update (defense in depth — catches stop during slow streaming)
+                    if self._is_stopped(inst_name):
                         with instance._compression_lock:
                             instance._streaming_responses = []
+                        try:
+                            gen.close()  # Explicitly close generator → triggers finally blocks → releases HTTP connection + semaphore immediately
+                        except (RuntimeError, GeneratorExit):
+                            pass  # Already closed/exhausted
+                        yield None  # Signal UI that stop was detected mid-stream
                         break
+                    
+                    # Yield partial content for UI update (after both checks pass)
+                    yield None
                 
                 if last_output is not None:
                     break
@@ -1688,6 +1732,7 @@ class ExecutionEngine:
                     extra_generate_cfg=merged_cfg,
                 )
 
+            # Pass _do_call directly — call_with_fallback handles generator lifecycle via finally blocks
             return self.pool.api_router.call_with_fallback(agent_type, _do_call, allocated_tokens=allocated_tokens)
         else:
             # Direct call without router — same merge priority as fallback path:
@@ -1818,10 +1863,7 @@ class ExecutionEngine:
         """
         # Auto-continue on truncation (only if user has enabled the setting)
         # FIX #2: Use pre-computed is_truncated from caller instead of re-checking
-        if (is_truncated and not self.pool.stopped and 
-            not self.pool.is_instance_halted(inst_name) and 
-            not self.pool.is_instance_terminated(inst_name) and 
-            self.pool.settings.auto_continue):
+        if is_truncated and not self._is_stopped(inst_name) and self.pool.settings.auto_continue:
             logger.info(f"Detected message truncation for {inst_name}. Auto-continuing.")
             cont_msg = Message(
                 role=USER,
@@ -1895,7 +1937,7 @@ class ExecutionEngine:
                 continue
 
             # Stop/halt check BEFORE tool execution (check before setting used_any_tool)
-            if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
+            if self._is_stopped(inst_name):
                 break
             
             # ── Disabled/Inexistent Tool Auto-Deny ────────────────────────────
@@ -2057,6 +2099,10 @@ class ExecutionEngine:
                 if conv and not validate_message_pool(conv, inst_name):
                     logger.error(f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
 
+            # Post-tool-execution stop check — catches stop during long-running synchronous tools (shell_cmd, etc.)
+            if self._is_stopped(inst_name):
+                break
+
             # Build function result message — include function_id and tool_success per OpenAI spec
             # function_id was extracted BEFORE _execute_tool call above
             fn_msg = Message(
@@ -2079,7 +2125,7 @@ class ExecutionEngine:
         # ── Handle orphaned tool calls from early break ───────────────────────────────
         # If halt/stop was detected mid-loop, remaining tools in turn_output don't have FUNCTION results.
         # Add placeholder FUNCTION messages to prevent API Error 400 (orphaned tool_call_id's).
-        if self.pool.stopped or self.pool.is_instance_halted(inst_name) or self.pool.is_instance_terminated(inst_name):
+        if self._is_stopped(inst_name):
             executed_set = set(executed_tools)  # Convert to set for O(1) lookup
             tools_processed = 0
             
@@ -2871,7 +2917,7 @@ class ExecutionEngine:
                 return inst, []
 
             for resp in self.run(inst):
-                if self.pool.stopped or self.pool.is_instance_halted(instance_name) or self.pool.is_instance_terminated(instance_name):
+                if self._is_stopped(instance_name):
                     break
                 
                 # FIX BOOL_LEAK: Unpack (messages, is_streaming) tuple from engine.run()

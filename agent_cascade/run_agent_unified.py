@@ -87,6 +87,11 @@ def run_agent_thread_unified(
             with pool._execution._state_lock:
                 pool._execution.active_stack.clear()
 
+        # Increment run generation to signal old threads they've been superseded.
+        # Old execution threads check this value and exit when it changes.
+        pool._run_generation += 1
+        current_generation = pool._run_generation
+
         # ── Store send_queue and loop on pool for sub-agent streaming ────
         # Sub-agents execute synchronously inside ExecutionEngine and need
         # access to the WebSocket send_queue to push stream_update events.
@@ -133,7 +138,7 @@ def run_agent_thread_unified(
                 turn_output, is_streaming_tick = turn_output_raw, False
 
             # Check for stop request or pool shutdown
-            if pool.stopped:
+            if pool.stopped or current_generation != pool._run_generation:
                 break
 
             now = time.monotonic()

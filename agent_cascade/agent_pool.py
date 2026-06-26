@@ -275,6 +275,11 @@ class AgentPool:
         self.terminated_instances: set = set()             # instances marked for immediate termination
         self.children: Dict[str, List[str]] = {}           # parent_name -> [child_names] for cascade termination
 
+        # ── Run generation counter (prevents resume race condition) ───────────
+        # Each time a new execution thread starts, this is incremented. Old threads
+        # check their captured generation value to detect they've been superseded.
+        self._run_generation = 0                           # monotonically increasing run ID
+
         # ── Attributes required by api_server.py and agent_invoker.py ──
         # These bridge the new unified model with existing call patterns.
         self.last_tool_args: Dict[str, Dict[str, Dict[str, Any]]] = {}  # tool arg cache for __USE_PREV_ARG__
@@ -810,7 +815,7 @@ class AgentPool:
             # Restore dismissal callbacks
             self._on_dismissed_callbacks = _callbacks
 
-    def stop_session(self):
+    def stop_session(self, release_slots: bool = True):
         """Minimal interrupt for "Stop" action — halts execution but preserves sessions.
         
         This method is used when the user clicks "Stop" to halt all streaming and put
@@ -823,7 +828,8 @@ class AgentPool:
         
         Order of operations (MINOR-1 FIX - updated docstring):
           1. Set _stopped_event (to halt threads)
-          2. Clear pending approvals (unblocks any threads waiting for user approval)
+          2. Release concurrency slots for all active instances (NEW — prevents stuck API slots)
+          3. Clear pending approvals (unblocks any threads waiting for user approval)
         
         Does NOT:
           - Dismiss sub-agents (they remain in pool with their current state)
@@ -832,10 +838,34 @@ class AgentPool:
           - Create a new logger session
           - Shutdown/recreate async infrastructure
         
+        Args:
+            release_slots: If True, immediately release concurrency slots for all instances.
+                         This ensures API endpoints are freed even if execution threads
+                         haven't noticed the stop signal yet. Default is True.
+        
         See reset() for full session reset that dismisses sub-agents and clears everything.
         """
-        # Step 1: Set stopped event to signal threads to halt
-        self._stopped_event.set()
+        # Step 1: Set stopped event to signal threads to halt (use property setter for side effects)
+        self.stopped = True
+
+        # ── Step 2: Release concurrency slots for all active instances ──────────────
+        # This ensures API endpoints are freed immediately, even if execution threads
+        # haven't noticed the stop signal yet. Prevents "stuck slot" issues where
+        # agents transitioned to IDLE still hold their semaphores.
+        # Uses instance._state_lock for thread safety against concurrent slot acquisition/release.
+        if release_slots:
+            try:
+                for inst_name, instance in list(self.instances.items()):
+                    with instance._state_lock:
+                        if hasattr(instance, '_slot_release') and instance._slot_release is not None:
+                            try:
+                                instance._slot_release()
+                                instance._slot_release = None
+                                logger.debug(f"[STOP_SLOT] Released slot for '{inst_name}' during stop_session")
+                            except Exception as e:
+                                logger.warning(f"[STOP_SLOT] Failed to release slot for '{inst_name}': {e}")
+            except Exception as e:
+                logger.warning(f"slot_release failed during stop_session (non-critical): {e}")
 
         # ── Step 3: Clear pending approvals ────────────────────────────────────────
         # Prevent dangling threads waiting for user approval.
