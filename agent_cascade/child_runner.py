@@ -85,7 +85,10 @@ def run_child_core(
                 f"Loop detected for {looped_agent}: {e.reason}. "
                 f"Surgical rollback of {pop_count} messages."
             )
-            pool.surgical_rollback(looped_agent, pop_count, reason=e.reason)
+            try:
+                pool.surgical_rollback(looped_agent, pop_count, reason=e.reason)
+            except Exception as rb_err:
+                logger.error(f"Rollback failed for {looped_agent}: {rb_err}")
 
         # Inject loop avoidance hint into the agent's conversation
         instance = pool.get_instance(looped_agent)
@@ -114,4 +117,10 @@ def run_child_core(
 
     # Extract and format result
     result = extract_instance_output(conv, instance_name, was_terminated=was_terminated)
-    return _format_result(instance_name, result, was_terminated, was_stopped, prefix)
+    return _format_result(
+        instance_name=instance_name,
+        result=result,
+        was_terminated=was_terminated,
+        was_stopped=was_stopped,
+        prefix=prefix,
+    )

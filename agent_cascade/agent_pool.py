@@ -1684,17 +1684,21 @@ class AgentPool:
             engine = ExecutionEngine(self)
             # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
 
-            result = run_child_core(
-                engine=engine,
-                pool=self,
-                agent_class=agent_class,
-                instance_name=child_instance_name,
-                args=args,
-                caller_name=caller,
-                child_depth=nest_depth,
-                prefix="Parallel Agent",
-            )
-            return result
+            try:
+                result = run_child_core(
+                    engine=engine,
+                    pool=self,
+                    agent_class=agent_class,
+                    instance_name=child_instance_name,
+                    args=args,
+                    caller_name=caller,
+                    child_depth=nest_depth,
+                    prefix="Parallel Agent",
+                )
+                return result
+            except Exception as e:
+                # Catch generic exceptions to preserve the structured agent-specific prefix
+                return f"[Parallel Agent '{child_instance_name}' Failed]:\n{str(e)}"
 
         self._async_registry.register(instance_name, run_child_agent, function_id=function_id)
 

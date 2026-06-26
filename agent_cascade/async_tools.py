@@ -128,7 +128,11 @@ class AsyncToolRegistry:
                     if entry.error:
                         result_msg = f"[Background Tool Error]:\n{entry.error}"
                     else:
-                        result_msg = f"[Background Tool Result]:\n{entry.result}"
+                        # Don't double-wrap if result is already formatted with a prefix like [Parallel Agent ...]
+                        if entry.result.strip().startswith('['):
+                            result_msg = entry.result
+                        else:
+                            result_msg = f"[Background Tool Result]:\n{entry.result}"
                     try:
                         self.pool._async_results.put(entry.agent_instance_name, result_msg, function_id=entry.function_id)
                     except Exception as e:
