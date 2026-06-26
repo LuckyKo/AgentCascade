@@ -10,6 +10,7 @@ from agent_cascade.utils.utils import extract_text_from_message
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.llm.schema import FUNCTION, Message
 from agent_cascade.settings import CHARS_PER_TOKEN_ESTIMATE
+from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -207,14 +208,18 @@ def compress_context(
                 tokens = qwen_count(content)
                 target_token_count += tokens
 
-            # Estimate prompt overhead from compressor's system message using CHARS_PER_TOKEN_ESTIMATE.
+            # Estimate system message overhead from compressor agent config using CHARS_PER_TOKEN_ESTIMATE.
             comp_agent = agent_pool.get_agent('Compressor')
             if comp_agent and hasattr(comp_agent, 'system_message'):
                 sys_prompt_tokens = len(str(comp_agent.system_message)) // CHARS_PER_TOKEN_ESTIMATE
             else:
                 sys_prompt_tokens = 50  # fallback estimate
 
-            prompt_template_tokens = 100  # compression prompt template (~500 chars / CHARS_PER_TOKEN_ESTIMATE)
+            # Actual COMPRESSION_PROMPT template size (with {history_text} replaced by empty string)
+            # since the history_text portion maps to target_messages which we already counted.
+            prompt_template_chars = len(COMPRESSION_PROMPT.format(history_text=""))
+            prompt_template_tokens = prompt_template_chars // CHARS_PER_TOKEN_ESTIMATE
+
             prompt_overhead_tokens = sys_prompt_tokens + prompt_template_tokens
 
             # Note: summary marker message is already included in target_messages, no need to count separately
