@@ -310,7 +310,7 @@ class ToolDispatcher:
 
         try:
             # Unified core execution — handles loop detection, status checks, formatting
-            result_string, _ = run_child_core(
+            result = run_child_core(
                 engine=self.engine,
                 pool=self.pool,
                 agent_class=agent_class,
@@ -323,7 +323,7 @@ class ToolDispatcher:
             logger.debug(
                 f"[SLOT_SYNC_CHILD_COMPLETE] Sync child '{instance_name}' completed in {time.monotonic() - sync_path_start:.2f}s"
             )
-            return result_string
+            return result
 
         except Exception as e:
             # Catch non-LoopDetectedError exceptions and return formatted error string.

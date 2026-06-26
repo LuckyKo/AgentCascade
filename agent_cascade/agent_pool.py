@@ -1684,7 +1684,7 @@ class AgentPool:
             engine = ExecutionEngine(self)
             # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
 
-            result_string, _ = run_child_core(
+            result = run_child_core(
                 engine=engine,
                 pool=self,
                 agent_class=agent_class,
@@ -1694,7 +1694,7 @@ class AgentPool:
                 child_depth=nest_depth,
                 prefix="Parallel Agent",
             )
-            return result_string
+            return result
 
         self._async_registry.register(instance_name, run_child_agent, function_id=function_id)
 
