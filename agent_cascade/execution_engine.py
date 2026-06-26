@@ -1590,6 +1590,45 @@ class ExecutionEngine:
                     val = self.pool.api_router.get_effective_max_tokens(agent_type_for_tokens)
                     if isinstance(val, int) and val > 0:
                         allocated_tokens = val
+                        
+                        # Log endpoint allocation with stats for observability
+                        prev_tokens = getattr(instance, '_allocated_max_input_tokens', 0)
+                        
+                        # Try to get the active endpoint details from priority list
+                        priority_ids = self.pool.api_router.get_agent_priorities(agent_type_for_tokens)
+                        if priority_ids:
+                            first_ep_id = priority_ids[0]
+                            ep = self.pool.api_router.get_endpoint(first_ep_id)
+                            if ep:
+                                endpoint_info = {
+                                    'endpoint': ep.name or first_ep_id,
+                                    'api_base': ep.api_base,
+                                    'model': ep.model,
+                                    'max_input_tokens': val,
+                                    'rate_limit_rpm': getattr(ep, 'rate_limit_rpm', 0),
+                                    'concurrency_limit': getattr(ep, 'concurrency_limit', 0),
+                                }
+                                if prev_tokens != val:
+                                    endpoint_info['prev_max_input_tokens'] = prev_tokens
+                                    logger.info(
+                                        f"Endpoint allocation updated for {agent_type_for_tokens}: "
+                                        f"{endpoint_info}"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"Endpoint confirmed for {agent_type_for_tokens}: "
+                                        f"{endpoint_info}"
+                                    )
+                            else:
+                                logger.debug(
+                                    f"No endpoint found by ID '{first_ep_id}' for {agent_type_for_tokens}, "
+                                    f"max_input_tokens={val}"
+                                )
+                        else:
+                            logger.debug(
+                                f"No priorities configured for {agent_type_for_tokens}, "
+                                f"max_input_tokens={val}"
+                            )
                 except Exception:
                     pass  # Fall through to template fallback below
             
@@ -1598,6 +1637,10 @@ class ExecutionEngine:
                 val = llm.generate_cfg['max_input_tokens']
                 if isinstance(val, int) and val > 0:
                     allocated_tokens = val
+                    logger.debug(
+                        f"Template fallback for {agent_type_for_tokens}: "
+                        f"max_input_tokens={val}"
+                    )
 
             def _do_call(llm_cfg: dict) -> Iterator[List[Message]]:
                 # Config merge priority (lowest → highest):
