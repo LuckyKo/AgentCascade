@@ -1560,6 +1560,25 @@ class ExecutionEngine:
         # Delegate to extracted method - Phase 3.6
         yield from self._execute_llm_call_with_retry(instance, llm_messages, template, active_functions)
 
+    @staticmethod
+    def _build_merged_cfg(llm, instance, endpoint_cfg: dict = None) -> dict:
+        """Merge config layers: template defaults → endpoint config → user override."""
+        merged = {}
+        if getattr(llm, 'generate_cfg', None):
+            merged.update(llm.generate_cfg)              # Layer 1: template defaults
+        if endpoint_cfg:
+            merged.update(endpoint_cfg)                   # Layer 2: endpoint config (if provided)
+        if instance._generate_cfg_override is not None:
+            merged.update(instance._generate_cfg_override)  # Layer 3: user override
+        return merged
+
+    @staticmethod
+    def _store_allocated_max_input_tokens(instance, cfg: dict) -> None:
+        """Store validated max_input_tokens in instance for compression tracking."""
+        val = cfg.get('max_input_tokens')
+        if isinstance(val, int) and val > 0:
+            instance._allocated_max_input_tokens = val
+
     def _execute_llm_call(self, instance: AgentInstance, template, messages: List[Message], active_functions) -> Iterator[List[Message]]:
         """Execute the actual LLM API call via api_router with failover.
         
@@ -1575,6 +1594,9 @@ class ExecutionEngine:
         if self.pool.api_router and hasattr(self.pool.api_router, 'call_with_fallback'):
             # Route through API router for multi-endpoint failover
             
+            # Derive agent type once for the entire method (used by token resolution + router call)
+            agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
+
             # Dynamic endpoint selection based on agent's actual token requirements
             allocated_tokens = None
             override = getattr(instance, '_generate_cfg_override', None)
@@ -1585,9 +1607,8 @@ class ExecutionEngine:
             
             # Prefer live API router data over stale template config (fixes max_tokens not updating on live config changes)
             if allocated_tokens is None:
-                agent_type_for_tokens = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
                 try:
-                    val = self.pool.api_router.get_effective_max_tokens(agent_type_for_tokens)
+                    val = self.pool.api_router.get_effective_max_tokens(agent_type)
                     if isinstance(val, int) and val > 0:
                         allocated_tokens = val
                         
@@ -1595,7 +1616,7 @@ class ExecutionEngine:
                         prev_tokens = getattr(instance, '_allocated_max_input_tokens', 0)
                         
                         # Try to get the active endpoint details from priority list
-                        priority_ids = self.pool.api_router.get_agent_priorities(agent_type_for_tokens)
+                        priority_ids = self.pool.api_router.get_agent_priorities(agent_type)
                         if priority_ids:
                             first_ep_id = priority_ids[0]
                             ep = self.pool.api_router.get_endpoint(first_ep_id)
@@ -1611,26 +1632,28 @@ class ExecutionEngine:
                                 if prev_tokens != val:
                                     endpoint_info['prev_max_input_tokens'] = prev_tokens
                                     logger.info(
-                                        f"Endpoint allocation updated for {agent_type_for_tokens}: "
+                                        f"Endpoint allocation updated for {agent_type}: "
                                         f"{endpoint_info}"
                                     )
                                 else:
                                     logger.debug(
-                                        f"Endpoint confirmed for {agent_type_for_tokens}: "
+                                        f"Endpoint confirmed for {agent_type}: "
                                         f"{endpoint_info}"
                                     )
                             else:
                                 logger.debug(
-                                    f"No endpoint found by ID '{first_ep_id}' for {agent_type_for_tokens}, "
+                                    f"No endpoint found by ID '{first_ep_id}' for {agent_type}, "
                                     f"max_input_tokens={val}"
                                 )
                         else:
                             logger.debug(
-                                f"No priorities configured for {agent_type_for_tokens}, "
+                                f"No priorities configured for {agent_type}, "
                                 f"max_input_tokens={val}"
                             )
-                except Exception:
+                except (KeyError, AttributeError, ValueError):
                     pass  # Fall through to template fallback below
+                except Exception:
+                    logger.warning(f"Failed to resolve max_tokens for {agent_type}, falling back to template", exc_info=True)
             
             # Template config as last resort (only used if no override and router unavailable/empty)
             if allocated_tokens is None and getattr(llm, 'generate_cfg', None) and 'max_input_tokens' in llm.generate_cfg:
@@ -1638,31 +1661,21 @@ class ExecutionEngine:
                 if isinstance(val, int) and val > 0:
                     allocated_tokens = val
                     logger.debug(
-                        f"Template fallback for {agent_type_for_tokens}: "
+                        f"Template fallback for {agent_type}: "
                         f"max_input_tokens={val}"
                     )
 
             def _do_call(llm_cfg: dict) -> Iterator[List[Message]]:
                 # Config merge priority (lowest → highest):
-                #   1. Template LLM generate_cfg     – base defaults (stop sequences, parallel_function_calls, etc.)
+                #   1. Template LLM generate_cfg     – base defaults
                 #   2. Endpoint config from fallback chain – correct max_input_tokens for the current endpoint
                 #   3. Per-instance override            – user-specified values via UI (highest priority)
-                merged_cfg = {}
-                if getattr(llm, 'generate_cfg', None):
-                    merged_cfg.update(llm.generate_cfg)          # Layer 1: template defaults
-                if llm_cfg:
-                    merged_cfg.update(llm_cfg)                    # Layer 2: endpoint config (overrides template defaults, e.g. correct max_input_tokens for this endpoint)
-                if instance._generate_cfg_override is not None:
-                    merged_cfg.update(instance._generate_cfg_override)  # Layer 3: user override
+                merged_cfg = self._build_merged_cfg(llm, instance, endpoint_cfg=llm_cfg)
                 merged_cfg['agent_name'] = template.name
                 
                 # Store allocated max_input_tokens in instance for compression check (ground-truth tracking)
-                # Validate to ensure it's a positive integer before storing
-                if 'max_input_tokens' in merged_cfg:
-                    val = merged_cfg['max_input_tokens']
-                    if isinstance(val, int) and val > 0:
-                        instance._allocated_max_input_tokens = val
-                
+                self._store_allocated_max_input_tokens(instance, merged_cfg)
+
                 # Register token count callback to capture actual token usage from LLM (ground-truth tracking)
                 merged_cfg['_on_token_count'] = _make_token_count_callback(instance)
 
@@ -1674,25 +1687,15 @@ class ExecutionEngine:
                     extra_generate_cfg=merged_cfg,
                 )
 
-            agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
             return self.pool.api_router.call_with_fallback(agent_type, _do_call, allocated_tokens=allocated_tokens)
         else:
             # Direct call without router — same merge priority as fallback path:
-            #   1. Template LLM generate_cfg (base defaults) → 2. Per-instance override (user-specified values)
-            merged_cfg = {}
-            if getattr(llm, 'generate_cfg', None):
-                merged_cfg.update(llm.generate_cfg)              # Layer 1: template defaults
-            if instance._generate_cfg_override is not None:
-                merged_cfg.update(instance._generate_cfg_override)  # Layer 2: user override (no endpoint config in direct call)
+            merged_cfg = self._build_merged_cfg(llm, instance)  # no endpoint config layer in direct call
             merged_cfg['agent_name'] = template.name
             
             # Store allocated max_input_tokens in instance for compression check (ground-truth tracking)
-            # Validate to ensure it's a positive integer before storing
-            if 'max_input_tokens' in merged_cfg:
-                val = merged_cfg['max_input_tokens']
-                if isinstance(val, int) and val > 0:
-                    instance._allocated_max_input_tokens = val
-            
+            self._store_allocated_max_input_tokens(instance, merged_cfg)
+
             # Register token count callback to capture actual token usage from LLM (ground-truth tracking)
             merged_cfg['_on_token_count'] = _make_token_count_callback(instance)
 
