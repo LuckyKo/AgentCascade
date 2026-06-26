@@ -278,27 +278,26 @@ class ToolDispatcher:
         child_depth: int
     ) -> str:
         """Run child agent synchronously (caller holds slot).
-        
-        Extracted from ExecutionEngine._handle_call_agent() - Phase 4.3
-        
+
+        Thin wrapper around child_runner.run_child_core() that handles
+        slot management unique to the sync path.
+
         This method:
         1. Releases caller's slot
-        2. Runs _create_and_run_agent()
-        3. Re-acquires caller's slot via _reacquire_caller_slot() (in finally block for FIX 3)
-        4. Extracts and returns result
-        
+        2. Calls run_child_core() for unified execution logic
+        3. Re-acquires caller's slot via _reacquire_caller_slot() (finally block)
+        4. Returns result_string from step 2
+
         Args:
             agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth
-            
+
         Returns:
             Result string from child agent
         """
-        # Local imports
-        from agent_cascade.compression.helpers import extract_instance_output
-        from agent_cascade.llm.schema import Message, USER
-        
+        from agent_cascade.child_runner import run_child_core
+
         sync_path_start = time.monotonic()
-        
+
         # Release caller's slot so the child can acquire it inside engine.run()
         if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release is not None:
             logger.debug(
@@ -308,52 +307,33 @@ class ToolDispatcher:
             logger.debug(
                 f"[SLOT_SYNC_RELEASE] Slot released for '{caller_name}', active agents can now acquire"
             )
-        
-        inst = None
-        conv = None
-        
+
         try:
-            # Run child synchronously via _create_and_run_agent
-            force_fresh = agent_class in ('security', 'compressor')  # Lowercase comparison
-            logger.debug(
-                f"[SLOT_SYNC_CHILD_START] Starting sync child '{instance_name}' ({agent_class}) for caller '{caller_name}'"
+            # Unified core execution — handles loop detection, status checks, formatting
+            result_string, _ = run_child_core(
+                engine=self.engine,
+                pool=self.pool,
+                agent_class=agent_class,
+                instance_name=instance_name,
+                args=args,
+                caller_name=caller_name,
+                child_depth=child_depth,
+                prefix="Agent",
             )
-            inst, conv = self.engine._create_and_run_agent(agent_class, instance_name, args, caller_name, child_depth, force_fresh=force_fresh)
             logger.debug(
                 f"[SLOT_SYNC_CHILD_COMPLETE] Sync child '{instance_name}' completed in {time.monotonic() - sync_path_start:.2f}s"
             )
+            return result_string
 
-        except LoopDetectedError as e:
-            # Catch loop detection locally — perform surgical rollback on the CHILD agent,
-            # then return an error string so the parent's turn continues normally.
-            # Unlike the async path (which re-raises to propagate to consumer-level recovery),
-            # the sync path must handle this here because it returns a value directly to
-            # the parent's turn loop via execute_tool(). Propagating would disrupt the parent.
-            looped_agent = e.agent_name if e.agent_name else instance_name
+        except Exception as e:
+            # Catch non-LoopDetectedError exceptions and return formatted error string.
+            # run_child_core handles LoopDetectedError internally, so this catches only
+            # unexpected errors (matching the old sync path format for parent parsing).
+            logger.error(f"Sync child '{instance_name}' failed: {e}")
+            return f"[Agent '{instance_name}' Failed]:\n{str(e)}"
 
-            # Surgical rollback on the correct agent (the one that looped)
-            if e.pop_count:
-                logger.warning(
-                    f"Loop detected for {looped_agent}: {e.reason}. "
-                    f"Surgical rollback of {e.pop_count} messages."
-                )
-                self.pool.surgical_rollback(looped_agent, e.pop_count, reason=e.reason)
-
-            # Inject loop avoidance hint into the child's conversation
-            looped_instance = self.pool.get_instance(looped_agent)
-            if looped_instance:
-                hint_msg = Message(
-                    role=USER,
-                    content=f"[SYSTEM]: A repetitive loop was detected ({e.reason}). "
-                            f"Please try a different approach.",
-                )
-                looped_instance.append_message(hint_msg)
-
-            return f"[Loop Detected for '{looped_agent}']: {e.reason}"
-            
         finally:
             # FIX 3: Always re-acquire caller's slot, even on early exit due to stop
-            # This ensures the parent agent can continue its turn after child execution ends
             logger.debug(
                 f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child"
             )
@@ -367,28 +347,6 @@ class ToolDispatcher:
                     f"[SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for '{caller_name}'. "
                     f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s"
                 )
-        
-        # Check if execution was stopped or child was terminated (FIX 4)
-        # REVIEWER FIX: Active stack check removed - by the time we reach here, 
-        # _create_and_run_agent()'s finally block already removed the instance from active_stack
-        was_stopped = self.pool.stopped
-        was_terminated = instance_name in self.pool.terminated_instances
-        
-        # Consolidated null/empty check
-        if inst is None or not conv:
-            logger.warning("SYNC path FAILED - %s creation returned inst=%s", instance_name, inst)
-            return f"Error: Agent '{instance_name}' execution failed with no output."
-
-        # Extract and format result — provide clear feedback for stopped/terminated agents (FIX 4)
-        if was_stopped:
-            result = extract_instance_output(conv, instance_name, was_terminated=False)
-            return f"[Agent '{instance_name}' Stopped]: Execution was stopped by user.\n{result}"
-        elif was_terminated:
-            result = extract_instance_output(conv, instance_name, was_terminated=True)
-            return f"[Agent '{instance_name}' Terminated]:\n{result}"
-        else:
-            result = extract_instance_output(conv, instance_name, was_terminated=False)
-            return f"[Agent '{instance_name}' Completed]:\n{result}"
 
     def _run_child_async(
         self,
@@ -452,9 +410,9 @@ class ToolDispatcher:
         if not slot_holder:
             return False
             
-        # MAJOR-1 FIX: Increase retry timeout from 0.2s total to 2s+ total for better robustness
-        # during stop cleanup when semaphore may be contended. Use 20 attempts with 0.1s sleep = 2s total.
-        max_attempts = 20
+        # Reverted from 20 back to 2: the original inline code used 2 attempts (0.2s total).
+        # Higher retry counts cause unnecessary blocking during stop cleanup.
+        max_attempts = 2
         retry_delay = 0.1
         
         for attempt in range(max_attempts):

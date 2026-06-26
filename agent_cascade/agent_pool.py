@@ -1678,34 +1678,23 @@ class AgentPool:
             Acquiring before AND inside would deadlock on Semaphore(1) (same thread,
             same semaphore). The child's engine.run() handles all concurrency control.
             """
-            try:
-                from agent_cascade.execution_engine import ExecutionEngine
-                from agent_cascade.compression.helpers import extract_instance_output
-                # Bug #4 fix: Import LoopDetectedError to re-raise it before generic handler
-                from .loop_detection import LoopDetectedError
+            from agent_cascade.execution_engine import ExecutionEngine
+            from agent_cascade.child_runner import run_child_core
 
-                engine = ExecutionEngine(self)
-                # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
-                inst, child_conv = engine._create_and_run_agent(agent_class, child_instance_name, args, caller, nest_depth)
+            engine = ExecutionEngine(self)
+            # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
 
-                if inst is None or child_conv is None:
-                    return f"[Parallel Agent '{child_instance_name}' Failed]: Internal error — agent creation returned None."
-
-                if not child_conv:
-                    return f"[Parallel Agent '{child_instance_name}' Failed]: Execution terminated with no output."
-
-                # Check if agent was terminated by user
-                was_terminated = child_instance_name in self.terminated_instances
-                result = extract_instance_output(child_conv, child_instance_name, was_terminated=was_terminated)
-                status = "Terminated" if was_terminated else "Finished"
-                return f"[Parallel Agent '{child_instance_name}' {status}]:\n{result}"
-
-            except LoopDetectedError:
-                # Bug #4 fix: Re-raise LoopDetectedError before it gets swallowed by generic handler
-                # Let LoopDetectedError propagate to the caller's recovery handler
-                raise
-            except Exception as e:
-                return f"[Parallel Agent '{child_instance_name}' Failed]:\n{str(e)}"
+            result_string, _ = run_child_core(
+                engine=engine,
+                pool=self,
+                agent_class=agent_class,
+                instance_name=child_instance_name,
+                args=args,
+                caller_name=caller,
+                child_depth=nest_depth,
+                prefix="Parallel Agent",
+            )
+            return result_string
 
         self._async_registry.register(instance_name, run_child_agent, function_id=function_id)
 
