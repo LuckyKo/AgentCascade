@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from agent_cascade.agent_instance import AgentInstance
 
 from agent_cascade.log import logger
+from agent_cascade.loop_detection import LoopDetectedError
 from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS
 from agent_cascade.tool_utils import (
     MAX_SPILL_SIZE,
@@ -292,8 +293,9 @@ class ToolDispatcher:
         Returns:
             Result string from child agent
         """
-        # Local import to match pattern in agent_pool.py:1287
+        # Local imports
         from agent_cascade.compression.helpers import extract_instance_output
+        from agent_cascade.llm.schema import Message, USER
         
         sync_path_start = time.monotonic()
         
@@ -320,6 +322,34 @@ class ToolDispatcher:
             logger.debug(
                 f"[SLOT_SYNC_CHILD_COMPLETE] Sync child '{instance_name}' completed in {time.monotonic() - sync_path_start:.2f}s"
             )
+
+        except LoopDetectedError as e:
+            # Catch loop detection locally — perform surgical rollback on the CHILD agent,
+            # then return an error string so the parent's turn continues normally.
+            # Unlike the async path (which re-raises to propagate to consumer-level recovery),
+            # the sync path must handle this here because it returns a value directly to
+            # the parent's turn loop via execute_tool(). Propagating would disrupt the parent.
+            looped_agent = e.agent_name if e.agent_name else instance_name
+
+            # Surgical rollback on the correct agent (the one that looped)
+            if e.pop_count:
+                logger.warning(
+                    f"Loop detected for {looped_agent}: {e.reason}. "
+                    f"Surgical rollback of {e.pop_count} messages."
+                )
+                self.pool.surgical_rollback(looped_agent, e.pop_count, reason=e.reason)
+
+            # Inject loop avoidance hint into the child's conversation
+            looped_instance = self.pool.get_instance(looped_agent)
+            if looped_instance:
+                hint_msg = Message(
+                    role=USER,
+                    content=f"[SYSTEM]: A repetitive loop was detected ({e.reason}). "
+                            f"Please try a different approach.",
+                )
+                looped_instance.append_message(hint_msg)
+
+            return f"[Loop Detected for '{looped_agent}']: {e.reason}"
             
         finally:
             # FIX 3: Always re-acquire caller's slot, even on early exit due to stop

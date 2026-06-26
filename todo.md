@@ -46,6 +46,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] streaming seems to be odd (not really working) on Security and Compressor agents
 - [ ] reading logs from workspace with code_intepreter seems to be an impossible task, investigate wtf is happening with out path mapping
 - [ ] retry is broken, it deleted the user message too
+- [ ] max tokens does not change when a new API endpoint is acquired 
 - [ ] stop is not quickly terminating streams and breaks something because i cant resume activity after
 - [ ] compressor can use tools when i specifically disabled everything for it, can also compress recursively. compressor token limit also seems to be wrong
 - [ ] compression causes loop detector to trigger and kick the agent back to parrent
@@ -55,30 +56,23 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
       ERROR: 'charmap' codec can't encode character '\u2717' in position 0: character maps to <undefined>
 
 # Errors to investigate:
-
-2026-06-25 09:25:12,105 - execution_engine.py - 648 - DEBUG - engine.run() ENTRY - instance=Compressor
-2026-06-25 09:25:12,117 - execution_engine.py - 688 - DEBUG - [SLOT_BYPASS] Skipping slot acquire - instance=Compressor, class=Compressor (nested invocation)
-2026-06-25 09:25:12,119 - execution_engine.py - 941 - INFO - [CACHE_REBUILD] Rebuilding working set for Compressor
-2026-06-25 09:25:12,119 - execution_engine.py - 1020 - DEBUG - [CACHE_REBUILD] System prompt content CHANGED for Compressor
-2026-06-25 09:25:12,145 - base.py - 946 - INFO - Agent [Compressor] - ALL tokens: 10028, Available tokens: 124543
-2026-06-25 09:26:42,170 - execution_engine.py - 825 - DEBUG - [SLOT_FINAL] Before finally release - instance=Compressor, slot_held=False
-2026-06-25 09:26:42,171 - execution_engine.py - 2437 - DEBUG - [SLOT_RELEASE] \_slot_release already None for Compressor during cleanup
-2026-06-25 09:26:42,172 - execution_engine.py - 835 - DEBUG - [SLOT_FINAL] After finally release - instance=Compressor, slot_still_held=False
-2026-06-25 09:26:42,173 - execution_engine.py - 870 - DEBUG - EXIT - Compressor RUNNING→IDLE
-2026-06-25 09:26:42,176 - execution_engine.py - 1303 - DEBUG - Rebuilt working sets for PreExistingFailuresInvestigator2: messages=58, llm_messages=57
-2026-06-25 09:26:42,177 - handler.py - 396 - ERROR - Forced compression raised exception for PreExistingFailuresInvestigator2: 'AgentInstance' object has no attribute '\_pending_notifications'
-2026-06-25 09:26:42,291 - handler.py - 274 - ERROR - Overfeeding detected for PreExistingFailuresInvestigator2: 3 forced compressions exceeded limit of 3. Context keeps filling faster than compression can reduce it. Terminating agent.
-2026-06-25 09:26:42,292 - execution_engine.py - 807 - ERROR - EXCEPTION - PreExistingFailuresInvestigator2: AttributeError: 'AgentInstance' object has no attribute '\_pending_notifications'
-2026-06-25 09:26:42,293 - execution_engine.py - 825 - DEBUG - [SLOT_FINAL] Before finally release - instance=PreExistingFailuresInvestigator2, slot_held=True
-2026-06-25 09:26:42,293 - execution_engine.py - 2430 - DEBUG - [SLOT_RELEASE] Successfully released for PreExistingFailuresInvestigator2 during cleanup
-2026-06-25 09:26:42,294 - execution_engine.py - 835 - DEBUG - [SLOT_FINAL] After finally release - instance=PreExistingFailuresInvestigator2, slot_still_held=False
-2026-06-25 09:26:42,294 - execution_engine.py - 870 - DEBUG - EXIT - PreExistingFailuresInvestigator2 RUNNING→IDLE
-2026-06-25 09:26:42,295 - execution_engine.py - 2848 - DEBUG - [CALL_AGENT_DEBUG] \_create_and_run_agent EXIT — target=PreExistingFailuresInvestigator2, reason=completed, inst_type=AgentInstance, conv_len=2, final_resp_len=1
-2026-06-25 09:26:42,308 - tool_dispatcher.py - 320 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'PreExistingFailuresInvestigator2' completed in 1454.95s
-2026-06-25 09:26:42,308 - tool_dispatcher.py - 327 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'Maine' after sync child
-2026-06-25 09:26:42,308 - agent_pool.py - 1635 - DEBUG - [CALL_AGENT_DEBUG] \_acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://localhost:1234/v1, concurrency_limit=0
-2026-06-25 09:26:42,309 - tool_dispatcher.py - 336 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 1454.97s
-2026-06-25 09:26:42,309 - tool_dispatcher.py - 116 - DEBUG - handle_call_agent returned type=str
-2026-06-25 09:26:42,477 - base.py - 946 - INFO - Agent [Orchestrator] - ALL tokens: 70252, Available tokens: 123324
+2026-06-26 03:05:51,001 - base.py - 946 - INFO - Agent [Researcher] - ALL tokens: 3324, Available tokens: 124226
+2026-06-26 03:05:52,039 - base.py - 946 - INFO - Agent [Researcher] - ALL tokens: 3375, Available tokens: 124226
+2026-06-26 03:05:53,087 - base.py - 946 - INFO - Agent [Researcher] - ALL tokens: 3428, Available tokens: 124226
+2026-06-26 03:05:54,115 - execution_engine.py - 1207 - WARNING - Loop detected for CodebaseInvestigator: Detected repeated sequence loop (assistant, function, assistant, function, assistant, function, assistant, function, assistant, function repeating 2 times)
+2026-06-26 03:05:54,116 - execution_engine.py - 828 - DEBUG - [SLOT_FINAL] Before finally release - instance=CodebaseInvestigator, slot_held=True
+2026-06-26 03:05:54,127 - execution_engine.py - 2444 - DEBUG - [SLOT_RELEASE] Successfully released for CodebaseInvestigator during cleanup
+2026-06-26 03:05:54,129 - execution_engine.py - 838 - DEBUG - [SLOT_FINAL] After finally release - instance=CodebaseInvestigator, slot_still_held=False
+2026-06-26 03:05:54,132 - execution_engine.py - 873 - DEBUG - EXIT - CodebaseInvestigator RUNNING→IDLE
+2026-06-26 03:05:54,133 - execution_engine.py - 2862 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=CodebaseInvestigator, reason=aborted, inst_type=AgentInstance, conv_len=2, final_resp_len=31
+2026-06-26 03:05:54,135 - tool_dispatcher.py - 327 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'Maine' after sync child
+2026-06-26 03:05:54,137 - agent_pool.py - 1639 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://localhost:1234/v1, concurrency_limit=0
+2026-06-26 03:05:54,142 - tool_dispatcher.py - 336 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 55.94s
+2026-06-26 03:05:54,145 - execution_engine.py - 1921 - ERROR - Tool call_agent failed for Maine: Loop detected for CodebaseInvestigator: Detected repeated sequence loop (assistant, function, assistant, function, assistant, function, assistant, function, assistant, function repeating 2 times)
+2026-06-26 03:05:54,147 - execution_engine.py - 828 - DEBUG - [SLOT_FINAL] Before finally release - instance=Maine, slot_held=True
+2026-06-26 03:05:54,148 - execution_engine.py - 2444 - DEBUG - [SLOT_RELEASE] Successfully released for Maine during cleanup
+2026-06-26 03:05:54,149 - execution_engine.py - 838 - DEBUG - [SLOT_FINAL] After finally release - instance=Maine, slot_still_held=False
+2026-06-26 03:05:54,149 - execution_engine.py - 856 - DEBUG - [FINAL_SYNC] Maine: Catching up 2 unlogged messages (logged=2, conversation=4)
+2026-06-26 03:05:54,150 - execution_engine.py - 873 - DEBUG - EXIT - Maine RUNNING→IDLE
 
 # EOF
