@@ -46,6 +46,8 @@ DEFAULT_COMPRESSION_COOLDOWN_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_DEFAULT_COMPRESSION_COOLDOWN_SECONDS', 2.0))  # Minimum seconds between forced compressions to prevent thrashing
 DEFAULT_COMPRESSION_MAX_ATTEMPTS: int = int(os.getenv(
     'QWEN_AGENT_COMPRESSION_MAX_ATTEMPTS', 100))  # Safety net max forced compressions before terminating (true overfeeding detected in core.py)
+CHARS_PER_TOKEN_ESTIMATE: float = float(os.getenv(
+    'QWEN_AGENT_CHARS_PER_TOKEN_ESTIMATE', 5.0))  # Rough chars-per-token ratio for estimations (typical English ~5, use float for precision)
 
 # Settings for forget_last tool (Feature 021)
 DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS: int = int(os.getenv(

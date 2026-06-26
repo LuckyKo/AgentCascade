@@ -5,11 +5,11 @@ from agent_cascade.compression.helpers import (
     compute_discard_count,
     build_marker_message,
 )
-from agent_cascade.llm.schema import FUNCTION
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
 from agent_cascade.utils.utils import extract_text_from_message
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
-from agent_cascade.llm.schema import Message
+from agent_cascade.llm.schema import FUNCTION, Message
+from agent_cascade.settings import CHARS_PER_TOKEN_ESTIMATE
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +120,8 @@ def compress_context(
 
     # ── 3b. Cap discard count so compression agent can actually process the messages ──
     # If the compression agent has a known context window, don't feed it more than it can handle.
-    # Estimate ~500 tokens per message; reserve 60% of the agent's context for input (40% for system prompt,
-    # existing summary, and output generation).
+    # Estimate ~500 tokens per message; reserve 90% of the agent's context for input messages (10% for system prompt,
+    # summary output, and overhead).
     max_tokens = None
     available_for_messages = None
     try:
@@ -207,8 +207,15 @@ def compress_context(
                 tokens = qwen_count(content)
                 target_token_count += tokens
 
-            # Estimate prompt overhead (system prompt ~50 tokens + compression prompt template ~100 tokens)
-            prompt_overhead_tokens = 150
+            # Estimate prompt overhead from compressor's system message using CHARS_PER_TOKEN_ESTIMATE.
+            comp_agent = agent_pool.get_agent('Compressor')
+            if comp_agent and hasattr(comp_agent, 'system_message'):
+                sys_prompt_tokens = len(str(comp_agent.system_message)) // CHARS_PER_TOKEN_ESTIMATE
+            else:
+                sys_prompt_tokens = 50  # fallback estimate
+
+            prompt_template_tokens = 100  # compression prompt template (~500 chars / CHARS_PER_TOKEN_ESTIMATE)
+            prompt_overhead_tokens = sys_prompt_tokens + prompt_template_tokens
 
             # Note: summary marker message is already included in target_messages, no need to count separately
             total_estimated = target_token_count + prompt_overhead_tokens

@@ -424,23 +424,6 @@ class AgentInstance:
 
 
 @dataclass
-class CompressResult:
-    """
-    Return type of compress_context(). Matches agent_cascade/compression/result.py.
-
-    Carries the outcome of a compression operation so callers can decide how to
-    proceed (retry, yield error, update summaries, etc.).
-    """
-    success: bool
-    summary_text: Optional[str] = None
-    marker_message: Optional[Message] = None
-    messages_discarded: int = 0
-    tail_count: int = 0
-    error: Optional[str] = None
-    mode: str = ""
-
-
-@dataclass
 class PoolSettings:
     """Configurable thresholds and timeouts for the agent pool."""
 
