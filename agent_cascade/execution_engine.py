@@ -1587,15 +1587,16 @@ class ExecutionEngine:
                     allocated_tokens = val
 
             def _do_call(llm_cfg: dict) -> Iterator[List[Message]]:
-                # Start with endpoint config as base, then apply per-instance overrides
-                merged_cfg = dict(llm_cfg)  # Endpoint defaults first
-                # Per-instance override (set by user via UI) takes precedence over endpoint defaults
+                # Config merge priority (lowest → highest):
+                #   1. Template LLM generate_cfg     – base defaults (stop sequences, parallel_function_calls, etc.)
+                #   2. Endpoint config from fallback chain – correct max_input_tokens for the current endpoint
+                #   3. Per-instance override            – user-specified values via UI (highest priority)
+                merged_cfg = {}
+                if hasattr(llm, 'generate_cfg'):
+                    merged_cfg.update(llm.generate_cfg)          # Layer 1: template defaults
+                merged_cfg.update(llm_cfg)                        # Layer 2: endpoint config (overrides template defaults, e.g. correct max_input_tokens for this endpoint)
                 if instance._generate_cfg_override is not None:
-                    merged_cfg.update(instance._generate_cfg_override)
-                elif hasattr(llm, 'generate_cfg'):
-                    merged_cfg.update(llm.generate_cfg)
-                # No more merged_cfg.update(llm_cfg) here — already set as base above
-                # This ensures user's max_input_tokens override is not silently lost
+                    merged_cfg.update(instance._generate_cfg_override)  # Layer 3: user override
                 merged_cfg['agent_name'] = template.name
                 
                 # Store allocated max_input_tokens in instance for compression check (ground-truth tracking)
@@ -1619,12 +1620,13 @@ class ExecutionEngine:
             agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'agent'
             return self.pool.api_router.call_with_fallback(agent_type, _do_call, allocated_tokens=allocated_tokens)
         else:
-            # Direct call without router — still respect instance override for max_input_tokens etc.
+            # Direct call without router — same merge priority as fallback path:
+            #   1. Template LLM generate_cfg (base defaults) → 2. Per-instance override (user-specified values)
             merged_cfg = {}
+            if hasattr(llm, 'generate_cfg'):
+                merged_cfg.update(llm.generate_cfg)              # Layer 1: template defaults
             if instance._generate_cfg_override is not None:
-                merged_cfg.update(instance._generate_cfg_override)
-            elif hasattr(llm, 'generate_cfg'):
-                merged_cfg.update(llm.generate_cfg)
+                merged_cfg.update(instance._generate_cfg_override)  # Layer 2: user override (no endpoint config in direct call)
             merged_cfg['agent_name'] = template.name
             
             # Store allocated max_input_tokens in instance for compression check (ground-truth tracking)
