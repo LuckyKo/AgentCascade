@@ -1592,9 +1592,10 @@ class ExecutionEngine:
                 #   2. Endpoint config from fallback chain – correct max_input_tokens for the current endpoint
                 #   3. Per-instance override            – user-specified values via UI (highest priority)
                 merged_cfg = {}
-                if hasattr(llm, 'generate_cfg'):
+                if getattr(llm, 'generate_cfg', None):
                     merged_cfg.update(llm.generate_cfg)          # Layer 1: template defaults
-                merged_cfg.update(llm_cfg)                        # Layer 2: endpoint config (overrides template defaults, e.g. correct max_input_tokens for this endpoint)
+                if llm_cfg:
+                    merged_cfg.update(llm_cfg)                    # Layer 2: endpoint config (overrides template defaults, e.g. correct max_input_tokens for this endpoint)
                 if instance._generate_cfg_override is not None:
                     merged_cfg.update(instance._generate_cfg_override)  # Layer 3: user override
                 merged_cfg['agent_name'] = template.name
@@ -1623,7 +1624,7 @@ class ExecutionEngine:
             # Direct call without router — same merge priority as fallback path:
             #   1. Template LLM generate_cfg (base defaults) → 2. Per-instance override (user-specified values)
             merged_cfg = {}
-            if hasattr(llm, 'generate_cfg'):
+            if getattr(llm, 'generate_cfg', None):
                 merged_cfg.update(llm.generate_cfg)              # Layer 1: template defaults
             if instance._generate_cfg_override is not None:
                 merged_cfg.update(instance._generate_cfg_override)  # Layer 2: user override (no endpoint config in direct call)
