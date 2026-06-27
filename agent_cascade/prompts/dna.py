@@ -213,17 +213,7 @@ TOOL_METADATA = {
             'destination': "Path to the destination, absolute or relative to workspace root (e.g., 'src/new.py')"
         }
     },
-    'move_file': {
-        'description': (
-            'Move a file or directory to a new location. If the destination already exists, '
-            'a timestamped backup is created before overwriting. Requires user approval for any files not owned '
-            'by the current agent. Moving files you created in this session is auto-approved.'
-        ),
-        'parameters': {
-            'source': "Path to the source file/directory, absolute or relative to workspace root",
-            'destination': "Path to the destination, absolute or relative to workspace root"
-        }
-    },
+    
     'code_interpreter': {
         'description': (
             'Python code sandbox (Docker-based). The workspace directory is mounted into the container. '

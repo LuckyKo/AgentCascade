@@ -81,11 +81,6 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
     copy_tool.agent_name = agent_name
     agent.function_map['copy_file'] = copy_tool
 
-    move_tool = MoveFile()
-    move_tool.agent_pool = agent_pool
-    move_tool.agent_name = agent_name
-    agent.function_map['move_file'] = move_tool
-
     # ── Context compression ──
     compress_tool = CompressContext()
     compress_tool.agent_pool = agent_pool

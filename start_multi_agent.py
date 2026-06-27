@@ -111,17 +111,17 @@ llm_cfg = {
 DEFAULT_TOOLS = {
     'orchestrator': [
         'call_agent', 'dismiss_agent', 'list_agents',
-        'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'move_file', 'read_file', 'view_image', 'list_dir', 'grep',
+        'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'read_file', 'view_image', 'list_dir', 'grep',
         'ddg_search', 'web_extractor', 'storage', 'retrieval', 'system_info'
     ],
     'coder': [
         'call_agent', 'list_agents',
-        'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'move_file', 'list_dir', 'grep', 'code_interpreter', 'shell_cmd',
+        'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'list_dir', 'grep', 'code_interpreter', 'shell_cmd',
         'ddg_search', 'web_extractor', 'storage'
     ],
     'researcher': [
         'call_agent', 'list_agents',
-        'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'move_file', 'list_dir', 'grep', 'code_interpreter',
+        'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'list_dir', 'grep', 'code_interpreter',
         'ddg_search', 'web_extractor', 'storage', 'retrieval',
         'doc_parser', 'simple_doc_parser', 'extract_doc_vocabulary'
     ],

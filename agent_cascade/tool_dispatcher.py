@@ -599,7 +599,7 @@ class ToolDispatcher:
             return tool_result
 
         # Exempt tools with short, structured output where truncation could confuse the agent
-        if tool_name in ['compress_context', 'read_file', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'move_file']:
+        if tool_name in ['compress_context', 'read_file', 'write_file', 'edit_file', 'delete_file', 'copy_file']:
             return tool_result
 
         inst = self.pool.get_instance(instance_name)

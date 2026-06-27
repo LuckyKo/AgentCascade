@@ -924,17 +924,21 @@ class MoveFile(BaseTool):
     """Move a file or directory — creates timestamped backup before overwriting existing destination (requires user approval)."""
 
     name = 'move_file'
-    description = TOOL_METADATA['move_file']['description']
+    description = (
+        'Move a file or directory to a new location. If the destination already exists, '
+        'a timestamped backup is created before overwriting. Requires user approval for any files not owned '
+        'by the current agent. Moving files you created in this session is auto-approved.'
+    )
     parameters = {
         'type': 'object',
         'properties': {
             'source': {
                 'type': 'string',
-                'description': TOOL_METADATA['move_file']['parameters']['source']
+                'description': "Path to the source file/directory, absolute or relative to workspace root"
             },
             'destination': {
                 'type': 'string',
-                'description': TOOL_METADATA['move_file']['parameters']['destination']
+                'description': "Path to the destination, absolute or relative to workspace root"
             }
         },
         'required': ['source', 'destination'],
