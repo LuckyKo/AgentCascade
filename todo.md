@@ -19,7 +19,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] need a memory consolidation task ran periodically - takes all summaries in log and arranges them in a neat continuous package like long term memory -> replaces last summary
 [ ] warn agents about message limit at 90%
 [ ] make cmd_shell pop open a console window in the back so the user can inspect or interact with it if needed.
-[ ] improve list_dir tool to be as useful and even more than any shell command
+[x] improve list_dir tool — FIXED (3ec490c): added recursive listing, glob filtering (include/exclude), sorting (name/size/date/type), human-readable sizes, timestamps, summary stats, max_entries cap, symlink cycle detection
 [ ] add a banner above the user chat entry that shows queued messages (with an X to dismiss each one individually)
 [ ] change USE_PREV_ARG system to a argument and (certain) tool output caching system. all tool arguments and certain outputs (like the result of a call_agent) longer than a certain threshold (line 1000 chars) get cached in a pool and can be inserted with {**USE_CHACHED_ENTRY_N**} in other tool arguments. system_info will display the truncated state of the cache pool. we'll use a rolling index to overwrite old entries in the pool with new ones. the system will use a toggle on/off in settings.
 
@@ -47,7 +47,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] reading logs from workspace with code_intepreter seems to be an impossible task, investigate wtf is happening with out path mapping
 - [ ] retry is broken, it deleted the user message too
 - [ ] max tokens does not change when a new API endpoint is acquired 
-- [ ] randomly duplicated agent log entries for tool outputs
+- [x] randomly duplicated agent log entries for tool outputs
 - [ ] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck
 - [x] loop detector triggers and just kicks back to parent instead of applying rollback and retrying — FIXED (same as above)
 - [ ] images don't get properly pasted in chat
