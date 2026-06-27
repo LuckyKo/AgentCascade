@@ -100,7 +100,7 @@ def run_child_core(
                     f"Please try a different approach."
                 ),
             )
-            instance.append_message(hint_msg)
+            engine._append_and_log(instance, hint_msg)
 
         return f"[{prefix} '{looped_agent}' Loop Detected]: {e.reason}"
 

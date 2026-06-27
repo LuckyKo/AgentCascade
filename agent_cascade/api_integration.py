@@ -387,7 +387,9 @@ def run_agent_in_pool_with_recovery(
                     content=f"[SYSTEM]: A repetitive loop was detected ({e.reason}). "
                             f"Please try a different approach.",
                 )
-                looped_instance.append_message(hint_msg)  # PR2: centralized mutation API handles cache sync
+                with looped_instance._compression_lock:
+                    looped_instance.append_message(hint_msg)
+                    pool.get_logger(looped_agent, looped_instance.agent_class).log_message(hint_msg)
             else:
                 # REVIEWER FINDING #2 + Fix #2 from reviewer: If instance not found, hint won't be injected and retry may be wasted
                 # Use error level logging since this indicates a logic issue
