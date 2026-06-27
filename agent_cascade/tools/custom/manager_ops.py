@@ -269,49 +269,59 @@ class DismissAgent(BaseTool):
         super().__init__(**kwargs)
         self.agent_pool = agent_pool
 
+    def _capture_log_path(self, instance_name: str) -> Optional[str]:
+        """Retrieve log path before dismissal removes the logger."""
+        try:
+            logger_inst = self.agent_pool.instance_loggers.get(instance_name)
+            if logger_inst:
+                return getattr(logger_inst, 'log_path', None)
+        except Exception as e:
+            from agent_cascade.log import logger
+            logger.debug(f"Log path lookup failed for instance '{instance_name}' (non-critical): {e}")
+        return None
+
     def call(self, params: str, **kwargs) -> str:
         params = self._verify_json_format_args(params)
         instance_name = params.get('instance_name')
         all_idle = params.get('all_idle', False)
 
+        if not self.agent_pool:
+            return json.dumps({"status": "error", "message": "No agent pool available."})
+
         if all_idle:
             active_set = {name for name, _depth in self.agent_pool.active_stack}
-            # Issue 4: Snapshot instance list like IdleManager does (agent_pool.py:2060)
+            # Snapshot instance list to avoid concurrent modification during iteration
             all_instances = list(self.agent_pool.instances.keys())
             
             dismissed = []
-            for inst in all_instances:
-                inst_obj = self.agent_pool.instances.get(inst)
+            for instance_name_iter in all_instances:
+                instance_obj = self.agent_pool.instances.get(instance_name_iter)
                 
-                # Skip root orchestrator(s) — no parent means top-level
-                if inst_obj and inst_obj.parent_instance is None:
+                if instance_obj is None:
                     continue
                 
-                # Issue 2: Use proper enum comparison for SLEEPING state
-                if inst_obj and inst_obj.state == AgentState.SLEEPING:
+                # Skip root orchestrator(s) — no parent means top-level
+                if instance_obj.parent_instance is None:
+                    continue
+                
+                # Skip agents already in SLEEPING state (not idle, just resting)
+                if instance_obj.state == AgentState.SLEEPING:
                     continue
                 
                 # Skip halted agents (intentionally paused, e.g., during compression)
-                if self.agent_pool.is_instance_halted(inst):
+                if self.agent_pool.is_instance_halted(instance_name_iter):
                     continue
                 
                 # Skip actively running agents
-                if inst in active_set:
+                if instance_name_iter in active_set:
                     continue
                 
-                # Issue 3: Capture log path with try/except (debug-level), before dismissal removes logger
-                log_path = None
-                try:
-                    logger_inst = self.agent_pool.instance_loggers.get(inst)
-                    if logger_inst:
-                        log_path = getattr(logger_inst, 'log_path', None)
-                except Exception as e:
-                    from agent_cascade.log import logger
-                    logger.debug(f"Log path lookup failed for instance '{inst}' (non-critical): {e}")
+                # Capture log path before dismissal removes the logger
+                log_path = self._capture_log_path(instance_name_iter)
                 
-                # Issue 1: Use dismiss_instance() for full cleanup (recursive child dismissal, active termination)
-                self.agent_pool.dismiss_instance(inst)
-                dismissed.append({'agent': inst, 'log_path': log_path})
+                # Use dismiss_instance() for full recursive cleanup (child dismissal + active termination)
+                self.agent_pool.dismiss_instance(instance_name_iter)
+                dismissed.append({'agent': instance_name_iter, 'log_path': log_path})
             
             if not dismissed:
                 return json.dumps({"status": "no_idle_agents", "message": "No idle agents found to dismiss."})
@@ -333,17 +343,10 @@ class DismissAgent(BaseTool):
                 "message": f"Instance '{instance_name}' not found."
             })
 
-        # Capture log path BEFORE dismissing — dismiss_instance removes the logger
-        log_path = None
-        try:
-            logger_inst = self.agent_pool.instance_loggers.get(instance_name)
-            if logger_inst:
-                log_path = getattr(logger_inst, 'log_path', None)
-        except Exception as e:
-            from agent_cascade.log import logger
-            logger.debug(f"Log path lookup failed for instance '{instance_name}' (non-critical): {e}")
+        # Capture log path before dismissal removes the logger
+        log_path = self._capture_log_path(instance_name)
 
-        # Issue 5: Use dismiss_instance() for full cleanup instead of clear_conversation()
+        # Use dismiss_instance() for full recursive cleanup (child dismissal + active termination)
         self.agent_pool.dismiss_instance(instance_name)
 
         return json.dumps({
