@@ -2017,8 +2017,8 @@ function renderToolResult(msg) {
 
   // Determine rendering strategy based on tool type and content characteristics.
   // Some tools return prose/markdown (web_extractor, ddg_search, calculate) that should be formatted.
-  // Others return code-like output (code_interpreter, read_file, shell_cmd, grep, list_dir, write_file, python_compiler) that should stay in <pre><code>.
-  const isCodeTool = ['code_interpreter', 'read_file', 'shell_cmd', 'grep', 'list_dir', 'write_file', 'python_compiler'].includes(msg.name);
+  // Others return code-like output (code_interpreter, read_file, shell_cmd, grep, list_dir, write_file) that should stay in <pre><code>.
+  const isCodeTool = ['code_interpreter', 'read_file', 'shell_cmd', 'grep', 'list_dir', 'write_file'].includes(msg.name);
   
   let contentHtml;
   if (msg.name === 'view_image' || content.match(/!\[.*?\]\(.*?\)/)) {
