@@ -4,6 +4,7 @@ from typing import List, Optional, Dict, Any
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.llm.schema import Message, ROLE, ASSISTANT, USER
+from agent_cascade.agent_instance import AgentState
 
 
 @register_tool('call_agent', allow_overwrite=True)
@@ -274,31 +275,43 @@ class DismissAgent(BaseTool):
         all_idle = params.get('all_idle', False)
 
         if all_idle:
-            active_set = set(self.agent_pool.active_stack)
-            all_instances = list(set(self.agent_pool.instance_classes.keys()) | 
-                                 set(self.agent_pool.instance_conversations.keys()))
+            active_set = {name for name, _depth in self.agent_pool.active_stack}
+            # Issue 4: Snapshot instance list like IdleManager does (agent_pool.py:2060)
+            all_instances = list(self.agent_pool.instances.keys())
             
             dismissed = []
-            # Capture log paths BEFORE clearing (clear_conversation removes the logger)
             for inst in all_instances:
-                if inst not in active_set and inst != 'Maine':
-                    # Get log path before it gets cleared
-                    log_path = None
+                inst_obj = self.agent_pool.instances.get(inst)
+                
+                # Skip root orchestrator(s) — no parent means top-level
+                if inst_obj and inst_obj.parent_instance is None:
+                    continue
+                
+                # Issue 2: Use proper enum comparison for SLEEPING state
+                if inst_obj and inst_obj.state == AgentState.SLEEPING:
+                    continue
+                
+                # Skip halted agents (intentionally paused, e.g., during compression)
+                if self.agent_pool.is_instance_halted(inst):
+                    continue
+                
+                # Skip actively running agents
+                if inst in active_set:
+                    continue
+                
+                # Issue 3: Capture log path with try/except (debug-level), before dismissal removes logger
+                log_path = None
+                try:
                     logger_inst = self.agent_pool.instance_loggers.get(inst)
                     if logger_inst:
                         log_path = getattr(logger_inst, 'log_path', None)
-                    elif inst in self.agent_pool.instance_conversations:
-                        from agent_cascade.log import logger
-                        logger.warning(f"Log path not found for instance '{inst}' — may affect resurrection")
-                    
-                    self.agent_pool.clear_conversation(inst)
-                    if hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
-                        self.agent_pool.operation_manager.cleanup_backups(inst)
-                    dismissed.append({'agent': inst, 'log_path': log_path})
-                    
-                    # Fire real-time callback for UI tab removal
-                    if hasattr(self.agent_pool, '_fire_on_dismissed'):
-                        self.agent_pool._fire_on_dismissed(inst, log_path)
+                except Exception as e:
+                    from agent_cascade.log import logger
+                    logger.debug(f"Log path lookup failed for instance '{inst}' (non-critical): {e}")
+                
+                # Issue 1: Use dismiss_instance() for full cleanup (recursive child dismissal, active termination)
+                self.agent_pool.dismiss_instance(inst)
+                dismissed.append({'agent': inst, 'log_path': log_path})
             
             if not dismissed:
                 return json.dumps({"status": "no_idle_agents", "message": "No idle agents found to dismiss."})
@@ -320,22 +333,18 @@ class DismissAgent(BaseTool):
                 "message": f"Instance '{instance_name}' not found."
             })
 
-        # Capture log path BEFORE clearing (clear_conversation removes the logger)
+        # Capture log path BEFORE dismissing — dismiss_instance removes the logger
         log_path = None
-        logger_inst = self.agent_pool.instance_loggers.get(instance_name)
-        if logger_inst:
-            log_path = getattr(logger_inst, 'log_path', None)
-        else:
+        try:
+            logger_inst = self.agent_pool.instance_loggers.get(instance_name)
+            if logger_inst:
+                log_path = getattr(logger_inst, 'log_path', None)
+        except Exception as e:
             from agent_cascade.log import logger
-            logger.warning(f"Log path not found for instance '{instance_name}' — may affect resurrection")
+            logger.debug(f"Log path lookup failed for instance '{instance_name}' (non-critical): {e}")
 
-        self.agent_pool.clear_conversation(instance_name)
-        if hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
-            self.agent_pool.operation_manager.cleanup_backups(instance_name)
-        
-        # Fire real-time callback for UI tab removal (triggers WebSocket broadcast)
-        if hasattr(self.agent_pool, '_fire_on_dismissed'):
-            self.agent_pool._fire_on_dismissed(instance_name, log_path)
+        # Issue 5: Use dismiss_instance() for full cleanup instead of clear_conversation()
+        self.agent_pool.dismiss_instance(instance_name)
 
         return json.dumps({
             "status": "dismissed",
