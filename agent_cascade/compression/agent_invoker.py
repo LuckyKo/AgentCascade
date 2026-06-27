@@ -4,6 +4,7 @@ Uses engine.run() to invoke the Compression Agent via _create_system_agent().
 This provides full AgentInstance lifecycle (state tracking, WebUI visibility, API points).
 """
 import logging
+import threading
 import time as _time
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 from agent_cascade.llm.schema import SYSTEM, USER
@@ -13,6 +14,14 @@ from agent_cascade.utils.utils import extract_text_from_message
 # Lazy import of ExecutionEngine to break circular dependency chain:
 # execution_engine.py → compression/handler.py → core.py → agent_invoker.py (→ ExecutionEngine would loop back)
 logger = logging.getLogger(__name__)
+
+# Module-level counter for generating unique Compressor instance names.
+# Each compression invocation gets a fresh instance name so the logger cache key
+# (instance_name, agent_class) is unique — prevents TAIL SYNC DRIFT from reusing
+# a cached logger with stale history data from previous compression cycles.
+_lock = threading.Lock()
+
+_compressor_invocation_counter = 0
 
 # Conversational filler prefixes to strip from summaries
 _SUMMARY_PREFIXES = [
@@ -100,7 +109,11 @@ def invoke_compression_agent(
     if not comp_agent:
         raise RuntimeError("Compressor is None after loading")
 
-    comp_state_key = 'Compressor'
+    # Generate a unique instance name for each compression invocation.
+    # This prevents the logger cache from reusing stale history data (TAIL SYNC DRIFT fix).
+    with _lock:
+        _compressor_invocation_counter += 1
+        comp_state_key = f'Compressor_{_compressor_invocation_counter}'
 
     # Build the history text for the summary prompt
     history_text = _format_messages_for_summary(target_messages)

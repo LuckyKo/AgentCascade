@@ -433,10 +433,14 @@ class CompressionHandler:
         """
         inst_name = instance.instance_name
         
-        # Halt other agents (exempt target, Compressor, and root agent)
-        exempt = [inst_name, 'Compressor']
+        # Halt other agents (exempt target, all Compressor instances, and root agent)
+        exempt = [inst_name]
         if instance.parent_instance:
             exempt.append(instance.parent_instance)
+        for inst in self.pool.instances:
+            if inst.startswith('Compressor_'):
+                exempt.append(inst)
+        
         self.pool.halt_all_instances(except_instances=exempt)
         
         try:
