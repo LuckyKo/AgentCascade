@@ -16,10 +16,13 @@ from typing import TYPE_CHECKING, Any, List, Optional
 
 if TYPE_CHECKING:
     from agent_cascade.execution_engine import ExecutionEngine
+else:
+    from agent_cascade.execution_engine import _invalidate_token_cache
 
 from agent_cascade.log import logger
 from agent_cascade.llm.schema import Message, USER
 from agent_cascade.agent_instance import AgentInstance
+from agent_cascade.utils.pool_validation import validate_message_pool
 
 
 # ── Helper Functions (moved from execution_engine module level) ───────────────
@@ -70,7 +73,52 @@ class CompressionHandler:
     def set_engine(self, engine: 'ExecutionEngine') -> None:
         """Set engine reference after ExecutionEngine construction completes."""
         self._engine = engine
-    
+
+    # ── Validation → Recovery Helper (Fix 5: deduplicated pattern) ────────────
+
+    def _recover_or_halt(
+        self, instance: 'AgentInstance', inst_name: str, agent_class: str,
+        conv: List[Message], context_label: str,
+        messages: List[Message], llm_messages: List[Message],
+    ) -> bool:
+        """Validate message pool, recover from log if invalid, halt on failure.
+
+        Shared pattern used after forced compression, compress tool, /compress, and /rollback.
+
+        Args:
+            instance: AgentInstance to update.
+            inst_name: Instance name for logger lookup.
+            agent_class: Agent class for logger lookup.
+            conv: Conversation list to validate.
+            context_label: Human-readable label for error messages (e.g. "forced compression").
+            messages: Working message list for rebuild_working_set.
+            llm_messages: LLM-formatted message list for rebuild_working_set.
+
+        Returns:
+            True if working set was rebuilt during recovery (caller should skip normal rebuild).
+        """
+        if not validate_message_pool(conv, inst_name):
+            logger.error(f"[MSG POOL VALIDATION] Pool invalid after {context_label} for '{inst_name}'. Attempting recovery from log...")
+            try:
+                log_inst = self.pool.get_logger(inst_name, agent_class)
+                log_inst.load_history_from_file()
+                recov = log_inst.data.get('history', [])
+                if recov and validate_message_pool(recov, inst_name):
+                    instance.rebuild_conversation(list(recov))
+                    self.engine._rebuild_working_set(messages, llm_messages, inst_name)
+                    logger.info(f"Recovered message pool from log for '{inst_name}' ({len(recov)} messages)")
+                    self._sync_logger_after_compression(inst_name, agent_class, "recovery", instance)
+                    return True
+                else:
+                    logger.error("Recovery from log also failed — message pool may be corrupted")
+                    notification_text = f"[SYSTEM] Compression corrupted pool: {context_label} and recovery both failed for {inst_name}. Agent halted to prevent corruption."
+                    self._inject_compression_notification(instance, notification_text, inst_name)
+                    self.pool.halt_instance(inst_name)
+                    return True
+            except Exception as e:
+                logger.error(f"Recovery attempt failed for '{inst_name}': {e}")
+        return False
+
     # ── Notification Helper with Pending Queue ────────────────────────────────
     
     def _inject_compression_notification(
@@ -425,39 +473,16 @@ class CompressionHandler:
                         f"Forced compression applied. Continue your work — context has been preserved."
                     )
 
-                    # ── Sync logger FIRST (before appending notification) to avoid double-logging via reset_history rewrite ──
                     self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression", instance)
 
-                    # Append notification AFTER sync — _append_and_log writes atomically to conv + JSONL
                     notif_msg = Message(role=USER, content=notification_text)
-                    self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
+                    self.engine._append_and_log(instance, notif_msg)
 
-                    # Re-fetch conv after notification append so validation includes the notification message
                     conv = self.pool.get_conversation(inst_name)
-
-                    # Item 10: Validate message pool after forced compression (now includes notification)
-                    from agent_cascade.utils.pool_validation import validate_message_pool
                     if not validate_message_pool(conv, inst_name):
-                        logger.error(f"[MSG POOL VALIDATION] Pool invalid after forced compression for '{inst_name}'. Attempting recovery from log...")
-                        # Recovery: reload full history directly from JSONL file on disk (D1 fix)
-                        try:
-                            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                            log_inst.load_history_from_file()  # FIX D1: read full history from disk, not stale in-memory pool
-                            recov = log_inst.data.get('history', [])
-                            if recov and validate_message_pool(recov, inst_name):
-                                instance.rebuild_conversation(list(recov))
-                                self.engine._rebuild_working_set(messages, llm_messages, inst_name)
-                                logger.info(f"Recovered message pool from log for '{inst_name}' ({len(recov)} messages)")
-                                # Sync logger again after recovery to reflect recovered state
-                                self._sync_logger_after_compression(inst_name, instance.agent_class, "recovery", instance)
-                            else:
-                                logger.error("Recovery from log also failed — message pool may be corrupted")
-                                notification_text = f"[SYSTEM] Compression corrupted pool: Forced compression and recovery both failed for {inst_name}. Agent halted to prevent corruption."
-                                self._inject_compression_notification(instance, notification_text, inst_name)
-                                # Halt this instance to prevent further execution with corrupted state
-                                self.pool.halt_instance(inst_name)
-                        except Exception as e:
-                            logger.error(f"Recovery attempt failed for '{inst_name}': {e}")
+                        working_set_rebuilt = self._recover_or_halt(
+                            instance, inst_name, instance.agent_class, conv, "forced compression", messages, llm_messages
+                        )
 
                     # Set cooldown flag to suppress loop detection on next turn after compression
                     instance._suppress_loop_detection_next_turn = True
@@ -521,40 +546,22 @@ class CompressionHandler:
         )
 
         if result.success:
-            from agent_cascade.execution_engine import _invalidate_token_cache
             _invalidate_token_cache(instance)  # Invalidate cache before rebuilding working set (Fix Finding #3)
 
             # Get current messages for rebuild and validation
             conv = self.pool.get_conversation(target_agent_name)
             
             if conv:
-                # ── FIX D2: Sync logger BEFORE validation ──
-                # Ensures that if recovery is needed, the logger has clean compressed state.
                 self._sync_logger_after_compression(target_agent_name, instance.agent_class, "compress_context tool", instance)
 
                 working_set_rebuilt = False
-                from agent_cascade.utils.pool_validation import validate_message_pool
                 if not validate_message_pool(conv, target_agent_name):
-                    logger.error(f"[MSG POOL VALIDATION] Pool invalid after compress_context tool for '{target_agent_name}'. Attempting recovery from log...")
-                    # Recovery: reload full history directly from JSONL file on disk (D1 fix)
-                    try:
-                        log_inst = self.pool.get_logger(target_agent_name, instance.agent_class)
-                        log_inst.load_history_from_file()  # FIX D1: read full history from disk, not stale in-memory pool
-                        recov = log_inst.data.get('history', [])
-                        if recov and validate_message_pool(recov, target_agent_name):
-                            instance.rebuild_conversation(list(recov))  # Centralized API handles full cache sync
-                            self.engine._rebuild_working_set(list(recov), list(self.pool.slice_history_for_llm(conv)), target_agent_name)
-                            working_set_rebuilt = True
-                            logger.info(f"Recovered message pool from log for '{target_agent_name}' ({len(recov)} messages)")
-                            # Sync logger again after recovery to reflect recovered state
-                            self._sync_logger_after_compression(target_agent_name, instance.agent_class, "recovery", instance)
-                        else:
-                            logger.error("Recovery from log also failed — message pool may be corrupted")
-                            notification_text = f"[SYSTEM] Compression corrupted pool: compress_context tool and recovery both failed for {target_agent_name}. Agent halted to prevent corruption."
-                            self._inject_compression_notification(instance, notification_text, target_agent_name)
-                            self.pool.halt_instance(target_agent_name)
-                    except Exception as e:
-                        logger.error(f"Recovery attempt failed for '{target_agent_name}': {e}")
+                    # Use recovered messages for rebuild_working_set in this path
+                    recov_msgs = list(self.pool.get_conversation(target_agent_name)) or conv
+                    working_set_rebuilt = self._recover_or_halt(
+                        instance, target_agent_name, instance.agent_class, conv, "compress_context tool",
+                        recov_msgs, list(self.pool.slice_history_for_llm(conv)),
+                    )
 
                 # Rebuild working set from compressed pool state (if not already rebuilt in recovery path)
                 if not working_set_rebuilt:
@@ -800,33 +807,13 @@ class CompressionHandler:
             # Validate message pool after compression (Item 10)
             conv = self.pool.get_conversation(inst_name)
 
-            # ── FIX: Sync logger BEFORE validation ──
-            # Ensures that if recovery is needed, the logger has clean compressed state.
             self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress command", instance)
 
             working_set_rebuilt = False
-            from agent_cascade.utils.pool_validation import validate_message_pool
             if conv and not validate_message_pool(conv, inst_name):
-                logger.error(f"[MSG POOL VALIDATION] Pool invalid after /compress for '{inst_name}'. Attempting recovery...")
-                try:
-                    log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                    log_inst.load_history_from_file()  # FIX D1: read full history from disk, not stale in-memory pool
-                    recov = log_inst.data.get('history', [])
-                    if recov and validate_message_pool(recov, inst_name):
-                        instance.rebuild_conversation(list(recov))  # PR2: centralized API handles full cache sync
-                        logger.info(f"Recovered message pool after /compress for '{inst_name}' ({len(recov)} messages)")
-                        self.engine._rebuild_working_set(messages, llm_messages, inst_name)
-                        working_set_rebuilt = True
-                        # FIX 5: Sync logger after recovery to reflect recovered state
-                        self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress recovery", instance)
-                    else:
-                        notification_text = f"[SYSTEM] Compression corrupted pool: Compression applied but message pool validation failed and recovery unsuccessful."
-                        notif_msg = Message(role=USER, content=notification_text)
-                        self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
-                        if response is not None:
-                            response.append(notif_msg)
-                except Exception as e:
-                    logger.error(f"Recovery after /compress failed for '{inst_name}': {e}")
+                working_set_rebuilt = self._recover_or_halt(
+                    instance, inst_name, instance.agent_class, conv, "/compress command", messages, llm_messages
+                )
             
             # Rebuild working set after successful compression (if not already rebuilt in recovery path)
             conv = self.pool.get_conversation(inst_name)
@@ -836,14 +823,11 @@ class CompressionHandler:
             # Set cooldown flag to suppress loop detection on next turn after compression
             instance._suppress_loop_detection_next_turn = True
             
-            # Fix Issue #2: Explicit token cache invalidation to handle edge cases
-            # where rebuild_working_set is not called (e.g., conv is None or validation fails)
-            from agent_cascade.execution_engine import _invalidate_token_cache
             _invalidate_token_cache(instance)
             
             notification_text = f"[SYSTEM] Compression applied successfully for {inst_name}."
             notif_msg = Message(role=USER, content=notification_text)
-            self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
+            self.engine._append_and_log(instance, notif_msg)
             if response is not None:
                 response.append(notif_msg)
             
@@ -856,7 +840,7 @@ class CompressionHandler:
             logger.error(f"/compress apply failed for {inst_name}: {e}")
             notification_text = f"[SYSTEM] Compression command failed: Compression apply failed for {inst_name}: {e}"
             notif_msg = Message(role=USER, content=notification_text)
-            self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
+            self.engine._append_and_log(instance, notif_msg)
             if response is not None:
                 response.append(notif_msg)
             return True
@@ -898,7 +882,7 @@ class CompressionHandler:
                 notification_text = f"[SYSTEM] Compression command failed: Compression preview encountered an error for {inst_name}. Cannot compress."
             
             notif_msg = Message(role=USER, content=notification_text)
-            self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
+            self.engine._append_and_log(instance, notif_msg)
             if response is not None:
                 response.append(notif_msg)
             return True
@@ -1009,49 +993,25 @@ class CompressionHandler:
             # Validate message pool after rollback (Item 10 - same as compress handler lines 602-626)
             conv = self.pool.get_conversation(inst_name)
 
-            # ── FIX: Sync logger BEFORE validation ──
-            # Ensures that if recovery is needed, the logger has clean compressed state.
             self._sync_logger_after_compression(inst_name, instance.agent_class, "/rollback command", instance)
 
             working_set_rebuilt = False
-            from agent_cascade.utils.pool_validation import validate_message_pool
             if conv and not validate_message_pool(conv, inst_name):
-                logger.error(f"[MSG POOL VALIDATION] Pool invalid after /rollback for '{inst_name}'. Attempting recovery...")
-                try:
-                    log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                    log_inst.load_history_from_file()  # FIX D1: read full history from disk, not stale in-memory pool
-                    recov = log_inst.data.get('history', [])
-                    if recov and validate_message_pool(recov, inst_name):
-                        instance.rebuild_conversation(list(recov))  # PR2: centralized API handles full cache sync
-                        logger.info(f"Recovered message pool after /rollback for '{inst_name}' ({len(recov)} messages)")
-                        self.engine._rebuild_working_set(messages, llm_messages, inst_name)
-                        working_set_rebuilt = True
-                        # FIX 5: Sync logger after recovery to reflect recovered state
-                        self._sync_logger_after_compression(inst_name, instance.agent_class, "/rollback recovery", instance)
-                    else:
-                        notification_text = f"[SYSTEM] Rollback corrupted pool: Rollback applied but message pool validation failed and recovery unsuccessful."
-                        notif_msg = Message(role=USER, content=notification_text)
-                        self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
-                        if response is not None:
-                            response.append(notif_msg)
-                except Exception as e:
-                    logger.error(f"Recovery after /rollback failed for '{inst_name}': {e}")
+                working_set_rebuilt = self._recover_or_halt(
+                    instance, inst_name, instance.agent_class, conv, "/rollback command", messages, llm_messages
+                )
             
             # Rebuild working set after successful validation (if not already rebuilt in recovery path)
             if conv and validate_message_pool(conv, inst_name) and not working_set_rebuilt:
                 self.engine._rebuild_working_set(messages, llm_messages, inst_name)
             
-            # Explicit token cache invalidation to handle edge cases where rebuild_working_set is not called
-            # (e.g., conv is None or validation fails). Matches compress handler pattern at lines 644-647.
-            from agent_cascade.execution_engine import _invalidate_token_cache
             _invalidate_token_cache(instance)
             
-            # Suppress loop detection on next turn to prevent false positives from abrupt state change
             instance._suppress_loop_detection_next_turn = True
             
             notification_text = f"[SYSTEM] Rollback applied: Rolled back {actual_count} message(s) for {inst_name}."
             notif_msg = Message(role=USER, content=notification_text)
-            self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
+            self.engine._append_and_log(instance, notif_msg)
             if response is not None:
                 response.append(notif_msg)
             
@@ -1063,7 +1023,7 @@ class CompressionHandler:
             # Append notification as a new Message object (not mutating last message content)
             notification_text = f"[SYSTEM] Rollback command failed: Rollback failed for {inst_name}: {e}"
             notif_msg = Message(role=USER, content=notification_text)
-            self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
+            self.engine._append_and_log(instance, notif_msg)
             if response is not None:
                 response.append(notif_msg)  # Keep local list update for streaming
             return True
