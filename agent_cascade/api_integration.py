@@ -387,9 +387,13 @@ def run_agent_in_pool_with_recovery(
                     content=f"[SYSTEM]: A repetitive loop was detected ({e.reason}). "
                             f"Please try a different approach.",
                 )
+                # Use _append_and_log pattern for atomic append+log under compression lock.
+                # (ExecutionEngine creates 4 handler instances per __init__, so we inline the
+                # equivalent logic here to avoid overhead in the tight retry loop.)
+                log_inst = pool.get_logger(looped_agent, looped_instance.agent_class)
                 with looped_instance._compression_lock:
                     looped_instance.append_message(hint_msg)
-                    pool.get_logger(looped_agent, looped_instance.agent_class).log_message(hint_msg)
+                    log_inst.log_message(hint_msg)
             else:
                 # REVIEWER FINDING #2 + Fix #2 from reviewer: If instance not found, hint won't be injected and retry may be wasted
                 # Use error level logging since this indicates a logic issue

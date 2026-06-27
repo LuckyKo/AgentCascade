@@ -365,6 +365,9 @@ class AgentLifecycleManager:
         # The existing injection in _setup_turn() is preserved for runtime updates (e.g., workspace changes).
         _inject_metadata_into_message(sys_msg, self.pool, instance)
         
+        # FIX: Initialize before if/else so it's available for both branches (was only set in else branch)
+        is_restored_session = False
+
         if is_reuse:
             # Thread-safe update of instance state for reuse
             # Note: All mutations use centralized API methods (edit_message_in_place, insert_message_at_head)
@@ -450,6 +453,8 @@ class AgentLifecycleManager:
                     is_restored_session = False
 
             # Log messages to agent's JSONL file (outside lock — logger has its own synchronization)
+            # Note: Direct log_message calls are acceptable here because the initialization path
+            # runs single-threaded and messages are already in conversation before logging.
             try:
                 log_inst = self.pool.get_logger(instance_name, agent_class)
                 if is_restored_session:
