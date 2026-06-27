@@ -48,46 +48,15 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] retry is broken, it deleted the user message too
 - [ ] max tokens does not change when a new API endpoint is acquired 
 - [ ] randomly duplicated agent log entries for tool outputs
-- [ ] stop is not quickly terminating streams and breaks something because i cant resume activity after, probably leaves allocate API slots stuck
+- [ ] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck
 - [x] loop detector triggers and just kicks back to parent instead of applying rollback and retrying — FIXED (same as above)
 - [ ] images don't get properly pasted in chat
-- [ ] dismiss: all_idle is borked
+- [x] dismiss: all_idle is borked — FIXED (8a1d3cf, 3064488): fixed tuple mismatch in active_stack check, hardcoded 'Maine' guard, missing SLEEPING/halted checks; replaced clear_conversation with dismiss_instance for full cleanup; extracted _capture_log_path helper; added null guards
 - [ ] max_tokens does not get updated when the API endpoint changes
 - [ ] investigate if we can make shell cmd accept special character and multi-line `python -c` commands
       ERROR: 'charmap' codec can't encode character '\u2717' in position 0: character maps to <undefined>
 
 # Errors to investigate:
-- [x] loop kick — FIXED (see loop detector fix above)
-2026-06-27 13:42:05,007 - base.py - 949 - INFO - Agent [Researcher] - ALL tokens: 18369, Available tokens: 29226
-2026-06-27 13:42:08,787 - base.py - 949 - INFO - Agent [Researcher] - ALL tokens: 21400, Available tokens: 29226
-2026-06-27 13:42:12,279 - base.py - 949 - INFO - Agent [Researcher] - ALL tokens: 23599, Available tokens: 29226
-2026-06-27 13:42:15,305 - base.py - 949 - INFO - Agent [Researcher] - ALL tokens: 23656, Available tokens: 29226
-2026-06-27 13:42:16,693 - base.py - 949 - INFO - Agent [Researcher] - ALL tokens: 23713, Available tokens: 29226
-2026-06-27 13:42:18,063 - base.py - 949 - INFO - Agent [Researcher] - ALL tokens: 23770, Available tokens: 29226
-2026-06-27 13:42:19,426 - execution_engine.py - 1244 - WARNING - Loop detected for CodebaseInvestigator: Detected repeated sequence loop (assistant, function repeating 4 times)
-2026-06-27 13:42:19,426 - execution_engine.py - 843 - DEBUG - [SLOT_FINAL] Before finally release - instance=CodebaseInvestigator, slot_held=True
-2026-06-27 13:42:19,427 - execution_engine.py - 2569 - DEBUG - [SLOT_RELEASE] Successfully released for CodebaseInvestigator during cleanup
-2026-06-27 13:42:19,428 - execution_engine.py - 853 - DEBUG - [SLOT_FINAL] After finally release - instance=CodebaseInvestigator, slot_still_held=False
-2026-06-27 13:42:19,428 - execution_engine.py - 895 - DEBUG - EXIT - CodebaseInvestigator RUNNING→IDLE
-2026-06-27 13:42:19,428 - execution_engine.py - 2991 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=CodebaseInvestigator, reason=aborted, inst_type=AgentInstance, conv_len=2, final_resp_len=54
-2026-06-27 13:42:19,428 - child_runner.py - 84 - WARNING - Loop detected for CodebaseInvestigator: Detected repeated sequence loop (assistant, function repeating 4 times). Surgical rollback of 6 messages.
-2026-06-27 13:42:19,449 - tool_dispatcher.py - 323 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'CodebaseInvestigator' completed in 151.77s
-2026-06-27 13:42:19,449 - tool_dispatcher.py - 337 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'Maine' after sync child
-2026-06-27 13:42:19,449 - agent_pool.py - 1670 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://localhost:1234/v1, concurrency_limit=0
-2026-06-27 13:42:19,449 - tool_dispatcher.py - 346 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 151.77s
-2026-06-27 13:42:19,450 - tool_dispatcher.py - 117 - DEBUG - handle_call_agent returned type=str
-2026-06-27 13:42:19,453 - execution_engine.py - 1699 - DEBUG - Endpoint confirmed for orchestrator: {'endpoint': 'LMS-27B-qwopus', 'api_base': 'http://localhost:1234/v1', 'model': 'qwopus3.6-27b-v1-preview', 'max_input_tokens': 125000, 'rate_limit_rpm': 0, 'concurrency_limit': 0}
-2026-06-27 13:42:19,459 - base.py - 949 - INFO - Agent [Orchestrator] - ALL tokens: 197, Available tokens: 123321
-2026-06-27 13:42:36,402 - execution_engine.py - 1699 - DEBUG - Endpoint confirmed for orchestrator: {'endpoint': 'LMS-27B-qwopus', 'api_base': 'http://localhost:1234/v1', 'model': 'qwopus3.6-27b-v1-preview', 'max_input_tokens': 125000, 'rate_limit_rpm': 0, 'concurrency_limit': 0}
-2026-06-27 13:42:36,405 - base.py - 949 - INFO - Agent [Orchestrator] - ALL tokens: 265, Available tokens: 123321
-2026-06-27 13:42:39,738 - execution_engine.py - 1699 - DEBUG - Endpoint confirmed for orchestrator: {'endpoint': 'LMS-27B-qwopus', 'api_base': 'http://localhost:1234/v1', 'model': 'qwopus3.6-27b-v1-preview', 'max_input_tokens': 125000, 'rate_limit_rpm': 0, 'concurrency_limit': 0}
-2026-06-27 13:42:39,742 - base.py - 949 - INFO - Agent [Orchestrator] - ALL tokens: 710, Available tokens: 123321
-2026-06-27 13:42:46,420 - api_server.py - 1929 - INFO - [update_endpoints] Received: 13 endpoints, 7 agent priority mappings
-2026-06-27 13:42:53,598 - tool_dispatcher.py - 486 - DEBUG - call_agent nesting - Maine depth=1/10
-2026-06-27 13:42:53,598 - tool_dispatcher.py - 303 - DEBUG - [SLOT_SYNC_RELEASE] Releasing slot for 'Maine' before running sync child 'CodebaseInvestigator2'
-2026-06-27 13:42:53,600 - execution_engine.py - 2569 - DEBUG - [SLOT_RELEASE] Successfully released for Maine during sync child
-2026-06-27 13:42:53,600 - tool_dispatcher.py - 307 - DEBUG - [SLOT_SYNC_RELEASE] Slot released for 'Maine', active agents can now acquire
-2026-06-27 13:42:53,600 - execution_engine.py - 2880 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target=CodebaseInvestigator2, class=researcher, caller=Maine, nest_depth=1, force_fresh=False
 
 
 # EOF
