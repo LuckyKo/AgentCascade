@@ -1717,6 +1717,14 @@ def create_app(agents, agent_pool, config=None):
                         removed = inst.trim_tail(1)
                         last_user_msg = removed[0] if removed else None
 
+                    # Sync JSONL log with trimmed conversation state to prevent ghost entries (desync fix)
+                    if agent_pool and inst is not None:
+                        try:
+                            log_inst = agent_pool.get_logger(instance_name, inst.agent_class)
+                            log_inst.reset_history(list(inst.conversation), rewrite=True)
+                        except Exception as e:
+                            logger.debug(f"Logger sync after retry trim failed for {instance_name} (non-critical): {e}")
+
                     # Post-unification: use pool instance directly — no legacy fallback needed
                     inst = agent_pool.get_instance(instance_name) if agent_pool else None
                     if not inst and not (inst.conversation if inst else []) and not last_user_msg:
@@ -1750,6 +1758,15 @@ def create_app(agents, agent_pool, config=None):
                             # Use insertion point logic to avoid splitting tool call/response pairs
                             insert_pos = _find_user_message_insertion_point(inst.conversation)
                             inst.insert_message_at(insert_pos, last_user_msg)
+                            
+                            # Log the re-inserted user message to JSONL (desync fix)
+                            try:
+                                log_inst = agent_pool.get_logger(instance_name, inst.agent_class)
+                                with inst._compression_lock:
+                                    conv_snapshot = list(inst.conversation)
+                                log_inst.update_history(conv_snapshot)
+                            except Exception as e:
+                                logger.debug(f"Logger sync after retry re-insert failed for {instance_name} (non-critical): {e}")
                         else:
                             # Fallback: create the instance first, then enqueue the message
                             create_main_agent_instance(

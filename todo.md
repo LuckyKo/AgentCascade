@@ -47,7 +47,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] reading logs from workspace with code_intepreter seems to be an impossible task, investigate wtf is happening with out path mapping
 - [ ] retry is broken, it deleted the user message too
 - [ ] max tokens does not change when a new API endpoint is acquired 
-- [x] randomly duplicated agent log entries for tool outputs — FIXED (atomic _append_and_log, event filter consistency, notification flush order)
+- [x] randomly duplicated agent log entries for tool outputs — FIXED (atomic _append_and_log, event filter consistency, notification flush order, retry path resync, double-insert fix)
 - [ ] stop is not quickly terminating streams and breaks something because i cant resume activity after, probably leaves allocate API slots stuck
 - [ ] loop detector triggers and just kicks back to parent instead of applying rollback and retrying
 - [ ] images don't get properly pasted in chat

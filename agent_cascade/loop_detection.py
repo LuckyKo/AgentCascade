@@ -10,6 +10,7 @@ repeated patterns of length L repeating K times. Returns (reason, pop_count) if
 a loop is found, else None.
 """
 
+import hashlib
 import re
 from typing import List, Optional, Tuple, Union
 
@@ -21,6 +22,12 @@ from agent_cascade.llm.schema import (
 _TOOL_TRUNCATED_RE = re.compile(
     r'\[TOOL RESPONSE TRUNCATED.*?\]', re.DOTALL
 )
+
+# Max chars to keep from text when building features (prevents huge feature strings)
+_FEATURE_TEXT_LIMIT = 3000
+
+# Number of hex chars from content hash used in FUNCTION features for differentiation
+_HASH_DIGITS = 8
 
 class LoopDetectedError(Exception):
     """Raised when a repetitive loop is detected in agent turns."""
@@ -96,10 +103,26 @@ def detect_loop(
         if fc:
             name = fc.get('name') if isinstance(fc, dict) else getattr(fc, 'name', '')
             args = fc.get('arguments') if isinstance(fc, dict) else getattr(fc, 'arguments', '')
+            # Include a hash of reasoning/text content so two messages calling the same
+            # tool with identical args but different reasoning are distinguished.
+            text_part = (reasoning + '\n' + content).strip()
+            if text_part:
+                text_hash = hashlib.md5(text_part.encode(errors='replace')).hexdigest()[:_HASH_DIGITS]
+                return f"{role}:{name}:{args}:t{text_hash}"
             return f"{role}:{name}:{args}"
 
-        # For plain messages, use first 3000 chars to distinguish long reasoning
-        return f"{role}:{text_feature[:3000]}"
+        # For FUNCTION role messages: include tool name + content hash to differentiate
+        # results from different tool calls (e.g., grep with different args).
+        # A plain text truncation [:3000] can make structurally similar outputs match.
+        if role == FUNCTION:
+            tool_name = m.get('name', '') or ''
+            content_hash = hashlib.md5(text_feature.encode(errors='replace')).hexdigest()[:_HASH_DIGITS]
+            # Include first 200 chars of content for structural similarity + hash for uniqueness
+            content_snippet = text_feature[:200].strip()
+            return f"{role}:{tool_name}:{content_snippet}:{content_hash}"
+
+        # For plain messages, use first _FEATURE_TEXT_LIMIT chars to distinguish long reasoning
+        return f"{role}:{text_feature[:_FEATURE_TEXT_LIMIT]}"
 
     # ── Build feature window (last 40 non-system messages) ──────────────
     window = messages[-40:]
@@ -117,34 +140,39 @@ def detect_loop(
 
     # ── Pattern matching: look for length-L patterns repeating K times ───
     for L in range(1, 21):
-        # Require more repetitions for shorter patterns to avoid false positives
-        K = 3 if L < 5 else 2
+        # Require more repetitions for shorter patterns to avoid false positives.
+        # Normal tool usage involves ASSISTANT→FUNCTION repeating many times with
+        # DIFFERENT arguments, so we need higher thresholds to catch actual loops.
+        if L < 3:
+            K = 4          # Need 4 repeats of a 1- or 2-step pattern (e.g., 8 msgs for L=2)
+        elif L < 5:
+            K = 3          # 3 repeats of a 3- or 4-step pattern
+        else:
+            K = 2          # 2 repeats of longer patterns
 
         if len(features) < L * K:
             continue
 
+        # Iterate backwards from the most recent position first.
+        # At each starting index i, verify K consecutive repetitions of length-L pattern.
         for i in range(len(features) - (L * K), -1, -1):
             pattern = features[i : i + L]
-            is_loop = True
 
+            # Verify all K repetitions match exactly
+            is_loop = True
             for k in range(1, K):
                 if features[i + k * L : i + (k + 1) * L] != pattern:
                     is_loop = False
                     break
 
-            if is_loop and features[-L:] == pattern:
+            if is_loop:
                 roles = [p.split(':')[0] for p in pattern]
 
                 # Skip false positives: single-function or single-user patterns
-                # (these are usually parallel tool responses, not agent loops)
                 if L == 1 and roles[0] in (FUNCTION, USER):
                     continue
 
                 # Skip FUNCTION-only sequences with no ASSISTANT messages interspersed.
-                # A real agent loop always involves the agent making decisions:
-                # ASSISTANT→FUNCTION→ASSISTANT→FUNCTION. If the pattern contains only
-                # FUNCTION role messages consecutively (no assistant decisions between them),
-                # it's likely from parallel tool execution / batch overflow, not an agent loop.
                 if roles and all(role == FUNCTION for role in roles):
                     continue
 
