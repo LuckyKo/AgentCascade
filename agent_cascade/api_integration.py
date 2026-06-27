@@ -338,6 +338,7 @@ def run_agent_in_pool_with_recovery(
     Yields:
         List[Message]: Current conversation state after each execution phase.
     """
+    from agent_cascade.child_runner import _recover_from_loop
 
     if max_auto_retries == -1:
         max_auto_retries = 999_999
@@ -347,6 +348,14 @@ def run_agent_in_pool_with_recovery(
     if instance is None:
         raise KeyError(f"Instance '{instance_name}' not found in pool")
 
+    # Hint injection callback for root path: direct lock-based append (avoids
+    # creating ExecutionEngine instances in the tight retry loop).
+    def _inject_root_hint(inst, msg: Message) -> None:
+        log_inst = pool.get_logger(instance_name, inst.agent_class)
+        with inst._compression_lock:
+            inst.append_message(msg)
+            log_inst.log_message(msg)
+
     while retry_count <= max_auto_retries:
         try:
             # Execute through unified engine
@@ -354,15 +363,13 @@ def run_agent_in_pool_with_recovery(
             return  # Success — no loop detected
 
         except LoopDetectedError as e:
-            # Bug #3 fix: Use agent_name from exception if available, fallback to instance_name for backward compat
             looped_agent = e.agent_name if e.agent_name else instance_name
-            
+
             if not auto_rollback_enabled or retry_count >= max_auto_retries:
                 logger.warning(
                     f"Loop detected for {looped_agent}: {e.reason}. "
                     f"Exceeded retries ({retry_count}/{max_auto_retries}). Stopping."
                 )
-                # Yield error state so UI can display it
                 error_msg = Message(
                     role=ASSISTANT,
                     content=f"[SYSTEM: Loop detected for {looped_agent} — {e.reason}]",
@@ -370,49 +377,23 @@ def run_agent_in_pool_with_recovery(
                 yield [error_msg]
                 return
 
-            logger.warning(
-                f"Loop detected for {looped_agent}: {e.reason}. "
-                f"Surgical rollback (Retry {retry_count + 1}/{max_auto_retries})."
+            # Shared recovery: rollback → get instance → inject hint
+            retry_count, succeeded = _recover_from_loop(
+                pool=pool,
+                exception=e,
+                instance_name=instance_name,
+                retry_count=retry_count,
+                max_auto_retries=max_auto_retries,
+                inject_hint=_inject_root_hint,
             )
 
-            # Bug #3 fix: Surgical rollback on the CORRECT agent (the one that actually looped)
-            pool.surgical_rollback(looped_agent, e.pop_count, reason=e.reason)
-
-            # Bug #3 fix: Get the correct instance for hint injection (not root agent's 'instance')
-            looped_instance = pool.get_instance(looped_agent)
-            if looped_instance:
-                # Inject loop avoidance hint (atomic with rollback)
-                hint_msg = Message(
-                    role=USER,
-                    content=f"[SYSTEM]: A repetitive loop was detected ({e.reason}). "
-                            f"Please try a different approach.",
-                )
-                # Use _append_and_log pattern for atomic append+log under compression lock.
-                # (ExecutionEngine creates 4 handler instances per __init__, so we inline the
-                # equivalent logic here to avoid overhead in the tight retry loop.)
-                log_inst = pool.get_logger(looped_agent, looped_instance.agent_class)
-                with looped_instance._compression_lock:
-                    looped_instance.append_message(hint_msg)
-                    log_inst.log_message(hint_msg)
-            else:
-                # REVIEWER FINDING #2 + Fix #2 from reviewer: If instance not found, hint won't be injected and retry may be wasted
-                # Use error level logging since this indicates a logic issue
-                logger.error(
-                    f"Could not find instance '{looped_agent}' for hint injection after rollback. "
-                    f"Rollback was performed but retry aborted — loop may persist."
-                )
-                # Yield informative error message before breaking (Fix #2 from reviewer)
-                # This ensures the consumer knows something went wrong instead of silent exit
+            if not succeeded:
                 error_msg = Message(
                     role=ASSISTANT,
                     content=f"[SYSTEM: Rollback performed but loop recovery failed — could not find agent '{looped_agent}' for hint injection]",
                 )
                 yield [error_msg]
-                # Break out of retry loop early if we can't inject the hint
-                # This prevents wasting remaining retries on an agent that never gets the hint
                 break
-
-            retry_count += 1
 
         except (KeyboardInterrupt, SystemExit):
             # Never swallow user interrupts or explicit exits

@@ -1,14 +1,87 @@
 """
 Child Agent Runner — Shared core logic for sync and async child agent execution.
 
-Unifies the duplicated execution paths from tool_dispatcher.py and agent_pool.py.
-See DESIGN_REWRITE.md §4.3 for architecture rationale.
+Unifies the duplicated execution paths from tool_dispatcher.py, agent_pool.py,
+and api_integration.py (root agent recovery). See DESIGN_REWRITE.md §4.3.
 """
+
+from typing import Callable, Optional
 
 from agent_cascade.log import logger
 from agent_cascade.llm.schema import Message, USER
 from agent_cascade.compression.helpers import extract_instance_output
 from agent_cascade.loop_detection import LoopDetectedError
+
+
+# ── Shared loop recovery helper (used by both root and child paths) ─────────
+
+def _recover_from_loop(
+    pool,                      # AgentPool instance
+    exception: LoopDetectedError,
+    instance_name: str,        # fallback agent name if e.agent_name is None
+    retry_count: int,
+    max_auto_retries: int,
+    inject_hint: Callable[[object, Message], None],  # callback(instance, msg)
+) -> tuple[int, bool]:
+    """Perform loop recovery: rollback → get instance → inject hint.
+
+    Shared between run_child_core() (child agents) and
+    run_agent_in_pool_with_recovery() (root agent). The only difference
+    is how the hint message gets appended — abstracted via inject_hint callback.
+
+    Args:
+        pool: The AgentPool managing all instances.
+        exception: The LoopDetectedError that was raised.
+        instance_name: Fallback name if e.agent_name is None.
+        retry_count: Current retry count (0-based).
+        max_auto_retries: Maximum retries allowed.
+        inject_hint: Callable(instance, message) that atomically appends a Message
+            to the agent's conversation and logs it.
+
+    Returns:
+        (retry_count, succeeded) tuple. If succeeded is False, no more retries
+        should be attempted. The caller should use the returned retry_count.
+    """
+    looped_agent = exception.agent_name or instance_name
+    pop_count = exception.pop_count or 0
+
+    # Surgical rollback on the agent that looped.
+    # If pop_count <= 0, we have no messages to roll back — recovery can't proceed safely.
+    rollback_success = False
+    if pop_count > 0:
+        logger.warning(
+            f"Loop detected for {looped_agent}: {exception.reason}. "
+            f"Surgical rollback (Retry {retry_count + 1}/{max_auto_retries})."
+        )
+        try:
+            pool.surgical_rollback(looped_agent, pop_count, reason=exception.reason)
+            rollback_success = True
+        except Exception as rb_err:
+            logger.error(f"Rollback failed for {looped_agent}: {rb_err}")
+
+    if not rollback_success:
+        return (retry_count + 1, False)
+
+    # Get the correct instance for hint injection
+    instance = pool.get_instance(looped_agent)
+    if not instance:
+        logger.error(
+            f"Could not find instance '{looped_agent}' for hint injection after rollback. "
+            f"Aborting retry — loop may persist."
+        )
+        return (retry_count + 1, False)
+
+    # Build and inject the loop avoidance hint
+    hint_msg = Message(
+        role=USER,
+        content=(
+            f"[SYSTEM]: A repetitive loop was detected ({exception.reason}). "
+            f"Please try a different approach."
+        ),
+    )
+    inject_hint(instance, hint_msg)
+
+    return (retry_count + 1, True)
 
 
 # ── Helper functions ────────────────────────────────────────────────────────
@@ -58,11 +131,15 @@ def run_child_core(
     child_depth: int,
     force_fresh: bool = False,
     prefix: str = "Agent",
+    max_auto_retries: int = 3,
 ) -> str:
     """Core child agent execution logic shared by sync and async paths.
 
-    Handles the entire lifecycle: creation, loop detection with rollback,
+    Handles the entire lifecycle: creation, loop detection with rollback and retry,
     status checking, and result formatting. Returns a formatted result string.
+
+    Args:
+        max_auto_retries: Maximum number of auto-rollback retries on loop detection.
 
     Raises:
         Exception: Only truly unexpected errors propagate. LoopDetectedError is handled internally.
@@ -70,39 +147,43 @@ def run_child_core(
     if not force_fresh:
         force_fresh = _determine_force_fresh(agent_class)
 
-    try:
-        inst, conv = engine._create_and_run_agent(
-            agent_class, instance_name, args, caller_name, child_depth,
-            force_fresh=force_fresh,
-        )
-    except LoopDetectedError as e:
-        looped_agent = e.agent_name or instance_name
-        pop_count = e.pop_count or 0
+    retry_count = 0
 
-        # Surgical rollback on the agent that looped
-        if pop_count > 0:
-            logger.warning(
-                f"Loop detected for {looped_agent}: {e.reason}. "
-                f"Surgical rollback of {pop_count} messages."
+    while retry_count <= max_auto_retries:
+        try:
+            inst, conv = engine._create_and_run_agent(
+                agent_class, instance_name, args, caller_name, child_depth,
+                force_fresh=force_fresh,
             )
-            try:
-                pool.surgical_rollback(looped_agent, pop_count, reason=e.reason)
-            except Exception as rb_err:
-                logger.error(f"Rollback failed for {looped_agent}: {rb_err}")
+            # Success — break out of the retry loop and proceed to result formatting
+            break
 
-        # Inject loop avoidance hint into the agent's conversation
-        instance = pool.get_instance(looped_agent)
-        if instance:
-            hint_msg = Message(
-                role=USER,
-                content=(
-                    f"[SYSTEM]: A repetitive loop was detected ({e.reason}). "
-                    f"Please try a different approach."
-                ),
+        except LoopDetectedError as e:
+            looped_agent = e.agent_name or instance_name
+
+            if retry_count >= max_auto_retries:
+                logger.warning(
+                    f"Loop detected for {looped_agent}: {e.reason}. "
+                    f"Exceeded retries ({retry_count}/{max_auto_retries}). Stopping."
+                )
+                return f"[{prefix} '{looped_agent}' Loop Detected]: {e.reason}"
+
+            # Shared recovery: rollback → get instance → inject hint
+            retry_count, succeeded = _recover_from_loop(
+                pool=pool,
+                exception=e,
+                instance_name=instance_name,
+                retry_count=retry_count,
+                max_auto_retries=max_auto_retries,
+                inject_hint=lambda inst, msg: engine._append_and_log(inst, msg),
             )
-            engine._append_and_log(instance, hint_msg)
 
-        return f"[{prefix} '{looped_agent}' Loop Detected]: {e.reason}"
+            if not succeeded:
+                return f"[{prefix} '{looped_agent}' Failed]: Rollback recovery failed."
+
+        except (KeyboardInterrupt, SystemExit):
+            # Never swallow user interrupts or explicit exits
+            raise
 
     # Check for null results before doing anything else
     if inst is None or not conv:
