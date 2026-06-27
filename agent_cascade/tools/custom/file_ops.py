@@ -3,8 +3,12 @@ import tempfile
 import os
 import atexit
 import sys
+from typing import Optional, Any, Union
 from agent_cascade.tools.base import BaseTool, register_tool
-from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_READ_FILE_MAX_LINES, DEFAULT_TOOL_RESULT_MAX_CHARS
+from agent_cascade.settings import (
+    DEFAULT_WORKSPACE, DEFAULT_READ_FILE_MAX_LINES, DEFAULT_TOOL_RESULT_MAX_CHARS,
+    CHARS_PER_TOKEN_ESTIMATE,
+)
 from agent_cascade.prompts.dna import TOOL_METADATA
 
 # --- Module-level cairosvg DLL state (Windows only) --------------------------- #
@@ -31,10 +35,51 @@ _gtk_common_paths = [
     r"C:\Program Files (x86)\GTK3-Runtime Win64\bin",
 ]
 
+# --- read_file constants ----------------------------------------------------- #
+DEFAULT_MAX_INPUT_TOKENS = 58000          # Default context window size in tokens
+MAX_LINE_LIMIT = 50000                    # Max lines to read per call (wild reads)
+MAX_LINE_LIMIT_EXPLICIT = 100000          # Max lines when user explicitly sets a limit
+HEX_DUMP_BYTES = 1024                     # Bytes to show in hex view for binary files
+CONTEXT_FRACTION = 0.25                   # Fraction of context window reserved for tool output
+
+
+def _is_binary_file(path: Path) -> bool:
+    """Check if a file is binary by reading its first 1 KiB and looking for null bytes."""
+    try:
+        with open(path, 'rb') as f:
+            chunk = f.read(1024)
+        # Empty files are not binary
+        if not chunk:
+            return False
+        # Check for null bytes (strong indicator of binary content)
+        return b'\x00' in chunk
+    except OSError:
+        return False
+
+
+def _format_hex_dump(data: bytes, start_offset: int = 0) -> str:
+    """Create a hex dump with ASCII column, similar to `hexdump -C`."""
+    lines: list[str] = []
+    i = 0
+    while i < len(data):
+        chunk = data[i:i + 16]
+        addr = start_offset + i
+        hex_part = ' '.join(f'{b:02x}' for b in chunk)
+        # Pad to fixed width (47 chars for 16 bytes: 3*16+15 spaces)
+        hex_part = hex_part.ljust(47)
+        ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+        lines.append(f'{addr:08x}  {hex_part}  |{ascii_part}|')
+        i += 16
+    return '\n'.join(lines)
+
 
 @register_tool('read_file', allow_overwrite=True)
 class ReadFile(BaseTool):
-    """Reads and returns the content of a specified file. Handles text, images, and PDF files."""
+    """Reads and returns the content of a specified file.
+
+    Handles text files natively with streaming line-by-line reading. For binary
+    files, displays a hex dump of the first N bytes with ASCII representation.
+    """
 
     name = 'read_file'
     description = TOOL_METADATA['read_file']['description']
@@ -63,7 +108,7 @@ class ReadFile(BaseTool):
         'required': ['path'],
     }
 
-    def __init__(self, cfg=None, **kwargs):
+    def __init__(self, cfg: Optional[dict] = None, **kwargs: Any) -> None:
         try:
             super().__init__(cfg)
         except (ValueError, TypeError):
@@ -71,134 +116,245 @@ class ReadFile(BaseTool):
         self.agent_pool = kwargs.get('agent_pool')
         self.agent_name = kwargs.get('agent_name')
 
-    def call(self, params: str, **kwargs) -> str:
+    # ------------------------------------------------------------------ #
+    #  Helper: resolve path using operation_manager (aligns with other tools)
+    # ------------------------------------------------------------------ #
+    def _resolve_path(self, path: str) -> Path:
+        """Resolve *path* using the same mechanism as all other file-op tools.
+        
+        Delegates to ``operation_manager._resolve_path`` when available; falls back
+        to a minimal resolution against ``DEFAULT_WORKSPACE`` otherwise.
+        """
+        if self.agent_pool is not None and hasattr(self.agent_pool, 'operation_manager'):
+            return self.agent_pool.operation_manager._resolve_path(path, mode="ro")
+
+        # Fallback: reuse view_image's same pattern (matches lines 472+)
+        base_dir = Path(DEFAULT_WORKSPACE)
+        if Path(path).is_absolute():
+            resolved = Path(path).resolve()
+        else:
+            resolved = (base_dir / path).resolve()
+        if not str(resolved).startswith(str(base_dir.resolve())):
+            raise ValueError(f"Path '{path}' is outside the allowed directory")
+        return resolved
+
+    # ------------------------------------------------------------------ #
+    #  Helper: determine effective max_input_tokens from config hierarchy
+    # ------------------------------------------------------------------ #
+    def _get_max_input_tokens(self, kwargs: dict) -> int:
+        """Return the effective context window size in tokens.
+        
+        Priority: agent_obj.llm > agent_pool.llm_cfg > DEFAULT_MAX_INPUT_TOKENS
+        """
+        tokens = DEFAULT_MAX_INPUT_TOKENS
+
+        # Check agent_pool configuration
+        if self.agent_pool is not None:
+            llm_cfg = getattr(self.agent_pool, 'llm_cfg', {})
+            pool_max = (
+                llm_cfg.get('max_input_tokens')
+                or llm_cfg.get('generate_cfg', {}).get('max_input_tokens')
+            )
+            if pool_max:
+                tokens = int(pool_max)
+
+        # Check agent_obj override (highest priority)
+        agent_obj = kwargs.get('agent_obj')
+        if agent_obj is not None:
+            llm = getattr(agent_obj, 'llm', None)
+            gen_cfg = getattr(llm, 'generate_cfg', None) if llm else None
+            agent_max = gen_cfg.get('max_input_tokens') if gen_cfg else None
+            if agent_max and agent_max != DEFAULT_MAX_INPUT_TOKENS:
+                tokens = int(agent_max)
+
+        return tokens
+
+    # ------------------------------------------------------------------ #
+    #  Helper: read text file with streaming line-by-line iteration
+    # ------------------------------------------------------------------ #
+    def _read_text_file(
+        self, path: str, resolved: Path, start_line: int, limit: int, char_limit: int
+    ) -> str:
+        """Read a text file using streaming line-by-line iteration.
+        
+        Returns formatted content string ready for the user.
+        """
+        total_lines = 0
+        lines_read: list[str] = []
+        current_chars = 0
+        hit_limit = False
+
+        with open(resolved, 'r', encoding='utf-8', errors='ignore') as f:
+            for line_num, raw_line in enumerate(f, 1):
+                if line_num < start_line:
+                    continue
+                if len(lines_read) >= limit:
+                    # We've read enough lines — peek ahead to see if there's more
+                    extra = f.readline()
+                    if extra:
+                        hit_limit = True
+                        # Count remaining lines for accurate total (+1 for the peeked line)
+                        total_lines = line_num + 1 + sum(1 for _ in f)
+                    else:
+                        total_lines = len(lines_read)  # exactly limit lines, EOF
+                    break
+
+                stripped = raw_line.rstrip('\n\r')
+                formatted = f"{line_num}: {stripped}\n"
+
+                if current_chars + len(formatted) > char_limit:
+                    # First line itself is huge — include a truncated portion
+                    if not lines_read:
+                        cut = min(len(formatted), max(char_limit, 200))
+                        lines_read.append(formatted[:cut] + " ... [LINE TRUNCATED]\n")
+                    hit_limit = True
+                    # Count remaining lines for accurate total (+1 for current line)
+                    total_lines = line_num + sum(1 for _ in f)
+                    break
+
+                lines_read.append(formatted)
+                current_chars += len(formatted)
+                total_lines = line_num
+
+        actual_end = start_line + len(lines_read) - 1 if lines_read else start_line - 1
+        content = ''.join(lines_read)
+
+        if not lines_read:
+            return f"File content ({path}) — empty file."
+
+        # Build header with total line count info
+        total_str = f">{total_lines}" if hit_limit else str(total_lines)
+        header = f"File content ({path}), lines {start_line} to {actual_end} of {total_str}:"
+
+        truncated_msg = ""
+        if hit_limit:
+            header += " [TRUNCATED]"
+            truncated_msg = (
+                f"\n\n[PAGINATION NOTE: This file is large. Use read_file with "
+                f"start_line={actual_end + 1} to read the next "
+                f"{min(limit, total_lines - actual_end)} lines.]"
+            )
+
+        return f"{header}\n```\n{content}```{truncated_msg}"
+
+    # ------------------------------------------------------------------ #
+    #  Helper: read binary file and return hex dump view
+    # ------------------------------------------------------------------ #
+    def _read_binary_file(self, path: str, resolved: Path) -> str:
+        """Read a binary file and return a hex dump of the first HEX_DUMP_BYTES bytes."""
+        try:
+            file_size = resolved.stat().st_size
+        except OSError:
+            file_size = 0
+
+        with open(resolved, 'rb') as f:
+            data = f.read(HEX_DUMP_BYTES)
+
+        if not data:
+            return f"File content ({path}) — empty binary file."
+
+        hex_view = _format_hex_dump(data)
+        size_str = f"{file_size:,}" if file_size > 0 else "unknown"
+        
+        return (
+            f"Binary file ({path}), {size_str} bytes.\n"
+            f"Hex dump of first {len(data)} bytes:\n```\n{hex_view}\n```"
+        )
+
+    # ------------------------------------------------------------------ #
+    #  Main call()                                                        #
+    # ------------------------------------------------------------------ #
+    def call(self, params: Union[str, dict], **kwargs: Any) -> str:
         from agent_cascade.utils.utils import json_loads
         import json
-        # Normalize legacy parameter names to current schema
+
+        # Normalize legacy parameter names to current schema (handles both str and dict inputs)
         try:
             if isinstance(params, str):
                 p = json_loads(params)
                 if 'start_line' in p and 'offset' not in p:
+                    # start_line takes precedence (1-indexed) → convert to 0-based offset
                     p['offset'] = p['start_line'] - 1
                 params = json.dumps(p)
             elif isinstance(params, dict):
                 if 'start_line' in params and 'offset' not in params:
                     params['offset'] = params['start_line'] - 1
-        except:
+        except (json.JSONDecodeError, TypeError, KeyError, ValueError):
             pass
 
         params = self._verify_json_format_args(params)
         path = params.get('path')
         if not path:
             return "ERROR: Missing 'path' parameter."
-        offset = params.get('offset', 0)
-        start_line = params.get('start_line', offset + 1)
+
+        # Determine starting line: start_line param takes precedence over offset
+        # Both are normalized to 1-based start_line for internal use
+        explicit_start = params.get('start_line')
+        explicit_offset = params.get('offset', 0)
+        if explicit_start is not None:
+            start_line = int(explicit_start)
+        else:
+            start_line = int(explicit_offset) + 1
+        start_line = max(1, start_line)
+
         limit = params.get('limit')
-        full_read = params.get('full_read', False)
+        full_read = bool(params.get('full_read', False))
 
         # Get the character limit from agent/tool options or settings
-        # Default "soft" limit for wild reads (if no limit/full_read provided)
         wild_limit = DEFAULT_TOOL_RESULT_MAX_CHARS
-        if hasattr(self, 'agent_pool') and self.agent_pool:
-            wild_limit = getattr(self.agent_pool, 'llm_cfg', {}).get('tool_result_max_chars', wild_limit)
+        if self.agent_pool is not None:
+            wild_limit = getattr(self.agent_pool, 'llm_cfg', {}).get(
+                'tool_result_max_chars', wild_limit
+            )
 
-        # Line-based limit is now secondary to character-based volume
-        if not full_read:
-            if limit is None:
-                # If no limit provided, we read until we hit the character threshold
-                limit = 1000000 
-                is_wild_read_candidate = True
-            else:
-                is_wild_read_candidate = False
-                if limit > 100000:
-                    limit = 100000
+        # Determine line limit and whether this is a "wild read" (no explicit limit)
+        if full_read:
+            limit = MAX_LINE_LIMIT
+            no_explicit_limit = False
+        elif limit is None:
+            limit = MAX_LINE_LIMIT
+            no_explicit_limit = True
         else:
-            limit = 1000000  # Effectively "full" read
-            is_wild_read_candidate = False
+            limit = min(int(limit), MAX_LINE_LIMIT_EXPLICIT)
+            no_explicit_limit = False
 
         try:
-            if hasattr(self, 'agent_pool') and self.agent_pool:
-                resolved = self.agent_pool.operation_manager._resolve_path(path, mode="ro")
-            else:
-                # Fallback if no agent_pool
-                base_dir = Path(DEFAULT_WORKSPACE)
-                if Path(path).is_absolute():
-                    resolved = Path(path).resolve()
-                else:
-                    resolved = (base_dir / path).resolve()
-                if not str(resolved).startswith(str(base_dir.resolve())):
-                     return f"Path '{path}' is outside the allowed directory"
+            # Resolve path using the same mechanism as all other file-op tools
+            resolved = self._resolve_path(path)
 
             if not resolved.exists():
                 return f"File not found: {path}"
 
-            with open(resolved, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
+            # Check it's actually a file (not a directory or special file)
+            if not resolved.is_file():
+                return f"Not a regular file: {path}"
 
-            total_lines = len(lines)
-            start_idx = max(0, start_line - 1)
-            
-            # --- Simple per-tool chunk limit ---
-            # Cap a single read to ~25% of the context window (in chars).
-            # The orchestrator's _truncate_tool_result() handles the 95% context guard.
-            max_input_tokens = 58000
-            if hasattr(self, 'agent_pool') and self.agent_pool:
-                llm_cfg = getattr(self.agent_pool, 'llm_cfg', {})
-                pool_max = llm_cfg.get('max_input_tokens') or llm_cfg.get('generate_cfg', {}).get('max_input_tokens')
-                if pool_max:
-                    max_input_tokens = int(pool_max)
-            agent_obj = kwargs.get('agent_obj')
-            if agent_obj and hasattr(agent_obj, 'llm') and hasattr(agent_obj.llm, 'generate_cfg'):
-                agent_max = agent_obj.llm.generate_cfg.get('max_input_tokens')
-                if agent_max and agent_max != 58000:
-                    max_input_tokens = int(agent_max)
-            
-            # 25% of context * ~2.5 chars/token (Hard Context Safety Limit)
-            char_limit = int(max_input_tokens * 0.25 * 2.5)
+            # Determine character budget for this read
+            max_input_tokens = self._get_max_input_tokens(kwargs)
+            char_limit = int(max_input_tokens * CONTEXT_FRACTION * CHARS_PER_TOKEN_ESTIMATE)
             char_limit = max(500, char_limit)  # floor at 500 chars
 
-            # If it's a candidate for wild read (no limit provided), 
-            # we cap it at wild_limit to avoid being flagged by the orchestrator
-            if is_wild_read_candidate:
+            if no_explicit_limit:
                 char_limit = min(char_limit, wild_limit)
 
-            end_idx = min(total_lines, start_idx + limit)
-            
-            # Build content iteratively, respecting the chunk char limit
-            content_lines = []
-            current_chars = 0
-            actual_end_idx = start_idx
-            
-            for i in range(start_idx, end_idx):
-                line_text = f"{i+1}: {lines[i]}"
-                if current_chars + len(line_text) > char_limit:
-                    if current_chars == 0:
-                        # First line is itself huge — include a truncated portion
-                        cut = min(len(line_text), max(char_limit, 200))
-                        content_lines.append(line_text[:cut] + " ... [LINE TRUNCATED]\n")
-                        actual_end_idx = i + 1
-                    break
-                
-                content_lines.append(line_text)
-                current_chars += len(line_text)
-                actual_end_idx = i + 1
+            # Check for binary content
+            if _is_binary_file(resolved):
+                return self._read_binary_file(path, resolved)
 
-            content = "".join(content_lines)
-            header = f"File content ({path}), lines {start_idx+1} to {actual_end_idx} of {total_lines}:"
-            
-            if actual_end_idx < total_lines:
-                header += " [TRUNCATED]"
+            return self._read_text_file(
+                path=path, resolved=resolved, start_line=start_line,
+                limit=limit, char_limit=char_limit,
+            )
 
-            msg = f"{header}\n```\n{content}\n```"
-            
-            if actual_end_idx < total_lines:
-                msg += (
-                    f"\n\n[PAGINATION NOTE: This file is large. Use read_file with "
-                    f"start_line={actual_end_idx+1} to read the next "
-                    f"{min(limit, total_lines - actual_end_idx)} lines.]"
-                )
-
-            return msg
+        except ValueError as e:
+            # Path resolution errors (outside allowed directories)
+            return f"Path error for '{path}': {e}"
+        except FileNotFoundError as e:
+            return f"File not found: {path}\n  Detail: {e}"
+        except PermissionError as e:
+            return f"Permission denied reading '{path}': {e}"
+        except OSError as e:
+            return f"OS error reading file '{path}': {e}"
         except Exception as e:
             return f"Error reading file: {str(e)}"
 
@@ -220,7 +376,7 @@ class ViewImage(BaseTool):
         'required': ['path'],
     }
 
-    def __init__(self, cfg=None, **kwargs):
+    def __init__(self, cfg: Optional[dict] = None, **kwargs: Any) -> None:
         try:
             super().__init__(cfg)
         except (ValueError, TypeError):
@@ -475,7 +631,7 @@ class EditFile(BaseTool):
                     params['old_content'] = params['old_string']
                 if 'new_string' in params and 'new_content' not in params:
                     params['new_content'] = params['new_string']
-        except:
+        except (json.JSONDecodeError, TypeError, KeyError, ValueError):
             pass
 
         params_json = self._verify_json_format_args(params)

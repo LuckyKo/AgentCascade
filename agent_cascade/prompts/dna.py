@@ -96,9 +96,9 @@ TOOL_METADATA = {
             'Reads and returns the content of a specified file. If the file is large, '
             'the content will be truncated. The tool\'s response will clearly indicate '
             'if truncation has occurred and will provide details on how to read more '
-            'of the file using the \'offset\' and \'limit\' parameters. Handles text, '
-            'images (PNG, JPG, GIF, WEBP, SVG, BMP), and PDF files. For text files, '
-            'it can read specific line ranges.'
+            'of the file using the \'offset\' and \'limit\' parameters. Handles text files '
+            'natively with streaming line-by-line reading. For binary files, displays a '
+            'hex dump of the first N bytes with ASCII representation.'
         ),
         'parameters': {
             'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py', 'data/input.csv').",
