@@ -6,8 +6,7 @@ import sys
 from typing import Optional, Any, Union
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.settings import (
-    DEFAULT_WORKSPACE, DEFAULT_READ_FILE_MAX_LINES, DEFAULT_TOOL_RESULT_MAX_CHARS,
-    CHARS_PER_TOKEN_ESTIMATE,
+    DEFAULT_WORKSPACE, DEFAULT_TOOL_RESULT_MAX_CHARS, CHARS_PER_TOKEN_ESTIMATE,
 )
 import json
 from agent_cascade.prompts.dna import TOOL_METADATA
@@ -39,7 +38,7 @@ _gtk_common_paths = [
 
 # --- read_file constants ----------------------------------------------------- #
 DEFAULT_MAX_INPUT_TOKENS = 58000          # Default context window size in tokens
-MAX_LINE_LIMIT = 50000                    # Max lines to read per call (wild reads)
+DEFAULT_READ_LINES = 250                  # Default lines to read when no limit specified
 MAX_LINE_LIMIT_EXPLICIT = 100000          # Max lines when user explicitly sets a limit
 HEX_DUMP_BYTES = 1024                     # Bytes to show in hex view for binary files
 CONTEXT_FRACTION = 0.25                   # Fraction of context window reserved for tool output
@@ -98,11 +97,6 @@ class ReadFile(BaseTool):
             'limit': {
                 'type': 'integer',
                 'description': TOOL_METADATA['read_file']['parameters']['limit']
-            },
-            'full_read': {
-                'type': 'boolean',
-                'description': TOOL_METADATA['read_file']['parameters']['full_read'],
-                'default': False
             }
         },
         'required': ['path'],
@@ -144,6 +138,16 @@ class ReadFile(BaseTool):
         return resolved
 
     # ------------------------------------------------------------------ #
+    #  Helper: safely extract max_input_tokens from a config dict         #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _extract_max_tokens(cfg: dict) -> Optional[int]:
+        """Extract max_input_tokens from a config dict, checking both top-level
+        and generate_cfg sub-dict."""
+        val = cfg.get('max_input_tokens') or (cfg.get('generate_cfg', {}) or {}).get('max_input_tokens')
+        return int(val) if val else None
+
+    # ------------------------------------------------------------------ #
     #  Helper: determine effective max_input_tokens from config hierarchy
     # ------------------------------------------------------------------ #
     def _get_max_input_tokens(self, kwargs: dict) -> int:
@@ -155,27 +159,50 @@ class ReadFile(BaseTool):
 
         # Check agent_pool configuration
         if self.agent_pool is not None:
-            llm_cfg = getattr(self.agent_pool, 'llm_cfg', {})
-            pool_max = (
-                llm_cfg.get('max_input_tokens')
-                or llm_cfg.get('generate_cfg', {}).get('max_input_tokens')
-            )
+            pool_max = self._extract_max_tokens(getattr(self.agent_pool, 'llm_cfg', {}))
             if pool_max:
-                tokens = int(pool_max)
+                tokens = pool_max
 
         # Check agent_obj override (highest priority)
         agent_obj = kwargs.get('agent_obj')
         if agent_obj is not None:
             llm = getattr(agent_obj, 'llm', None)
-            gen_cfg = getattr(llm, 'generate_cfg', None) if llm else None
-            agent_max = gen_cfg.get('max_input_tokens') if gen_cfg else None
+            gen_cfg = getattr(llm, 'generate_cfg', {}) if llm else {}
+            agent_max = self._extract_max_tokens(gen_cfg)
             if agent_max and agent_max != DEFAULT_MAX_INPUT_TOKENS:
-                tokens = int(agent_max)
+                tokens = agent_max
 
         return tokens
 
     # ------------------------------------------------------------------ #
-    #  Helper: read text file with streaming line-by-line iteration
+    #  Helper: determine line limit and whether this is a "wild read"     #
+    # ------------------------------------------------------------------ #
+    def _determine_limits(self, limit: Optional[int]) -> tuple[int, bool]:
+        """Return (line_limit, is_wild_read). Wild reads have no explicit limit
+        set by the caller and get capped more aggressively on character budget.
+        
+        Priority: explicit limit > -1 (unlimited) > default."""
+        if limit == -1:
+            return MAX_LINE_LIMIT_EXPLICIT, False
+        elif limit is not None:
+            return min(int(limit), MAX_LINE_LIMIT_EXPLICIT), False
+        else:
+            return DEFAULT_READ_LINES, True  # wild read — char budget will be capped lower
+
+    # ------------------------------------------------------------------ #
+    #  Helper: calculate character budget for the read                    #
+    # ------------------------------------------------------------------ #
+    def _calculate_char_limit(self, kwargs: dict, is_wild_read: bool, wild_limit: int) -> int:
+        """Calculate the character limit based on context window and token estimates."""
+        max_input_tokens = self._get_max_input_tokens(kwargs)
+        char_limit = int(max_input_tokens * CONTEXT_FRACTION * CHARS_PER_TOKEN_ESTIMATE)
+        char_limit = max(500, char_limit)  # floor at 500 chars
+        if is_wild_read:
+            char_limit = min(char_limit, wild_limit)
+        return char_limit
+
+    # ------------------------------------------------------------------ #
+    #  Helper: read text file with streaming line-by-line iteration       #
     # ------------------------------------------------------------------ #
     def _read_text_file(
         self, path: str, resolved: Path, start_line: int, limit: int, char_limit: int
@@ -230,17 +257,16 @@ class ReadFile(BaseTool):
             return f"File content ({path}) — empty file."
 
         # Build header with total line count info
-        # Only prefix with ">" when we actually hit the line limit (not char limit)
-        total_str = f">{total_lines}" if hit_line_limit else str(total_lines)
-        header = f"File content ({path}), lines {start_line} to {actual_end} of {total_str}:"
+        header = f"File content ({path}), lines {start_line} to {actual_end} of {total_lines}:"
 
         truncated_msg = ""
         if hit_line_limit or hit_char_limit:
             header += " [TRUNCATED]"
+            remaining = max(0, total_lines - actual_end)
+            next_chunk = min(limit, remaining) if limit > 0 else remaining
             truncated_msg = (
                 f"\n\n[PAGINATION NOTE: This file is large. Use read_file with "
-                f"start_line={actual_end + 1} to read the next "
-                f"{min(limit, total_lines - actual_end)} lines.]"
+                f"start_line={actual_end + 1} to read the next {next_chunk} lines.]"
             )
 
         return f"{header}\n```\n{content}```{truncated_msg}"
@@ -295,12 +321,16 @@ class ReadFile(BaseTool):
         params = self._verify_json_format_args(params)
         path = params.get('path')
         if not path:
-            return "ERROR: Missing 'path' parameter."
+            return "ERROR: Missing 'path' parameter. Please provide a file path."
 
-        raw_start = int(params.get('start_line', 1))
+        # Validate start_line type (Fix #7)
+        raw_start = params.get('start_line', 1)
+        try:
+            raw_start = int(raw_start)
+        except (TypeError, ValueError):
+            return f"ERROR: 'start_line' must be an integer, got: {raw_start!r}"
 
         limit = params.get('limit')
-        full_read = bool(params.get('full_read', False))
 
         # Get the character limit from agent/tool options or settings
         wild_limit = DEFAULT_TOOL_RESULT_MAX_CHARS
@@ -310,15 +340,7 @@ class ReadFile(BaseTool):
             )
 
         # Determine line limit and whether this is a "wild read" (no explicit limit)
-        if full_read:
-            limit = MAX_LINE_LIMIT_EXPLICIT  # Explicit request → use higher limit
-            no_explicit_limit = False
-        elif limit is None:
-            limit = MAX_LINE_LIMIT
-            no_explicit_limit = True
-        else:
-            limit = min(int(limit), MAX_LINE_LIMIT_EXPLICIT)
-            no_explicit_limit = False
+        limit, is_wild_read = self._determine_limits(limit)
 
         try:
             # Resolve path using the same mechanism as all other file-op tools
@@ -332,12 +354,7 @@ class ReadFile(BaseTool):
                 return f"Not a regular file: {path}"
 
             # Determine character budget for this read
-            max_input_tokens = self._get_max_input_tokens(kwargs)
-            char_limit = int(max_input_tokens * CONTEXT_FRACTION * CHARS_PER_TOKEN_ESTIMATE)
-            char_limit = max(500, char_limit)  # floor at 500 chars
-
-            if no_explicit_limit:
-                char_limit = min(char_limit, wild_limit)
+            char_limit = self._calculate_char_limit(kwargs, is_wild_read, wild_limit)
 
             # Check for binary content
             if _is_binary_file(resolved):
@@ -360,11 +377,10 @@ class ReadFile(BaseTool):
         except ValueError as e:
             # Path resolution errors (outside allowed directories)
             return f"Path error for '{path}': {e}"
-        except FileNotFoundError as e:
-            return f"File not found: {path}\n  Detail: {e}"
         except PermissionError as e:
             return f"Permission denied reading '{path}': {e}"
         except OSError as e:
+            # Catches FileNotFoundError, IOError, etc. — merged handler (Fix #6)
             return f"OS error reading file '{path}': {e}"
         except Exception as e:
             return f"Error reading file: {str(e)}"
