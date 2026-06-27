@@ -241,15 +241,6 @@ TOOL_METADATA = {
             'fix_paths': 'Auto-translate Windows host paths to Docker container paths. Default is true. Set to false to disable.',
         }
     },
-    'python_compiler': {
-        'description': (
-            'Checks Python code for syntax errors without executing it. '
-            'Returns "Valid" or a detailed error message.'
-        ),
-        'parameters': {
-            'code': 'The Python code to check for syntax errors.'
-        }
-    },
     'shell_cmd': {
         'description': (
             'Execute a shell command on the host system. This ALWAYS requires explicit user approval so use it as a last resort tool only! '
@@ -415,8 +406,7 @@ TOOL_METADATA = {
             'Auto-detects the language from the file extension and applies the '
             'appropriate syntax checker. Works with Python, JavaScript, TypeScript, '
             'JSON, YAML, TOML, XML, HTML, CSS, C, C++, C#, Java, Go, Rust, and more. '
-            'Returns "Valid (<language>)" or a detailed error message. '
-            'Similar to python_compiler but works for all common languages.'
+            'Returns "Valid (<language>)" or a detailed error message.'
         ),
         'parameters': {
             'path': 'Path to the file to check, absolute or relative to the workspace root.'

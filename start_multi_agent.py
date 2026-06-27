@@ -53,7 +53,6 @@ from agent_cascade.tools import (
     doc_parser,
     extract_doc_vocabulary,
     code_interpreter,
-    python_compiler,
 )
 from agent_cascade.tools.custom import SystemInfo
 from agent_cascade.settings import DEFAULT_WORKSPACE
@@ -140,7 +139,7 @@ DEFAULT_TOOLS = {
 
 # Tools available to ALL agents (shown in UI but disabled by default)
 ALL_BUILTIN_TOOLS = [
-    'image_gen', 'storage', 'retrieval', 'code_interpreter', 'python_compiler',
+    'image_gen', 'storage', 'retrieval', 'code_interpreter',
     'delete_file', 'shell_cmd', # These are powerful - enable manually
 ]
 
@@ -218,12 +217,6 @@ if __name__ == '__main__':
                     agent.function_map['code_interpreter']._operation_manager = agent_pool.operation_manager
                 except Exception:
                     pass
-            
-            if 'python_compiler' in default_tools:
-                try:
-                    agent.function_map['python_compiler'] = python_compiler.PythonCompiler(cfg={'work_dir': DEFAULT_WORKSPACE})
-                except Exception:
-                    pass
 
     # Load orchestrator with its default tools
     orchestrator = load_orchestrator_agent(agent_pool, llm_cfg)
@@ -263,12 +256,6 @@ if __name__ == '__main__':
         try:
             orchestrator.function_map['code_interpreter'] = code_interpreter.CodeInterpreter(cfg={'work_dir': DEFAULT_WORKSPACE})
             orchestrator.function_map['code_interpreter']._operation_manager = agent_pool.operation_manager
-        except Exception:
-            pass
-
-    if 'python_compiler' in default_orch_tools:
-        try:
-            orchestrator.function_map['python_compiler'] = python_compiler.PythonCompiler(cfg={'work_dir': DEFAULT_WORKSPACE})
         except Exception:
             pass
 

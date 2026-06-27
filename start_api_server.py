@@ -41,7 +41,6 @@ from agent_cascade.tools import (
     image_gen,
     web_extractor,
     code_interpreter,
-    python_compiler,
 )
 from agent_cascade.tools.custom import SystemInfo
 from agent_cascade.settings import DEFAULT_WORKSPACE
@@ -174,12 +173,6 @@ def initialize_agents():
         shared_tools['code_interpreter'] = code_interpreter.CodeInterpreter(cfg={'work_dir': DEFAULT_WORKSPACE})
         if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
             shared_tools['code_interpreter']._operation_manager = agent_pool.operation_manager
-    except Exception:
-        pass
-        
-    try:
-        from agent_cascade.tools import python_compiler
-        shared_tools['python_compiler'] = python_compiler.PythonCompiler(cfg={'work_dir': DEFAULT_WORKSPACE})
     except Exception:
         pass
 
