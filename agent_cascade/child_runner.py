@@ -150,10 +150,23 @@ def run_child_core(
     retry_count = 0
 
     while retry_count <= max_auto_retries:
+        # On first attempt, use force_fresh as configured.
+        # On retries after rollback, reuse the existing instance to preserve the hint.
+        is_retry = retry_count > 0
+
+        # Check if execution was stopped between retries
+        if pool.stopped and is_retry:
+            return _format_result(
+                instance_name=instance_name,
+                result="Execution stopped during retry.",
+                was_stopped=True,
+                prefix=prefix,
+            )
+
         try:
             inst, conv = engine._create_and_run_agent(
                 agent_class, instance_name, args, caller_name, child_depth,
-                force_fresh=force_fresh,
+                force_fresh=force_fresh and not is_retry,
             )
             # Success — break out of the retry loop and proceed to result formatting
             break
