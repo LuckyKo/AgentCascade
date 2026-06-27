@@ -1578,7 +1578,7 @@ def create_app(agents, agent_pool, config=None):
                                                             continue
                                                         try:
                                                             item = json.loads(line)
-                                                            if "metadata" not in item:  # Skip metadata lines
+                                                            if "metadata" not in item and "event" not in item:  # Skip metadata lines and event entries
                                                                 recov.append(item)
                                                         except json.JSONDecodeError as e:
                                                             logger.debug(f"Skipping malformed JSONL line in agent pool recovery: {e}")

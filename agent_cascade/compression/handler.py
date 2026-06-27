@@ -219,7 +219,7 @@ class CompressionHandler:
         - reset_history(rewrite=True) replaces logger state with pool state
         
         FIX D4: If an `instance` is provided, pending notifications in the queue are
-        also flushed to JSONL as event markers before the rewrite sync. This ensures
+        flushed to JSONL as USER messages after the rewrite sync. This ensures
         compression notifications are persisted even if the agent halts before the
         next tool result drains them into a message.
         
@@ -233,10 +233,14 @@ class CompressionHandler:
             conv = self.pool.get_conversation(instance_name)
             log_inst = self.pool.get_logger(instance_name, agent_class)
             
-            # FIX D4: Flush pending notifications to JSONL before logger rewrite sync.
-            # Notifications sit in _pending_notifications until drained by a tool result;
-            # if the agent halts immediately after compression they'd be lost from JSONL.
-            # Clear queue INSIDE the lock to prevent duplicate flushes on next compression (C1 fix).
+            # FIX D4: First rewrite the file with pool state (reset_history overwrites everything)
+            logger.debug(
+                f"Logger sync after {operation_name} for '{instance_name}': "
+                f"pool_len={len(conv) if conv else 0}, using reset_history() for full sync"
+            )
+            log_inst.reset_history(conv, rewrite=True)
+            
+            # Then flush pending notifications AFTER rewrite (they'd be lost if written before)
             if instance is not None and getattr(instance, '_pending_notifications', None):
                 with instance._compression_lock:
                     pending = list(instance._pending_notifications)
@@ -244,20 +248,15 @@ class CompressionHandler:
                 for notif in pending:
                     try:
                         log_inst.log_message({
-                            "role": "event",
+                            "role": "user",
                             "content": notif,
-                            "notification_type": "compression_feedback",
                         })
                     except Exception as e:
                         logger.error(f"Failed to flush notification to JSONL for '{instance_name}': {e}")
-                logger.debug(
-                    f"Flushed {len(pending)} pending notification(s) to JSONL for '{instance_name}' before sync"
-                )
-            logger.debug(
-                f"Logger sync after {operation_name} for '{instance_name}': "
-                f"pool_len={len(conv) if conv else 0}, using reset_history() for full sync"
-            )
-            log_inst.reset_history(conv, rewrite=True)
+                if pending:
+                    logger.debug(
+                        f"Flushed {len(pending)} pending notification(s) to JSONL for '{instance_name}' after rewrite sync"
+                    )
             
             # ── Tail sync check after compression (design doc §5.2 — D1 fix) ──
             # Verify pool tail matches JSONL tail after the sync write.

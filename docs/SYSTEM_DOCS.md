@@ -244,6 +244,8 @@ Each phase is a focused method (~20-60 lines), making them independently testabl
 
 Both paths ultimately call the same underlying compression logic in `agent_cascade/compression/core.py`, but they differ in their approach: system-triggered is fast and automatic, while tool-triggered produces higher-quality summaries through deliberate agent reasoning.
 
+**Overfeeding Safeguard:** Before sending messages to the compressor, the system performs actual token counting (not rough estimates) to verify that target messages fit within 90% of the compressor's context window. If they don't — TRUE overfeeding is detected and the agent is terminated with a clear diagnostic showing exact token counts. A safety net counter (default 100 compressions, configurable via `QWEN_AGENT_DEFAULT_COMPRESSION_MAX_ATTEMPTS`) guards against infinite loops if token counting fails silently.
+
 ---
 
 ## 4. Data Flow
@@ -424,12 +426,12 @@ Step 3: Generate Summary
 
 Step 4: Insert Marker
   A COMPRESSION_MARKER message is inserted at the cut position in agent pool, `tail - cut_offset_from_tail` in JSON log
-  In memory: [SYS][U0(first user message)][COMP1: "Summarized X"][tail]
+  In memory: [SYS][U0(first user message)][COMP1: "Summarized {([U0]/PrevMarker)[U1][A1]}"][U2][A2]
   In JSONL:  [SYS][U0][U1][A1][COMP1][U2][A2]  ← marker at original position
 
 Step 5: Trim Working Set
   Discarded messages removed from in-memory conversation
-  Only first user message + compressed summaries + recent tail remain visible to LLM
+  Only first user message + stacked compressed summaries + recent tail remain visible to LLM
 
 Step 6: Release Lock
   Agent continues with reduced working set
@@ -453,8 +455,34 @@ After 2nd compress:  Memory: [SYS][U0][COMP1...][COMP2: "Summarized U2,A2"][U3][
 Working set feeds to LLM: [SYS][U0][COMP1...][COMP2...][recent messages...]
 ```
 
-NOTE: Agent memory and JSONL are NOT in full sync. the logs retain the full conversation history at all times. The rule is that the tail end past the last marker MUST be in sync at all times.
+NOTE: Agent memory and JSONL are NOT in full sync. the logs retain the full conversation history at all times. The rule is that the tail end past the last marker MUST be in sync at all times and have the EXACT same number of messages since the last compression marker.
+All atomic operations on agent pool should be mirrored in the log AFTER they have changed the active message pool.
 
+**Overfeeding Protection — How Compression Avoids Its Own Token Budget:**
+
+The compressor agent has a finite context window (default 125K tokens). To prevent sending more messages to the compressor than it can handle, the system uses a two-stage protection:
+
+```
+Stage 1: Rough Estimate Pre-Filter (core.py, ~line 126)
+  - Read compressor's max_input_tokens from its LLM config
+  - Reserve 90% for input messages (10% reserved for output generation)
+  - Cap discard count using a rough estimate of ~5 chars/token
+
+Stage 2: Actual Token Count Verification (core.py, after target messages assembled)
+  - After selecting target messages to send to the compressor:
+    a) Count ACTUAL tokens of each target message using qwen tokenizer
+    b) Add estimated prompt overhead (~150 tokens for system + compression prompt)
+    c) If an existing summary marker exists, count its token content too
+    d) Compare total against available_for_messages (90% of compressor's context window)
+
+  TRUE Overfeeding Detected → Compression fails gracefully:
+    - Agent is terminated with a clear error message showing exact token counts
+    - This means the agent's context is filling faster than compression can reduce it
+
+Safety Net (handler.py, default 100 compressions):
+  - A high-threshold counter guards against infinite loops if token counting fails silently
+  - Configurable via env var: QWEN_AGENT_DEFAULT_COMPRESSION_MAX_ATTEMPTS (default 100)
+```
 
 **On Session Reload (crash recovery):** The system performs a single forward pass through the JSONL file, finds all compression markers, stacks them in order, and takes the tail after the last marker. This produces the same working set that would exist in memory — no backward scanning or complex reconstruction needed.
 

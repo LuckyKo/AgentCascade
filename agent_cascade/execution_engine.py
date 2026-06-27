@@ -495,8 +495,34 @@ class ExecutionEngine:
             logger.error(f"[SLOT_ACQUIRE_FAILED] {context} for {instance.instance_name}: {e}")
             raise
 
-    # ── Unified injection helpers ──────────────────────────────────────────
-    
+    # ── Unified injection helpers (atomic: append + cache sync + log) ───────
+
+    def _append_and_log(
+        self,
+        instance: AgentInstance,
+        msg: Message,
+        inst_name: str,
+        agent_class: str
+    ) -> None:
+        """Append a message to working sets AND log it atomically under compression lock.
+        
+        Single source of truth for message injection: updates conversation, caches,
+        and JSONL log in one locked operation. Prevents race conditions where delta
+        sync could re-log messages already written by separate code paths.
+        
+        Args:
+            instance: AgentInstance to update
+            msg: Message to append
+            inst_name: Instance name for logger lookup
+            agent_class: Agent class for logger lookup
+        """
+        with instance._compression_lock:
+            # 1. Append to conversation + sync caches (reentrant lock)
+            instance.append_message(msg)
+            # 2. Log immediately inside the same lock (prevents delta sync race)
+            log_inst = self.pool.get_logger(inst_name, agent_class)
+            log_inst.log_message(msg)
+
     def _append_to_working_sets(
         self,
         instance: AgentInstance,
@@ -594,24 +620,23 @@ class ExecutionEngine:
                 first_msg.content = self.compression_handler._drain_tool_warnings(instance, first_msg.content, prepend=True)
 
         with instance._compression_lock:
+            # Get logger inside lock to ensure atomic append+log (prevents race with delta sync)
+            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+            
             for msg in processed_messages:
                 # Append to response accumulator (separate list for local use)
                 response.append(msg)
                 # Use helper which handles cache sync atomically via centralized API
                 # Note: Reentrant lock — outer _compression_lock held here, inner acquired by append_message()
                 self._append_to_working_sets(instance, msg)
+                # Log immediately inside the same lock to prevent delta sync from re-logging these messages
+                log_inst.log_message(msg)
         
         # Mark activity OUTSIDE the lock to reduce hold time (Fix #1 from reviewer)
         # Call once per message, not in a nested loop
-        for _ in processed_messages:
-            self.pool._mark_activity(inst_name)
-
-        # Log messages outside the lock to minimize hold time (logging can be slow)
-        # Independent loop - each message logged exactly once
         try:
-            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-            for msg in processed_messages:
-                log_inst.log_message(msg)
+            for _ in processed_messages:
+                self.pool._mark_activity(inst_name)
             
             # ── Tail sync check after drain+inject logging (design doc §5.2 — D1 fix) ──
             if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
@@ -721,10 +746,9 @@ class ExecutionEngine:
                 for item in queued:
                     msg = self._make_user_message(item)
                     if msg.content.strip():
-                        self.pool.add_message(inst_name, msg)
+                        # Use unified helper: atomic append + cache sync + log under compression lock
                         try:
-                            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-                            log_inst.log_message(msg)
+                            self._append_and_log(instance, msg, inst_name, instance.agent_class)
                         except Exception:
                             pass
                 

@@ -269,7 +269,7 @@ class AgentInstanceLogger:
                 try:
                     msg_dict = json.loads(line)
                     # FIX #2: Ensure msg_dict is actually a dict before checking keys
-                    if isinstance(msg_dict, dict) and "metadata" not in msg_dict:  # Only load message dicts, skip metadata lines and non-dict JSON values
+                    if isinstance(msg_dict, dict) and "metadata" not in msg_dict and "event" not in msg_dict:  # Only load message dicts, skip metadata lines, event entries, and non-dict JSON values
                         self.data["history"].append(msg_dict)
                 except json.JSONDecodeError:
                     logger.warning(f"Skipping malformed JSON line in {self.log_path} — data may be incomplete")
@@ -453,9 +453,8 @@ class AgentInstanceLogger:
                                 continue
                             try:
                                 item = json.loads(line)
-                                if isinstance(item, dict) and "metadata" not in item:
-                                    # Preserve ALL messages including previous compression markers
-                                    # (cumulative audit trail per design doc context_compression_sync.md)
+                                if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+                                    # Preserve ALL messages including compression markers (no event entries)
                                     existing_msgs.append(item)
                             except json.JSONDecodeError:
                                 logger.warning(f"Skipping malformed JSON line in {self.log_path}")
@@ -499,17 +498,8 @@ class AgentInstanceLogger:
                 with open(self.log_path, 'w', encoding='utf-8') as f:
                     f.writelines(lines)
 
-                # FIX D9: Append COMPRESSION event marker to rewrite=True path.
-                # This matches the behavior of the rewrite=False path (line 529-533)
-                # and provides an explicit audit trail for compression events in JSONL.
-                # M2 fix: Use _append_line() instead of a separate open('a') call to avoid
-                # race conditions and stay consistent with the non-rewrite path.
+                # Excise COMPRESSION event marker — only messages and markers belong in JSONL logs
                 self._file_handle = None  # Invalidate so _ensure_file reopens clean after overwrite
-                self._append_line({
-                    "event": "COMPRESSION",
-                    "timestamp": datetime.datetime.now().isoformat(),
-                    "message": "Context was compressed. Re-asserting working set baseline."
-                })
 
                 logger.info(f"Rewrote agent log {self.log_path} with {len(result_msgs)} messages.")
             except Exception as e:
@@ -537,13 +527,7 @@ class AgentInstanceLogger:
                 break
 
         if summary_msg and idx_in_new != -1:
-            # Append the compression baseline event marker
-            self._append_line({
-                "event": "COMPRESSION",
-                "timestamp": datetime.datetime.now().isoformat(),
-                "message": "Context was compressed. Re-asserting working set baseline."
-            })
-
+            # Append the compression baseline marker (no event entries — only messages belong in logs)
             # 1. Append the summary message
             self._append_line(summary_msg)
 
@@ -582,21 +566,15 @@ class AgentInstanceLogger:
         """Rollback the history by popping N messages.
 
         If soft=False, re-writes the log file (truncates).
-        If soft=True, appends a ROLLBACK marker to the log and keeps the file intact.
+        If soft=True, keeps the file intact and pops from in-memory history only.
         """
         if count <= 0:
             return
 
         # 1. Update physical log file
         if soft:
-            marker = {
-                "event": "ROLLBACK",
-                "timestamp": datetime.datetime.now().isoformat(),
-                "message": f"Surgical rollback of {count} messages."
-                           f"{' Reason: ' + reason if reason else ''}",
-                "rolled_back_count": count
-            }
-            self._append_line(marker)
+            # No event entries — just keep the file intact (soft rollback is implicit in file state)
+            pass
         else:
             # Close cached handle before truncating (Fix #1)
             if self._file_handle and not self._file_handle.closed:

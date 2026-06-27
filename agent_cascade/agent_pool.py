@@ -1024,7 +1024,7 @@ class AgentPool:
                             if isinstance(item, dict):
                                 if "metadata" in item:
                                     metadata.update(item["metadata"])
-                                else:
+                                elif "event" not in item:  # Skip event entries (COMPRESSION/ROLLBACK markers)
                                     messages.append(item)
                             else:
                                 logger.debug(f"load_session_from_log: skipping non-dict JSONL entry of type {type(item).__name__}")

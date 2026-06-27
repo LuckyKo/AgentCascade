@@ -124,7 +124,7 @@ TOOL_REGISTRY (global dict)          agent_factory.register_standard_tools()
 
 | # | Tool Name | Class | File | Required Params | Optional Params | Description |
 |---|-----------|-------|------|-----------------|-----------------|-------------|
-| 1 | `read_file` | `ReadFile` | `tools/custom/file_ops.py:35` | `path` (str) | `offset` (int, default 0), `limit` (int), `full_read` (bool, default False) | Read file content with pagination. Handles text, images, PDFs. Character-limited reads. |
+| 1 | `read_file` | `ReadFile` | `tools/custom/file_ops.py:35` | `path` (str) | `start_line` (int, default 1), `limit` (int, -1 for unlimited) | Read file content with pagination. Handles text and binary files via hex dump. Character-limited reads. |
 | 2 | `view_image` | `ViewImage` | `tools/custom/file_ops.py:205` | `path` (str) | — | View image files (PNG, JPG, GIF, WEBP, SVG→PNG auto-convert, BMP). Returns ContentItem list. |
 | 3 | `write_file` | `WriteFile` | `tools/custom/file_ops.py:346` | `path` (str), `content` (str) | `justification` (str) | Create or overwrite file with auto-backup. Requires user approval for existing files. |
 | 4 | `edit_file` | `EditFile` | `tools/custom/file_ops.py:414` | `path` (str), `old_content` (str), `new_content` (str) | `match_mode` (enum: exact/heuristic/heuristic_agnostic, default 'exact'), `justification` (str) | Surgical text replacement. Preserves rest of file content. |
