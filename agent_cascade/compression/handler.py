@@ -16,13 +16,19 @@ from typing import TYPE_CHECKING, Any, List, Optional
 
 if TYPE_CHECKING:
     from agent_cascade.execution_engine import ExecutionEngine
-else:
-    from agent_cascade.execution_engine import _invalidate_token_cache
 
 from agent_cascade.log import logger
 from agent_cascade.llm.schema import Message, USER
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.utils.pool_validation import validate_message_pool
+
+
+# ── Token Cache Helper (local copy to avoid circular import with execution_engine) ──
+
+def _invalidate_token_cache(instance):
+    """Invalidate all token count caches after conversation mutation."""
+    instance._last_actual_token_count = 0
+    instance._last_token_count_conversation_length = -1
 
 
 # ── Helper Functions (moved from execution_engine module level) ───────────────
