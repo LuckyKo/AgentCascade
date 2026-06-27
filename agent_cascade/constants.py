@@ -22,7 +22,6 @@ ALL_USER_APPROVAL_TOOLS: frozenset[str] = frozenset({
     'edit_file',      # Edit existing files (requires approval if not agent-owned)
     'delete_file',    # Delete files (requires approval if not agent-owned)
     'copy_file',      # Copy files or directories
-    'move_file',      # Move files or directories
 })
 
 

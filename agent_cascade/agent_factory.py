@@ -11,7 +11,7 @@ from agent_cascade.log import logger
 from agent_cascade.tools.code_interpreter import CodeInterpreter
 from agent_cascade.tools.custom import (
     ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep,
-    DeleteFile, CopyFile, MoveFile, ReIndent, DismissAgent, ListAgents, ShellCmd, SystemInfo,
+    DeleteFile, CopyFile, ReIndent, DismissAgent, ListAgents, ShellCmd, SystemInfo,
     ReadLogs, Calculate, CodeMap, ForgetLast, SyntaxCheck,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext

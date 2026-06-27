@@ -44,7 +44,6 @@ class OperationType(Enum):
     FILE_EDIT = "file_edit"
     FILE_DELETE = "file_delete"
     FILE_COPY = "file_copy"
-    FILE_MOVE = "file_move"
     FILE_REPLACE = "file_replace"
     CODE_EXECUTE = "code_execute"
     EXTERNAL_TOOL = "external_tool"

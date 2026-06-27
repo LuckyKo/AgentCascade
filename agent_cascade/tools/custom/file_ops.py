@@ -919,7 +919,6 @@ class CopyFile(BaseTool):
         return self.agent_pool.operation_manager.copy_file(source, destination, self.agent_name)
 
 
-@register_tool('move_file', allow_overwrite=True)
 class MoveFile(BaseTool):
     """Move a file or directory — creates timestamped backup before overwriting existing destination (requires user approval)."""
 
