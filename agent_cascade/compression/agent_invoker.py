@@ -112,6 +112,7 @@ def invoke_compression_agent(
     # Generate a unique instance name for each compression invocation.
     # This prevents the logger cache from reusing stale history data (TAIL SYNC DRIFT fix).
     with _lock:
+        global _compressor_invocation_counter
         _compressor_invocation_counter += 1
         comp_state_key = f'Compressor_{_compressor_invocation_counter}'
 
