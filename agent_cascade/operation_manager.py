@@ -22,7 +22,7 @@ import fnmatch
 import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
@@ -641,6 +641,162 @@ class OperationManager:
         except (OSError, ValueError):
             return "?"
 
+    # ── Static helpers for list_directory (fixes #4, #5) ───────────────
+
+    @staticmethod
+    def _matches_filters(name: str, include_fn, exclude_fn) -> bool:
+        """Check if a name passes both include and exclude filters."""
+        if include_fn and not include_fn(name):
+            return False
+        if exclude_fn and exclude_fn(name):
+            return False
+        return True
+
+    @staticmethod
+    def _make_entry(name: str, is_dir: bool, stat_info) -> dict:
+        """Create a standardized entry dict from a name, type flag, and optional stat info."""
+        if stat_info is None:
+            return {'name': name, 'is_dir': is_dir, 'size': 0 if is_dir else None, 'mtime': None}
+        return {
+            'name': name,
+            'is_dir': is_dir,
+            'size': 0 if is_dir else stat_info.st_size,
+            'mtime': stat_info.st_mtime,
+        }
+
+    # ── Extracted flat listing (fix #3) ────────────────────────────────
+
+    def _list_flat(
+        self, resolved: Path, include_fn, exclude_fn, sort_by: str, max_entries: int
+    ) -> Tuple[str, int, int, int]:
+        """Flat directory listing via os.scandir. Returns (output_str, dirs, files, size)."""
+        dirs = []
+        files = []
+
+        with os.scandir(str(resolved)) as it:
+            for entry in it:
+                if not self._matches_filters(entry.name, include_fn, exclude_fn):
+                    continue
+                try:
+                    stat_info = entry.stat()
+                except Exception:
+                    stat_info = None
+                is_dir = entry.is_dir()
+                (dirs if is_dir else files).append(
+                    self._make_entry(entry.name, is_dir, stat_info)
+                )
+
+        sorted_dirs = self._sort_entries(dirs, sort_by)
+        sorted_files = self._sort_entries(files, sort_by)
+
+        # Apply max_entries cap: dirs first, then fill with files
+        overflow_count = 0
+        if len(sorted_dirs) + len(sorted_files) > max_entries:
+            remaining = max_entries
+            show_dirs = sorted_dirs[:remaining]
+            remaining -= len(show_dirs)
+            show_files = sorted_files[:remaining]
+            overflow_count = (len(sorted_dirs) - len(show_dirs)) + (len(sorted_files) - len(show_files))
+            sorted_dirs, sorted_files = show_dirs, show_files
+
+        total_dirs = len(sorted_dirs)
+        total_files = len(sorted_files)
+        total_size = sum(f['size'] for f in sorted_files if f.get('size'))
+
+        output = ""
+        if sorted_dirs:
+            output += "Directories:\n"
+            for e in sorted_dirs:
+                output += f"  {e['name']}/ (modified: {self._format_mtime(e['mtime'])})\n"
+        if sorted_files:
+            output += "\nFiles:\n"
+            for e in sorted_files:
+                output += f"  {e['name']} ({self._format_size(e['size'])}, modified: {self._format_mtime(e['mtime'])})\n"
+        if overflow_count > 0:
+            output += f"  ... and {overflow_count} more entries (output limited to {max_entries}); use include/exclude to narrow\n"
+
+        return output, total_dirs, total_files, total_size
+
+    # ── Extracted recursive listing (fix #3) ───────────────────────────
+
+    def _list_recursive(
+        self, path: str, resolved: Path, include_fn, exclude_fn, sort_by: str, max_depth: int, max_entries: int
+    ) -> Tuple[str, int, int, int]:
+        """Recursive directory listing via os.walk. Returns (output_str, dirs, files, size)."""
+        entries_by_dir: dict = OrderedDict()  # dir_path -> sorted entry list
+        visited_dirs: set = set()
+        entry_count = 0
+        root_depth = len(resolved.parts)
+
+        for dirpath, subdirs, filenames in os.walk(str(resolved), topdown=True):
+            current_dir = Path(dirpath)
+            abs_path = current_dir.resolve()
+
+            if abs_path in visited_dirs:   # symlink cycle guard
+                subdirs.clear()
+                continue
+            visited_dirs.add(abs_path)
+
+            # Fix #1: reuse abs_path instead of calling .resolve() again
+            current_depth = len(abs_path.parts) - root_depth
+            dir_entries = []
+
+            for d_name in sorted(subdirs):
+                if entry_count >= max_entries:
+                    break
+                try:
+                    stat_info = (current_dir / d_name).stat()
+                except Exception:
+                    stat_info = None
+                if not self._matches_filters(d_name, include_fn, exclude_fn):
+                    continue
+                dir_entries.append(self._make_entry(d_name, True, stat_info))
+                entry_count += 1
+
+            for f_name in sorted(filenames):
+                if entry_count >= max_entries:
+                    break
+                try:
+                    stat_info = (current_dir / f_name).stat()
+                except Exception:
+                    stat_info = None
+                if not self._matches_filters(f_name, include_fn, exclude_fn):
+                    continue
+                dir_entries.append(self._make_entry(f_name, False, stat_info))
+                entry_count += 1
+
+            if dir_entries:
+                entries_by_dir[dirpath] = self._sort_entries(dir_entries, sort_by)
+
+            if entry_count >= max_entries:
+                subdirs.clear()
+                continue
+            if max_depth != -1 and current_depth >= max_depth - 1:
+                subdirs.clear()
+
+        # Fix #8: compute summary stats from collected data (not during formatting)
+        total_dirs = sum(1 for g in entries_by_dir.values() for e in g if e['is_dir'])
+        total_files = sum(1 for g in entries_by_dir.values() for e in g if not e['is_dir'])
+        total_size = sum(e['size'] or 0 for g in entries_by_dir.values() for e in g if not e['is_dir'])
+
+        output = ""
+        # Fix #7: replace decorative headers with plain brackets
+        for dir_path, group in entries_by_dir.items():
+            rel_label = str(Path(dir_path).relative_to(resolved)) if Path(dir_path) != resolved else path + "/"
+            output += f"\n[{rel_label}]\n" if rel_label != path + "/" else f"[{rel_label}]\n"
+            for e in group:
+                if e['is_dir']:
+                    output += f"[DIR] {e['name']}/ (modified: {self._format_mtime(e['mtime'])})\n"
+                else:
+                    output += f"  {e['name']} ({self._format_size(e['size'])}, modified: {self._format_mtime(e['mtime'])})\n"
+
+        if entry_count >= max_entries and entries_by_dir:
+            output += f"\n  ... (listing stopped at {max_entries} entries; use include/exclude to narrow)\n"
+
+        return output, total_dirs, total_files, total_size
+
+    # ── Main dispatcher (~30 lines) ────────────────────────────────────
+
     def list_directory(
         self,
         path: str = ".",
@@ -660,212 +816,42 @@ class OperationManager:
             if not resolved.is_dir():
                 return f"Not a directory: {path}"
 
-            # Normalize parameters
-            if max_depth < 0 and max_depth != -1:
-                max_depth = 0
+            # Fix #2: normalize all negative max_depth to -1 (unlimited)
+            if max_depth < 0:
+                max_depth = -1
             if recursive and max_depth == 0:
                 recursive = False
 
-            # Validate sort_by
             valid_sort_keys = {"name", "size", "date", "type"}
             if sort_by not in valid_sort_keys:
                 sort_by = "name"
 
-            # Prepare filter functions using fnmatch (simple globs only)
             include_fn = (lambda name: fnmatch.fnmatch(name, include)) if include else None
             exclude_fn = (lambda name: fnmatch.fnmatch(name, exclude)) if exclude else None
 
-            result = f"Contents of {path}/ (Absolute path: {resolved}):\n\n"
+            header = f"Contents of {path}/ (Absolute path: {resolved}):\n\n"
 
             if recursive:
-                # ── Recursive mode using os.walk ──────────────────────────
-                from collections import OrderedDict
-                entries_by_dir: dict = OrderedDict()  # dir_path -> list of entry dicts
-                visited_dirs: set = set()  # symlink cycle detection
-                entry_count = 0
-                root_depth = len(resolved.parts)
-
-                for dirpath, subdirs, filenames in os.walk(str(resolved), topdown=True):
-                    current_dir = Path(dirpath)
-                    abs_path = current_dir.resolve()
-
-                    # Symlink cycle detection: skip already-visited directories
-                    if abs_path in visited_dirs:
-                        subdirs.clear()
-                        continue
-                    visited_dirs.add(abs_path)
-
-                    current_depth = len(current_dir.resolve().parts) - root_depth
-                    dir_entries = []
-
-                    # Process directories first (sorted for deterministic output)
-                    for d_name in sorted(subdirs):
-                        if entry_count >= max_entries:
-                            break
-                        try:
-                            stat_info = (current_dir / d_name).stat()
-                        except Exception:
-                            stat_info = None
-                        if include_fn and not include_fn(d_name):
-                            continue
-                        if exclude_fn and exclude_fn(d_name):
-                            continue
-                        dir_entries.append({
-                            'name': d_name,
-                            'is_dir': True,
-                            'size': 0,
-                            'mtime': stat_info.st_mtime if stat_info else None
-                        })
-                        entry_count += 1
-
-                    # Process files (sorted for deterministic output)
-                    for f_name in sorted(filenames):
-                        if entry_count >= max_entries:
-                            break
-                        full = current_dir / f_name
-                        try:
-                            stat_info = full.stat()
-                        except Exception:
-                            stat_info = None
-                        if include_fn and not include_fn(f_name):
-                            continue
-                        if exclude_fn and exclude_fn(f_name):
-                            continue
-                        dir_entries.append({
-                            'name': f_name,
-                            'is_dir': False,
-                            'size': stat_info.st_size if stat_info else None,
-                            'mtime': stat_info.st_mtime if stat_info else None
-                        })
-                        entry_count += 1
-
-                    if dir_entries:
-                        # Sort entries: dirs always before files, then by sort_by key
-                        sorted_entries = self._sort_entries(dir_entries, sort_by)
-                        entries_by_dir[dirpath] = sorted_entries
-
-                    # Stop traversal early when max_entries is reached
-                    if entry_count >= max_entries:
-                        subdirs.clear()
-                        continue
-
-                    # Prune subdirs for depth control (mutate in-place so os.walk respects it)
-                    if max_depth != -1 and current_depth >= max_depth - 1:
-                        subdirs.clear()
-
-                # Format recursive output with section headers
-                total_dirs = 0
-                total_files = 0
-                total_size = 0
-
-                for dir_path, group in entries_by_dir.items():
-                    rel_label = str(Path(dir_path).relative_to(resolved)) if Path(dir_path) != resolved else ""
-                    if rel_label == "":
-                        result += f"═══ {path}/ ═══\n"
-                    else:
-                        result += f"\n─── dir: {rel_label} ───\n"
-
-                    for entry in group:
-                        if entry['is_dir']:
-                            mtime_str = self._format_mtime(entry['mtime'])
-                            result += f"[DIR] {entry['name']}/ (modified: {mtime_str})\n"
-                            total_dirs += 1
-                        else:
-                            size_str = self._format_size(entry['size'])
-                            mtime_str = self._format_mtime(entry['mtime'])
-                            result += f"  {entry['name']} ({size_str}, modified: {mtime_str})\n"
-                            total_files += 1
-                            if entry['size']:
-                                total_size += entry['size']
-
-                # Truncation notice for recursive mode
-                if entry_count >= max_entries and entries_by_dir:
-                    result += f"\n  ... (listing stopped at {max_entries} entries; use include/exclude to narrow)\n"
-
+                output, total_dirs, total_files, total_size = self._list_recursive(
+                    path, resolved, include_fn, exclude_fn, sort_by, max_depth, max_entries
+                )
+                is_empty = not (total_dirs or total_files)
             else:
-                # ── Flat mode using os.scandir ────────────────────────────
-                dirs = []
-                files = []
-                with os.scandir(str(resolved)) as it:
-                    for entry in it:
-                        if include_fn and not include_fn(entry.name):
-                            continue
-                        if exclude_fn and exclude_fn(entry.name):
-                            continue
-                        if entry.is_dir():
-                            try:
-                                stat_info = entry.stat()
-                            except Exception:
-                                stat_info = None
-                            dirs.append({
-                                'name': entry.name,
-                                'is_dir': True,
-                                'size': 0,
-                                'mtime': stat_info.st_mtime if stat_info else None
-                            })
-                        else:
-                            try:
-                                stat_info = entry.stat()
-                            except Exception:
-                                stat_info = None
-                            files.append({
-                                'name': entry.name,
-                                'is_dir': False,
-                                'size': stat_info.st_size if stat_info else None,
-                                'mtime': stat_info.st_mtime if stat_info else None
-                            })
+                output, total_dirs, total_files, total_size = self._list_flat(
+                    resolved, include_fn, exclude_fn, sort_by, max_entries
+                )
+                is_empty = not (total_dirs or total_files)
 
-                # Sort directories and files separately by sort_by key
-                sorted_dirs = self._sort_entries(dirs, sort_by)
-                sorted_files = self._sort_entries(files, sort_by)
+            if is_empty:
+                output += "  (empty directory or all entries filtered out)"
 
-                # Apply max_entries cap to flat output
-                overflow_count = 0
-                if len(sorted_dirs) + len(sorted_files) > max_entries:
-                    # Fill with dirs first, then files
-                    remaining = max_entries
-                    show_dirs = sorted_dirs[:remaining]
-                    remaining -= len(show_dirs)
-                    show_files = sorted_files[:remaining]
-                    overflow_count = (len(sorted_dirs) - len(show_dirs)) + (len(sorted_files) - len(show_files))
-                    sorted_dirs = show_dirs
-                    sorted_files = show_files
-
-                total_dirs = len(sorted_dirs)
-                total_files = len(sorted_files)
-                total_size = sum(f['size'] for f in sorted_files if f.get('size'))
-
-                # Format flat output
-                if sorted_dirs:
-                    result += "Directories:\n"
-                    for entry in sorted_dirs:
-                        mtime_str = self._format_mtime(entry['mtime'])
-                        result += f"  {entry['name']}/ (modified: {mtime_str})\n"
-
-                if sorted_files:
-                    result += "\nFiles:\n"
-                    for entry in sorted_files:
-                        size_str = self._format_size(entry['size'])
-                        mtime_str = self._format_mtime(entry['mtime'])
-                        result += f"  {entry['name']} ({size_str}, modified: {mtime_str})\n"
-
-                if overflow_count > 0:
-                    result += f"  ... and {overflow_count} more entries (output limited to {max_entries}); use include/exclude to narrow\n"
-
-            # Empty directory handling
-            if not recursive and total_dirs == 0 and total_files == 0:
-                result += "  (empty directory or all entries filtered out)"
-            elif recursive and not entries_by_dir:
-                result += "  (empty directory or all entries filtered out)"
-
-            # Summary statistics
             if show_summary:
-                result += f"\nSummary:\n"
-                result += f"  Total directories: {total_dirs}\n"
-                result += f"  Total files:       {total_files}\n"
-                result += f"  Total size:        {self._format_size(total_size)}\n"
+                output += f"\nSummary:\n"
+                output += f"  Total directories: {total_dirs}\n"
+                output += f"  Total files:       {total_files}\n"
+                output += f"  Total size:        {self._format_size(total_size)}\n"
 
-            return result
+            return header + output
         except Exception as e:
             return f"Error listing directory: {str(e)}"
 
