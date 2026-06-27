@@ -986,7 +986,6 @@ class ExecutionEngine:
                     except AttributeError:
                         pass
                 
-                conv.insert(0, sys_msg)
                 instance.insert_message_at_head(sys_msg)  # PR2: centralized API handles cache sync and clear
                 m0 = sys_msg
                 m0_role = SYSTEM
