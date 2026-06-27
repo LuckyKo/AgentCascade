@@ -77,8 +77,7 @@ class CompressionHandler:
     # ── Validation → Recovery Helper (Fix 5: deduplicated pattern) ────────────
 
     def _recover_or_halt(
-        self, instance: 'AgentInstance', inst_name: str, agent_class: str,
-        conv: List[Message], context_label: str,
+        self, instance: 'AgentInstance', conv: List[Message], context_label: str,
         messages: List[Message], llm_messages: List[Message],
     ) -> bool:
         """Validate message pool, recover from log if invalid, halt on failure.
@@ -86,9 +85,7 @@ class CompressionHandler:
         Shared pattern used after forced compression, compress tool, /compress, and /rollback.
 
         Args:
-            instance: AgentInstance to update.
-            inst_name: Instance name for logger lookup.
-            agent_class: Agent class for logger lookup.
+            instance: AgentInstance to update (inst_name/agent_class derived from it).
             conv: Conversation list to validate.
             context_label: Human-readable label for error messages (e.g. "forced compression").
             messages: Working message list for rebuild_working_set.
@@ -97,6 +94,8 @@ class CompressionHandler:
         Returns:
             True if working set was rebuilt during recovery (caller should skip normal rebuild).
         """
+        inst_name = instance.instance_name
+        agent_class = instance.agent_class
         if not validate_message_pool(conv, inst_name):
             logger.error(f"[MSG POOL VALIDATION] Pool invalid after {context_label} for '{inst_name}'. Attempting recovery from log...")
             try:
@@ -301,16 +300,15 @@ class CompressionHandler:
                     instance._pending_notifications = []  # Clear immediately to prevent duplicates
                 for notif in pending:
                     try:
-                        log_inst.log_message({
-                            "role": "user",
-                            "content": notif,
-                        })
+                        self.engine._append_and_log(instance, Message(role=USER, content=notif))
                     except Exception as e:
-                        logger.error(f"Failed to flush notification to JSONL for '{instance_name}': {e}")
+                        logger.error(f"Failed to flush notification for '{instance_name}': {e}")
                 if pending:
                     logger.debug(
-                        f"Flushed {len(pending)} pending notification(s) to JSONL for '{instance_name}' after rewrite sync"
+                        f"Flushed {len(pending)} pending notification(s) for '{instance_name}' after rewrite sync"
                     )
+                    # Re-fetch conv since _append_and_log may have appended notifications to it
+                    conv = self.pool.get_conversation(instance_name)
             
             # ── Tail sync check after compression (design doc §5.2 — D1 fix) ──
             # Verify pool tail matches JSONL tail after the sync write.
@@ -475,14 +473,16 @@ class CompressionHandler:
 
                     self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression", instance)
 
-                    notif_msg = Message(role=USER, content=notification_text)
-                    self.engine._append_and_log(instance, notif_msg)
-
+                    # Validate BEFORE appending notification to avoid false recovery from notif role alternation
                     conv = self.pool.get_conversation(inst_name)
                     if not validate_message_pool(conv, inst_name):
                         working_set_rebuilt = self._recover_or_halt(
-                            instance, inst_name, instance.agent_class, conv, "forced compression", messages, llm_messages
+                            instance, conv, "forced compression", messages, llm_messages
                         )
+
+                    # Append notification after validation passes
+                    notif_msg = Message(role=USER, content=notification_text)
+                    self.engine._append_and_log(instance, notif_msg)
 
                     # Set cooldown flag to suppress loop detection on next turn after compression
                     instance._suppress_loop_detection_next_turn = True
@@ -559,7 +559,7 @@ class CompressionHandler:
                     # Use recovered messages for rebuild_working_set in this path
                     recov_msgs = list(self.pool.get_conversation(target_agent_name)) or conv
                     working_set_rebuilt = self._recover_or_halt(
-                        instance, target_agent_name, instance.agent_class, conv, "compress_context tool",
+                        instance, conv, "compress_context tool",
                         recov_msgs, list(self.pool.slice_history_for_llm(conv)),
                     )
 
@@ -812,7 +812,7 @@ class CompressionHandler:
             working_set_rebuilt = False
             if conv and not validate_message_pool(conv, inst_name):
                 working_set_rebuilt = self._recover_or_halt(
-                    instance, inst_name, instance.agent_class, conv, "/compress command", messages, llm_messages
+                    instance, conv, "/compress command", messages, llm_messages
                 )
             
             # Rebuild working set after successful compression (if not already rebuilt in recovery path)
@@ -998,7 +998,7 @@ class CompressionHandler:
             working_set_rebuilt = False
             if conv and not validate_message_pool(conv, inst_name):
                 working_set_rebuilt = self._recover_or_halt(
-                    instance, inst_name, instance.agent_class, conv, "/rollback command", messages, llm_messages
+                    instance, conv, "/rollback command", messages, llm_messages
                 )
             
             # Rebuild working set after successful validation (if not already rebuilt in recovery path)

@@ -874,6 +874,7 @@ class ExecutionEngine:
                     )
                     with instance._compression_lock:
                         conv = list(instance.conversation)
+                        # Catch-all: messages are already in conversation; only JSONL needs catching up.
                         for msg in conv[already_logged_count:]:
                             if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
                                 log_inst.log_message(msg)
