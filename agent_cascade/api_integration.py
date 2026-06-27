@@ -234,6 +234,16 @@ def create_main_agent_instance(
                         log_inst.log_message(msg)
                     except Exception as e:
                         logger.warning(f"Failed to log message for {instance_name}: {e}")
+            
+            # ── Tail sync check after initial session logging (design doc §5.2 — D1 fix) ──
+            try:
+                if getattr(pool.settings, 'tail_sync_check_enabled', True):
+                    from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                    with instance._compression_lock:
+                        conv = list(instance.conversation)
+                    _check_tail(instance_name, conv, log_inst.log_path, context="api_integration_init")
+            except Exception:
+                pass  # Non-critical diagnostic check
     except Exception as e:
         logger.warning(f"Logging initial messages for {instance_name} failed: {e}")
 

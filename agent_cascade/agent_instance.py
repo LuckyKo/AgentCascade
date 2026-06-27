@@ -447,4 +447,7 @@ class PoolSettings:
     sleeping_timeout: float = 300.0           # Max seconds to wait for background tools before timeout
     sleeping_wakeup_interval: float = 5.0     # Interval between wakeup log messages while SLEEPING
     
+    # Tail sync check (design doc §5.2 compliance — D1 fix)
+    tail_sync_check_enabled: bool = True      # Enable lightweight tail-length checks after writes
+    
     

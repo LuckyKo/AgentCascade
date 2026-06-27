@@ -1865,6 +1865,11 @@ class AgentPool:
             try:
                 log_inst = self._logger.get_logger(instance_name, inst.agent_class)
                 log_inst.truncate_to(len(inst.conversation))
+                
+                # ── Tail sync check after rollback (design doc §5.2 — D1 fix) ──
+                if getattr(self.settings, 'tail_sync_check_enabled', True):
+                    from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                    _check_tail(instance_name, list(inst.conversation), log_inst.log_path, context="surgical_rollback")
             except Exception as e:
                 logger.debug(f"Logger truncation failed during rollback for {instance_name} (non-critical): {e}")
 

@@ -608,12 +608,19 @@ class ExecutionEngine:
 
         # Log messages outside the lock to minimize hold time (logging can be slow)
         # Independent loop - each message logged exactly once
-        for msg in processed_messages:
-            try:
-                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+        try:
+            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+            for msg in processed_messages:
                 log_inst.log_message(msg)
-            except Exception as e:
-                logger.debug(f"Logging failed for {inst_name} (non-critical): {e}")
+            
+            # ── Tail sync check after drain+inject logging (design doc §5.2 — D1 fix) ──
+            if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
+                from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                with instance._compression_lock:
+                    conv = instance.conversation
+                _check_tail(inst_name, conv, log_inst.log_path, context="drain_inject")
+        except Exception as e:
+            logger.debug(f"Logging failed for {inst_name} (non-critical): {e}")
 
         return True
 
@@ -720,6 +727,17 @@ class ExecutionEngine:
                             log_inst.log_message(msg)
                         except Exception:
                             pass
+                
+                # ── Tail sync check after early-exit logging (design doc §5.2 — D1 fix) ──
+                if queued and getattr(self.pool.settings, 'tail_sync_check_enabled', True):
+                    try:
+                        from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                        with instance._compression_lock:
+                            conv = instance.conversation
+                        log_inst = self.pool.get_logger(inst_name, instance.agent_class)
+                        _check_tail(inst_name, conv, log_inst.log_path, context="early_exit")
+                    except Exception:
+                        pass  # Non-critical check
                 logger.debug("early exit - %s (_setup_turn returned empty)", instance.instance_name)
                 return  # Manual command handled or error
 
@@ -867,9 +885,15 @@ class ExecutionEngine:
                         f"(logged={already_logged_count}, conversation={conv_len})"
                     )
                     with instance._compression_lock:
-                        for msg in instance.conversation[already_logged_count:]:
+                        conv = list(instance.conversation)
+                        for msg in conv[already_logged_count:]:
                             if isinstance(msg, Message) or (isinstance(msg, dict) and 'role' in msg):
                                 log_inst.log_message(msg)
+                        
+                        # ── Tail sync check after final sync (design doc §5.2 — D1 fix) ──
+                        if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
+                            from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                            _check_tail(inst_name, conv, log_inst.log_path, context="final_sync")
             except Exception as e:
                 logger.debug(f"Final sync to JSONL failed for {getattr(instance, 'instance_name', 'unknown')} (non-critical): {e}")
             
@@ -1821,6 +1845,7 @@ class ExecutionEngine:
         # turn_output is already in conv by the time this runs (appended before logging),
         # so it's naturally included in the delta — no separate loop needed.
         try:
+            wrote_any = False
             if already_logged_count < len(conv):
                 for msg in conv[already_logged_count:]:
                     # Check both text content and function_call to avoid skipping
@@ -1831,6 +1856,13 @@ class ExecutionEngine:
                     has_function_call = bool(_msg_field(msg, 'function_call'))
                     if has_content or has_function_call:
                         log_inst.log_message(msg)
+                        wrote_any = True
+            
+            # ── Tail sync check after write (design doc §5.2 — D1 fix) ──
+            # Lightweight length-only verification that pool tail matches JSONL tail.
+            if wrote_any and getattr(self.pool.settings, 'tail_sync_check_enabled', True):
+                from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                _check_tail(inst_name, conv, log_inst.log_path, context="log_messages")
         except Exception as e:
             logger.debug(f"Logging message to file failed for {inst_name} (non-critical): {e}")
 

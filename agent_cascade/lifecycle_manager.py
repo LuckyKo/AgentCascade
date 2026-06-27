@@ -423,6 +423,11 @@ class AgentLifecycleManager:
                     log_inst = self.pool.get_logger(instance_name, agent_class)
                     log_inst.update_history(conv)
                     log_inst._file_history_synced = True
+                    
+                    # ── Tail sync check after update_history (design doc §5.2 — D1 fix) ──
+                    if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
+                        from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                        _check_tail(instance_name, conv, log_inst.log_path, context="update_history")
                 except Exception as e:
                     logger.debug(f"Logger sync via update_history for {instance_name} failed (non-critical): {e}")
         else:
@@ -452,6 +457,13 @@ class AgentLifecycleManager:
                 else:
                     log_inst.log_message(sys_msg)
                     log_inst.log_message(task_msg)
+                
+                # ── Tail sync check after session init logging (design doc §5.2 — D1 fix) ──
+                if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
+                    from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                    with instance._compression_lock:
+                        conv = list(instance.conversation)
+                    _check_tail(instance_name, conv, log_inst.log_path, context="session_init")
             except Exception as e:
                 logger.debug(f"Logging messages for {instance_name} failed (non-critical): {e}")
         

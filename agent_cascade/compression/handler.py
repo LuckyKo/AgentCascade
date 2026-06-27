@@ -230,6 +230,12 @@ class CompressionHandler:
                 f"pool_len={len(conv) if conv else 0}, using reset_history() for full sync"
             )
             log_inst.reset_history(conv, rewrite=True)
+            
+            # ── Tail sync check after compression (design doc §5.2 — D1 fix) ──
+            # Verify pool tail matches JSONL tail after the sync write.
+            if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
+                from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                _check_tail(instance_name, conv, log_inst.log_path, context=f"compression/{operation_name}")
         except Exception as e:
             logger.error(
                 f"Logger sync after {operation_name} FAILED for '{instance_name}': {e}. "

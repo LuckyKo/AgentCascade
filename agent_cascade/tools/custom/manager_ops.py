@@ -123,6 +123,14 @@ You are a specialized agent instance.
         
         # Record user message in persistent log
         logger_inst.log_message(user_msg)
+        
+        # ── Tail sync check after init logging (design doc §5.2 — D1 fix) ──
+        try:
+            if getattr(self.agent_pool.settings, 'tail_sync_check_enabled', True):
+                from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                _check_tail(instance_name, messages, logger_inst.log_path, context="manager_ops_init")
+        except Exception:
+            pass  # Non-critical diagnostic check
 
         max_internal_retries = 3
         internal_retries = 0
@@ -135,6 +143,15 @@ You are a specialized agent instance.
                     # Check for tool call events in the run
                     if resp and (resp[-1].get(ROLE) == FUNCTION or resp[-1].get('function_call')):
                         logger_inst.update_history(messages + resp)
+                        
+                        # ── Tail sync check after tool response logging ──
+                        try:
+                            if getattr(self.agent_pool.settings, 'tail_sync_check_enabled', True):
+                                from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                                _check_tail(instance_name, messages + resp, logger_inst.log_path, context="manager_ops_tool_response")
+                        except Exception:
+                            pass
+                        
                         # Check for loop
                         from agent_cascade.loop_detection import detect_loop
                         loop_info = detect_loop(messages + response)
@@ -149,6 +166,14 @@ You are a specialized agent instance.
                     
                     # Final log sync for the session turn
                     logger_inst.update_history(messages)
+                    
+                    # ── Tail sync check after final sync logging ──
+                    try:
+                        if getattr(self.agent_pool.settings, 'tail_sync_check_enabled', True):
+                            from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
+                            _check_tail(instance_name, messages, logger_inst.log_path, context="manager_ops_final_sync")
+                    except Exception:
+                        pass
 
                     # Accumulate refined text output
                     from agent_cascade.compression.helpers import extract_instance_output
