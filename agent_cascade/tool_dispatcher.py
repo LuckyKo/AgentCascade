@@ -249,11 +249,11 @@ class ToolDispatcher:
             instance: The calling agent instance
             
         Returns:
-            JSON result string with status, agent info, and log_path
+            Human-readable string with embedded [status=...] tag, agent info, and optional log path
         """
         if args is None:
             # JSON parsing failed in _resolve_placeholders — return error
-            return json.dumps({"status": "error", "message": "Invalid JSON arguments."})
+            return "[status=error] Invalid JSON arguments."
 
         target_name = args.get('instance_name', '')
         all_idle = args.get('all_idle', False)
@@ -277,7 +277,7 @@ class ToolDispatcher:
             # Snapshot instance list to avoid concurrent modification during iteration
             all_instances = list(self.pool.instances.keys())
 
-            dismissed = []
+            dismissed = []  # list of (agent_name, log_path_or_None) tuples
             for inst_name in all_instances:
                 inst_obj = self.pool.instances.get(inst_name)
                 if inst_obj is None:
@@ -299,47 +299,43 @@ class ToolDispatcher:
                 log_path = _capture_log_path(inst_name)
 
                 self.pool.dismiss_instance(inst_name)
-                dismissed.append({'agent': inst_name, 'log_path': log_path})
+                dismissed.append((inst_name, log_path))
 
             if not dismissed:
-                return json.dumps({"status": "no_idle_agents", "message": "No idle agents found to dismiss."})
+                return "[status=no_idle_agents] No idle agents found to dismiss."
 
-            return json.dumps({
-                "status": "dismissed_all_idle",
-                "agents": dismissed,
-                "count": len(dismissed),
-                "message": f"Successfully dismissed {len(dismissed)} idle agents: {', '.join(d['agent'] for d in dismissed)}"
-            })
+            # Build human-readable summary with per-agent log paths
+            agent_names = ", ".join(name for name, _ in dismissed)
+            lines = [f"[status=dismissed_all_idle] Successfully dismissed {len(dismissed)} idle agents: {agent_names}"]
+            for name, lp in dismissed:
+                if lp is not None:
+                    lines.append(f"  {name} → {lp}")
+            return "\n".join(lines)
 
         # ── Single-instance dismissal ──
         if not target_name:
-            return json.dumps({"status": "error", "message": "Please provide 'instance_name' or set 'all_idle' to true."})
+            return "[status=error] Please provide 'instance_name' or set 'all_idle' to true."
 
         # Don't allow dismissing self or the root agent
         if target_name == instance.instance_name:
-            return json.dumps({"status": "error", "agent": target_name, "message": f"Cannot dismiss yourself ({target_name})."})
+            return f"[status=error] Cannot dismiss yourself ({target_name})."
         if instance.parent_instance and target_name == instance.parent_instance:
-            return json.dumps({"status": "error", "agent": target_name, "message": f"Cannot dismiss your supervisor ({target_name})."})
+            return f"[status=error] Cannot dismiss your supervisor ({target_name})."
 
         # Check existence before dismissing
         if target_name not in self.pool.instance_conversations:
-            return json.dumps({
-                "status": "not_found",
-                "agent": target_name,
-                "message": f"Instance '{target_name}' not found."
-            })
+            return f"[status=not_found] Instance '{target_name}' not found — no agent by that name is currently active."
 
         # Capture log path before dismissal removes the logger
         log_path = _capture_log_path(target_name)
 
         self.pool.dismiss_instance(target_name)
 
-        return json.dumps({
-            "status": "dismissed",
-            "agent": target_name,
-            "log_path": log_path,
-            "message": f"Agent instance '{target_name}' dismissed — conversation context cleared and backups removed."
-        })
+        # Build clean human-readable response
+        lines = [f"[status=dismissed] Agent '{target_name}' dismissed successfully."]
+        if log_path is not None:
+            lines.append(f"Log file: {log_path}")
+        return "\n".join(lines)
 
     # ── call_agent Sub-Methods (extracted from ExecutionEngine._handle_call_agent) ───────────
     
