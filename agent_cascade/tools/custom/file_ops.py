@@ -709,6 +709,40 @@ class ListDir(BaseTool):
             'path': {
                 'type': 'string',
                 'description': TOOL_METADATA['list_dir']['parameters']['path']
+            },
+            'recursive': {
+                'type': 'boolean',
+                'default': False,
+                'description': TOOL_METADATA['list_dir']['parameters']['recursive']
+            },
+            'max_depth': {
+                'type': 'integer',
+                'default': -1,
+                'description': TOOL_METADATA['list_dir']['parameters']['max_depth']
+            },
+            'include': {
+                'type': 'string',
+                'description': TOOL_METADATA['list_dir']['parameters']['include']
+            },
+            'exclude': {
+                'type': 'string',
+                'description': TOOL_METADATA['list_dir']['parameters']['exclude']
+            },
+            'sort_by': {
+                'type': 'string',
+                'enum': ['name', 'size', 'date', 'type'],
+                'default': 'name',
+                'description': TOOL_METADATA['list_dir']['parameters']['sort_by']
+            },
+            'show_summary': {
+                'type': 'boolean',
+                'default': False,
+                'description': TOOL_METADATA['list_dir']['parameters']['show_summary']
+            },
+            'max_entries': {
+                'type': 'integer',
+                'default': 500,
+                'description': TOOL_METADATA['list_dir']['parameters']['max_entries']
             }
         },
         'required': ['path'],
@@ -724,7 +758,18 @@ class ListDir(BaseTool):
     def call(self, params: str, **kwargs) -> str:
         params = self._verify_json_format_args(params)
         path = params.get('path', '.')
-        return self.agent_pool.operation_manager.list_directory(path)
+        recursive = params.get('recursive', False)
+        max_depth = params.get('max_depth', -1)
+        include = params.get('include')  # None if not provided
+        exclude = params.get('exclude')  # None if not provided
+        sort_by = params.get('sort_by', 'name')
+        show_summary = params.get('show_summary', False)
+        max_entries = params.get('max_entries', 500)
+        return self.agent_pool.operation_manager.list_directory(
+            path, recursive=recursive, max_depth=max_depth,
+            include=include, exclude=exclude, sort_by=sort_by,
+            show_summary=show_summary, max_entries=max_entries
+        )
 
 
 @register_tool('grep', allow_overwrite=True)

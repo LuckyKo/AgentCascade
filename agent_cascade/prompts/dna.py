@@ -157,10 +157,19 @@ TOOL_METADATA = {
     },
     'list_dir': {
         'description': (
-            'Lists the names of files and subdirectories directly within a specified directory path.'
+            'Lists files and subdirectories within a specified directory path. '
+            'Supports recursive traversal, glob-based filtering, sorting by name/size/date/type, '
+            'and optional summary statistics.'
         ),
         'parameters': {
-            'path': "Path to the directory, absolute or relative to the workspace root (e.g., '.', 'src', 'data/images')"
+            'path': "Path to the directory, absolute or relative to the workspace root (e.g., '.', 'src', 'data/images')",
+            'recursive': "When true, recurse into subdirectories. Default: false.",
+            'max_depth': "Maximum recursion depth when recursive=true. -1 means unlimited, 0 or negative behaves like non-recursive. Default: -1.",
+            'include': "Optional glob pattern to include only matching files (e.g., '*.py', 'test_*'). Simple globs only; '**' patterns are not supported.",
+            'exclude': "Optional glob pattern to exclude matching entries (e.g., '__pycache__/*', '*.pyc').",
+            'sort_by': 'Sorting order. Options: "name" (default), "size" (largest first), "date" (newest first), "type" (extension). For size and date, descending order is used.',
+            'show_summary': "When true, append summary statistics (total files/dirs, total size) at the end. Default: false.",
+            'max_entries': "Maximum number of entries to display before truncating output. Helps control verbosity in large directories. Default: 500."
         }
     },
     'grep': {
