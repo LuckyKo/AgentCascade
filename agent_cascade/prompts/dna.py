@@ -96,14 +96,14 @@ TOOL_METADATA = {
             'Reads and returns the content of a specified file. If the file is large, '
             'the content will be truncated. The tool\'s response will clearly indicate '
             'if truncation has occurred and will provide details on how to read more '
-            'of the file using the \'offset\' and \'limit\' parameters. Handles text files '
+            'of the file using the \'start_line\' and \'limit\' parameters. Handles text files '
             'natively with streaming line-by-line reading. For binary files, displays a '
             'hex dump of the first N bytes with ASCII representation.'
         ),
         'parameters': {
             'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py', 'data/input.csv').",
-            'offset': "Optional: For text files, the 0-based line number to start reading from. Use for paginating through large files.",
-            'limit': "Optional: For text files, maximum number of lines to read. Use with 'offset' to paginate through large files.",
+            'start_line': "Optional: 1-based line number to start reading from. Supports negative values (-1 = last line, -3 = third-to-last). Default is 1.",
+            'limit': "Optional: For text files, maximum number of lines to read. Use with 'start_line' to paginate through large files.",
             'full_read': 'Set to true to read the entire file (bypasses truncation limit). Default is false.'
         }
     },

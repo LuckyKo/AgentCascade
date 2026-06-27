@@ -9,7 +9,9 @@ from agent_cascade.settings import (
     DEFAULT_WORKSPACE, DEFAULT_READ_FILE_MAX_LINES, DEFAULT_TOOL_RESULT_MAX_CHARS,
     CHARS_PER_TOKEN_ESTIMATE,
 )
+import json
 from agent_cascade.prompts.dna import TOOL_METADATA
+from agent_cascade.utils.utils import json_loads
 
 # --- Module-level cairosvg DLL state (Windows only) --------------------------- #
 _cairosvg_dll_handles: list = []          # handles returned by os.add_dll_directory()
@@ -41,6 +43,7 @@ MAX_LINE_LIMIT = 50000                    # Max lines to read per call (wild rea
 MAX_LINE_LIMIT_EXPLICIT = 100000          # Max lines when user explicitly sets a limit
 HEX_DUMP_BYTES = 1024                     # Bytes to show in hex view for binary files
 CONTEXT_FRACTION = 0.25                   # Fraction of context window reserved for tool output
+MIN_TRUNCATED_LINE_CHARS = 200            # Minimum characters to keep when truncating a single line
 
 
 def _is_binary_file(path: Path) -> bool:
@@ -57,19 +60,16 @@ def _is_binary_file(path: Path) -> bool:
         return False
 
 
-def _format_hex_dump(data: bytes, start_offset: int = 0) -> str:
+def _format_hex_dump(data: bytes) -> str:
     """Create a hex dump with ASCII column, similar to `hexdump -C`."""
     lines: list[str] = []
-    i = 0
-    while i < len(data):
+    for i in range(0, len(data), 16):
         chunk = data[i:i + 16]
-        addr = start_offset + i
         hex_part = ' '.join(f'{b:02x}' for b in chunk)
         # Pad to fixed width (47 chars for 16 bytes: 3*16+15 spaces)
         hex_part = hex_part.ljust(47)
         ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
-        lines.append(f'{addr:08x}  {hex_part}  |{ascii_part}|')
-        i += 16
+        lines.append(f'{i:08x}  {hex_part}  |{ascii_part}|')
     return '\n'.join(lines)
 
 
@@ -90,10 +90,10 @@ class ReadFile(BaseTool):
                 'type': 'string',
                 'description': TOOL_METADATA['read_file']['parameters']['path']
             },
-            'offset': {
+            'start_line': {
                 'type': 'integer',
-                'description': TOOL_METADATA['read_file']['parameters']['offset'],
-                'default': 0
+                'description': TOOL_METADATA['read_file']['parameters']['start_line'],
+                'default': 1
             },
             'limit': {
                 'type': 'integer',
@@ -128,13 +128,18 @@ class ReadFile(BaseTool):
         if self.agent_pool is not None and hasattr(self.agent_pool, 'operation_manager'):
             return self.agent_pool.operation_manager._resolve_path(path, mode="ro")
 
-        # Fallback: reuse view_image's same pattern (matches lines 472+)
+        # Fallback: resolve against DEFAULT_WORKSPACE with commonpath check
         base_dir = Path(DEFAULT_WORKSPACE)
         if Path(path).is_absolute():
             resolved = Path(path).resolve()
         else:
             resolved = (base_dir / path).resolve()
-        if not str(resolved).startswith(str(base_dir.resolve())):
+        base_resolved = base_dir.resolve()
+        try:
+            common = os.path.commonpath([resolved, base_resolved])
+        except ValueError:
+            raise ValueError(f"Path '{path}' is outside the allowed directory")
+        if common != str(base_resolved):
             raise ValueError(f"Path '{path}' is outside the allowed directory")
         return resolved
 
@@ -182,9 +187,10 @@ class ReadFile(BaseTool):
         total_lines = 0
         lines_read: list[str] = []
         current_chars = 0
-        hit_limit = False
+        hit_line_limit = False   # Truncated because we hit the line count limit
+        hit_char_limit = False   # Truncated because we hit the character budget
 
-        with open(resolved, 'r', encoding='utf-8', errors='ignore') as f:
+        with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
             for line_num, raw_line in enumerate(f, 1):
                 if line_num < start_line:
                     continue
@@ -192,7 +198,7 @@ class ReadFile(BaseTool):
                     # We've read enough lines — peek ahead to see if there's more
                     extra = f.readline()
                     if extra:
-                        hit_limit = True
+                        hit_line_limit = True
                         # Count remaining lines for accurate total (+1 for the peeked line)
                         total_lines = line_num + 1 + sum(1 for _ in f)
                     else:
@@ -205,9 +211,9 @@ class ReadFile(BaseTool):
                 if current_chars + len(formatted) > char_limit:
                     # First line itself is huge — include a truncated portion
                     if not lines_read:
-                        cut = min(len(formatted), max(char_limit, 200))
+                        cut = min(len(formatted), max(char_limit, MIN_TRUNCATED_LINE_CHARS))
                         lines_read.append(formatted[:cut] + " ... [LINE TRUNCATED]\n")
-                    hit_limit = True
+                    hit_char_limit = True
                     # Count remaining lines for accurate total (+1 for current line)
                     total_lines = line_num + sum(1 for _ in f)
                     break
@@ -216,18 +222,20 @@ class ReadFile(BaseTool):
                 current_chars += len(formatted)
                 total_lines = line_num
 
-        actual_end = start_line + len(lines_read) - 1 if lines_read else start_line - 1
+        # Since empty files are caught below, actual_end is always valid here
+        actual_end = start_line + len(lines_read) - 1
         content = ''.join(lines_read)
 
         if not lines_read:
             return f"File content ({path}) — empty file."
 
         # Build header with total line count info
-        total_str = f">{total_lines}" if hit_limit else str(total_lines)
+        # Only prefix with ">" when we actually hit the line limit (not char limit)
+        total_str = f">{total_lines}" if hit_line_limit else str(total_lines)
         header = f"File content ({path}), lines {start_line} to {actual_end} of {total_str}:"
 
         truncated_msg = ""
-        if hit_limit:
+        if hit_line_limit or hit_char_limit:
             header += " [TRUNCATED]"
             truncated_msg = (
                 f"\n\n[PAGINATION NOTE: This file is large. Use read_file with "
@@ -262,40 +270,34 @@ class ReadFile(BaseTool):
         )
 
     # ------------------------------------------------------------------ #
+    #  Helper: resolve negative/zero start_line against total lines       #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _resolve_start_line(start_line: int, total_lines: int) -> int:
+        """Convert a possibly-negative start_line to a valid 1-based line number.
+        
+        Mirrors ReIndent's negative-index handling (see operation_manager.py ~1927):
+        - Positive: 1 = first line, 2 = second, etc. Clamped to [1, total_lines].
+        - Zero or negative: converted like Python list indexing (-1 = last, -3 = third-to-last).
+          If the result is <= 0 (e.g., start_line=-100 on a 5-line file), clamped to 1.
+        """
+        if start_line <= 0:
+            # 0 → last line; negative counts from end (-1=last, -2=second-to-last)
+            offset_from_end = min(max(1, -start_line), total_lines)
+            resolved = total_lines - offset_from_end + 1
+            return max(1, resolved)
+        return min(start_line, total_lines)
+
+    # ------------------------------------------------------------------ #
     #  Main call()                                                        #
     # ------------------------------------------------------------------ #
     def call(self, params: Union[str, dict], **kwargs: Any) -> str:
-        from agent_cascade.utils.utils import json_loads
-        import json
-
-        # Normalize legacy parameter names to current schema (handles both str and dict inputs)
-        try:
-            if isinstance(params, str):
-                p = json_loads(params)
-                if 'start_line' in p and 'offset' not in p:
-                    # start_line takes precedence (1-indexed) → convert to 0-based offset
-                    p['offset'] = p['start_line'] - 1
-                params = json.dumps(p)
-            elif isinstance(params, dict):
-                if 'start_line' in params and 'offset' not in params:
-                    params['offset'] = params['start_line'] - 1
-        except (json.JSONDecodeError, TypeError, KeyError, ValueError):
-            pass
-
         params = self._verify_json_format_args(params)
         path = params.get('path')
         if not path:
             return "ERROR: Missing 'path' parameter."
 
-        # Determine starting line: start_line param takes precedence over offset
-        # Both are normalized to 1-based start_line for internal use
-        explicit_start = params.get('start_line')
-        explicit_offset = params.get('offset', 0)
-        if explicit_start is not None:
-            start_line = int(explicit_start)
-        else:
-            start_line = int(explicit_offset) + 1
-        start_line = max(1, start_line)
+        raw_start = int(params.get('start_line', 1))
 
         limit = params.get('limit')
         full_read = bool(params.get('full_read', False))
@@ -309,7 +311,7 @@ class ReadFile(BaseTool):
 
         # Determine line limit and whether this is a "wild read" (no explicit limit)
         if full_read:
-            limit = MAX_LINE_LIMIT
+            limit = MAX_LINE_LIMIT_EXPLICIT  # Explicit request → use higher limit
             no_explicit_limit = False
         elif limit is None:
             limit = MAX_LINE_LIMIT
@@ -340,6 +342,15 @@ class ReadFile(BaseTool):
             # Check for binary content
             if _is_binary_file(resolved):
                 return self._read_binary_file(path, resolved)
+
+            # Resolve negative/zero start_line against total file length
+            if raw_start <= 0:
+                with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
+                    total = sum(1 for _ in f)
+                start_line = self._resolve_start_line(raw_start, total)
+            else:
+                # Clamp positive start_line to a reasonable max (we'll refine after reading)
+                start_line = raw_start
 
             return self._read_text_file(
                 path=path, resolved=resolved, start_line=start_line,
@@ -470,8 +481,13 @@ class ViewImage(BaseTool):
                     resolved = Path(path).resolve()
                 else:
                     resolved = (base_dir / path).resolve()
-                if not str(resolved).startswith(str(base_dir.resolve())):
-                     return f"Path '{path}' is outside the allowed directory"
+                base_resolved = base_dir.resolve()
+                try:
+                    common = os.path.commonpath([resolved, base_resolved])
+                except ValueError:
+                    return f"Path '{path}' is outside the allowed directory"
+                if common != str(base_resolved):
+                    return f"Path '{path}' is outside the allowed directory"
 
             if not resolved.exists():
                 return f"Image not found: {path}"
@@ -536,8 +552,7 @@ class WriteFile(BaseTool):
 
     def call(self, params: str, **kwargs) -> str:
         import re
-        import json
-        from agent_cascade.utils.utils import extract_code, json_loads
+        from agent_cascade.utils.utils import extract_code
 
         # --- Robust Fallback for Non-JSON Input ---
         # Handles the case where the model emits "path\n```code```" instead of JSON
@@ -614,8 +629,7 @@ class EditFile(BaseTool):
         self.agent_name = kwargs.get('agent_name')
 
     def call(self, params: str, **kwargs) -> str:
-        import json
-        from agent_cascade.utils.utils import extract_code, json_loads
+        from agent_cascade.utils.utils import extract_code
         
         # Normalize legacy parameter names to current schema
         try:
