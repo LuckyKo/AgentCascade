@@ -223,6 +223,12 @@ class CompressionHandler:
         compression notifications are persisted even if the agent halts before the
         next tool result drains them into a message.
         
+        IMPORTANT: Call this BEFORE appending any new notification messages via
+        _append_and_log(). If you append first, reset_history will re-write those
+        same messages to JSONL (double-logging). Correct order:
+          1. _sync_logger_after_compression() — resets logger to match conv
+          2. _append_and_log(notif_msg) — appends notification atomically
+        
         Args:
             instance_name: Name of the agent instance
             agent_class: Agent class for logger retrieval
@@ -418,14 +424,16 @@ class CompressionHandler:
                         f"[SYSTEM] Context exceeded {usage_pct:.1f}%. "
                         f"Forced compression applied. Continue your work — context has been preserved."
                     )
-                    self._inject_compression_notification(instance, notification_text, inst_name)
+
+                    # ── Sync logger FIRST (before appending notification) to avoid double-logging via reset_history rewrite ──
+                    self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression", instance)
+
+                    # Append notification AFTER sync — _append_and_log writes atomically to conv + JSONL
+                    notif_msg = Message(role=USER, content=notification_text)
+                    self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
 
                     # Re-fetch conv after notification append so validation includes the notification message
                     conv = self.pool.get_conversation(inst_name)
-
-                    # ── FIX: Sync logger BEFORE validation ──
-                    # Ensures that if recovery is needed, the logger has clean compressed state.
-                    self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression", instance)
 
                     # Item 10: Validate message pool after forced compression (now includes notification)
                     from agent_cascade.utils.pool_validation import validate_message_pool
@@ -814,7 +822,7 @@ class CompressionHandler:
                     else:
                         notification_text = f"[SYSTEM] Compression corrupted pool: Compression applied but message pool validation failed and recovery unsuccessful."
                         notif_msg = Message(role=USER, content=notification_text)
-                        instance.append_message(notif_msg)
+                        self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
                         if response is not None:
                             response.append(notif_msg)
                 except Exception as e:
@@ -835,7 +843,7 @@ class CompressionHandler:
             
             notification_text = f"[SYSTEM] Compression applied successfully for {inst_name}."
             notif_msg = Message(role=USER, content=notification_text)
-            instance.append_message(notif_msg)
+            self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
             if response is not None:
                 response.append(notif_msg)
             
@@ -848,7 +856,7 @@ class CompressionHandler:
             logger.error(f"/compress apply failed for {inst_name}: {e}")
             notification_text = f"[SYSTEM] Compression command failed: Compression apply failed for {inst_name}: {e}"
             notif_msg = Message(role=USER, content=notification_text)
-            instance.append_message(notif_msg)
+            self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
             if response is not None:
                 response.append(notif_msg)
             return True
@@ -890,7 +898,7 @@ class CompressionHandler:
                 notification_text = f"[SYSTEM] Compression command failed: Compression preview encountered an error for {inst_name}. Cannot compress."
             
             notif_msg = Message(role=USER, content=notification_text)
-            instance.append_message(notif_msg)
+            self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
             if response is not None:
                 response.append(notif_msg)
             return True
@@ -1023,7 +1031,7 @@ class CompressionHandler:
                     else:
                         notification_text = f"[SYSTEM] Rollback corrupted pool: Rollback applied but message pool validation failed and recovery unsuccessful."
                         notif_msg = Message(role=USER, content=notification_text)
-                        instance.append_message(notif_msg)
+                        self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
                         if response is not None:
                             response.append(notif_msg)
                 except Exception as e:
@@ -1043,7 +1051,7 @@ class CompressionHandler:
             
             notification_text = f"[SYSTEM] Rollback applied: Rolled back {actual_count} message(s) for {inst_name}."
             notif_msg = Message(role=USER, content=notification_text)
-            instance.append_message(notif_msg)
+            self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
             if response is not None:
                 response.append(notif_msg)
             
@@ -1055,7 +1063,7 @@ class CompressionHandler:
             # Append notification as a new Message object (not mutating last message content)
             notification_text = f"[SYSTEM] Rollback command failed: Rollback failed for {inst_name}: {e}"
             notif_msg = Message(role=USER, content=notification_text)
-            instance.append_message(notif_msg)  # Updates conversation + _cached_messages (= messages/llm_messages) atomically
+            self.engine._append_and_log(instance, notif_msg, inst_name, instance.agent_class)
             if response is not None:
                 response.append(notif_msg)  # Keep local list update for streaming
             return True

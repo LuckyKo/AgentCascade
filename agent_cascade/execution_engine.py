@@ -502,7 +502,9 @@ class ExecutionEngine:
         instance: AgentInstance,
         msg: Message,
         inst_name: str,
-        agent_class: str
+        agent_class: str,
+        *,
+        lock_held: bool = False  # Caller already holds _compression_lock (RLock)
     ) -> None:
         """Append a message to working sets AND log it atomically under compression lock.
         
@@ -515,11 +517,18 @@ class ExecutionEngine:
             msg: Message to append
             inst_name: Instance name for logger lookup
             agent_class: Agent class for logger lookup
+            lock_held: True if caller already holds _compression_lock (avoids redundant acquire)
         """
-        with instance._compression_lock:
-            # 1. Append to conversation + sync caches (reentrant lock)
+        if not lock_held:
+            with instance._compression_lock:
+                # 1. Append to conversation + sync caches
+                instance.append_message(msg)
+                # 2. Log immediately inside the same lock (prevents delta sync race)
+                log_inst = self.pool.get_logger(inst_name, agent_class)
+                log_inst.log_message(msg)
+        else:
+            # Caller holds lock — just do the work directly
             instance.append_message(msg)
-            # 2. Log immediately inside the same lock (prevents delta sync race)
             log_inst = self.pool.get_logger(inst_name, agent_class)
             log_inst.log_message(msg)
 
@@ -543,6 +552,45 @@ class ExecutionEngine:
         # Note: Reentrant lock — caller typically holds _compression_lock, append_message acquires it again
         instance.append_message(msg)  # Updates conversation, _cached_messages, _cached_llm_messages
         
+    def _append_and_log_batch(
+        self,
+        instance: AgentInstance,
+        msgs: List[Message],
+        inst_name: str,
+        agent_class: str,
+        *,
+        lock_held: bool = False  # Caller already holds _compression_lock (RLock)
+    ) -> None:
+        """Append multiple messages to working sets AND log them atomically under compression lock.
+        
+        Batch version of _append_and_log for efficiency. Appends all messages at once
+        via append_messages() (single cache sync), then logs each one.
+        
+        Args:
+            instance: AgentInstance to update
+            msgs: List of messages to append and log
+            inst_name: Instance name for logger lookup
+            agent_class: Agent class for logger lookup
+            lock_held: True if caller already holds _compression_lock (avoids redundant acquire)
+        """
+        if not msgs:
+            return  # No-op for empty batches — no append, no log, no lock needed
+        
+        if not lock_held:
+            with instance._compression_lock:
+                # 1. Batch append to conversation + sync caches in one operation
+                instance.append_messages(msgs)
+                # 2. Log each message immediately inside the same lock (prevents delta sync race)
+                log_inst = self.pool.get_logger(inst_name, agent_class)
+                for msg in msgs:
+                    log_inst.log_message(msg)
+        else:
+            # Caller holds lock — just do the work directly
+            instance.append_messages(msgs)
+            log_inst = self.pool.get_logger(inst_name, agent_class)
+            for msg in msgs:
+                log_inst.log_message(msg)
+
     def _append_to_working_sets_batch(
         self,
         instance: AgentInstance,
@@ -620,17 +668,11 @@ class ExecutionEngine:
                 first_msg.content = self.compression_handler._drain_tool_warnings(instance, first_msg.content, prepend=True)
 
         with instance._compression_lock:
-            # Get logger inside lock to ensure atomic append+log (prevents race with delta sync)
-            log_inst = self.pool.get_logger(inst_name, instance.agent_class)
-            
             for msg in processed_messages:
                 # Append to response accumulator (separate list for local use)
                 response.append(msg)
-                # Use helper which handles cache sync atomically via centralized API
-                # Note: Reentrant lock — outer _compression_lock held here, inner acquired by append_message()
-                self._append_to_working_sets(instance, msg)
-                # Log immediately inside the same lock to prevent delta sync from re-logging these messages
-                log_inst.log_message(msg)
+                # Unified helper: atomic append + cache sync + log under compression lock
+                self._append_and_log(instance, msg, inst_name, instance.agent_class, lock_held=True)
         
         # Mark activity OUTSIDE the lock to reduce hold time (Fix #1 from reviewer)
         # Call once per message, not in a nested loop
@@ -643,6 +685,7 @@ class ExecutionEngine:
                 from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
                 with instance._compression_lock:
                     conv = instance.conversation
+                log_inst = self.pool.get_logger(inst_name, instance.agent_class)
                 _check_tail(inst_name, conv, log_inst.log_path, context="drain_inject")
         except Exception as e:
             logger.debug(f"Logging failed for {inst_name} (non-critical): {e}")
@@ -849,7 +892,7 @@ class ExecutionEngine:
                     role=ASSISTANT,
                     content="\n\n[SYSTEM: Turn limit reached. Ask me to continue if incomplete.]",
                 )
-                self._append_to_working_sets(instance, msg)
+                self._append_and_log(instance, msg, inst_name, instance.agent_class)
                 response.append(msg)  # Stream turn limit to UI
                 yield response
 
@@ -1928,9 +1971,8 @@ class ExecutionEngine:
                 role=USER,
                 content="[SYSTEM]: Your previous response was cut off. Continue from where you left off."
             )
-            # Cache consistency: append_message() handles _cached_messages/_cached_llm_messages sync;
-            # manual messages.append() would cause double-append (see cache_bug_investigation_report.md)
-            self._append_to_working_sets(instance, cont_msg)
+            # Unified helper: atomic append + cache sync + log under compression lock
+            self._append_and_log(instance, cont_msg, inst_name, instance.agent_class)
             return True
         
         return False
@@ -2043,9 +2085,8 @@ class ExecutionEngine:
                         'tool_success': False,
                     },
                 )
-                # Cache consistency: append_message() handles _cached_messages/_cached_llm_messages sync;
-                # manual messages.append() would cause double-append (see cache_bug_investigation_report.md)
-                self._append_to_working_sets(instance, fn_msg)
+                # Unified helper: atomic append + cache sync + log under compression lock
+                self._append_and_log(instance, fn_msg, inst_name, instance.agent_class)
                 response.append(fn_msg)  # Stream denial to UI (separate list for streaming)
                 
                 # Track as executed for orphan handling (it was processed, just denied)
@@ -2173,9 +2214,8 @@ class ExecutionEngine:
                     'tool_success': _tool_success,
                 },
             )
-            # Cache consistency: append_message() handles _cached_messages/_cached_llm_messages sync;
-            # manual messages.append() would cause double-append (see cache_bug_investigation_report.md)
-            self._append_to_working_sets(instance, fn_msg)
+            # Unified helper: atomic append + cache sync + log under compression lock
+            self._append_and_log(instance, fn_msg, inst_name, instance.agent_class)
             response.append(fn_msg)  # Stream tool result to UI (separate list for streaming)
             
             # Track executed tool for orphan handling
@@ -2276,9 +2316,8 @@ class ExecutionEngine:
                             'tool_success': False,
                         },
                     )
-                    # Cache consistency: append_message() handles _cached_messages/_cached_llm_messages sync;
-                    # manual messages.append() would cause double-append (see cache_bug_investigation_report.md)
-                    self._append_to_working_sets(instance, fn_msg)
+                    # Unified helper: atomic append + cache sync + log under compression lock
+                    self._append_and_log(instance, fn_msg, inst_name, instance.agent_class, lock_held=True)
                     response.append(fn_msg)  # Stream to UI (separate list for streaming)
                     
                     # Track as executed for consistency (matching primary loop pattern)
@@ -2308,9 +2347,8 @@ class ExecutionEngine:
         # Extracted to _normalize_turn_output() - Phase 3.3 (FIX #3: now only normalizes)
         self._normalize_turn_output(turn_output)
 
-        # Cache consistency: append_messages() handles _cached_messages/_cached_llm_messages sync;
-        # manual messages.extend() would cause double-append (see cache_bug_investigation_report.md)
-        self._append_to_working_sets_batch(instance, turn_output)
+        # Unified helper: atomic batch append + cache sync + log under compression lock
+        self._append_and_log_batch(instance, turn_output, inst_name, instance.agent_class)
         response.extend(turn_output)  # Separate list for streaming/accumulation
         # Streaming UI Content Update Fix: Clear _streaming_responses after Phase 4 commits messages
         instance._streaming_responses = []
@@ -2354,8 +2392,7 @@ class ExecutionEngine:
                         f"[CONTINUE_FIX] Could not merge continue-saved message for {inst_name}: "
                         f"no assistant message found in turn_output. Re-appending as separate message."
                     )
-                    with instance._compression_lock:
-                        instance.append_message(saved)
+                    self._append_and_log(instance, saved, inst_name, instance.agent_class)
         
         # Extract ground-truth usage info from LLM response (ground-truth token tracking)
         # This replaces manual token counting with actual API-reported values
