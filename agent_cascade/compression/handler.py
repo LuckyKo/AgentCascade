@@ -207,7 +207,8 @@ class CompressionHandler:
         self,
         instance_name: str,
         agent_class: str,
-        operation_name: str
+        operation_name: str,
+        instance: 'AgentInstance' = None,
     ) -> None:
         """Sync logger state to match pool after compression/rollback operations.
         
@@ -217,14 +218,36 @@ class CompressionHandler:
         - update_history() is ADDITIVE only (can't shrink history)
         - reset_history(rewrite=True) replaces logger state with pool state
         
+        FIX D4: If an `instance` is provided, pending notifications in the queue are
+        also flushed to JSONL as event markers before the rewrite sync. This ensures
+        compression notifications are persisted even if the agent halts before the
+        next tool result drains them into a message.
+        
         Args:
             instance_name: Name of the agent instance
             agent_class: Agent class for logger retrieval
             operation_name: Description for logging (e.g., "forced compression", "/compress command")
+            instance: Optional agent instance to drain pending notifications from
         """
         try:
             conv = self.pool.get_conversation(instance_name)
             log_inst = self.pool.get_logger(instance_name, agent_class)
+            
+            # FIX D4: Flush pending notifications to JSONL before logger rewrite sync.
+            # Notifications sit in _pending_notifications until drained by a tool result;
+            # if the agent halts immediately after compression they'd be lost from JSONL.
+            if instance is not None and getattr(instance, '_pending_notifications', None):
+                with instance._compression_lock:
+                    pending = list(instance._pending_notifications)
+                for notif in pending:
+                    log_inst.log_message({
+                        "role": "event",
+                        "content": notif,
+                        "notification_type": "compression_feedback",
+                    })
+                logger.debug(
+                    f"Flushed {len(pending)} pending notification(s) to JSONL for '{instance_name}' before sync"
+                )
             logger.debug(
                 f"Logger sync after {operation_name} for '{instance_name}': "
                 f"pool_len={len(conv) if conv else 0}, using reset_history() for full sync"
@@ -398,7 +421,7 @@ class CompressionHandler:
 
                     # ── FIX: Sync logger BEFORE validation ──
                     # Ensures that if recovery is needed, the logger has clean compressed state.
-                    self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression")
+                    self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression", instance)
 
                     # Item 10: Validate message pool after forced compression (now includes notification)
                     from agent_cascade.utils.pool_validation import validate_message_pool
@@ -414,7 +437,7 @@ class CompressionHandler:
                                 self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                                 logger.info(f"Recovered message pool from log for '{inst_name}' ({len(recov)} messages)")
                                 # Sync logger again after recovery to reflect recovered state
-                                self._sync_logger_after_compression(inst_name, instance.agent_class, "recovery")
+                                self._sync_logger_after_compression(inst_name, instance.agent_class, "recovery", instance)
                             else:
                                 logger.error("Recovery from log also failed — message pool may be corrupted")
                                 notification_text = f"[SYSTEM] Compression corrupted pool: Forced compression and recovery both failed for {inst_name}. Agent halted to prevent corruption."
@@ -495,7 +518,7 @@ class CompressionHandler:
             if conv:
                 # ── FIX D2: Sync logger BEFORE validation ──
                 # Ensures that if recovery is needed, the logger has clean compressed state.
-                self._sync_logger_after_compression(target_agent_name, instance.agent_class, "compress_context tool")
+                self._sync_logger_after_compression(target_agent_name, instance.agent_class, "compress_context tool", instance)
 
                 working_set_rebuilt = False
                 from agent_cascade.utils.pool_validation import validate_message_pool
@@ -512,7 +535,7 @@ class CompressionHandler:
                             working_set_rebuilt = True
                             logger.info(f"Recovered message pool from log for '{target_agent_name}' ({len(recov)} messages)")
                             # Sync logger again after recovery to reflect recovered state
-                            self._sync_logger_after_compression(target_agent_name, instance.agent_class, "recovery")
+                            self._sync_logger_after_compression(target_agent_name, instance.agent_class, "recovery", instance)
                         else:
                             logger.error("Recovery from log also failed — message pool may be corrupted")
                             notification_text = f"[SYSTEM] Compression corrupted pool: compress_context tool and recovery both failed for {target_agent_name}. Agent halted to prevent corruption."
@@ -767,7 +790,7 @@ class CompressionHandler:
 
             # ── FIX: Sync logger BEFORE validation ──
             # Ensures that if recovery is needed, the logger has clean compressed state.
-            self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress command")
+            self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress command", instance)
 
             working_set_rebuilt = False
             from agent_cascade.utils.pool_validation import validate_message_pool
@@ -783,7 +806,7 @@ class CompressionHandler:
                         self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                         working_set_rebuilt = True
                         # FIX 5: Sync logger after recovery to reflect recovered state
-                        self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress recovery")
+                        self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress recovery", instance)
                     else:
                         notification_text = f"[SYSTEM] Compression corrupted pool: Compression applied but message pool validation failed and recovery unsuccessful."
                         notif_msg = Message(role=USER, content=notification_text)
@@ -976,7 +999,7 @@ class CompressionHandler:
 
             # ── FIX: Sync logger BEFORE validation ──
             # Ensures that if recovery is needed, the logger has clean compressed state.
-            self._sync_logger_after_compression(inst_name, instance.agent_class, "/rollback command")
+            self._sync_logger_after_compression(inst_name, instance.agent_class, "/rollback command", instance)
 
             working_set_rebuilt = False
             from agent_cascade.utils.pool_validation import validate_message_pool
@@ -992,7 +1015,7 @@ class CompressionHandler:
                         self.engine._rebuild_working_set(messages, llm_messages, inst_name)
                         working_set_rebuilt = True
                         # FIX 5: Sync logger after recovery to reflect recovered state
-                        self._sync_logger_after_compression(inst_name, instance.agent_class, "/rollback recovery")
+                        self._sync_logger_after_compression(inst_name, instance.agent_class, "/rollback recovery", instance)
                     else:
                         notification_text = f"[SYSTEM] Rollback corrupted pool: Rollback applied but message pool validation failed and recovery unsuccessful."
                         notif_msg = Message(role=USER, content=notification_text)
