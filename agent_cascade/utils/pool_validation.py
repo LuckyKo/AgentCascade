@@ -56,6 +56,14 @@ def validate_message_pool(messages: list[Any], agent_name: str) -> bool:
         # Increase content window from 200 to 500 chars for better precision (Issue 8 fix)
         content_key = str(content)[:500] if content else ''
 
+        # Skip tool-call messages — parallel tool calls produce consecutive assistant messages
+        # with empty/identical content, which is expected behavior not corruption.
+        has_function_call = (msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None))
+        if has_function_call:
+            prev_role = role
+            prev_content = content_key
+            continue
+
         if role == prev_role and content_key == prev_content:
             dup_count += 1
             compression_logger.warning(f"[MSG POOL VALIDATION] Duplicate consecutive msg at index {i} for '{agent_name}'")
