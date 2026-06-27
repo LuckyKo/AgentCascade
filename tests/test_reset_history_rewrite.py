@@ -75,13 +75,17 @@ def tmp_log(tmp_path):
 # ──────────────────────────────────────────────
 
 def _read_log_messages(log_path: Path) -> list:
-    """Read a JSONL log file and return all non-metadata entries as dicts."""
+    """Read a JSONL log file and return all non-metadata, non-event entries as dicts.
+
+    Skips event-type markers (e.g., COMPRESSION events) since they are audit
+    trail entries, not conversation messages.
+    """
     msgs = []
     for line in log_path.read_text().strip().splitlines():
         if not line.strip():
             continue
         item = json.loads(line)
-        if isinstance(item, dict) and "metadata" not in item:
+        if isinstance(item, dict) and "metadata" not in item and "event" not in item:
             msgs.append(item)
     return msgs
 
