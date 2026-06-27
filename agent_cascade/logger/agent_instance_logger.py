@@ -502,13 +502,14 @@ class AgentInstanceLogger:
                 # FIX D9: Append COMPRESSION event marker to rewrite=True path.
                 # This matches the behavior of the rewrite=False path (line 529-533)
                 # and provides an explicit audit trail for compression events in JSONL.
-                compress_event = {
+                # M2 fix: Use _append_line() instead of a separate open('a') call to avoid
+                # race conditions and stay consistent with the non-rewrite path.
+                self._file_handle = None  # Invalidate so _ensure_file reopens clean after overwrite
+                self._append_line({
                     "event": "COMPRESSION",
                     "timestamp": datetime.datetime.now().isoformat(),
                     "message": "Context was compressed. Re-asserting working set baseline."
-                }
-                with open(self.log_path, 'a', encoding='utf-8') as f:
-                    f.write(json.dumps(compress_event, ensure_ascii=False) + '\n')
+                })
 
                 logger.info(f"Rewrote agent log {self.log_path} with {len(result_msgs)} messages.")
             except Exception as e:

@@ -236,15 +236,20 @@ class CompressionHandler:
             # FIX D4: Flush pending notifications to JSONL before logger rewrite sync.
             # Notifications sit in _pending_notifications until drained by a tool result;
             # if the agent halts immediately after compression they'd be lost from JSONL.
+            # Clear queue INSIDE the lock to prevent duplicate flushes on next compression (C1 fix).
             if instance is not None and getattr(instance, '_pending_notifications', None):
                 with instance._compression_lock:
                     pending = list(instance._pending_notifications)
+                    instance._pending_notifications = []  # Clear immediately to prevent duplicates
                 for notif in pending:
-                    log_inst.log_message({
-                        "role": "event",
-                        "content": notif,
-                        "notification_type": "compression_feedback",
-                    })
+                    try:
+                        log_inst.log_message({
+                            "role": "event",
+                            "content": notif,
+                            "notification_type": "compression_feedback",
+                        })
+                    except Exception as e:
+                        logger.error(f"Failed to flush notification to JSONL for '{instance_name}': {e}")
                 logger.debug(
                     f"Flushed {len(pending)} pending notification(s) to JSONL for '{instance_name}' before sync"
                 )
