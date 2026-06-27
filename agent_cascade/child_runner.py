@@ -16,42 +16,25 @@ from agent_cascade.loop_detection import LoopDetectedError
 # ── Shared loop recovery helper (used by both root and child paths) ─────────
 
 def _recover_from_loop(
-    pool,                      # AgentPool instance
-    exception: LoopDetectedError,
-    instance_name: str,        # fallback agent name if e.agent_name is None
-    retry_count: int,
-    max_auto_retries: int,
-    inject_hint: Callable[[object, Message], None],  # callback(instance, msg)
+    pool, exception: LoopDetectedError, instance_name: str,
+    retry_count: int, max_auto_retries: int,
+    inject_hint: Callable[[object, Message], None],
 ) -> tuple[int, bool]:
     """Perform loop recovery: rollback → get instance → inject hint.
 
-    Shared between run_child_core() (child agents) and
-    run_agent_in_pool_with_recovery() (root agent). The only difference
-    is how the hint message gets appended — abstracted via inject_hint callback.
-
-    Args:
-        pool: The AgentPool managing all instances.
-        exception: The LoopDetectedError that was raised.
-        instance_name: Fallback name if e.agent_name is None.
-        retry_count: Current retry count (0-based).
-        max_auto_retries: Maximum retries allowed.
-        inject_hint: Callable(instance, message) that atomically appends a Message
-            to the agent's conversation and logs it.
-
-    Returns:
-        (retry_count, succeeded) tuple. If succeeded is False, no more retries
-        should be attempted. The caller should use the returned retry_count.
+    Shared between run_child_core (child agents) and
+    run_agent_in_pool_with_recovery (root agent). Returns (new_retry_count, succeeded).
+    If succeeded is False, caller should abort retries immediately.
     """
     looped_agent = exception.agent_name or instance_name
     pop_count = exception.pop_count or 0
 
-    # Surgical rollback on the agent that looped.
     # If pop_count <= 0, we have no messages to roll back — recovery can't proceed safely.
     rollback_success = False
     if pop_count > 0:
         logger.warning(
-            f"Loop detected for {looped_agent}: {exception.reason}. "
-            f"Surgical rollback (Retry {retry_count + 1}/{max_auto_retries})."
+            f"Loop detected for {looped_agent}: {exception.reason}. Rolling back "
+            f"(Retry {retry_count + 1}/{max_auto_retries})."
         )
         try:
             pool.surgical_rollback(looped_agent, pop_count, reason=exception.reason)
@@ -62,7 +45,6 @@ def _recover_from_loop(
     if not rollback_success:
         return (retry_count + 1, False)
 
-    # Get the correct instance for hint injection
     instance = pool.get_instance(looped_agent)
     if not instance:
         logger.error(
@@ -71,7 +53,6 @@ def _recover_from_loop(
         )
         return (retry_count + 1, False)
 
-    # Build and inject the loop avoidance hint
     hint_msg = Message(
         role=USER,
         content=(
@@ -150,12 +131,7 @@ def run_child_core(
     retry_count = 0
 
     while retry_count <= max_auto_retries:
-        # On first attempt, use force_fresh as configured.
-        # On retries after rollback, reuse the existing instance to preserve the hint.
-        is_retry = retry_count > 0
-
-        # Check if execution was stopped between retries
-        if pool.stopped and is_retry:
+        if pool.stopped and retry_count > 0:
             return _format_result(
                 instance_name=instance_name,
                 result="Execution stopped during retry.",
@@ -166,7 +142,8 @@ def run_child_core(
         try:
             inst, conv = engine._create_and_run_agent(
                 agent_class, instance_name, args, caller_name, child_depth,
-                force_fresh=force_fresh and not is_retry,
+                # Reuse existing instance on retries to preserve the injected hint
+                force_fresh=force_fresh and retry_count == 0,
             )
             # Success — break out of the retry loop and proceed to result formatting
             break
@@ -181,7 +158,6 @@ def run_child_core(
                 )
                 return f"[{prefix} '{looped_agent}' Loop Detected]: {e.reason}"
 
-            # Shared recovery: rollback → get instance → inject hint
             retry_count, succeeded = _recover_from_loop(
                 pool=pool,
                 exception=e,
