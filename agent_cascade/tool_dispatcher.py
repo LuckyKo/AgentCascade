@@ -12,6 +12,7 @@ Design Pattern: Lazy Initialization (same as AgentLifecycleManager, CompressionH
 - self.engine property raises RuntimeError if accessed before initialization
 """
 
+import json
 import time
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
@@ -241,30 +242,104 @@ class ToolDispatcher:
         Extracted from ExecutionEngine._handle_dismiss_agent() - Phase 4.3
         
         Removes another agent from the pool. Prevents dismissing self or supervisor.
+        Supports both single-instance dismissal and bulk dismissal of all idle agents.
         
         Args:
-            args: Tool arguments (instance_name)
+            args: Tool arguments (instance_name, all_idle)
             instance: The calling agent instance
             
         Returns:
-            Result string confirming dismissal or error message
+            JSON result string with status, agent info, and log_path
         """
         if args is None:
             # JSON parsing failed in _resolve_placeholders — return error
-            return 'Error: Invalid JSON arguments.'
+            return json.dumps({"status": "error", "message": "Invalid JSON arguments."})
 
         target_name = args.get('instance_name', '')
+        all_idle = args.get('all_idle', False)
+
+        # ── Helper: capture log_path before dismissal removes the logger ──
+        def _capture_log_path(name: str) -> Optional[str]:
+            try:
+                logger_inst = self.pool.instance_loggers.get(name)
+                if logger_inst:
+                    return getattr(logger_inst, 'log_path', None)
+            except Exception as e:
+                logger.debug(f"Log path lookup failed for instance '{name}' (non-critical): {e}")
+            return None
+
+        # Import here to avoid circular imports at module level
+        from agent_cascade.agent_instance import AgentState
+
+        # ── Bulk dismissal of all idle agents ──
+        if all_idle:
+            active_set = {name for name, _depth in self.pool.active_stack}
+            # Snapshot instance list to avoid concurrent modification during iteration
+            all_instances = list(self.pool.instances.keys())
+
+            dismissed = []
+            for inst_name in all_instances:
+                inst_obj = self.pool.instances.get(inst_name)
+                if inst_obj is None:
+                    continue
+                # Skip root orchestrator(s) — no parent means top-level
+                if inst_obj.parent_instance is None:
+                    continue
+                # Skip agents already in SLEEPING state (not idle, just resting)
+                if inst_obj.state == AgentState.SLEEPING:
+                    continue
+                # Skip halted agents (intentionally paused, e.g., during compression)
+                if self.pool.is_instance_halted(inst_name):
+                    continue
+                # Skip actively running agents
+                if inst_name in active_set:
+                    continue
+
+                # Capture log path before dismissal removes the logger
+                log_path = _capture_log_path(inst_name)
+
+                self.pool.dismiss_instance(inst_name)
+                dismissed.append({'agent': inst_name, 'log_path': log_path})
+
+            if not dismissed:
+                return json.dumps({"status": "no_idle_agents", "message": "No idle agents found to dismiss."})
+
+            return json.dumps({
+                "status": "dismissed_all_idle",
+                "agents": dismissed,
+                "count": len(dismissed),
+                "message": f"Successfully dismissed {len(dismissed)} idle agents: {', '.join(d['agent'] for d in dismissed)}"
+            })
+
+        # ── Single-instance dismissal ──
         if not target_name:
-            return "Error: dismiss_agent requires instance_name."
+            return json.dumps({"status": "error", "message": "Please provide 'instance_name' or set 'all_idle' to true."})
 
         # Don't allow dismissing self or the root agent
         if target_name == instance.instance_name:
-            return f"Error: Cannot dismiss yourself ({target_name})."
+            return json.dumps({"status": "error", "agent": target_name, "message": f"Cannot dismiss yourself ({target_name})."})
         if instance.parent_instance and target_name == instance.parent_instance:
-            return f"Error: Cannot dismiss your supervisor ({target_name})."
+            return json.dumps({"status": "error", "agent": target_name, "message": f"Cannot dismiss your supervisor ({target_name})."})
+
+        # Check existence before dismissing
+        if target_name not in self.pool.instance_conversations:
+            return json.dumps({
+                "status": "not_found",
+                "agent": target_name,
+                "message": f"Instance '{target_name}' not found."
+            })
+
+        # Capture log path before dismissal removes the logger
+        log_path = _capture_log_path(target_name)
 
         self.pool.dismiss_instance(target_name)
-        return f"[Agent '{target_name}' dismissed successfully.]"
+
+        return json.dumps({
+            "status": "dismissed",
+            "agent": target_name,
+            "log_path": log_path,
+            "message": f"Agent instance '{target_name}' dismissed — conversation context cleared and backups removed."
+        })
 
     # ── call_agent Sub-Methods (extracted from ExecutionEngine._handle_call_agent) ───────────
     
