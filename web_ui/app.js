@@ -1392,56 +1392,22 @@ function handleServerMessage(data) {
       state.activeSecurityChecks.delete(request_id);
       state.securityResponses[request_id] = { response, verdict, reason };
 
-      const card = document.querySelector(`.approval-card[data-request-id="${request_id}"]`);
-      if (card) {
-          let respDiv = card.querySelector('.security-response-box');
-          if (!respDiv) {
-             respDiv = document.createElement('div');
-             respDiv.className = 'security-response-box';
-             respDiv.style = "margin-top: 8px; padding: 8px; background: rgba(255,193,7,0.15); border-left: 3px solid #ffc107; font-size: 13px; color: var(--text-color);";
-             card.insertBefore(respDiv, card.querySelector('.approval-actions'));
-          }
-          respDiv.innerHTML = `<strong>🛡️ Security Expert:</strong><div style="margin-top:4px;">${renderMarkdown(response)}</div>`;
-          
-          const askBtn = card.querySelector('.ask-security-btn');
-          if (askBtn) {
-             askBtn.innerHTML = '🛡️ Ask Security';
-             askBtn.disabled = false;
-          }
-
-          // QoL: If security advisor said NO, auto-fill the rejection field
-          if (verdict === 'NO' && reason) {
+      // QoL: Auto-fill rejection field if security advisor said NO or timed out
+      // (rendered via renderApprovals() triggered by state change broadcast)
+      if (verdict === 'NO' || verdict === 'TIMEOUT') {
+          const card = document.querySelector(`.approval-card[data-request-id="${request_id}"]`);
+          if (card) {
               const rejectBtn = card.querySelector('.btn-danger');
-              if (rejectBtn) {
-                  // Only show input if not already visible
-                  if (!card.querySelector('.reject-input-area')) {
-                      showRejectInput(request_id, rejectBtn);
-                  }
-                  // Find the input within this specific card
-                  const input = card.querySelector('.reject-reason-input');
-                  if (input) {
-                      input.value = reason;
-                  }
+              if (rejectBtn && !card.querySelector('.reject-input-area')) {
+                  showRejectInput(request_id, rejectBtn);
+              }
+              const input = card.querySelector('.reject-reason-input');
+              if (input) {
+                  input.value = verdict === 'NO' && reason
+                      ? reason
+                      : 'Security advisor timed out after 180s. Please resubmit with clearer justification.';
               }
           }
-
-          // QoL: If security advisor timed out, auto-fill rejection field
-          if (verdict === 'TIMEOUT') {
-              const rejectBtn = card.querySelector('.btn-danger');
-              if (rejectBtn) {
-                  // Only show input if not already visible
-                  if (!card.querySelector('.reject-input-area')) {
-                      showRejectInput(request_id, rejectBtn);
-                  }
-                  // Find the input within this specific card
-                  const input = card.querySelector('.reject-reason-input');
-                  if (input) {
-                      input.value = 'Security advisor timed out after 180s. Please resubmit with clearer justification.';
-                  }
-              }
-          }
-      } else {
-          renderApprovals();
       }
       break;
     }
@@ -2417,25 +2383,44 @@ function renderApprovals() {
     const secResp = state.securityResponses[ap.request_id];
     let securityHtml = '';
     if (secResp) {
-       securityHtml = `<div class="security-response-box" style="margin-top: 8px; padding: 8px; background: rgba(255,193,7,0.15); border-left: 3px solid #ffc107; font-size: 13px; color: var(--text-color);">
+       securityHtml = `<div class="security-response-box">
          <strong>🛡️ Security Expert:</strong><div style="margin-top:4px;">${renderMarkdown(secResp.response)}</div>
        </div>`;
     }
 
+    // Extract justification from the dedicated field. The fallback to tool_args is for
+    // backward compat with pre-change approval objects still in-flight during deployment.
+    let justification = '';
+    if (ap.justification && ap.justification.trim()) {
+      justification = escapeHtml(ap.justification.trim());
+    } else if (ap.tool_args && ap.tool_args.justification && ap.tool_args.justification.trim()) {
+      justification = escapeHtml(ap.tool_args.justification.trim());
+    }
+
+    // Build the justification block — most prominent info in the card
+    let justificationHtml = '';
+    if (justification) {
+      justificationHtml = `<div class="approval-justification">${justification}</div>`;
+    }
+
+    // Tool icon based on tool name for visual clarity
+    const toolIconMap = {
+      'write_file': '📝', 'read_file': '📄', 'edit_file': '✏️',
+      'shell_cmd': '⚙️', 'call_agent': '🤖', 'delete_file': '🗑️',
+      'copy_file': '📋', 'move_file': '🔀', 'grep': '🔍', 'list_dir': '📁',
+      'view_image': '🖼️', 'code_map': '🗺️', 'syntax_check': '✅',
+      'web_extractor': '🌐', 'ddg_search': '🔎', 'code_interpreter': '🐍',
+    };
+    const toolIcon = toolIconMap[ap.tool_name] || '🛠️';
+
     card.innerHTML = `
       <div class="approval-header">
-        <span class="approval-icon">🛡️</span>
-        <strong>Approval Required</strong>
+        <span class="approval-icon">${toolIcon}</span>
+        <strong>${escapeHtml(ap.tool_name)}</strong>
+        <span class="approval-agent-label">by ${escapeHtml(ap.agent_name)}</span>
       </div>
-      <div class="approval-meta">
-        <span>Agent: <strong>${escapeHtml(ap.agent_name)}</strong></span>
-        <span>Tool: <strong>${escapeHtml(ap.tool_name)}</strong></span>
-      </div>
-      <div class="approval-desc">${renderMarkdown(ap.description)}</div>
-      <details class="approval-args">
-        <summary>Raw Arguments</summary>
-        <pre><code>${argsHtml}</code></pre>
-      </details>
+      ${justificationHtml}
+      <pre class="approval-args-block">${argsHtml}</pre>
       ${securityHtml}
       <div class="approval-actions">
         <button class="btn btn-primary btn-sm" data-request-id="${escapeHtml(ap.request_id)}" onclick="approveRequest(this.dataset.requestId)">✅ Approve</button>

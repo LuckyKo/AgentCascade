@@ -58,6 +58,8 @@ class PendingApproval:
     tool_name: str
     tool_args: Dict[str, Any]
     description: str
+    # Extracted justification from tool_args (e.g., shell_cmd passes 'justification')
+    justification: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     # Threading primitives for blocking
     event: threading.Event = field(default_factory=threading.Event)
@@ -448,12 +450,21 @@ class OperationManager:
         """
         request_id = f"op_{uuid.uuid4().hex[:8]}"
 
+        # Extract justification from tool_args if present (e.g., shell_cmd passes 'justification')
+        just = ""
+        try:
+            just = tool_args.get("justification", "") or ""
+        except (AttributeError, TypeError):
+            pass
+
+        # str() guards against non-string values (e.g., integers from malformed tool_args)
         approval = PendingApproval(
             request_id=request_id,
             agent_name=agent_name,
             tool_name=tool_name,
             tool_args=tool_args,
             description=description,
+            justification=str(just),
         )
 
         with self._lock:
@@ -530,6 +541,7 @@ class OperationManager:
                     'tool_name': a.tool_name,
                     'tool_args': a.tool_args,
                     'description': a.description,
+                    'justification': getattr(a, 'justification', ''),
                     'timestamp': a.timestamp,
                 }
                 for a in self.pending.values()
