@@ -1369,14 +1369,13 @@ def create_app(agents, agent_pool, config=None):
                             except Exception as e:
                                 logger.warning(f"Failed to transition {inst_name} to IDLE: {e}")
                         
-                        # Increment run generation to signal old threads they've been superseded.
-                        # This works alongside pool.stopped for defense-in-depth: even if an old thread
-                        # misses the stopped flag, it will detect _my_generation != pool._run_generation
-                        # in its next _is_stopped() check and exit promptly.
-                        agent_pool._run_generation += 1
-
-                        # Halt threads and unblock pending approvals (non-destructive — preserves sessions)
+                        # Halt threads, release slots, and unblock pending approvals (non-destructive — preserves sessions)
                         agent_pool.stop_session()
+
+                        # Increment run generation AFTER slot release so old threads see both signals:
+                        # pool.stopped=True + _run_generation bumped. New resume threads snapshot the
+                        # incremented value; stale threads detect mismatch on next _is_stopped() check.
+                        agent_pool._run_generation += 1
                     
                     # FIX 1 & 2: Clean up active stack and halted state after stop_session()
                     if agent_pool:
