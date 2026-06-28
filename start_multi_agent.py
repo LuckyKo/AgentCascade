@@ -15,7 +15,6 @@ The Orchestrator is also a launchable agent with its own soul.md!
 """
 
 import os
-import requests
 from pathlib import Path
 from agent_cascade.log import logger
 
@@ -24,12 +23,6 @@ PROJECT_ROOT = Path(__file__).parent.absolute()
 from agent_cascade.shared_init import detect_workspace_dir, ensure_workspace
 WORKSPACE_DIR = detect_workspace_dir(PROJECT_ROOT)
 ensure_workspace(WORKSPACE_DIR)
-
-from bs4 import BeautifulSoup
-# WebUI (Gradio) was replaced by the custom HTML/JS frontend served via FastAPI.
-# Use start_api_server.py instead of this file for the web interface.
-# from agent_cascade.gui import WebUI  # obsolete — removed in unified branch
-from agent_cascade.tools.base import BaseTool, register_tool
 
 # Import built-in tools from agent_cascade (needed for per-agent tool loading)
 from agent_cascade.tools import (
@@ -43,47 +36,8 @@ from agent_cascade.tools import (
 )
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
-# Register web tools globally
-@register_tool('ddg_search', allow_overwrite=True)
-class DDGSearch(BaseTool):
-    name = 'ddg_search'
-    description = 'Search for information from the internet using DuckDuckGo (No API key required).'
-    parameters = {
-        'type': 'object',
-        'properties': {
-            'query': {
-                'type': 'string',
-                'description': 'The search query'
-            }
-        },
-        'required': ['query'],
-    }
-
-    def call(self, params: str, **kwargs) -> str:
-        params = self._verify_json_format_args(params)
-        query = params['query']
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            url = f'https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}'
-            response = requests.get(url, headers=headers, timeout=10)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            results = []
-            for result in soup.select('.result')[:5]:
-                title_elem = result.select_one('.result__title')
-                snippet_elem = result.select_one('.result__snippet')
-                url_elem = result.select_one('.result__url')
-                if title_elem and snippet_elem:
-                    title = title_elem.get_text(strip=True)
-                    snippet = snippet_elem.get_text(strip=True)
-                    url_text = url_elem.get_text(strip=True) if url_elem else ''
-                    results.append(f'Title: {title}\nSnippet: {snippet}\nURL: {url_text}')
-            if results:
-                return '\n\n'.join(results)
-            return 'No results found.'
-        except Exception as e:
-            return f'Search failed: {str(e)}'
-
-# Configure for LM Studio (using a vision-capable model)
+# DDGSearch is now a shared module — imported instead of defined inline
+from agent_cascade.tools.custom import DDGSearch
 llm_cfg = {
     'model': 'whatever_is_on',  # or your preferred vision model
     'model_server': 'http://localhost:1234/v1',
@@ -236,7 +190,7 @@ if __name__ == '__main__':
             except Exception as e:
                 logger.warning("Cleanup backups failed during shutdown: %s", e)
         logger.info("[INFO] Terminated.")
-        os._exit(0)
+        sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_shutdown)
     if os.name != 'nt':

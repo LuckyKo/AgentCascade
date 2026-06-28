@@ -20,6 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from agent_cascade.log import logger
 from agent_server.schema import GlobalConfig
 
 
@@ -124,7 +125,7 @@ def main():
     # TODO: Remove these two hacky code interpreter env vars.
     os.environ['M6_CODE_INTERPRETER_WORK_DIR'] = code_interpreter_work_dir
 
-    from agent_cascade.utils.utils import append_signal_handler, get_local_ip, logger
+    from agent_cascade.utils.utils import append_signal_handler, get_local_ip
     logger.info(server_config)
 
     if args.server_host == '0.0.0.0':

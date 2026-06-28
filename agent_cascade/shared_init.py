@@ -153,11 +153,17 @@ def _instantiate_extract_doc_vocabulary(work_dir: str):
 
 
 def _instantiate_code_interpreter(work_dir: str, operation_manager=None):
-    """Instantiate the CodeInterpreter tool and attach OperationManager if provided."""
+    """Instantiate the CodeInterpreter tool and attach OperationManager if provided.
+
+    Note: CodeInterpreter.__init__ hardcodes self._operation_manager = None (line 243)
+    and does not read it from the cfg dict, so direct attribute assignment is required.
+    This is safe — _operation_manager is an internal reference used only for dynamic
+    extra-folder resolution (_resolve_extra_folders) and is never mutated externally.
+    """
     from agent_cascade.tools import code_interpreter
     inst = code_interpreter.CodeInterpreter(cfg={'work_dir': work_dir})
     if operation_manager:
-        inst._operation_manager = operation_manager
+        inst._operation_manager = operation_manager  # cfg doesn't support this — direct assignment required
     return inst
 
 
@@ -284,6 +290,15 @@ def load_tools_per_agent(
             logger.debug("[INIT] CodeInterpreter loaded for %s", label)
         except Exception as e:
             logger.debug("[INIT] CodeInterpreter skipped for %s: %s", label, e)
+
+    # Report any tool names in default_tools that this function doesn't handle
+    HANDLED_TOOLS = {
+        'image_gen', 'web_extractor', 'storage', 'retrieval',
+        'simple_doc_parser', 'doc_parser', 'extract_doc_vocabulary', 'code_interpreter',
+    }
+    unhandled = set(default_tools) - HANDLED_TOOLS
+    if unhandled:
+        logger.debug("[INIT] Ignoring non-built-in tools for %s: %s", label, sorted(unhandled))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

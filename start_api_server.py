@@ -10,7 +10,6 @@ Usage:
 """
 
 import os
-import requests
 from pathlib import Path
 
 from agent_cascade.log import logger
@@ -21,51 +20,7 @@ from agent_cascade.shared_init import detect_workspace_dir, ensure_workspace
 WORKSPACE_DIR = detect_workspace_dir(PROJECT_ROOT)
 ensure_workspace(WORKSPACE_DIR)
 
-from bs4 import BeautifulSoup
-from agent_cascade.tools.base import BaseTool, register_tool
-
-# ── DDGSearch tool definition (unique to each entry point — kept here) ────────
-@register_tool('ddg_search', allow_overwrite=True)
-class DDGSearch(BaseTool):
-    name = 'ddg_search'
-    description = 'Search for information from the internet using DuckDuckGo (No API key required).'
-    parameters = {
-        'type': 'object',
-        'properties': {
-            'query': {
-                'type': 'string',
-                'description': 'The search query'
-            }
-        },
-        'required': ['query'],
-    }
-
-    def call(self, params: str, **kwargs) -> str:
-        params = self._verify_json_format_args(params)
-        query = params['query']
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            url = f'https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}'
-            response = requests.get(url, headers=headers, timeout=10)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            results = []
-            for result in soup.select('.result')[:5]:
-                title_elem = result.select_one('.result__title')
-                snippet_elem = result.select_one('.result__snippet')
-                url_elem = result.select_one('.result__url')
-                if title_elem and snippet_elem:
-                    title = title_elem.get_text(strip=True)
-                    snippet = snippet_elem.get_text(strip=True)
-                    url_text = url_elem.get_text(strip=True) if url_elem else ''
-                    results.append(f'Title: {title}\nSnippet: {snippet}\nURL: {url_text}')
-            if results:
-                return '\n\n'.join(results)
-            return 'No results found.'
-        except Exception as e:
-            return f'Search failed: {str(e)}'
-
-
-# ── Configuration (same as start_multi_agent.py) ──────────────────────────────
+from agent_cascade.tools.custom import DDGSearch
 llm_cfg = {
     'model': 'whatever_is_on',
     'model_server': 'http://localhost:1234/v1',
@@ -201,7 +156,6 @@ if __name__ == '__main__':
     logger.info("=" * 50)
 
     import signal
-    import os
 
     def handle_shutdown(signum, frame):
         logger.info("\n[INFO] Initiating graceful shutdown...")
@@ -212,7 +166,7 @@ if __name__ == '__main__':
             except Exception as e:
                 logger.warning("Cleanup backups failed during shutdown: %s", e)
         logger.info("[INFO] Terminated.")
-        os._exit(0)
+        sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_shutdown)
     if os.name != 'nt':

@@ -653,14 +653,13 @@ def build_stream_update_from_pool(
     current_version = (len(conv_snapshot), id(conv_snapshot[-1]) if conv_snapshot else None, len(stream_resp_snapshot) if stream_resp_snapshot else 0, stream_content_len)
     cached_stats = _stream_token_stats_cache.get(instance_name)
     
-    # Feature Plan #023 Fix: Import get_history_stats before conditional to ensure availability in all branches
-    from agent_cascade.utils.utils import get_history_stats
-    
     if cached_stats is not None and current_version == _last_stream_versions.get(instance_name):
         # Conversation unchanged — reuse previously computed token stats
         h_stats, r_stats = cached_stats
     else:
         # Conversation changed or first call — compute fresh stats
+        from agent_cascade.utils.utils import get_history_stats
+
         # Streaming UI Content Update Fix: Include streaming responses in combined snapshot
         combined_snapshot = conv_snapshot + (stream_resp_snapshot if stream_resp_snapshot else [])
         active_h = pool.slice_history_for_llm(combined_snapshot) if combined_snapshot else conv_snapshot
