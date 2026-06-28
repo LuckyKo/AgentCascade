@@ -608,10 +608,6 @@ class AgentPool:
     # ── API bridge methods for api_server.py ────────────────────────────────
     # These methods provide access patterns that api_server.py expects.
 
-    def is_halted(self, instance_name: str) -> bool:
-        """Check if an instance is halted (checks global pause + per-instance halt)."""
-        return self._paused.is_set() or instance_name in self._halted_instances
-
     def list_agents(self) -> List[str]:
         """Return all available agent template names."""
         return list(self.templates.keys())

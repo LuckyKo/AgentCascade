@@ -888,7 +888,7 @@ def create_app(agents, agent_pool, config=None):
             "active_agent": sess_name,
             "agents": agent_pool.list_agents() if agent_pool else [],
             "active_stack": get_active_stack(),
-            "instance_halted": agent_pool.is_halted(sess_name) if (agent_pool and hasattr(agent_pool, 'is_halted')) else False,
+            "instance_halted": agent_pool.is_instance_halted(sess_name) if (agent_pool and hasattr(agent_pool, 'is_instance_halted')) else False,
         }
 
     # ── REST endpoints ────────────────────────────────────────────────────
@@ -1449,14 +1449,14 @@ def create_app(agents, agent_pool, config=None):
                     
                     was_halted = False
                     if agent_pool:
-                        was_halted = agent_pool.is_halted(target_instance)
+                        was_halted = agent_pool.is_instance_halted(target_instance)
                         agent_pool.resume()  # clear global pause flag
                         logger.info(f"Instance {target_instance} resumed by user. Was halted: {was_halted}")
                     
                     # For the main session: only restart generation if it was actually halted
                     if target_instance == session['session_name']:
                         if is_generating and was_halted:
-                            # Currently generating but was halted — signal stop first, then restart with continuation
+                            # Currently generating but was halted — stop old thread first, then restart generation
                             logger.info(f"Main session was still generating — signalling stop before resume.")
                             with session_lock:
                                 session['stop_requested'] = True
@@ -1570,13 +1570,7 @@ def create_app(agents, agent_pool, config=None):
                             # Not halted and not generating — just update UI state (no-op from user's perspective)
                             await broadcast({'type': 'state', **build_state()})
                     
-                    # For agent instances: inject a continuation message into their queue so when 
-                    # the orchestrator next calls them, they continue from where they left off
-                    elif target_instance != session['session_name'] and agent_pool and was_halted:
-                        cont_msg = f"[SYSTEM]: Agent {target_instance} was paused. Please continue from where you left off."
-                        agent_pool.enqueue_message(target_instance, cont_msg)
-                        logger.info(f"Injected continuation message into agent instance {target_instance}'s queue.")
-
+                    # For agent instances: agents wake naturally from sleep loop, no continuation message needed
                 elif msg_type in ('terminate_agent_instance', 'terminate_sub_agent'):
                     """Terminate the specified agent instance and set it to TERMINATED state."""
                     # Add session_lock guard for consistency with other handlers (Finding #5)
