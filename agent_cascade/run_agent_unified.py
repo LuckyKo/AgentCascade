@@ -72,10 +72,12 @@ def run_agent_thread_unified(
     """
     from .api_integration import (
         broadcast_stream_update,
+        build_stream_update_from_pool,
         create_main_agent_instance,
         run_agent_in_pool_with_recovery,
         build_state_from_pool,
         _apply_ui_config,
+        _put_stream_update,
     )
 
     try:
