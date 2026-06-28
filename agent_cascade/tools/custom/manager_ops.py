@@ -1,10 +1,8 @@
-import json
 import copy
 from typing import List, Optional, Dict, Any
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.llm.schema import Message, ROLE, ASSISTANT, USER
-from agent_cascade.agent_instance import AgentState
 
 
 @register_tool('call_agent', allow_overwrite=True)
@@ -242,119 +240,6 @@ You are a specialized agent instance.
                     continue
                     
                 return f"Error calling agent {instance_name} ({agent_class}): {str(e)}"
-
-
-@register_tool('dismiss_agent', allow_overwrite=True)
-class DismissAgent(BaseTool):
-    """Clear a sub-agent instance's conversation history (manager tool)."""
-
-    name = 'dismiss_agent'
-    description = TOOL_METADATA['dismiss_agent']['description']
-    parameters = {
-        'type': 'object',
-        'properties': {
-            'instance_name': {
-                'type': 'string',
-                'description': TOOL_METADATA['dismiss_agent']['parameters']['instance_name']
-            },
-            'all_idle': {
-                'type': 'boolean',
-                'description': TOOL_METADATA['dismiss_agent']['parameters']['all_idle']
-            }
-        },
-        'required': [],
-    }
-
-    def __init__(self, agent_pool=None, **kwargs):
-        super().__init__(**kwargs)
-        self.agent_pool = agent_pool
-
-    def _capture_log_path(self, instance_name: str) -> Optional[str]:
-        """Retrieve log path before dismissal removes the logger."""
-        try:
-            logger_inst = self.agent_pool.instance_loggers.get(instance_name)
-            if logger_inst:
-                return getattr(logger_inst, 'log_path', None)
-        except Exception as e:
-            from agent_cascade.log import logger
-            logger.debug(f"Log path lookup failed for instance '{instance_name}' (non-critical): {e}")
-        return None
-
-    def call(self, params: str, **kwargs) -> str:
-        params = self._verify_json_format_args(params)
-        instance_name = params.get('instance_name')
-        all_idle = params.get('all_idle', False)
-
-        if not self.agent_pool:
-            return json.dumps({"status": "error", "message": "No agent pool available."})
-
-        if all_idle:
-            active_set = {name for name, _depth in self.agent_pool.active_stack}
-            # Snapshot instance list to avoid concurrent modification during iteration
-            all_instances = list(self.agent_pool.instances.keys())
-            
-            dismissed = []
-            for instance_name_iter in all_instances:
-                instance_obj = self.agent_pool.instances.get(instance_name_iter)
-                
-                if instance_obj is None:
-                    continue
-                
-                # Skip root orchestrator(s) — no parent means top-level
-                if instance_obj.parent_instance is None:
-                    continue
-                
-                # Skip agents already in SLEEPING state (not idle, just resting)
-                if instance_obj.state == AgentState.SLEEPING:
-                    continue
-                
-                # Skip halted agents (intentionally paused, e.g., during compression)
-                if self.agent_pool.is_instance_halted(instance_name_iter):
-                    continue
-                
-                # Skip actively running agents
-                if instance_name_iter in active_set:
-                    continue
-                
-                # Capture log path before dismissal removes the logger
-                log_path = self._capture_log_path(instance_name_iter)
-                
-                # Use dismiss_instance() for full recursive cleanup (child dismissal + active termination)
-                self.agent_pool.dismiss_instance(instance_name_iter)
-                dismissed.append({'agent': instance_name_iter, 'log_path': log_path})
-            
-            if not dismissed:
-                return json.dumps({"status": "no_idle_agents", "message": "No idle agents found to dismiss."})
-            
-            return json.dumps({
-                "status": "dismissed_all_idle",
-                "agents": dismissed,
-                "count": len(dismissed),
-                "message": f"Successfully dismissed {len(dismissed)} idle agents: {', '.join(d['agent'] for d in dismissed)}"
-            })
-
-        if not instance_name:
-            return json.dumps({"status": "error", "message": "Please provide 'instance_name' or set 'all_idle' to true."})
-
-        if instance_name not in self.agent_pool.instance_conversations:
-            return json.dumps({
-                "status": "not_found",
-                "agent": instance_name,
-                "message": f"Instance '{instance_name}' not found."
-            })
-
-        # Capture log path before dismissal removes the logger
-        log_path = self._capture_log_path(instance_name)
-
-        # Use dismiss_instance() for full recursive cleanup (child dismissal + active termination)
-        self.agent_pool.dismiss_instance(instance_name)
-
-        return json.dumps({
-            "status": "dismissed",
-            "agent": instance_name,
-            "log_path": log_path,
-            "message": f"Agent instance '{instance_name}' dismissed — conversation context cleared and backups removed."
-        })
 
 
 @register_tool('list_agents', allow_overwrite=True)

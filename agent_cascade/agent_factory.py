@@ -11,7 +11,7 @@ from agent_cascade.log import logger
 from agent_cascade.tools.code_interpreter import CodeInterpreter
 from agent_cascade.tools.custom import (
     ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep,
-    DeleteFile, CopyFile, ReIndent, DismissAgent, ListAgents, ShellCmd, SystemInfo,
+    DeleteFile, CopyFile, ReIndent, ListAgents, ShellCmd, SystemInfo,
     ReadLogs, Calculate, CodeMap, ForgetLast, SyntaxCheck,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
@@ -35,7 +35,6 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
 
     # ── Sub-agent management (intercepted in _run, not _call_tool) ──
     agent.function_map['call_agent'] = _AgentInstanceFunctionProxy(CALL_AGENT_SCHEMA)
-    agent.function_map['dismiss_agent'] = DismissAgent(agent_pool=agent_pool)
     agent.function_map['list_agents'] = ListAgents(agent_pool=agent_pool)
 
     # ── Read-only tools (free access) ──
