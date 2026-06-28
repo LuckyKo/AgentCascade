@@ -1900,7 +1900,7 @@ def create_app(agents, agent_pool, config=None):
                                 app.active_security_checks.add(rid)
 
                             loop = asyncio.get_running_loop()
-                            def _security_check():
+                            def _security_check(rid=rid, auto_apply=auto_apply, ap=ap, loop=loop):
                                 sec_state_key = None  # Defined early so finally can reference it directly (Fix #4)
                                 sec_instance = None   # Pre-initialize for defensive programming
                                 engine = None         # Pre-initialize for defensive programming
