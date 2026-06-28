@@ -1035,7 +1035,13 @@ def serialize_message(msg: Any, index: Optional[int] = None) -> dict:
     """Serialize a Message object or dict to a JSON-serializable dict for UI rendering.
 
     Handles Message objects (Pydantic or dataclass), raw dicts, and any object with role/content attributes.
-    Includes optional index field for UI ordering.
+    Features:
+      - UI cache support (_ui_cache) to avoid expensive re-serialization of large history messages
+      - Content list normalization for multimodal messages (text, image, audio, video, file)
+      - Large content truncation at 100K characters for wire-level performance
+      - function_call normalization (handles objects with .name/.arguments attributes)
+      - None value stripping and internal cache key cleanup (_tokens/_words/_ui_cache)
+      - Extra field extraction (tool_success from extra dict)
 
     Args:
         msg: A Message object, dict, or any object with role/content attributes.
@@ -1044,28 +1050,102 @@ def serialize_message(msg: Any, index: Optional[int] = None) -> dict:
     Returns:
         JSON-serializable dictionary.
     """
-    if isinstance(msg, dict):
-        result = dict(msg)
-    elif hasattr(msg, 'model_dump'):
-        # Pydantic model
-        result = msg.model_dump()
+    # Use cache if available to avoid expensive re-serialization of large history messages
+    if isinstance(msg, dict) and '_ui_cache' in msg:
+        res = dict(msg['_ui_cache'])
+        # Strip internal keys that might leak from stale cache data or session deserialization
+        res.pop('_tokens', None)
+        res.pop('_words', None)
+        res.pop('_ui_cache', None)
+        # Also strip any None values from cached data (defensive against old code versions)
+        for key in list(res.keys()):
+            if res[key] is None:
+                del res[key]
+        if index is not None:
+            res['index'] = index
+        return res
+
+    if hasattr(msg, 'model_dump'):
+        d = msg.model_dump()
+    elif isinstance(msg, dict):
+        d = dict(msg)
     else:
-        # Message dataclass or similar
-        result = {
-            ROLE: getattr(msg, 'role', ''),
-            CONTENT: getattr(msg, 'content', ''),
-        }
-        if hasattr(msg, 'function_call') and msg.function_call:
-            result['function_call'] = msg.function_call
-        if hasattr(msg, 'name') and msg.name:
-            result[NAME] = msg.name
-        if hasattr(msg, 'reasoning_content') and msg.reasoning_content:
-            result[REASONING_CONTENT] = msg.reasoning_content
+        d = {}
+        for k in ['role', 'content', 'name', 'function_call', 'reasoning_content']:
+            val = getattr(msg, k, None)
+            if val is not None:
+                d[k] = val
+
+    # Normalize content to string (handles multimodal message lists)
+    content = d.get('content', '')
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if 'text' in item:
+                    parts.append(item['text'])
+                elif 'image' in item:
+                    parts.append(f"![image]({item['image']})")
+                elif 'audio' in item:
+                    parts.append(f"[Audio: {item['audio']}]")
+                elif 'video' in item:
+                    parts.append(f"[Video: {item['video']}]")
+                elif 'file' in item:
+                    parts.append(f"[File: {item['file']}]")
+            elif isinstance(item, str):
+                parts.append(item)
+            elif hasattr(item, 'text') and item.text:
+                parts.append(item.text)
+            elif hasattr(item, 'image') and item.image:
+                parts.append(f"![image]({item.image})")
+        content = '\n'.join(parts)
+
+    # UI Performance: Truncate exceptionally large content at the wire level.
+    # The full content is still preserved in the backend history and persistent logs.
+    if isinstance(content, str) and len(content) > 100000:
+        content = content[:100000] + "\n\n... [TRUNCATED IN UI FOR PERFORMANCE. Full content is available in the session logs.]"
+
+    d['content'] = content or ''
+
+    # Normalize function_call (handles objects with .name/.arguments attributes)
+    fc = d.get('function_call')
+    if fc:
+        if hasattr(fc, 'name'):
+            d['function_call'] = {'name': fc.name, 'arguments': fc.arguments}
+        # else: not an object with .name — keep as-is (should already be a dict)
+    else:
+        d.pop('function_call', None)
+
+    # Strip None values and internal fields
+    for key in list(d.keys()):
+        if d[key] is None:
+            del d[key]
+
+    # FIX3 (internal cache keys leak): Remove _tokens/_words injected by get_history_stats
+    # so they don't serialize to the frontend.
+    d.pop('_tokens', None)
+    d.pop('_words', None)
+    d.pop('_ui_cache', None)
+
+    # Extract tool_success from extra before stripping — frontend needs it for isToolFailure()
+    if 'extra' in d and isinstance(d['extra'], dict):
+        ts = d['extra'].get('tool_success')
+        if ts is not None:
+            d['tool_success'] = bool(ts)
+
+    d.pop('extra', None)
+
+    # UI Performance: Store in cache if the input is a persistent history dict.
+    # CRITICAL: We DO NOT cache if it's the very last message (index 0 means no index set),
+    # as the orchestrator often mutates the latest turn's messages (merging reasoning,
+    # async injections, etc.) and we don't want the UI to "hang" on a stale version.
+    if isinstance(msg, dict) and index is not None and index > 0:
+        msg['_ui_cache'] = dict(d)
 
     if index is not None:
-        result['index'] = index
+        d['index'] = index
 
-    return result
+    return d
 
 
 def _check_is_waiting(pool: AgentPool, instance_name: str) -> bool:

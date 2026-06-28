@@ -145,101 +145,7 @@ def _validate_disabled_tools(ui_cfg: Dict[str, Any]) -> None:
             validate_tool_names(normalize_disabled_tools(dt), known_tools=known)
 
 
-# ─── Message serialization ────────────────────────────────────────────────────
-
-def serialize_message(msg, index=None):
-    """Convert a Message object or dict to a JSON-serializable dict with caching."""
-    # Use cache if available to avoid expensive re-serialization of large history messages
-    if isinstance(msg, dict) and '_ui_cache' in msg:
-        res = dict(msg['_ui_cache'])
-        if index is not None:
-            res['index'] = index
-        return res
-
-    if hasattr(msg, 'model_dump'):
-        d = msg.model_dump()
-    elif isinstance(msg, dict):
-        d = dict(msg)
-    else:
-        d = {}
-        for k in ['role', 'content', 'name', 'function_call', 'reasoning_content']:
-            val = getattr(msg, k, None)
-            if val is not None:
-                d[k] = val
-
-    # Normalize content to string
-    content = d.get('content', '')
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                if 'text' in item:
-                    parts.append(item['text'])
-                elif 'image' in item:
-                    parts.append(f"![image]({item['image']})")
-                elif 'audio' in item:
-                    parts.append(f"[Audio: {item['audio']}]")
-                elif 'video' in item:
-                    parts.append(f"[Video: {item['video']}]")
-                elif 'file' in item:
-                    parts.append(f"[File: {item['file']}]")
-            elif isinstance(item, str):
-                parts.append(item)
-            elif hasattr(item, 'text') and item.text:
-                parts.append(item.text)
-            elif hasattr(item, 'image') and item.image:
-                parts.append(f"![image]({item.image})")
-        content = '\n'.join(parts)
-    
-    # UI Performance: Truncate exceptionally large content at the wire level.
-    # The full content is still preserved in the backend 'history' and persistent logs.
-    if isinstance(content, str) and len(content) > 100000:
-        content = content[:100000] + "\n\n... [TRUNCATED IN UI FOR PERFORMANCE. Full content is available in the session logs.]"
-    
-    d['content'] = content or ''
-
-    # Normalize function_call
-    fc = d.get('function_call')
-    if fc:
-        if hasattr(fc, 'name'):
-            d['function_call'] = {'name': fc.name, 'arguments': fc.arguments}
-        # else: already a dict, keep it
-    else:
-        d.pop('function_call', None)
-
-    # Strip None values and internal fields
-    for key in list(d.keys()):
-        if d[key] is None:
-            del d[key]
-    
-    # FIX3 (internal cache keys leak): Remove _tokens/_words injected by get_history_stats
-    # so they don't serialize to the frontend.
-    d.pop('_tokens', None)
-    d.pop('_words', None)
-    d.pop('_ui_cache', None)
-    
-    # Extract tool_success from extra before stripping — frontend needs it for isToolFailure()
-    if 'extra' in d and isinstance(d['extra'], dict):
-        ts = d['extra'].get('tool_success')
-        if ts is not None:
-            d['tool_success'] = bool(ts)
-    
-    d.pop('extra', None)
-    
-    # UI Performance: Store in cache if the input is a persistent history dict.
-    # CRITICAL: We DO NOT cache if it's the very last message in the list,
-    # as the orchestrator often mutates the latest turn's messages (merging reasoning, 
-    # async injections, etc.) and we don't want the UI to "hang" on a stale version.
-    if isinstance(msg, dict) and index is not None and index > 0:
-        msg['_ui_cache'] = dict(d)
-
-    if index is not None:
-        d['index'] = index
-
-    return d
-
-
-# Global caches for UI performance
+# serialize_message imported from agent_cascade.api_integration (unified version)
 
 # ── Logging Setup ─────────────────────────────────────────────────────────────
 
@@ -315,6 +221,7 @@ def create_app(agents, agent_pool, config=None):
         build_state_from_pool,
         build_stream_update_from_pool,
         create_main_agent_instance,
+        serialize_message,
         _apply_ui_config,
         _build_agents_list,
         _get_approvals,
