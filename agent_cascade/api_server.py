@@ -286,6 +286,7 @@ def create_app(agents, agent_pool, config=None):
         _get_approvals,
         _resolve_max_tokens,
         _find_user_message_insertion_point,
+        _put_stream_update,
     )
 
     # ── Helpers ───────────────────────────────────────────────────────────
@@ -2110,7 +2111,14 @@ def create_app(agents, agent_pool, config=None):
                                         # logger.debug(f"[SECURITY] Before engine.run - sec_instance._generate_cfg_override['disabled_tools']={override_disabled}")
                                         
                                         # Execute via engine.run() — this handles LLM call, retries, and streaming
+                                        _last_sec_send = 0.0
+                                        _sec_tick_num = 0
+                                        _sec_last_resp_len = 0
                                         for resp in engine.run(sec_instance):
+                                            # Check for pool shutdown / generation change
+                                            if agent_pool.stopped:
+                                                break
+
                                             elapsed = time.monotonic() - sec_start_time
                                             if elapsed > SECURITY_ADVISOR_TIMEOUT_SECONDS:
                                                 sec_timeout_reached = True
@@ -2121,6 +2129,52 @@ def create_app(agents, agent_pool, config=None):
                                                 )
                                                 break
 
+                                            now_sec = time.monotonic()
+
+                                            # Unpack (turn_output, is_streaming_tick) from engine.run() yield
+                                            if isinstance(resp, tuple) and len(resp) == 2:
+                                                sec_turn_output, sec_is_streaming_tick = resp
+                                            else:
+                                                sec_turn_output, sec_is_streaming_tick = resp, False
+
+                                            # Detect response length changes (new committed messages)
+                                            _sec_resp_len = len(sec_turn_output) if sec_turn_output else 0
+                                            _sec_len_changed = (_sec_resp_len != _sec_last_resp_len)
+                                            _sec_last_resp_len = _sec_resp_len
+
+                                            # ── WebSocket broadcast loop for Security agent ──
+                                            # Mirrors the regular agent broadcast pattern from run_agent_unified.py.
+                                            # force_full=True every 100 ticks (~10s) reconciles sync gaps: during partial
+                                            # streaming some events may be dropped; periodic full refresh ensures eventual
+                                            # UI consistency even if individual stream_update messages were lost.
+                                            if (sec_is_streaming_tick or _sec_len_changed
+                                                or (now_sec - _last_sec_send > 0.1)):
+                                                force_full = (_sec_tick_num % 100 == 0)
+                                                try:
+                                                    # Guard against None send_queue/loop (shouldn't happen but defensive)
+                                                    if send_queue is not None and loop is not None:
+                                                        stream_update = build_stream_update_from_pool(
+                                                            pool=agent_pool,
+                                                            instance_name=sec_state_key,
+                                                            responses=sec_turn_output,
+                                                            force_full=force_full,
+                                                        )
+                                                        if stream_update is not None:
+                                                            asyncio.run_coroutine_threadsafe(
+                                                                _put_stream_update(
+                                                                    send_queue,
+                                                                    {'type': 'stream_update', **stream_update},
+                                                                ),
+                                                                loop,
+                                                            )
+                                                    _last_sec_send = now_sec
+                                                except (RuntimeError, Exception) as e:
+                                                    # RuntimeError if event loop is closed; catch-all for safety
+                                                    logger.debug(
+                                                        f"[SECURITY] Stream broadcast failed (non-critical): {e}"
+                                                    )
+
+                                            _sec_tick_num += 1
 
                                             # Update instance_state for UI visibility (thread-safe)
                                             with agent_pool._execution._state_lock:

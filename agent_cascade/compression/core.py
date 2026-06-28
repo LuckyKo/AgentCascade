@@ -24,6 +24,8 @@ def compress_context(
     force: bool = False,           # Bypass validation guards (forced compression at >95%)
     dry_run: bool = False,         # If True, generate summary but don't mutate pool
     precomputed_summary: str | None = None,  # Pre-generated summary to skip LLM call in auto mode
+    send_queue=None,               # Optional: asyncio.Queue for WebSocket stream_update events
+    loop=None,                     # Optional: asyncio event loop for thread-safe queue dispatch
 ) -> CompressResult:
     """
     Unified compression function. Handles ALL compression triggers:
@@ -276,6 +278,8 @@ def compress_context(
                 target_messages=target_messages,
                 existing_summary=existing_summary,
                 caller_name=target_agent_name,  # Pass actual instance name for slot management
+                send_queue=send_queue,          # WebSocket queue for real-time UI updates
+                loop=loop,                      # Event loop for thread-safe dispatch
             )
         except Exception as e:
             # Fail-safe: Compression Agent failed — pool is untouched
