@@ -11,10 +11,8 @@ from agent_cascade.llm.schema import SYSTEM, USER
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
 from agent_cascade.utils.utils import extract_text_from_message
 
-# Imports for WebSocket broadcast (used inside engine.run() loop)
-from agent_cascade.api_integration import (
-    build_stream_update_from_pool, _put_stream_update,
-)
+# Import shared broadcast helper (replaces duplicated inline broadcast loops)
+from agent_cascade.api_integration import broadcast_stream_update
 
 # Lazy import of ExecutionEngine to break circular dependency chain:
 # execution_engine.py → compression/handler.py → core.py → agent_invoker.py (→ ExecutionEngine would loop back)
@@ -79,8 +77,6 @@ def invoke_compression_agent(
     target_messages,
     existing_summary=None,
     caller_name=None,       # Optional: the caller instance name for slot management
-    send_queue=None,        # Optional: asyncio.Queue for WebSocket stream_update events
-    loop=None,              # Optional: asyncio event loop for thread-safe queue dispatch
 ):
     """
     Invoke the Compression Agent to generate a summary of target messages.
@@ -94,10 +90,6 @@ def invoke_compression_agent(
         existing_summary: Optional previous summary text to compound onto.
         caller_name: Optional caller instance name for slot management. If not provided,
                      reads agent_pool.session_name (falls back to 'Orchestrator').
-        send_queue: Optional asyncio.Queue to push stream_update events to the WebSocket
-                    handler. If None, falls back to agent_pool._ws_send_queue.
-        loop: Optional asyncio event loop for thread-safe queue dispatch. If None,
-              falls back to agent_pool._ws_loop.
 
     Returns:
         The raw summary string (with thinking blocks stripped).
@@ -275,47 +267,17 @@ def invoke_compression_agent(
                 else:
                     comp_turn_output, comp_is_streaming_tick = resp, False
 
-                # Detect response length changes (new committed messages)
-                _comp_resp_len = len(comp_turn_output) if comp_turn_output else 0
-                _comp_len_changed = (_comp_resp_len != _comp_last_resp_len)
-                _comp_last_resp_len = _comp_resp_len
-
-                # ── WebSocket broadcast loop for Compressor agent ──
-                # Mirrors the regular agent broadcast pattern from run_agent_unified.py.
-                # Uses explicit send_queue/loop params (preferred) with fallback to
-                # agent_pool._ws_send_queue / _ws_loop attributes set by the caller thread.
-                # Note: has_tool_event check omitted — Compressor runs with disabled_tools
-                # so it never produces tool-call events during streaming; only text output.
-                # force_full=True every 100 ticks (~10s) reconciles sync gaps: during partial
-                # streaming some events may be dropped; periodic full refresh ensures eventual
-                # UI consistency even if individual stream_update messages were lost.
-                if (comp_is_streaming_tick or _comp_len_changed
-                    or (now_comp - _last_comp_send > 0.1)):
-                    # Prefer explicit params; fall back to pool attributes set by caller thread
-                    ws_queue = send_queue or getattr(agent_pool, '_ws_send_queue', None)
-                    ws_loop = loop or getattr(agent_pool, '_ws_loop', None)
-                    try:
-                        if ws_queue and ws_loop and not ws_loop.is_closed():
-                            force_full = (_comp_tick_num % 100 == 0)
-                            stream_update = build_stream_update_from_pool(
-                                pool=agent_pool,
-                                instance_name=comp_state_key,
-                                responses=comp_turn_output,
-                                force_full=force_full,
-                            )
-                            if stream_update is not None:
-                                import asyncio
-                                asyncio.run_coroutine_threadsafe(
-                                    _put_stream_update(
-                                        ws_queue,
-                                        {'type': 'stream_update', **stream_update},
-                                    ),
-                                    ws_loop,
-                                )
-                            _last_comp_send = now_comp
-                    except (RuntimeError, Exception) as e:
-                        # RuntimeError if event loop is closed; catch-all for safety
-                        logger.debug(f"[COMPRESSION] Stream broadcast failed (non-critical): {e}")
+                # Use shared broadcast helper (pool attributes _ws_send_queue/_ws_loop are set by caller thread)
+                _last_comp_send, _comp_last_resp_len = broadcast_stream_update(
+                    pool=agent_pool,
+                    instance_name=comp_state_key,
+                    turn_output=comp_turn_output,
+                    is_streaming_tick=comp_is_streaming_tick,
+                    tick_num=_comp_tick_num,
+                    now_sec=now_comp,
+                    last_send=_last_comp_send,
+                    last_resp_len=_comp_last_resp_len,
+                )
 
                 _comp_tick_num += 1
 

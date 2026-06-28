@@ -278,6 +278,7 @@ def create_app(agents, agent_pool, config=None):
     # ── Unified architecture imports (Phase 5) ───────────────────────────
     from agent_cascade.run_agent_unified import run_agent_thread_unified
     from agent_cascade.api_integration import (
+        broadcast_stream_update,
         build_state_from_pool,
         build_stream_update_from_pool,
         create_main_agent_instance,
@@ -2137,42 +2138,17 @@ def create_app(agents, agent_pool, config=None):
                                             else:
                                                 sec_turn_output, sec_is_streaming_tick = resp, False
 
-                                            # Detect response length changes (new committed messages)
-                                            _sec_resp_len = len(sec_turn_output) if sec_turn_output else 0
-                                            _sec_len_changed = (_sec_resp_len != _sec_last_resp_len)
-                                            _sec_last_resp_len = _sec_resp_len
-
-                                            # ── WebSocket broadcast loop for Security agent ──
-                                            # Mirrors the regular agent broadcast pattern from run_agent_unified.py.
-                                            # force_full=True every 100 ticks (~10s) reconciles sync gaps: during partial
-                                            # streaming some events may be dropped; periodic full refresh ensures eventual
-                                            # UI consistency even if individual stream_update messages were lost.
-                                            if (sec_is_streaming_tick or _sec_len_changed
-                                                or (now_sec - _last_sec_send > 0.1)):
-                                                force_full = (_sec_tick_num % 100 == 0)
-                                                try:
-                                                    # Guard against None send_queue/loop (shouldn't happen but defensive)
-                                                    if send_queue is not None and loop is not None:
-                                                        stream_update = build_stream_update_from_pool(
-                                                            pool=agent_pool,
-                                                            instance_name=sec_state_key,
-                                                            responses=sec_turn_output,
-                                                            force_full=force_full,
-                                                        )
-                                                        if stream_update is not None:
-                                                            asyncio.run_coroutine_threadsafe(
-                                                                _put_stream_update(
-                                                                    send_queue,
-                                                                    {'type': 'stream_update', **stream_update},
-                                                                ),
-                                                                loop,
-                                                            )
-                                                    _last_sec_send = now_sec
-                                                except (RuntimeError, Exception) as e:
-                                                    # RuntimeError if event loop is closed; catch-all for safety
-                                                    logger.debug(
-                                                        f"[SECURITY] Stream broadcast failed (non-critical): {e}"
-                                                    )
+                                            # ── WebSocket broadcast for Security agent (shared helper) ──
+                                            _last_sec_send, _sec_last_resp_len = broadcast_stream_update(
+                                                pool=agent_pool,
+                                                instance_name=sec_state_key,
+                                                turn_output=sec_turn_output,
+                                                is_streaming_tick=sec_is_streaming_tick,
+                                                tick_num=_sec_tick_num,
+                                                now_sec=now_sec,
+                                                last_send=_last_sec_send,
+                                                last_resp_len=_sec_last_resp_len,
+                                            )
 
                                             _sec_tick_num += 1
 

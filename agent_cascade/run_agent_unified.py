@@ -71,13 +71,11 @@ def run_agent_thread_unified(
         thread.start()
     """
     from .api_integration import (
+        broadcast_stream_update,
         create_main_agent_instance,
         run_agent_in_pool_with_recovery,
         build_state_from_pool,
-        build_stream_update_from_pool,
         _apply_ui_config,
-        _put_stream_update,
-        # Note: _build_activity_update removed - dual update paths created split perception
     )
 
     try:
@@ -143,11 +141,6 @@ def run_agent_thread_unified(
 
             now = time.monotonic()
 
-            # ── Detect state changes for sub-agent refresh ───────────────
-            resp_len = len(turn_output)
-            len_changed = (resp_len != exec_state['last_resp_len'])
-            exec_state['last_resp_len'] = resp_len
-
             # Check if the last message is a tool call or function result
             has_tool_event = False
             streaming_text = None
@@ -176,45 +169,19 @@ def run_agent_thread_unified(
                     else:
                         streaming_text = str(content)
 
-            # ── Throttle state broadcasts ────────────────────────────────
-            # Bypass throttle for:
-            # 1. New committed messages (len_changed)
-            # 2. Tool events (<ctrl42>_tool, function response)
-            # 3. Explicit streaming signals from ExecutionEngine (is_streaming_tick)
-            # 4. Periodic 100ms interval (fallback)
-            should_broadcast = (
-                is_streaming_tick
-                or len_changed
-                or has_tool_event
-                or (now - last_send > 0.1)
+            # ── WebSocket broadcast (shared helper handles all throttling) ──
+            # Tool events are signaled via is_streaming_tick=True so the helper
+            # bypasses its internal throttle immediately.
+            last_send, exec_state['last_resp_len'] = broadcast_stream_update(
+                pool=pool,
+                instance_name=instance_name,
+                turn_output=turn_output,
+                is_streaming_tick=is_streaming_tick or has_tool_event,
+                tick_num=tick_num,
+                now_sec=now,
+                last_send=last_send,
+                last_resp_len=exec_state['last_resp_len'],
             )
-
-            if should_broadcast:
-                # Fix #2: Force full state refresh every 100 ticks (~10 seconds) to recover
-                # from sync gaps. During partial streaming, some messages may be missed;
-                # periodic full refresh ensures eventual consistency.
-                force_full = (tick_num % 100 == 0)
-                
-                # Build lightweight stream update (only serializes changing messages)
-                # build_stream_update_from_pool internally handles sub-agent snapshots
-                stream_update = build_stream_update_from_pool(
-                    pool=pool,
-                    instance_name=instance_name,
-                    responses=turn_output,
-                    force_full=force_full,
-                )
-                if stream_update is not None:
-                    event = {
-                        'type': 'stream_update',
-                        **stream_update,
-                    }
-                    # Use put_nowait to avoid blocking the agent thread when
-                    # the send_queue is full (stale events are dropped).
-                    asyncio.run_coroutine_threadsafe(
-                        _put_stream_update(send_queue, event),
-                        loop,
-                    )
-                    last_send = now
 
             tick_num += 1
 
@@ -257,8 +224,8 @@ def run_agent_thread_unified(
                 instance_name=instance_name,
                 responses=[error_msg],
             )
-            if stream_update is not None:
-                # Use put_nowait via helper - QueueFull handled inside event loop
+            if stream_update is not None and send_queue and loop:
+                # Defensive guard: send_queue/loop may be stale after exception
                 asyncio.run_coroutine_threadsafe(
                     _put_stream_update(send_queue, {
                         'type': 'stream_update',
