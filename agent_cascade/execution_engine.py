@@ -692,6 +692,16 @@ class ExecutionEngine:
         if not skip_slot_acquire:
             instance._slot_release = None  # Initialize for proper cleanup in finally block
             self._acquire_slot_with_logging(instance, "initial")
+            
+            # FIX: Check stopped right after acquiring to exit promptly.
+            # Prevents stale threads from continuing with re-acquired slots
+            # after stop_session() released them (race condition: stop → release → old thread wakes → reacquires)
+            if self._is_stopped(instance.instance_name):
+                logger.debug(
+                    f"[SLOT_STOP_CHECK] Stale slot detected after initial acquire for {instance.instance_name}, exiting"
+                )
+                self._release_slot(instance, instance.instance_name)
+                return  # Exit generator immediately instead of continuing with stale state
         else:
             # Bypass mode — nested agent (Security/Compressor) running within existing turn
             logger.debug(
@@ -2679,6 +2689,14 @@ class ExecutionEngine:
             if not skip_slot_acquire:
                 self._acquire_slot_with_logging(instance, "after_async_wakeup")
 
+                # FIX: Check stopped right after re-acquiring to exit promptly.
+                # Prevents stale threads from continuing with re-acquired slots after stop_session()
+                if self._is_stopped(inst_name):
+                    logger.debug(
+                        f"[SLOT_STOP_CHECK] Stale slot detected after async wakeup for {inst_name}, exiting"
+                    )
+                    return SleepAction.CONTINUE_LOOP, None
+
             # Continue to normal LLM processing below (in RUNNING state now)
             return SleepAction.CONTINUE_LOOP, None
 
@@ -2754,6 +2772,14 @@ class ExecutionEngine:
                 # Re-acquire concurrency slot after waking from SLEEPING
                 if not skip_slot_acquire:
                     self._acquire_slot_with_logging(instance, "after_stable_drain")
+
+                    # FIX: Check stopped right after re-acquiring to exit promptly.
+                    # Prevents stale threads from continuing with re-acquired slots after stop_session()
+                    if self._is_stopped(inst_name):
+                        logger.debug(
+                            f"[SLOT_STOP_CHECK] Stale slot detected after stable drain for {inst_name}, exiting"
+                        )
+                        return SleepAction.CONTINUE_LOOP, None
 
                 # Loop back; now in RUNNING state → LLM processes injected results
                 return SleepAction.CONTINUE_LOOP, []  # Bridge signal for UI update before LLM processing
