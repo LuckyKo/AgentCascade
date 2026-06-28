@@ -979,15 +979,8 @@ def create_app(agents, agent_pool, config=None):
     async def api_resume_all():
         """Resume all paused agent instances."""
         if agent_pool:
-            halted_before = [n for n in agent_pool.instances.keys() if agent_pool.is_halted(n)]
-            agent_pool.resume()  # clear global pause flag after capture
-            
-            cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
-            parsed_content = _parse_multimodal_content(cont_msg)
-            for inst_name in halted_before:
-                agent_pool.enqueue_message(inst_name, parsed_content)
-            
-            return {"status": "ok", "message": f"Resumed {len(halted_before)} instances"}
+            agent_pool.resume()  # clear global pause flag — agents wake naturally from sleep loop
+            return {"status": "ok", "message": "All instances resumed"}
         return {"status": "error", "message": "Agent pool not available"}
 
     @app.get("/api/sessions")
@@ -1435,19 +1428,8 @@ def create_app(agents, agent_pool, config=None):
                     # Resume ALL paused instances by clearing the global flag.
                     # Agents wake up naturally from their 100ms sleep loop — no thread restart needed.
                     if agent_pool:
-                        # Capture halted list BEFORE clearing _paused (is_halted checks _paused)
-                        halted_before = [n for n in agent_pool.instances.keys() if agent_pool.is_halted(n)]
                         agent_pool.resume()  # clear global pause flag
-                        
-                        cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
-                        parsed_content = _parse_multimodal_content(cont_msg)
-                        for inst_name in halted_before:
-                            agent_pool.enqueue_message(inst_name, parsed_content)
-                        
-                        if not halted_before:
-                            logger.info("resume_all called but no instances were paused — skipping continuation messages")
-                        else:
-                            logger.info(f"Resumed {len(halted_before)} paused instances: {halted_before}")
+                        logger.info("Cleared global pause flag — all agents will resume naturally")
                     
                     # Mark session as generating again
                     with session_lock:
@@ -1468,7 +1450,7 @@ def create_app(agents, agent_pool, config=None):
                     was_halted = False
                     if agent_pool:
                         was_halted = agent_pool.is_halted(target_instance)
-                        agent_pool.resume()
+                        agent_pool.resume()  # clear global pause flag
                         logger.info(f"Instance {target_instance} resumed by user. Was halted: {was_halted}")
                     
                     # For the main session: only restart generation if it was actually halted
@@ -1483,13 +1465,7 @@ def create_app(agents, agent_pool, config=None):
                             await asyncio.sleep(0.1)
                         
                         if was_halted:
-                            # Was halted (regardless of generating state — we already handled the generating case above)
-                            # Enqueue continuation message — same queue drained during turn loop
-                            cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
-                            parsed_content = _parse_multimodal_content(cont_msg)
-                            if agent_pool:
-                                agent_pool.enqueue_message(target_instance, parsed_content)
-                            
+                            # Was halted — agents wake naturally from sleep loop, no continuation message needed
                             # Start agent generation
                             with session_lock:
                                 session['stop_requested'] = False
