@@ -1125,6 +1125,14 @@ function handleServerMessage(data) {
       if (!state.activeSubTab) {
         switchMainTab(getAgentTabId(state.sessionName));
       }
+
+      // Ensure API endpoints and assignments are rendered after full state update.
+      // Only re-render here if api_router wasn't in this message (already handled above).
+      // This covers the case where api_router arrived in a prior message but agents arrived later.
+      if (!data.api_router) {
+        renderApiEndpoints();
+        renderAgentApiAssignments();
+      }
       updateControls();
 
       // Update stats if generating — pass active agent messages
@@ -4184,10 +4192,19 @@ function handleApiEndpointKeydown(e) {
 
 function renderAgentApiAssignments() {
   const container = document.getElementById('agent-api-assignments');
-  if (!container || !state.api_router || !state.agents) return;
-
-  const endpoints = state.api_router.endpoints || [];
-  const priorities = state.api_router.agent_priorities || {};
+  if (!container) return;
+  
+  const endpoints = (state.api_router && state.api_router.endpoints) ? state.api_router.endpoints : [];
+  const priorities = (state.api_router && state.api_router.agent_priorities) ? state.api_router.agent_priorities : {};
+  
+  // Show placeholder when agents haven't loaded yet (no endpoints to assign anyway)
+  if (endpoints.length === 0) {
+    container.innerHTML = `
+      <div style="text-align:center;color:var(--text-muted);padding:12px;font-size:12px;">
+        Add endpoints above, then assign them to agent types.
+      </div>`;
+    return;
+  }
 
   // Extract unique agent types and their friendly names
   const typeToName = {};

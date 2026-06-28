@@ -49,27 +49,14 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] max tokens does not change when a new API endpoint is acquired 
 - [x] randomly duplicated agent log entries for tool outputs
 - [x] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck
-- [x] loop detector triggers and just kicks back to parent instead of applying rollback and retrying — FIXED (same as above)
+- [ ] loop detector is appending to agent pool the first user message on rollback instead of surgically removing the loop only
 - [ ] images don't get properly pasted in chat
+- [ ] session load must also load the type of agent and instance name from the json file and use that
 - [x] dismiss: all_idle is borked — FIXED (8a1d3cf, 3064488): fixed tuple mismatch in active_stack check, hardcoded 'Maine' guard, missing SLEEPING/halted checks; replaced clear_conversation with dismiss_instance for full cleanup; extracted _capture_log_path helper; added null guards
 - [ ] max_tokens does not get updated when the API endpoint changes
 - [ ] investigate if we can make shell cmd accept special character and multi-line `python -c` commands
       ERROR: 'charmap' codec can't encode character '\u2717' in position 0: character maps to <undefined>
 
 # Errors to investigate:
-- [x] **FIXED** Security agent returns properly formatted answer but system remained halted — root cause was Python closure late-binding bug in `_security_check()` (api_server.py:1903). Variables `rid`, `auto_apply`, `ap` were captured by reference, so when another message arrived and reassigned them, the security thread approved the wrong operation. Fix: added default argument binding `def _security_check(rid=rid, auto_apply=auto_apply, ap=ap, loop=loop)` to capture by value.
-2026-06-28 06:39:46,160 - execution_engine.py - 649 - DEBUG - engine.run() ENTRY - instance=Security_op_15493c14
-2026-06-28 06:39:46,160 - execution_engine.py - 706 - DEBUG - [SLOT_BYPASS] Skipping slot acquire - instance=Security_op_15493c14, class=Security (nested invocation)
-2026-06-28 06:39:46,161 - execution_engine.py - 975 - INFO - [CACHE_REBUILD] Rebuilding working set for Security_op_15493c14
-2026-06-28 06:39:46,161 - execution_engine.py - 1053 - DEBUG - [CACHE_REBUILD] System prompt content CHANGED for Security_op_15493c14
-2026-06-28 06:39:46,163 - agent_instance_logger.py - 504 - INFO - Rewrote agent log n:\work\WD\AgentWorkspace\logs\security_Security_op_15493c14_20260628_063946.jsonl with 2 messages.
-2026-06-28 06:39:46,166 - base.py - 949 - INFO - Agent [Security] - ALL tokens: 315, Available tokens: 164578
-2026-06-28 06:39:49,796 - execution_engine.py - 852 - DEBUG - [SLOT_FINAL] Before finally release - instance=Security_op_15493c14, slot_held=False
-2026-06-28 06:39:49,815 - execution_engine.py - 2585 - DEBUG - [SLOT_RELEASE] _slot_release already None for Security_op_15493c14 during cleanup
-2026-06-28 06:39:49,816 - execution_engine.py - 862 - DEBUG - [SLOT_FINAL] After finally release - instance=Security_op_15493c14, slot_still_held=False
-2026-06-28 06:39:49,816 - execution_engine.py - 904 - DEBUG - EXIT - Security_op_15493c14 RUNNING→IDLE
-2026-06-28 06:39:49,817 - api_server.py - 2302 - INFO - [SECURITY] Automatic Approval for op_bff24d98 with justification: Read-only `git diff --stat` operation comparing tw...
-2026-06-28 06:39:49,817 - api_server.py - 2372 - DEBUG - [SECURITY] Released active check for op_bff24d98
-2026-06-28 06:39:50,587 - api_server.py - 1986 - WARNING - Security check already active for request op_15493c14, ignoring duplicate.
 
 # EOF

@@ -97,15 +97,28 @@ def update_config(server_config, args, server_config_path):
 def main():
     args = parse_args()
     server_config_path = Path(__file__).resolve().parent / 'agent_server/server_config.json'
-    with open(server_config_path, 'r') as f:
-        server_config = json.load(f)
-        server_config = GlobalConfig(**server_config)
+
+    try:
+        with open(server_config_path, 'r') as f:
+            server_config = json.load(f)
+            server_config = GlobalConfig(**server_config)
+    except FileNotFoundError:
+        logger.error("[FATAL] Server config not found: %s", server_config_path)
+        raise SystemExit(1)
+    except Exception as e:
+        logger.error("[FATAL] Failed to parse server config: %s", e)
+        raise SystemExit(1)
+
     server_config = update_config(server_config, args, server_config_path)
 
-    os.makedirs(server_config.path.work_space_root, exist_ok=True)
-    os.makedirs(server_config.path.download_root, exist_ok=True)
+    try:
+        os.makedirs(server_config.path.work_space_root, exist_ok=True)
+        os.makedirs(server_config.path.download_root, exist_ok=True)
+        os.makedirs(server_config.path.code_interpreter_ws, exist_ok=True)
+    except Exception as e:
+        logger.error("[FATAL] Cannot create workspace directories: %s", e)
+        raise SystemExit(1)
 
-    os.makedirs(server_config.path.code_interpreter_ws, exist_ok=True)
     code_interpreter_work_dir = str(Path(__file__).resolve().parent / server_config.path.code_interpreter_ws)
 
     # TODO: Remove these two hacky code interpreter env vars.
@@ -121,23 +134,25 @@ def main():
     static_url = f'http://{static_url}:{server_config.server.fast_api_port}/static'
     os.environ['M6_CODE_INTERPRETER_STATIC_URL'] = static_url
 
-    servers = {
-        'database':
-            subprocess.Popen([
-                sys.executable,
-                os.path.join(os.getcwd(), 'agent_server/database_server.py'),
-            ]),
-        'workstation':
-            subprocess.Popen([
-                sys.executable,
-                os.path.join(os.getcwd(), 'agent_server/workstation_server.py'),
-            ]),
-        'assistant':
-            subprocess.Popen([
-                sys.executable,
-                os.path.join(os.getcwd(), 'agent_server/assistant_server.py'),
-            ]),
+    servers = {}
+    server_names = ['database', 'workstation', 'assistant']
+    server_scripts = {
+        'database': 'agent_server/database_server.py',
+        'workstation': 'agent_server/workstation_server.py',
+        'assistant': 'agent_server/assistant_server.py',
     }
+
+    for name, script in server_scripts.items():
+        try:
+            proc = subprocess.Popen([sys.executable, os.path.join(os.getcwd(), script)])
+            servers[name] = proc
+            logger.info("[INIT] Started %s server (PID %d)", name, proc.pid)
+        except Exception as e:
+            logger.error("[FATAL] Failed to start %s server: %s", name, e)
+            # Clean up already-started servers
+            for v in servers.values():
+                v.terminate()
+            raise SystemExit(1)
 
     def signal_handler(sig_num, _frame):
         for v in servers.values():
@@ -150,8 +165,11 @@ def main():
     append_signal_handler(signal.SIGINT, signal_handler)
     append_signal_handler(signal.SIGTERM, signal_handler)
 
-    for p in list(servers.values()):
-        p.wait()
+    try:
+        for p in list(servers.values()):
+            p.wait()
+    except KeyboardInterrupt:
+        logger.info("\n[INFO] Interrupted by user.")
 
 
 if __name__ == '__main__':

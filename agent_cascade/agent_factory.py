@@ -11,7 +11,7 @@ from agent_cascade.log import logger
 from agent_cascade.tools.code_interpreter import CodeInterpreter
 from agent_cascade.tools.custom import (
     ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep,
-    DeleteFile, CopyFile, ReIndent, ListAgents, ShellCmd, SystemInfo,
+    DeleteFile, CopyFile, ReIndent, ListAgents, ShellCmd,
     ReadLogs, Calculate, CodeMap, ForgetLast, SyntaxCheck,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
@@ -92,11 +92,6 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
     shell_tool.agent_name = agent_name
     agent.function_map['shell_cmd'] = shell_tool
 
-    info_tool = SystemInfo()
-    info_tool.agent_pool = agent_pool
-    info_tool.agent_name = agent_name
-    agent.function_map['system_info'] = info_tool
-
     # ── Log Reading ──
     read_logs_tool = ReadLogs()
     read_logs_tool.agent_pool = agent_pool
@@ -116,18 +111,21 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
     # ── Code Interpreter (sandbox) ──
     try:
         om = agent_pool.operation_manager
-        code_cfg = {'work_dir': str(om.base_dir)}
-        if hasattr(om, 'extra_work_folders_ro') and om.extra_work_folders_ro:
-            code_cfg['extra_work_folders_ro'] = [str(p) for p in om.extra_work_folders_ro]
-        if hasattr(om, 'extra_work_folders_rw') and om.extra_work_folders_rw:
-            code_cfg['extra_work_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
-        # Debug log when no extra folders are configured so operators know why nothing is mounted
-        if not code_cfg.get('extra_work_folders_ro') and not code_cfg.get('extra_work_folders_rw'):
-            logger.debug("CodeInterpreter: No extra work folders configured (RO/RW)")
-        code_tool = CodeInterpreter(cfg=code_cfg)
-        # Pass operation_manager reference so _start_kernel can read updated extra folders dynamically
-        code_tool._operation_manager = om
-        agent.function_map['code_interpreter'] = code_tool
+        if om is not None:
+            code_cfg = {'work_dir': str(om.base_dir)}
+            if hasattr(om, 'extra_work_folders_ro') and om.extra_work_folders_ro:
+                code_cfg['extra_work_folders_ro'] = [str(p) for p in om.extra_work_folders_ro]
+            if hasattr(om, 'extra_work_folders_rw') and om.extra_work_folders_rw:
+                code_cfg['extra_work_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
+            # Debug log when no extra folders are configured so operators know why nothing is mounted
+            if not code_cfg.get('extra_work_folders_ro') and not code_cfg.get('extra_work_folders_rw'):
+                logger.debug("CodeInterpreter: No extra work folders configured (RO/RW)")
+            code_tool = CodeInterpreter(cfg=code_cfg)
+            # Pass operation_manager reference so _start_kernel can read updated extra folders dynamically
+            code_tool._operation_manager = om
+            agent.function_map['code_interpreter'] = code_tool
+        else:
+            logger.warning("Skipping CodeInterpreter for agent %s: operation_manager is None", agent_name)
     except Exception as e:
         logger.warning(f"Failed to load CodeInterpreter for agent {agent_name}: {e}")
 

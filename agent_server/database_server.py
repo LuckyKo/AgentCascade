@@ -36,9 +36,17 @@ from agent_server.schema import GlobalConfig
 from agent_server.utils import rm_browsing_meta_data, save_browsing_meta_data, save_history
 
 # Read config
-with open(Path(__file__).resolve().parent / 'server_config.json', 'r') as f:
-    server_config = json.load(f)
-    server_config = GlobalConfig(**server_config)
+config_path = Path(__file__).resolve().parent / 'server_config.json'
+try:
+    with open(config_path, 'r') as f:
+        server_config = json.load(f)
+        server_config = GlobalConfig(**server_config)
+except FileNotFoundError:
+    logger.error("[FATAL] Server config not found: %s", config_path)
+    raise SystemExit(1)
+except Exception as e:
+    logger.error("[FATAL] Failed to parse server config: %s", e)
+    raise SystemExit(1)
 
 # This APP only requires storage capacity, so using the memory module alone
 mem = Memory()
@@ -108,7 +116,8 @@ def cache_page(**kwargs):
         *_, last = mem.run([{'role': 'user', 'content': [{'file': url}]}])
         title = get_basename_from_url(url)
         save_browsing_meta_data(url, title, meta_file)
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to process page content for %s: %s", url, e)
         rm_browsing_meta_data(url, meta_file)
 
 
@@ -134,6 +143,14 @@ async def web_listening(request: Request):
 
 
 if __name__ == '__main__':
-    uvicorn.run(app='database_server:app',
-                host=server_config.server.server_host,
-                port=server_config.server.fast_api_port)
+    port = server_config.server.fast_api_port
+    try:
+        uvicorn.run(app='database_server:app',
+                    host=server_config.server.server_host,
+                    port=port)
+    except OSError as e:
+        if e.errno == 98 or 'address already in use' in str(e).lower():
+            logger.error("[FATAL] Port %d is already in use. Check other running services.", port)
+        else:
+            logger.error("[FATAL] Database server failed to start: %s", e)
+        raise SystemExit(1)

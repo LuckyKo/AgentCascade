@@ -25,12 +25,15 @@ WebSocket protocol (all JSON):
     {"type": "approvals", "approvals": [...]}
 """
 
+import argparse
 import asyncio
 import copy
 import glob
 import json
 import os
 import re
+import signal
+import sys
 import threading
 import time
 import traceback
@@ -73,6 +76,11 @@ from agent_cascade.agent_pool import ACTIVE_STATES
 from agent_cascade.agent_instance import AgentState, InvalidStateTransition
 
 # Pre-compiled regexes moved to agent_cascade.utils.thinking_block
+
+# Module-level lock used by helper functions before create_app() runs.
+# Overwritten inside create_app() for the per-app instance, but safe as a fallback.
+import threading
+session_lock = threading.Lock()
 
 # LLM config keys for update_config optimization (defense-in-depth)
 LLM_CONFIG_KEYS = frozenset({
@@ -836,7 +844,11 @@ def create_app(agents, agent_pool, config=None):
 
     @app.get("/api/state")
     async def api_get_state():
-        return build_state()
+        try:
+            return build_state()
+        except Exception as e:
+            logger.warning("State build failed: %s", e, exc_info=True)
+            return {"agents": [], "messages": [], "agent_instances": {}, "instances": {}, "active_stack": [], "generating": False, "session_name": "Maine", "instance_name": "Maine", "total_tokens": 0, "total_words": 0, "max_tokens": 2048, "summary": "", "has_queued_messages": False, "stopped": False, "current_model": "Unknown", "telemetry": None, "default_workspace": str(DEFAULT_WORKSPACE), "is_waiting": False, "api_router": {"endpoints": [], "agent_priorities": {}}}
 
     @app.post("/api/reset")
     async def api_reset():
@@ -858,8 +870,8 @@ def create_app(agents, agent_pool, config=None):
         try:
             from agent_cascade.api_integration import _clear_performance_caches
             _clear_performance_caches()
-        except Exception:
-            pass  # Non-critical — caches will self-correct
+        except Exception as e:
+            logger.debug(f"Cache clearing failed during session reset (non-critical): {e}")
         
         # Fix #3 (Feature 020): Wrap session state modifications with session_lock to prevent race condition
         with session_lock:
@@ -1069,7 +1081,8 @@ def create_app(agents, agent_pool, config=None):
         try:
             init = {'type': 'state', **build_state()}
             await websocket.send_text(json.dumps(init, ensure_ascii=False, default=str))
-        except Exception:
+        except Exception as e:
+            logger.warning(f"WebSocket initial state send failed: {e}")
             ws_connections.discard(websocket)
             return
 
@@ -2003,8 +2016,8 @@ def create_app(agents, agent_pool, config=None):
                                             clean_text = _THINK_BLOCK_RE.sub('', clean_text)
                                         if '[think' in clean_text.lower() or '[thought' in clean_text.lower():
                                             clean_text = _THINK_BLOCK_BRACKET_RE.sub('', clean_text).strip()
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        logger.debug(f"Thinking block stripping failed (non-critical): {e}")
                                         
                                     # Initialize verdict defaults before parsing
                                     is_yes = False
@@ -2180,8 +2193,8 @@ def create_app(agents, agent_pool, config=None):
                                             agent_pool.instance_state[sec_state_key]['active'] = False
                                         try:
                                             agent_pool.active_stack_remove(sec_state_key)
-                                        except Exception:
-                                            pass  # Already removed or never existed - non-critical
+                                        except Exception as e:
+                                            logger.debug(f"Active stack removal failed for {sec_state_key} (non-critical): {e}")
 
                                     # Fix #3: Release endpoint slot when done
                                     if hasattr(app, 'active_security_checks') and rid:
@@ -2261,8 +2274,8 @@ def create_app(agents, agent_pool, config=None):
                     try:
                         from agent_cascade.api_integration import _clear_performance_caches
                         _clear_performance_caches()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Cache clearing failed during message edit (non-critical): {e}")
                     
                     await broadcast({'type': 'state', **build_state()})
                             
@@ -2303,8 +2316,8 @@ def create_app(agents, agent_pool, config=None):
                     try:
                         from agent_cascade.api_integration import _clear_performance_caches
                         _clear_performance_caches()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Cache clearing failed during message deletion (non-critical): {e}")
                     
                     await broadcast({'type': 'state', **build_state()})
 
@@ -2352,8 +2365,8 @@ def create_app(agents, agent_pool, config=None):
                                 try:
                                     from agent_cascade.api_integration import _clear_performance_caches
                                     _clear_performance_caches()
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    logger.debug(f"Cache clearing failed during session load (non-critical): {e}")
                                 await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'inject':
@@ -2461,12 +2474,11 @@ def create_app(agents, agent_pool, config=None):
 
 if __name__ == "__main__":
     import uvicorn
-    import argparse
     from agent_cascade.agent_pool import AgentPool
 
     # Resolve project root: api_server.py lives inside agent_cascade/, so go up one level
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
-    
+
     parser = argparse.ArgumentParser(description="AgentCascade API Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=12345, help="Port to bind to")
@@ -2485,33 +2497,57 @@ if __name__ == "__main__":
         'api_base': os.getenv('QWEN_AGENT_API_BASE', 'https://api.openai.com/v1'),
         'api_key': os.getenv('QWEN_AGENT_API_KEY', 'EMPTY'),
     }
-    
+
     # Resolve idle timeout settings: CLI > env var > default
     idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
     idle_check_interval = args.idle_check_interval if args.idle_check_interval is not None else float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
-    
+
     # Create OperationManager for blocking user approvals on mutating operations
     from agent_cascade.operation_manager import OperationManager
-    operation_mgr = OperationManager(base_dir=args.workspace)
-    
-    agent_pool = AgentPool(
-        llm_cfg=initial_llm_cfg,
-        agents_dir=str(PROJECT_ROOT / 'agents'),
-        workspace_dir=args.workspace,
-        operation_manager=operation_mgr,
-    )
+    try:
+        operation_mgr = OperationManager(base_dir=args.workspace)
+        logger.debug("OperationManager initialized with base_dir: %s", args.workspace)
+    except Exception as e:
+        logger.error("[FATAL] OperationManager initialization failed: %s", e)
+        raise SystemExit(1)
+
+    try:
+        agent_pool = AgentPool(
+            llm_cfg=initial_llm_cfg,
+            agents_dir=str(PROJECT_ROOT / 'agents'),
+            workspace_dir=args.workspace,
+            operation_manager=operation_mgr,
+        )
+        logger.debug("AgentPool created successfully")
+    except Exception as e:
+        logger.error("[FATAL] AgentPool creation failed: %s", e)
+        raise SystemExit(1)
+
     operation_mgr.agent_pool = agent_pool
-    
+
     # Set idle timeout settings via PoolSettings (new pool uses PoolSettings instead of constructor args)
     agent_pool.settings.idle_timeout_seconds = idle_timeout
     agent_pool.settings.idle_check_interval = idle_check_interval
-    
+
     # Create the root orchestrator instance in the new pool (use lowercase to match template key)
-    agent_pool.create_instance('Maine', 'orchestrator')
-    
+    try:
+        agent_pool.create_instance('Maine', 'orchestrator')
+        logger.debug("Orchestrator instance 'Maine' created")
+    except Exception as e:
+        logger.error("[FATAL] Failed to create orchestrator instance: %s", e)
+        raise SystemExit(1)
+
+    # Start background services (idle checker thread, etc.)
+    try:
+        agent_pool.start()
+        logger.debug("AgentPool background services started")
+    except Exception as e:
+        logger.error("[FATAL] Failed to start AgentPool background services: %s", e)
+        raise SystemExit(1)
+
     # Get the orchestrator agent template for create_app (new pool separates instances from templates)
     orch_agent = agent_pool.get_agent('orchestrator')
-    
+
     # Inject system message into Maine's conversation so the soul content flows into the instance
     # Priority: base_system_message > system_message (matches the priority chain in run_agent_thread)
     sys_msg_content = None
@@ -2519,15 +2555,52 @@ if __name__ == "__main__":
         sys_msg_content = str(orch_agent.base_system_message)
     elif hasattr(orch_agent, 'system_message') and orch_agent.system_message:
         sys_msg_content = str(orch_agent.system_message)
-    
+
     if sys_msg_content:
         from agent_cascade.llm.schema import Message, SYSTEM
         maine_inst = agent_pool.get_instance('Maine')
         if maine_inst and not maine_inst.conversation:
             # PR3 migration: Use centralized API for system message append at server startup
             maine_inst.append_messages([Message(role=SYSTEM, content=sys_msg_content)])
-    
-    app = create_app(agents=[orch_agent], agent_pool=agent_pool)
-    
-    logger.info("Starting AgentCascade API Server on %s:%d", args.host, args.port)
-    uvicorn.run(app, host=args.host, port=args.port)
+
+    try:
+        app = create_app(agents=[orch_agent], agent_pool=agent_pool)
+        logger.debug("FastAPI app created successfully")
+    except Exception as e:
+        logger.error("[FATAL] Failed to create API server app: %s", e)
+        raise SystemExit(1)
+
+    port = args.port
+    logger.info("\n[OK] API Server ready!")
+    logger.info("    -> Open http://127.0.0.1:%d in your browser", port)
+    logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", port)
+    logger.info("    -> REST API at http://127.0.0.1:%d/api/", port)
+    logger.info("=" * 50)
+
+    # Set up graceful shutdown handler
+    def handle_shutdown(signum, frame):
+        logger.info("\n[INFO] Initiating graceful shutdown...")
+        agent_pool.stopped = True
+        if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
+            try:
+                agent_pool.operation_manager.cleanup_backups()
+            except Exception as e:
+                logger.debug(f"Backup cleanup failed during shutdown (non-critical): {e}")
+        logger.info("[INFO] Terminated.")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, handle_shutdown)
+    if os.name != 'nt':
+        signal.signal(signal.SIGTERM, handle_shutdown)
+
+    try:
+        uvicorn.run(app, host=args.host, port=port)
+    except OSError as e:
+        if e.errno == 98 or 'address already in use' in str(e).lower():
+            logger.error("[FATAL] Port %d is already in use. Use --port to specify a different port.", port)
+        else:
+            logger.error("[FATAL] Server failed to start: %s", e)
+        raise SystemExit(1)
+    except Exception as e:
+        logger.error("[FATAL] Server crashed: %s", e)
+        raise SystemExit(1)

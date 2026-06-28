@@ -14,37 +14,24 @@ User Approval System:
 The Orchestrator is also a launchable agent with its own soul.md!
 """
 
-import json
 import os
 import requests
 from pathlib import Path
 from agent_cascade.log import logger
 
-# ── Workspace Detection ──────────────────────────────────────────────────────
-# Detect if we should use a sibling 'AgentWorkspace' instead of the local folder
+# ── Workspace Detection (shared) ─────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.absolute()
-WORKSPACE_DIR = os.getenv('QWEN_AGENT_DEFAULT_WORKSPACE')
-
-if not WORKSPACE_DIR:
-    sibling_ws = PROJECT_ROOT.parent / 'AgentWorkspace'
-    if sibling_ws.exists():
-        WORKSPACE_DIR = str(sibling_ws)
-        os.environ['QWEN_AGENT_DEFAULT_WORKSPACE'] = WORKSPACE_DIR
-        logger.info(f"[INIT] Detected sibling workspace: {WORKSPACE_DIR}")
-    else:
-        WORKSPACE_DIR = str(PROJECT_ROOT / 'workspace')
-        os.environ['QWEN_AGENT_DEFAULT_WORKSPACE'] = WORKSPACE_DIR
-        logger.info(f"[INIT] Using local workspace: {WORKSPACE_DIR}")
+from agent_cascade.shared_init import detect_workspace_dir, ensure_workspace
+WORKSPACE_DIR = detect_workspace_dir(PROJECT_ROOT)
+ensure_workspace(WORKSPACE_DIR)
 
 from bs4 import BeautifulSoup
 # WebUI (Gradio) was replaced by the custom HTML/JS frontend served via FastAPI.
 # Use start_api_server.py instead of this file for the web interface.
 # from agent_cascade.gui import WebUI  # obsolete — removed in unified branch
 from agent_cascade.tools.base import BaseTool, register_tool
-from agent_cascade.agent_pool import AgentPool
-from agent_cascade.agent_factory import load_orchestrator_agent
 
-# Import built-in tools from agent_cascade
+# Import built-in tools from agent_cascade (needed for per-agent tool loading)
 from agent_cascade.tools import (
     image_gen,
     web_extractor,
@@ -54,7 +41,6 @@ from agent_cascade.tools import (
     extract_doc_vocabulary,
     code_interpreter,
 )
-from agent_cascade.tools.custom import SystemInfo
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
 # Register web tools globally
@@ -72,7 +58,7 @@ class DDGSearch(BaseTool):
         },
         'required': ['query'],
     }
-    
+
     def call(self, params: str, **kwargs) -> str:
         params = self._verify_json_format_args(params)
         query = params['query']
@@ -144,135 +130,63 @@ ALL_BUILTIN_TOOLS = [
 ]
 
 
+from agent_cascade.tools.custom import SystemInfo as _SystemInfo
 
 if __name__ == '__main__':
+    import sys
+
     logger.info("Initializing Agent Orchestrator...")
     logger.info("=" * 50)
 
-    # Resolve idle timeout settings from env vars (Issue #2)
-    idle_timeout = float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
-    idle_check_interval = float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
-
-    # Create OperationManager for blocking user approvals on mutating operations
-    from agent_cascade.operation_manager import OperationManager
-    operation_mgr = OperationManager(base_dir=WORKSPACE_DIR)
-
-    # Create agent pool (auto-loads all agents from /agents directory)
-    agent_pool = AgentPool(
-        llm_cfg, str(PROJECT_ROOT / 'agents'), workspace_dir=WORKSPACE_DIR,
-        operation_manager=operation_mgr,
+    # ── Infrastructure initialization (delegated to shared module) ────────────
+    from agent_cascade.shared_init import (
+        initialize_infrastructure, load_tools_per_agent,
+        load_orchestrator, build_all_agents_list,
     )
 
-    # Set back-reference so OperationManager can check pool.stopped during approval loops
-    operation_mgr.agent_pool = agent_pool
+    operation_mgr, agent_pool, _ = initialize_infrastructure(
+        PROJECT_ROOT, llm_cfg, use_shared_tools=False,
+    )
 
-    # Configure pool settings before starting background services (avoids race window)
-    if hasattr(agent_pool, 'settings'):  # TODO: Remove hasattr guard once old pool files are fully removed
-        agent_pool.settings.idle_timeout_seconds = idle_timeout
-        agent_pool.settings.idle_check_interval = idle_check_interval
-
-    # Start background services (idle checker thread, etc.)
-    agent_pool.start()
-
-    # Add tools to all agents based on their role
+    # Add tools to all agents based on their role (per-agent pattern)
     for agent_name in agent_pool.list_agents():
         agent = agent_pool.get_agent(agent_name)
         if agent:
             # Get default tools for this agent type
             default_tools = DEFAULT_TOOLS.get(agent_name, DEFAULT_TOOLS['writer'])
-            
+
             # Always add web tools and system info
             agent.function_map['ddg_search'] = DDGSearch()
-            agent.function_map['system_info'] = SystemInfo(agent_pool=agent_pool)
-            
-            # Add default built-in tools
-            if 'image_gen' in default_tools:
-                try:
-                    agent.function_map['image_gen'] = image_gen.ImageGen(llm_cfg=llm_cfg)
-                except Exception:
-                    pass
-            
-            if 'web_extractor' in default_tools:
-                agent.function_map['web_extractor'] = web_extractor.WebExtractor(cfg={'work_dir': DEFAULT_WORKSPACE})
-            
-            if 'storage' in default_tools:
-                agent.function_map['storage'] = storage.Storage()
-            
-            if 'retrieval' in default_tools:
-                from agent_cascade.tools import retrieval
-                agent.function_map['retrieval'] = retrieval.Retrieval(cfg={'work_dir': DEFAULT_WORKSPACE})
-            
-            if 'simple_doc_parser' in default_tools:
-                agent.function_map['simple_doc_parser'] = simple_doc_parser.SimpleDocParser(cfg={'work_dir': DEFAULT_WORKSPACE})
-            
-            if 'doc_parser' in default_tools:
-                agent.function_map['doc_parser'] = doc_parser.DocParser(cfg={'work_dir': DEFAULT_WORKSPACE})
-            
-            if 'extract_doc_vocabulary' in default_tools:
-                agent.function_map['extract_doc_vocabulary'] = extract_doc_vocabulary.ExtractDocVocabulary(cfg={'work_dir': DEFAULT_WORKSPACE})
-            
-            if 'code_interpreter' in default_tools:
-                try:
-                    agent.function_map['code_interpreter'] = code_interpreter.CodeInterpreter(cfg={'work_dir': DEFAULT_WORKSPACE})
-                    agent.function_map['code_interpreter']._operation_manager = agent_pool.operation_manager
-                except Exception:
-                    pass
+            agent.function_map['system_info'] = _SystemInfo(agent_pool=agent_pool)
 
-    # Load orchestrator with its default tools
-    orchestrator = load_orchestrator_agent(agent_pool, llm_cfg)
+            # Load built-in tools for this agent (delegated to shared module)
+            load_tools_per_agent(
+                agent, default_tools, llm_cfg, WORKSPACE_DIR,
+                agent_pool, operation_mgr, agent_name=agent_name,
+            )
+
+    # Load orchestrator from the pool
+    orchestrator = load_orchestrator(agent_pool)
 
     # Add web tools and system info to orchestrator
     orchestrator.function_map['ddg_search'] = DDGSearch()
-    orchestrator.function_map['system_info'] = SystemInfo(agent_pool=agent_pool)
+    orchestrator.function_map['system_info'] = _SystemInfo(agent_pool=agent_pool)
 
-    # Add orchestrator's default built-in tools
+    # Load built-in tools for the orchestrator (delegated to shared module)
     default_orch_tools = DEFAULT_TOOLS['orchestrator']
-    if 'image_gen' in default_orch_tools:
-        try:
-            orchestrator.function_map['image_gen'] = image_gen.ImageGen(llm_cfg=llm_cfg)
-        except Exception:
-            pass
-
-    if 'web_extractor' in default_orch_tools:
-        orchestrator.function_map['web_extractor'] = web_extractor.WebExtractor(cfg={'work_dir': DEFAULT_WORKSPACE})
-
-    if 'storage' in default_orch_tools:
-        orchestrator.function_map['storage'] = storage.Storage()
-
-    if 'retrieval' in default_orch_tools:
-        from agent_cascade.tools import retrieval
-        orchestrator.function_map['retrieval'] = retrieval.Retrieval(cfg={'work_dir': DEFAULT_WORKSPACE})
-
-    if 'simple_doc_parser' in default_orch_tools:
-        orchestrator.function_map['simple_doc_parser'] = simple_doc_parser.SimpleDocParser(cfg={'work_dir': DEFAULT_WORKSPACE})
-
-    if 'doc_parser' in default_orch_tools:
-        orchestrator.function_map['doc_parser'] = doc_parser.DocParser(cfg={'work_dir': DEFAULT_WORKSPACE})
-
-    if 'extract_doc_vocabulary' in default_orch_tools:
-        orchestrator.function_map['extract_doc_vocabulary'] = extract_doc_vocabulary.ExtractDocVocabulary(cfg={'work_dir': DEFAULT_WORKSPACE})
-
-    if 'code_interpreter' in default_orch_tools:
-        try:
-            orchestrator.function_map['code_interpreter'] = code_interpreter.CodeInterpreter(cfg={'work_dir': DEFAULT_WORKSPACE})
-            orchestrator.function_map['code_interpreter']._operation_manager = agent_pool.operation_manager
-        except Exception:
-            pass
+    load_tools_per_agent(
+        orchestrator, default_orch_tools, llm_cfg, WORKSPACE_DIR,
+        agent_pool, operation_mgr, agent_name='',  # empty label → 'orchestrator'
+    )
 
     # Also load all sub-agents for the agent selector
-    all_agents = [orchestrator]
-    for agent_name in agent_pool.list_agents():
-        if agent_name != 'orchestrator':  # Don't duplicate
-            sub_agent = agent_pool.get_agent(agent_name)
-            if sub_agent:
-                all_agents.append(sub_agent)
+    all_agents = build_all_agents_list(agent_pool, orchestrator)
 
     logger.info(f"[OK] Available agents: {[a.name for a in all_agents]}")
     logger.info("=" * 50)
 
     # Set up background thread for async terminal messages
     import threading
-    import sys
     def async_input_listener():
         while True:
             try:
@@ -282,15 +196,36 @@ if __name__ == '__main__':
                     target = orchestrator.session_name if hasattr(orchestrator, 'session_name') else 'Maine'
                     agent_pool.enqueue_message(target, msg)
                     logger.info(f"\n[QUEUED] '{msg}' → {target} (will be injected on its next turn)")
-            except Exception:
+            except Exception as e:
+                logger.warning("Async input listener error: %s", e)
                 break
     threading.Thread(target=async_input_listener, daemon=True).start()
 
-    logger.info("\n[TIP] You can type messages in this terminal at ANY TIME to seamlessly inject them into the active agent's thought process without clicking Stop in the WebUI!")
+    # ── Launch the API server (FastAPI + custom HTML/JS frontend) ──────────────
+    try:
+        from agent_cascade.api_server import create_app
+        import uvicorn
+
+        chatbot_config = {
+            'session_name': 'Maine',
+            'verbose': False,
+        }
+
+        app = create_app(all_agents, agent_pool, chatbot_config)
+        logger.debug("FastAPI app created successfully")
+    except Exception as e:
+        logger.error("[FATAL] Failed to create API server app: %s", e)
+        raise SystemExit(1)
+
+    port = int(os.getenv('QWEN_AGENT_PORT', 8765))
+    logger.info("\n[OK] API Server ready!")
+    logger.info("    -> Open http://127.0.0.1:%d in your browser", port)
+    logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", port)
+    logger.info("    -> REST API at http://127.0.0.1:%d/api/", port)
+    logger.info("\n[TIP] Type in this terminal to inject messages into the active agent.")
     logger.info("=" * 50)
 
     import signal
-    import os
 
     def handle_shutdown(signum, frame):
         logger.info("\n[INFO] Initiating graceful shutdown...")
@@ -298,8 +233,8 @@ if __name__ == '__main__':
         if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
             try:
                 agent_pool.operation_manager.cleanup_backups()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Cleanup backups failed during shutdown: %s", e)
         logger.info("[INFO] Terminated.")
         os._exit(0)
 
@@ -307,23 +242,14 @@ if __name__ == '__main__':
     if os.name != 'nt':
         signal.signal(signal.SIGTERM, handle_shutdown)
 
-    # Note: Gradio might try to override signal handlers, but we'll try to catch it first.
-    # To be extremely aggressive against hanging, os._exit(0) is used above.
-
-    # Launch the API server (FastAPI + custom HTML/JS frontend) instead of Gradio WebUI
-    from agent_cascade.api_server import create_app
-    import uvicorn
-
-    chatbot_config = {
-        'session_name': 'Maine',
-        'verbose': False,
-    }
-
-    app = create_app(all_agents, agent_pool, chatbot_config)
-    port = 8765
-    logger.info("\n[OK] API Server ready!")
-    logger.info("    -> Open http://127.0.0.1:%d in your browser", port)
-    logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", port)
-    logger.info("    -> REST API at http://127.0.0.1:%d/api/", port)
-
-    uvicorn.run(app, host='0.0.0.0', port=port, log_level='info')
+    try:
+        uvicorn.run(app, host='0.0.0.0', port=port, log_level='info')
+    except OSError as e:
+        if e.errno == 98 or 'address already in use' in str(e).lower():
+            logger.error("[FATAL] Port %d is already in use. Change QWEN_AGENT_PORT env var or stop the other process.", port)
+        else:
+            logger.error("[FATAL] Server failed to start: %s", e)
+        raise SystemExit(1)
+    except Exception as e:
+        logger.error("[FATAL] Server crashed: %s", e)
+        raise SystemExit(1)

@@ -15,6 +15,8 @@ See DESIGN_REWRITE.md §5 for design rationale.
 
 from typing import Any, Dict, Iterator, List, Optional
 
+import threading
+
 from agent_cascade.llm.schema import (
     ASSISTANT, CONTENT, NAME, REASONING_CONTENT, ROLE, SYSTEM, USER, Message,
 )
@@ -47,6 +49,11 @@ _last_stream_versions: Dict[str, tuple] = {}
 # Cached serialized instance data for unchanged instances (reused across stream_updates)
 _cached_instance_data: Dict[str, dict] = {}
 
+# M1 Fix: UI serialization cache keyed by id(msg). Avoids mutating input dicts.
+_ui_serialization_cache: Dict[int, dict] = {}
+_UI_CACHE_MAXSIZE = 2000  # Bounded to prevent unbounded growth over long sessions
+_ui_cache_lock = threading.Lock()  # Thread-safe access for concurrent UI serialization calls
+
 # BUG31 Fix #4: Cache token stats per instance for build_stream_update_from_pool.
 # During active generation, the conversation doesn't change — skip expensive slice_history_for_llm + get_history_stats.
 # Key: instance_name, Value: (h_stats, r_stats) tuple of dicts
@@ -56,11 +63,12 @@ _STREAM_TOKEN_STATS_CACHE_MAXSIZE = 100  # Bounded cache (FIFO eviction) to prev
 
 def _clear_performance_caches():
     """Clear all module-level performance caches. Called during session reset."""
-    global _token_stats_cache, _cached_instance_data, _stream_token_stats_cache, _last_stream_versions
+    global _token_stats_cache, _cached_instance_data, _stream_token_stats_cache, _last_stream_versions, _ui_serialization_cache
     _token_stats_cache.clear()
     _cached_instance_data.clear()
     _stream_token_stats_cache.clear()
     _last_stream_versions.clear()
+    _ui_serialization_cache.clear()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1031,33 +1039,45 @@ def _find_user_message_insertion_point(conversation: list) -> int:
     return 0
 
 
-def serialize_message(msg: Any, index: Optional[int] = None) -> dict:
-    """Serialize a Message object or dict to a JSON-serializable dict for UI rendering.
+def serialize_message(
+    msg: Any,
+    index: Optional[int] = None,
+    for_ui: bool = True,
+) -> dict:
+    """Serialize a Message object or dict to a JSON-serializable dict.
 
-    Handles Message objects (Pydantic or dataclass), raw dicts, and any object with role/content attributes.
+    Handles Message objects (Pydantic or dataclass), raw dicts, and any object
+    with role/content attributes.
+
     Features:
-      - UI cache support (_ui_cache) to avoid expensive re-serialization of large history messages
+      - UI cache via module-level dict keyed by id(msg) — never mutates input
       - Content list normalization for multimodal messages (text, image, audio, video, file)
-      - Large content truncation at 100K characters for wire-level performance
+      - Large content truncation at 100K characters when for_ui=True
       - function_call normalization (handles objects with .name/.arguments attributes)
-      - None value stripping and internal cache key cleanup (_tokens/_words/_ui_cache)
+      - None value stripping and internal cache key cleanup (_tokens/_words)
       - Extra field extraction (tool_success from extra dict)
 
     Args:
         msg: A Message object, dict, or any object with role/content attributes.
         index: Optional message index for UI ordering.
+        for_ui: If True (default), truncate large content at 100K chars and use
+            the serialization cache. Set to False when serializing for agent
+            reasoning pipelines where full fidelity is needed.
 
     Returns:
         JSON-serializable dictionary.
     """
-    # Use cache if available to avoid expensive re-serialization of large history messages
-    if isinstance(msg, dict) and '_ui_cache' in msg:
-        res = dict(msg['_ui_cache'])
-        # Strip internal keys that might leak from stale cache data or session deserialization
+    # M1: Look up in module-level cache (keyed by id(msg)) instead of mutating input.
+    # Cache stores truncated UI versions — only use when for_ui=True.
+    msg_id = id(msg) if isinstance(msg, dict) else None
+    with _ui_cache_lock:
+        cached = _ui_serialization_cache.get(msg_id)
+    if cached is not None and for_ui:
+        res = dict(cached)  # Copy to avoid mutating the cache entry
+        # Strip internal keys that might leak from stale cache data
         res.pop('_tokens', None)
         res.pop('_words', None)
-        res.pop('_ui_cache', None)
-        # Also strip any None values from cached data (defensive against old code versions)
+        # Also strip any None values (defensive against old code versions)
         for key in list(res.keys()):
             if res[key] is None:
                 del res[key]
@@ -1100,9 +1120,8 @@ def serialize_message(msg: Any, index: Optional[int] = None) -> dict:
                 parts.append(f"![image]({item.image})")
         content = '\n'.join(parts)
 
-    # UI Performance: Truncate exceptionally large content at the wire level.
-    # The full content is still preserved in the backend history and persistent logs.
-    if isinstance(content, str) and len(content) > 100000:
+    # M2: Only truncate when rendering for the UI — preserve full content for agent reasoning
+    if for_ui and isinstance(content, str) and len(content) > 100000:
         content = content[:100000] + "\n\n... [TRUNCATED IN UI FOR PERFORMANCE. Full content is available in the session logs.]"
 
     d['content'] = content or ''
@@ -1125,7 +1144,6 @@ def serialize_message(msg: Any, index: Optional[int] = None) -> dict:
     # so they don't serialize to the frontend.
     d.pop('_tokens', None)
     d.pop('_words', None)
-    d.pop('_ui_cache', None)
 
     # Extract tool_success from extra before stripping — frontend needs it for isToolFailure()
     if 'extra' in d and isinstance(d['extra'], dict):
@@ -1135,17 +1153,28 @@ def serialize_message(msg: Any, index: Optional[int] = None) -> dict:
 
     d.pop('extra', None)
 
-    # UI Performance: Store in cache if the input is a persistent history dict.
-    # CRITICAL: We DO NOT cache if it's the very last message (index 0 means no index set),
-    # as the orchestrator often mutates the latest turn's messages (merging reasoning,
-    # async injections, etc.) and we don't want the UI to "hang" on a stale version.
-    if isinstance(msg, dict) and index is not None and index > 0:
-        msg['_ui_cache'] = dict(d)
+    # M1: Store in module-level cache keyed by id(msg), never mutate the input dict.
+    # Only cache for persistent history dicts (skip index=0 latest turn messages).
+    if msg_id is not None and for_ui and isinstance(msg, dict) and index is not None and index > 0:
+        _store_ui_cache(msg_id, d)
 
     if index is not None:
         d['index'] = index
 
     return d
+
+
+def _store_ui_cache(msg_id: int, cached_data: dict) -> None:
+    """Store serialized message data in the module-level UI cache with bounded size.
+    
+    Uses a deep copy to prevent nested mutable leakage between cached entries.
+    Thread-safe via _ui_cache_lock."""
+    import copy as _copy  # Lazy import — only used during serialization, not hot path
+    with _ui_cache_lock:
+        # Evict oldest entry when cache exceeds max size (FIFO via insertion order)
+        if len(_ui_serialization_cache) >= _UI_CACHE_MAXSIZE:
+            _ui_serialization_cache.pop(next(iter(_ui_serialization_cache)))
+        _ui_serialization_cache[msg_id] = _copy.deepcopy(cached_data)
 
 
 def _check_is_waiting(pool: AgentPool, instance_name: str) -> bool:
