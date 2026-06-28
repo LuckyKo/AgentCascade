@@ -959,25 +959,9 @@ def create_app(agents, agent_pool, config=None):
             return {"status": "ok", "result": result}
         return {"status": "error", "message": "No operation manager"}
 
-    @app.post("/api/halt/{instance_name}")
-    async def api_halt_instance(instance_name: str):
-        """Halt a specific agent instance (pauses it until resumed)."""
-        if agent_pool and hasattr(agent_pool, 'halt_instance'):
-            agent_pool.halt_instance(instance_name)
-            return {"status": "ok", "message": f"Instance {instance_name} halted"}
-        return {"status": "error", "message": "Agent pool not available"}
-
-    @app.post("/api/resume/{instance_name}")
-    async def api_resume_instance(instance_name: str):
-        """Resume a previously halted agent instance."""
-        if agent_pool and hasattr(agent_pool, 'resume_instance'):
-            agent_pool.resume_instance(instance_name)
-            return {"status": "ok", "message": f"Instance {instance_name} resumed"}
-        return {"status": "error", "message": "Agent pool not available"}
-
     @app.post("/api/resume_all")
     async def api_resume_all():
-        """Resume all paused agent instances."""
+        """Resume all paused agent instances (global resume)."""
         if agent_pool:
             agent_pool.resume()  # clear global pause flag — agents wake naturally from sleep loop
             return {"status": "ok", "message": "All instances resumed"}
