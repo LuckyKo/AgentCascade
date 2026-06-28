@@ -2695,7 +2695,7 @@ class ExecutionEngine:
                     logger.debug(
                         f"[SLOT_STOP_CHECK] Stale slot detected after async wakeup for {inst_name}, exiting"
                     )
-                    return SleepAction.CONTINUE_LOOP, None
+                    return SleepAction.BREAK_LOOP, None  # Exit immediately → triggers finally → releases slot
 
             # Continue to normal LLM processing below (in RUNNING state now)
             return SleepAction.CONTINUE_LOOP, None
@@ -2779,7 +2779,7 @@ class ExecutionEngine:
                         logger.debug(
                             f"[SLOT_STOP_CHECK] Stale slot detected after stable drain for {inst_name}, exiting"
                         )
-                        return SleepAction.CONTINUE_LOOP, None
+                        return SleepAction.BREAK_LOOP, None  # Exit immediately → triggers finally → releases slot
 
                 # Loop back; now in RUNNING state → LLM processes injected results
                 return SleepAction.CONTINUE_LOOP, []  # Bridge signal for UI update before LLM processing
