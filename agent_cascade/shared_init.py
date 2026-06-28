@@ -107,7 +107,7 @@ def configure_and_start_pool(agent_pool, idle_timeout: float, idle_check_interva
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  3. Tool instantiation helpers (one per tool, with try/except)
+#  3. Tool instantiation helpers (one per tool)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _instantiate_image_gen(llm_cfg):
@@ -155,10 +155,10 @@ def _instantiate_extract_doc_vocabulary(work_dir: str):
 def _instantiate_code_interpreter(work_dir: str, operation_manager=None):
     """Instantiate the CodeInterpreter tool and attach OperationManager if provided.
 
-    Note: CodeInterpreter.__init__ hardcodes self._operation_manager = None (line 243)
-    and does not read it from the cfg dict, so direct attribute assignment is required.
-    This is safe — _operation_manager is an internal reference used only for dynamic
-    extra-folder resolution (_resolve_extra_folders) and is never mutated externally.
+    Note: CodeInterpreter.__init__ hardcodes self._operation_manager = None and does not
+    read it from the cfg dict, so direct attribute assignment is required. This is safe —
+    _operation_manager is an internal reference used only for dynamic extra-folder
+    resolution (_resolve_extra_folders) and is never mutated externally.
     """
     from agent_cascade.tools import code_interpreter
     inst = code_interpreter.CodeInterpreter(cfg={'work_dir': work_dir})
@@ -171,6 +171,116 @@ def _instantiate_system_info(agent_pool):
     """Instantiate the SystemInfo tool."""
     from agent_cascade.tools.custom import SystemInfo
     return SystemInfo(agent_pool=agent_pool)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Tool registry: maps tool_name -> (factory_fn, list_of_required_param_names)
+#
+# Each entry declares which keyword arguments the factory needs. The loader
+# inspects this list and builds a kwargs dict from whatever is available at call
+# time. If a required param is None/missing the tool is skipped (logged at DEBUG).
+# ──────────────────────────────────────────────────────────────────────────────
+
+TOOL_REGISTRY = {
+    'image_gen':            (_instantiate_image_gen,           ['llm_cfg']),
+    'web_extractor':        (_instantiate_web_extractor,       ['work_dir']),
+    'storage':              (_instantiate_storage,             []),
+    'retrieval':            (_instantiate_retrieval,           ['work_dir']),
+    'simple_doc_parser':    (_instantiate_simple_doc_parser,   ['work_dir']),
+    'doc_parser':           (_instantiate_doc_parser,          ['work_dir']),
+    'extract_doc_vocabulary': (_instantiate_extract_doc_vocabulary, ['work_dir']),
+    'code_interpreter':     (_instantiate_code_interpreter,    ['work_dir']),
+    'system_info':          (_instantiate_system_info,         ['agent_pool']),
+}
+
+# Human-readable display names (used in log messages)
+TOOL_DISPLAY = {
+    'image_gen':              'ImageGen',
+    'web_extractor':          'WebExtractor',
+    'storage':                'Storage',
+    'retrieval':              'Retrieval',
+    'simple_doc_parser':      'SimpleDocParser',
+    'doc_parser':             'DocParser',
+    'extract_doc_vocabulary': 'ExtractDocVocabulary',
+    'code_interpreter':       'CodeInterpreter',
+    'system_info':            'SystemInfo',
+}
+
+
+def _load_tool(name, registry, work_dir=None, llm_cfg=None, operation_manager=None, agent_pool=None):
+    """
+    Look up *name* in the tool registry and instantiate it.
+
+    Returns the tool instance on success, or ``None`` on failure (logged at WARNING).
+    """
+    if name not in registry:
+        return None
+
+    factory, required_params = registry[name]
+    display_name = TOOL_DISPLAY.get(name, name)
+
+    # Source pool of all available keyword arguments
+    param_pool = {
+        'work_dir': work_dir or DEFAULT_WORKSPACE,
+        'llm_cfg': llm_cfg,
+        'operation_manager': operation_manager,
+        'agent_pool': agent_pool,
+    }
+
+    # Build kwargs from the subset the factory actually needs
+    kwargs = {}
+    for p in required_params:
+        val = param_pool.get(p)
+        if val is None and p != 'work_dir':  # work_dir always has a default via DEFAULT_WORKSPACE
+            logger.debug("[INIT] %s skipped (missing required param '%s')", display_name, p)
+            return None
+        kwargs[p] = val
+
+    try:
+        instance = factory(**kwargs)
+        logger.debug("[INIT] %s tool loaded", display_name)
+        return instance
+    except Exception as e:
+        logger.warning("[INIT] %s tool skipped (not available): %s", display_name, e)
+        return None
+
+
+def _load_tool_for_agent(name, registry, agent, label, work_dir=None, llm_cfg=None, operation_manager=None, agent_pool=None):
+    """
+    Instantiate *name* for a single agent and store it in ``agent.function_map``.
+
+    Returns the tool instance on success, or ``None`` on failure (logged at WARNING).
+    """
+    if name not in registry:
+        return None
+
+    factory, required_params = registry[name]
+    display_name = TOOL_DISPLAY.get(name, name)
+
+    # Source pool of all available keyword arguments
+    param_pool = {
+        'work_dir': work_dir or DEFAULT_WORKSPACE,
+        'llm_cfg': llm_cfg,
+        'operation_manager': operation_manager,
+        'agent_pool': agent_pool,
+    }
+
+    kwargs = {}
+    for p in required_params:
+        val = param_pool.get(p)
+        if val is None and p != 'work_dir':  # work_dir always has a default via DEFAULT_WORKSPACE
+            logger.debug("[INIT] %s skipped for %s (missing required param '%s')", display_name, label, p)
+            return None
+        kwargs[p] = val
+
+    try:
+        instance = factory(**kwargs)
+        agent.function_map[name] = instance
+        logger.debug("[INIT] %s loaded for %s", display_name, label)
+        return instance
+    except Exception as e:
+        logger.warning("[INIT] %s skipped for %s: %s", display_name, label, e)
+        return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -187,33 +297,26 @@ def load_tools_shared(
     This is the pattern used by start_api_server.py (tools are shared in memory).
     All tools use DEFAULT_WORKSPACE from settings — no per-call work_dir needed.
     """
+    # Shared tools subset: only the tools that make sense to share across agents
+    SHARED_TOOL_NAMES = ('system_info', 'image_gen', 'web_extractor', 'code_interpreter')
+
+    # Explicitly pass DEFAULT_WORKSPACE so the dependency is visible in the call site
+    work_dir = DEFAULT_WORKSPACE
+
     tools = {}
-
-    try:
-        tools['system_info'] = _instantiate_system_info(agent_pool)
-        logger.debug("[INIT] SystemInfo tool loaded")
-    except Exception as e:
-        logger.debug("[INIT] SystemInfo skipped (not available): %s", e)
-
-    try:
-        tools['image_gen'] = _instantiate_image_gen(llm_cfg)
-        logger.debug("[INIT] ImageGen tool loaded")
-    except Exception as e:
-        logger.debug("[INIT] ImageGen tool skipped (not available): %s", e)
-
-    try:
-        tools['web_extractor'] = _instantiate_web_extractor(DEFAULT_WORKSPACE)
-        logger.debug("[INIT] WebExtractor tool loaded")
-    except Exception as e:
-        logger.debug("[INIT] WebExtractor tool skipped (not available): %s", e)
-
-    try:
-        tools['code_interpreter'] = _instantiate_code_interpreter(
-            DEFAULT_WORKSPACE, operation_manager
+    for name in SHARED_TOOL_NAMES:
+        instance = _load_tool(
+            name, TOOL_REGISTRY,
+            work_dir=work_dir, llm_cfg=llm_cfg,
+            operation_manager=operation_manager, agent_pool=agent_pool,
         )
-        logger.debug("[INIT] CodeInterpreter tool loaded")
-    except Exception as e:
-        logger.debug("[INIT] CodeInterpreter tool skipped (not available): %s", e)
+        if instance is not None:
+            tools[name] = instance
+
+    # Safety net: catch SHARED_TOOL_NAMES entries missing from TOOL_REGISTRY
+    missing = set(SHARED_TOOL_NAMES) - set(TOOL_REGISTRY)
+    if missing:
+        logger.debug("[INIT] Shared tools not in registry (likely a bug): %s", sorted(missing))
 
     if not tools:
         logger.warning("[INIT] No tools were successfully loaded — agents will have limited capabilities")
@@ -235,70 +338,15 @@ def load_tools_per_agent(
     # DDGSearch and system_info are added by callers directly (lightweight, no shared state)
     # We only handle the built-in tools here.
 
-    if 'image_gen' in default_tools:
-        try:
-            agent.function_map['image_gen'] = _instantiate_image_gen(llm_cfg)
-            logger.debug("[INIT] ImageGen loaded for %s", label)
-        except Exception as e:
-            logger.debug("[INIT] ImageGen skipped for %s: %s", label, e)
-
-    if 'web_extractor' in default_tools:
-        try:
-            agent.function_map['web_extractor'] = _instantiate_web_extractor(DEFAULT_WORKSPACE)
-            logger.debug("[INIT] WebExtractor loaded for %s", label)
-        except Exception as e:
-            logger.debug("[INIT] WebExtractor skipped for %s: %s", label, e)
-
-    if 'storage' in default_tools:
-        try:
-            agent.function_map['storage'] = _instantiate_storage()
-            logger.debug("[INIT] Storage loaded for %s", label)
-        except Exception as e:
-            logger.debug("[INIT] Storage skipped for %s: %s", label, e)
-
-    if 'retrieval' in default_tools:
-        try:
-            agent.function_map['retrieval'] = _instantiate_retrieval(DEFAULT_WORKSPACE)
-            logger.debug("[INIT] Retrieval loaded for %s", label)
-        except Exception as e:
-            logger.debug("[INIT] Retrieval skipped for %s: %s", label, e)
-
-    if 'simple_doc_parser' in default_tools:
-        try:
-            agent.function_map['simple_doc_parser'] = _instantiate_simple_doc_parser(DEFAULT_WORKSPACE)
-            logger.debug("[INIT] SimpleDocParser loaded for %s", label)
-        except Exception as e:
-            logger.debug("[INIT] SimpleDocParser skipped for %s: %s", label, e)
-
-    if 'doc_parser' in default_tools:
-        try:
-            agent.function_map['doc_parser'] = _instantiate_doc_parser(DEFAULT_WORKSPACE)
-            logger.debug("[INIT] DocParser loaded for %s", label)
-        except Exception as e:
-            logger.debug("[INIT] DocParser skipped for %s: %s", label, e)
-
-    if 'extract_doc_vocabulary' in default_tools:
-        try:
-            agent.function_map['extract_doc_vocabulary'] = _instantiate_extract_doc_vocabulary(DEFAULT_WORKSPACE)
-            logger.debug("[INIT] ExtractDocVocabulary loaded for %s", label)
-        except Exception as e:
-            logger.debug("[INIT] ExtractDocVocabulary skipped for %s: %s", label, e)
-
-    if 'code_interpreter' in default_tools:
-        try:
-            agent.function_map['code_interpreter'] = _instantiate_code_interpreter(
-                DEFAULT_WORKSPACE, operation_manager
-            )
-            logger.debug("[INIT] CodeInterpreter loaded for %s", label)
-        except Exception as e:
-            logger.debug("[INIT] CodeInterpreter skipped for %s: %s", label, e)
+    for name in default_tools:
+        _load_tool_for_agent(
+            name, TOOL_REGISTRY, agent, label,
+            work_dir=work_dir, llm_cfg=llm_cfg,
+            operation_manager=operation_manager, agent_pool=agent_pool,
+        )
 
     # Report any tool names in default_tools that this function doesn't handle
-    HANDLED_TOOLS = {
-        'image_gen', 'web_extractor', 'storage', 'retrieval',
-        'simple_doc_parser', 'doc_parser', 'extract_doc_vocabulary', 'code_interpreter',
-    }
-    unhandled = set(default_tools) - HANDLED_TOOLS
+    unhandled = set(default_tools) - set(TOOL_REGISTRY)
     if unhandled:
         logger.debug("[INIT] Ignoring non-built-in tools for %s: %s", label, sorted(unhandled))
 

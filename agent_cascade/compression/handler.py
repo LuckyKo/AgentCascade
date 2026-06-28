@@ -21,6 +21,7 @@ from agent_cascade.log import logger
 from agent_cascade.llm.schema import Message, USER
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.utils.pool_validation import validate_message_pool
+from agent_cascade.utils.utils import msg_field
 
 
 # ── Token Cache Helper (local copy to avoid circular import with execution_engine) ──
@@ -29,18 +30,6 @@ def _invalidate_token_cache(instance):
     """Invalidate all token count caches after conversation mutation."""
     instance._last_actual_token_count = 0
     instance._last_token_count_conversation_length = -1
-
-
-# ── Helper Functions (moved from execution_engine module level) ───────────────
-
-def _msg_role(msg: dict | Message) -> str:
-    """Safely get role from dict or Message object."""
-    return msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-
-
-def _msg_content(msg: dict | Message) -> str:
-    """Safely get content from dict or Message object."""
-    return msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
 
 
 # ── CompressionHandler Class ─────────────────────────────────────────────────
@@ -150,7 +139,7 @@ class CompressionHandler:
         with instance._compression_lock:
             # Dedup guard — check if notification appears as a complete line (avoids substring false positives)
             notification_exists = any(
-                notification_text in str(_msg_content(m)).split('\n')
+                notification_text in str(msg_field(m, 'content', '')).split('\n')
                 for m in instance.conversation
             )
             
@@ -468,8 +457,8 @@ class CompressionHandler:
                 conv = self.pool.get_conversation(inst_name)
                 if conv:
                     for idx, msg in enumerate(conv):
-                        role = _msg_role(msg)
-                        c = _msg_content(msg)
+                        role = msg_field(msg, 'role', '')
+                        c = msg_field(msg, 'content', '')
                         if isinstance(c, str) and '<context_summary>' in c:
                             instance.latest_marker_index = idx
 
@@ -615,7 +604,7 @@ class CompressionHandler:
         # Find the last USER message
         last_user = None
         for msg in reversed(messages):
-            role = _msg_role(msg)
+            role = msg_field(msg, 'role', '')
             if role == USER:
                 last_user = msg
                 break
@@ -623,7 +612,7 @@ class CompressionHandler:
         if last_user is None:
             return None
         
-        content = _msg_content(last_user)
+        content = msg_field(last_user, 'content', '')
         if not isinstance(content, str):
             return None
         
@@ -927,7 +916,7 @@ class CompressionHandler:
         # Find the last USER message
         last_user = None
         for msg in reversed(messages):
-            role = _msg_role(msg)
+            role = msg_field(msg, 'role', '')
             if role == USER:
                 last_user = msg
                 break
@@ -935,7 +924,7 @@ class CompressionHandler:
         if last_user is None:
             return None
         
-        content = _msg_content(last_user)
+        content = msg_field(last_user, 'content', '')
         if not isinstance(content, str):
             return None
         

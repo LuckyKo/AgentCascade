@@ -36,7 +36,7 @@ from agent_cascade.tool_utils import (
 # Python caches module imports in sys.modules, so this is not a performance concern.
 # Kept local to _create_and_run_agent only because execution_engine shouldn't have
 # hard dependency on api_integration at module scope (cleaner separation of concerns).
-from agent_cascade.utils.utils import extract_text_from_message
+from agent_cascade.utils.utils import extract_text_from_message, msg_field, msg_set
 
 # M3: Import validate_message_pool from standalone utils module (Phase 2 Task 2.4)
 # Moved to utils/pool_validation.py to break circular import chain with compression module
@@ -56,25 +56,6 @@ class SleepAction(Enum):
     """Actions returned by _handle_sleeping_state() to control the main loop."""
     CONTINUE_LOOP = auto()  # Re-enter while loop (with possible yield)
     BREAK_LOOP = auto()     # Transitioned to COMPLETING/TERMINATED, exit while loop
-
-
-# ── Message Field Accessor Helper (Phase 2 Task 2.0) ────────────────────────────
-def _msg_field(msg, field: str, default=None):
-    """Unified field accessor for dict or Message objects.
-    
-    Handles both dict format (e.g., {'role': 'user', ...}) and Message object
-    format with attributes (e.g., msg.role). Used throughout execution_engine
-    to avoid repetitive isinstance checks.
-    
-    Args:
-        msg: Message object or dict with message fields
-        field: Field name to access ('role', 'content', 'extra', etc.)
-        default: Default value if field not found
-        
-    Returns:
-        Field value or default
-    """
-    return msg.get(field, default) if isinstance(msg, dict) else getattr(msg, field, default)
 
 
 def _get_active_functions_from_template(template, instance=None) -> list:
@@ -173,18 +154,14 @@ def _normalize_gemma_thought_tags(msg):
     Returns:
         None (modifies msg in-place)
     """
-    content = _msg_field(msg, 'content', '')
-    if not _msg_field(msg, 'function_call') and isinstance(content, str) and '<|channel>thought' in content.lower():
+    content = msg_field(msg, 'content', '')
+    if not msg_field(msg, 'function_call') and isinstance(content, str) and '<|channel>thought' in content.lower():
         match = re.search(r'^\s*<\|channel>thought\n?([\s\S]*?)(?:\n?<\|channel>|$)', content, re.IGNORECASE)
         if match:
             reasoning_text = match.group(1).strip()
             cleaned_content = re.sub(r'^\s*<\|channel>thought\n?[\s\S]*?(?:\n?<\|channel>|$)', '', content, count=1, flags=re.IGNORECASE).strip()
-            if isinstance(msg, dict):
-                msg['reasoning_content'] = reasoning_text
-                msg['content'] = cleaned_content
-            else:
-                msg.reasoning_content = reasoning_text
-                msg.content = cleaned_content
+            msg_set(msg, 'reasoning_content', reasoning_text)
+            msg_set(msg, 'content', cleaned_content)
 
 
 def _normalize_thinking_blocks(text):
@@ -234,7 +211,7 @@ def _check_message_truncation(msg):
     Returns:
         True if message indicates truncation, False otherwise
     """
-    extra = _msg_field(msg, 'extra')
+    extra = msg_field(msg, 'extra')
     # Type safety check: ensure extra is a dict before calling .get() (Issue #3)
     return extra is not None and isinstance(extra, dict) and extra.get('finish_reason') == 'length'
 
@@ -783,7 +760,7 @@ class ExecutionEngine:
                     # FIX BOOL_LEAK: Validate message type before appending to prevent bool/list leak
                     if isinstance(msg, (Message, dict)):
                         # Endpoint recovery: [RETRYING] messages are transient UI notifications only — don't add to conversation history
-                        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                        content = msg_field(msg, 'content', '')
                         is_retrying_msg = isinstance(content, str) and content.startswith("[RETRYING]")
                         
                         # Yield for UI visibility (even transient messages)
@@ -1798,15 +1775,12 @@ class ExecutionEngine:
             _normalize_gemma_thought_tags(msg)
             
             # Strip thinking blocks from reasoning_content to prevent tag pollution in history
-            reasoning_content = _msg_field(msg, 'reasoning_content')
+            reasoning_content = msg_field(msg, 'reasoning_content')
             if isinstance(reasoning_content, str):
-                if isinstance(msg, dict):
-                    msg['reasoning_content'] = _normalize_thinking_blocks(reasoning_content)
-                else:
-                    msg.reasoning_content = _normalize_thinking_blocks(reasoning_content)
+                msg_set(msg, 'reasoning_content', _normalize_thinking_blocks(reasoning_content))
             
             # Clean thinking blocks from function call arguments (P4 continuation)
-            func_call = _msg_field(msg, 'function_call')
+            func_call = msg_field(msg, 'function_call')
             if func_call:
                 _normalize_tool_arguments(func_call)
 
@@ -1850,8 +1824,8 @@ class ExecutionEngine:
                     # assistant messages that have tool calls but empty content.
                     # Skipping such messages breaks the count-based delta sync,
                     # causing duplicate entries on the next logging pass.
-                    has_content = bool(str(_msg_field(msg, 'content', '')).strip())
-                    has_function_call = bool(_msg_field(msg, 'function_call'))
+                    has_content = bool(str(msg_field(msg, 'content', '')).strip())
+                    has_function_call = bool(msg_field(msg, 'function_call'))
                     if has_content or has_function_call:
                         log_inst.log_message(msg)
                         wrote_any = True
@@ -2295,17 +2269,14 @@ class ExecutionEngine:
                 # Find the last assistant message in turn_output (most recent generation) and merge content
                 merged = False
                 for msg in reversed(turn_output):
-                    role = _msg_field(msg, 'role', '')
+                    role = msg_field(msg, 'role', '')
                     if role == ASSISTANT:
-                        old_content = _msg_field(saved, 'content', '') or ''
-                        new_content = _msg_field(msg, 'content', '') or ''
+                        old_content = msg_field(saved, 'content', '') or ''
+                        new_content = msg_field(msg, 'content', '') or ''
                         merged_content = old_content + new_content
                         
                         # Update the message with merged content (handle both dict and Message object)
-                        if isinstance(msg, dict):
-                            msg['content'] = merged_content
-                        else:
-                            msg.content = merged_content
+                        msg_set(msg, 'content', merged_content)
                         
                         logger.debug(f"[CONTINUE_FIX] Merged continue-saved assistant message ({len(old_content)} chars) with new response ({len(new_content)} chars)")
                         merged = True
@@ -2323,7 +2294,7 @@ class ExecutionEngine:
         # Extract ground-truth usage info from LLM response (ground-truth token tracking)
         # This replaces manual token counting with actual API-reported values
         for msg in turn_output:
-            extra = msg.get('extra') if isinstance(msg, dict) else getattr(msg, 'extra', None)
+            extra = msg_field(msg, 'extra')
             if extra and isinstance(extra, dict) and 'usage' in extra:
                 usage = extra['usage']
                 if isinstance(usage, dict):
@@ -2382,9 +2353,9 @@ class ExecutionEngine:
         # Check if last assistant message had a tool call (still working)
         has_tool_call = False
         for msg in reversed(response):
-            role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
+            role = msg_field(msg, 'role', '')
             if role == ASSISTANT:
-                fc = msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None)
+                fc = msg_field(msg, 'function_call')
                 has_tool_call = fc is not None
                 break
         
@@ -3115,7 +3086,7 @@ class ExecutionEngine:
             latest_summary = ''
             if not is_initial and final_resp:
                 last_msg = final_resp[-1]
-                content = last_msg.get('content', '') if isinstance(last_msg, dict) else getattr(last_msg, 'content', '')
+                content = msg_field(last_msg, 'content', '')
                 latest_summary = str(content)[:500] if content else ''
             
             # Thread-safe state read - snapshot under lock before building dict
@@ -3168,9 +3139,8 @@ class ExecutionEngine:
                     # Skip unexpected list objects to prevent incorrect processing
                     continue
                 
-                role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-                func_call = (msg.get('function_call') if isinstance(msg, dict)
-                             else getattr(msg, 'function_call', None))
+                role = msg_field(msg, 'role', '')
+                func_call = msg_field(msg, 'function_call')
 
                 # For assistant with function call, count only the function call string
                 if role == ASSISTANT and func_call:
@@ -3228,16 +3198,12 @@ class ExecutionEngine:
             return
 
         last_msg = messages[-1]
-        content = (last_msg.get('content') if isinstance(last_msg, dict)
-                   else getattr(last_msg, 'content', None))
+        content = msg_field(last_msg, 'content')
 
         if isinstance(content, str):
             if guard_prefix not in content:
                 new_content = content + f"\n\n{notification_text}"
-                if isinstance(last_msg, dict):
-                    last_msg['content'] = new_content
-                else:
-                    last_msg.content = new_content
+                msg_set(last_msg, 'content', new_content)
         elif isinstance(content, list):
             has_notification = any(
                 (isinstance(item, dict) and guard_prefix in str(item.get('text', '')))

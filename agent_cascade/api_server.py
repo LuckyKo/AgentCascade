@@ -31,6 +31,7 @@ import copy
 import glob
 import json
 import os
+import platform
 import re
 import signal
 import sys
@@ -51,7 +52,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
-from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX
+from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX, msg_field, msg_set
 from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_MARKER
 from agent_cascade.llm.base import _truncate_input_messages_roughly
 from agent_cascade.execution_engine import ExecutionEngine
@@ -87,13 +88,6 @@ LLM_CONFIG_KEYS = frozenset({
     'max_input_tokens', 'max_output_tokens', 'top_p', 'frequency_penalty',
     'presence_penalty', 'stop', 'timeout', 'model_type'
 })
-
-
-def _get_msg_role(msg):
-    """Extract the 'role' field from a message, handling both dict and Message object types."""
-    if isinstance(msg, dict):
-        return msg.get(ROLE)
-    return getattr(msg, 'role', None)
 
 
 def _parse_multimodal_content(text):
@@ -262,7 +256,6 @@ def create_app(agents, agent_pool, config=None):
             for msg in reversed(history):
                 content = msg.get(CONTENT, '')
                 if isinstance(content, str) and "<context_summary>" in content:
-                    import re
                     match = _CONTEXT_SUMMARY_RE.search(content)
                     if match:
                         agent_pool.instance_summaries[name] = match.group(1).strip()
@@ -906,7 +899,6 @@ def create_app(agents, agent_pool, config=None):
 
     @app.get("/api/sessions")
     async def api_list_sessions():
-        from pathlib import Path
         if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
             log_dir = agent_pool.operation_manager.base_dir / 'logs'
         else:
@@ -947,9 +939,6 @@ def create_app(agents, agent_pool, config=None):
 
     @app.get("/api/file")
     async def api_serve_file(path: str):
-        from fastapi.responses import FileResponse, JSONResponse
-        import os
-        
         # Clean file:/// if present
         if path.startswith("file:///"):
             path = path[8:]
@@ -977,10 +966,8 @@ def create_app(agents, agent_pool, config=None):
     @app.get("/api/telemetry/export")
     async def api_telemetry_export():
         """Download the raw telemetry JSONL log file."""
-        from fastapi.responses import FileResponse, JSONResponse
         if agent_pool and hasattr(agent_pool, 'telemetry') and agent_pool.telemetry:
             path = agent_pool.telemetry.export_jsonl()
-            import os
             if os.path.exists(path):
                 return FileResponse(path, media_type='application/jsonlines', filename=os.path.basename(path))
         return JSONResponse(status_code=404, content={"message": "No telemetry data available"})
@@ -1229,7 +1216,7 @@ def create_app(agents, agent_pool, config=None):
                     with inst._compression_lock:
                         if inst.conversation:
                             last_msg = inst.conversation[-1]
-                            last_role = _get_msg_role(last_msg)
+                            last_role = msg_field(last_msg, 'role')
                             if last_role == ASSISTANT:
                                 saved_assistant_msg = inst.conversation.pop()
                                 # Store on instance for merging in execution_engine._process_response
@@ -1534,7 +1521,7 @@ def create_app(agents, agent_pool, config=None):
                             # PR3 migration: Use centralized API for retry rollback
                             # Count trailing assistant/function messages first, then trim once (reviewer optimization)
                             count_to_trim = 0
-                            while inst.conversation and count_to_trim < len(inst.conversation) and _get_msg_role(inst.conversation[-1 - count_to_trim]) in (ASSISTANT, FUNCTION):
+                            while inst.conversation and count_to_trim < len(inst.conversation) and msg_field(inst.conversation[-1 - count_to_trim], 'role') in (ASSISTANT, FUNCTION):
                                 count_to_trim += 1
                             if count_to_trim > 0:
                                 removed = inst.trim_tail(count_to_trim)
@@ -1542,7 +1529,7 @@ def create_app(agents, agent_pool, config=None):
                     # Roll back one more (the user message) to allow a clean re-trigger
                     last_user_msg = None
                     inst = agent_pool.get_instance(instance_name)
-                    if inst is not None and inst.conversation and _get_msg_role(inst.conversation[-1]) == USER:
+                    if inst is not None and inst.conversation and msg_field(inst.conversation[-1], 'role') == USER:
                         # PR3 migration: Use centralized API for removing user message
                         removed = inst.trim_tail(1)
                         last_user_msg = removed[0] if removed else None
@@ -1662,8 +1649,6 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'restart_server':
                     logger.warning("Server restart requested via UI")
                     await broadcast({'type': 'error', 'message': 'Server is restarting... Please wait.'})
-                    import sys
-                    import os
                     os.execl(sys.executable, sys.executable, *sys.argv)
 
                 elif msg_type == 'update_config':
@@ -1823,10 +1808,6 @@ def create_app(agents, agent_pool, config=None):
                                 sec_instance = None   # Pre-initialize for defensive programming
                                 engine = None         # Pre-initialize for defensive programming
                                 try:
-                                    import platform
-                                    import json
-                                    import copy
-
                                     with app.security_check_lock:
                                         workspace_info = f"Main workspace: {agent_pool.operation_manager.base_dir}\n"
                                         if agent_pool.operation_manager.extra_work_folders_ro:
@@ -2231,7 +2212,7 @@ def create_app(agents, agent_pool, config=None):
                         msg = history[idx]
                         
                         # Get current content regardless of message type (dict or Message object)
-                        old_content = msg.get(CONTENT, "") if isinstance(msg, dict) else getattr(msg, 'content', "")
+                        old_content = msg_field(msg, CONTENT, "")
                         new_parsed_content = _parse_multimodal_content(content)
                         
                         # If this is a compression marker, ensure tags are preserved

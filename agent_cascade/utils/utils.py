@@ -39,6 +39,52 @@ from agent_cascade.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION
 from agent_cascade.log import logger
 
 
+# ── Message Field Accessor Helpers (consolidated from execution_engine, handler, api_server) ──
+
+def msg_field(msg, field_name: str, default=None):
+    """Get a field from a message, handling both dict and Message objects.
+    
+    Replaces duplicated _msg_field / _msg_role / _msg_content / _get_msg_role patterns
+    that existed across execution_engine.py, compression/handler.py, and api_server.py.
+    
+    Args:
+        msg: Message object or dict with message fields
+        field_name: Field name to access ('role', 'content', 'extra', etc.)
+        default: Default value if field not found
+        
+    Returns:
+        Field value or default
+    """
+    return msg.get(field_name, default) if isinstance(msg, dict) else getattr(msg, field_name, default)
+
+
+def msg_set(msg, field_name: str, value) -> None:
+    """Set a field on a message, handling both dict and Message objects.
+    
+    Args:
+        msg: Message object or dict with message fields
+        field_name: Field name to set ('role', 'content', etc.)
+        value: Value to assign
+    """
+    if isinstance(msg, dict):
+        msg[field_name] = value
+    else:
+        setattr(msg, field_name, value)
+
+
+def msg_has_field(msg, field_name: str) -> bool:
+    """Check if a message has a field, handling both dict and Message objects.
+    
+    Args:
+        msg: Message object or dict with message fields
+        field_name: Field name to check for
+        
+    Returns:
+        True if the field exists on the message
+    """
+    return field_name in msg if isinstance(msg, dict) else hasattr(msg, field_name)
+
+
 def append_signal_handler(sig, handler):
     """
     Installs a new signal handler while preserving any existing handler.
