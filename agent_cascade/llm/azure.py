@@ -15,8 +15,6 @@
 import os
 from typing import Dict, Optional
 
-import openai
-
 from agent_cascade.llm.base import register_llm
 from agent_cascade.llm.oai import TextChatAtOAI
 
@@ -49,6 +47,7 @@ class TextChatAtAzure(TextChatAtOAI):
             api_kwargs['api_version'] = api_version
 
         def _chat_complete_create(*args, **kwargs):
+            import openai  # Lazy import — only needed when actually making Azure API calls
             client = openai.AzureOpenAI(**api_kwargs)
             return client.chat.completions.create(*args, **kwargs)
 
