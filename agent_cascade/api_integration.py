@@ -38,6 +38,7 @@ from .loop_detection import LoopDetectedError
 # BUG31: Increased maxsize from 100 to 5000 to prevent premature cache eviction during multi-instance sessions.
 _token_stats_cache: Dict[tuple, dict] = {}
 _TOKEN_STATS_CACHE_MAXSIZE = 5000
+_token_stats_lock = threading.Lock()  # Lock for _token_stats_cache (thread safety)
 
 # Fix #3: Version tracker per instance. Incremented each time a message is added.
 # Used to skip serializing instances whose conversation hasn't changed.
@@ -59,16 +60,23 @@ _ui_cache_lock = threading.Lock()  # Thread-safe access for concurrent UI serial
 # Key: instance_name, Value: (h_stats, r_stats) tuple of dicts
 _stream_token_stats_cache: Dict[str, tuple] = {}
 _STREAM_TOKEN_STATS_CACHE_MAXSIZE = 100  # Bounded cache (FIFO eviction) to prevent unbounded growth
+_stream_token_stats_lock = threading.Lock()  # C3: Dedicated lock for _stream_token_stats_cache
+
+# C4: Dedicated lock for _last_stream_versions and _cached_instance_data
+_stream_version_lock = threading.Lock()
 
 
 def _clear_performance_caches():
     """Clear all module-level performance caches. Called during session reset."""
-    global _token_stats_cache, _cached_instance_data, _stream_token_stats_cache, _last_stream_versions, _ui_serialization_cache
-    _token_stats_cache.clear()
-    _cached_instance_data.clear()
-    _stream_token_stats_cache.clear()
-    _last_stream_versions.clear()
-    _ui_serialization_cache.clear()
+    with _stream_token_stats_lock:
+        _stream_token_stats_cache.clear()
+    with _stream_version_lock:
+        _cached_instance_data.clear()
+        _last_stream_versions.clear()
+    with _token_stats_lock:
+        _token_stats_cache.clear()
+    with _ui_cache_lock:
+        _ui_serialization_cache.clear()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -651,9 +659,14 @@ def build_stream_update_from_pool(
     # Streaming UI Step 3 Fix: Include streaming response length AND content length in cache key 
     # so growing streaming content triggers cache invalidation and fresh stats computation
     current_version = (len(conv_snapshot), id(conv_snapshot[-1]) if conv_snapshot else None, len(stream_resp_snapshot) if stream_resp_snapshot else 0, stream_content_len)
-    cached_stats = _stream_token_stats_cache.get(instance_name)
     
-    if cached_stats is not None and current_version == _last_stream_versions.get(instance_name):
+    # C3: Thread-safe read of _stream_token_stats_cache and _last_stream_versions
+    with _stream_token_stats_lock:
+        cached_stats = _stream_token_stats_cache.get(instance_name)
+    with _stream_version_lock:
+        last_version = _last_stream_versions.get(instance_name)
+    
+    if cached_stats is not None and current_version == last_version:
         # Conversation unchanged — reuse previously computed token stats
         h_stats, r_stats = cached_stats
     else:
@@ -674,12 +687,12 @@ def build_stream_update_from_pool(
             h_stats = {'tokens': len(active_h) * 4, 'words': 0}
             r_stats = {'tokens': 0, 'words': 0}
         
-        # Cache the computed stats for next tick
-        # Evict oldest entry if cache is full (FIFO-style eviction)
-        if len(_stream_token_stats_cache) >= _STREAM_TOKEN_STATS_CACHE_MAXSIZE:
-            oldest_key = next(iter(_stream_token_stats_cache))
-            del _stream_token_stats_cache[oldest_key]
-        _stream_token_stats_cache[instance_name] = (h_stats, r_stats)
+        # C3: Thread-safe write to _stream_token_stats_cache
+        with _stream_token_stats_lock:
+            if len(_stream_token_stats_cache) >= _STREAM_TOKEN_STATS_CACHE_MAXSIZE:
+                oldest_key = next(iter(_stream_token_stats_cache))
+                del _stream_token_stats_cache[oldest_key]
+            _stream_token_stats_cache[instance_name] = (h_stats, r_stats)
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
     # Direct call without caching to avoid staleness when endpoints change at runtime
@@ -721,21 +734,21 @@ def build_stream_update_from_pool(
         # any missed partial messages are recovered within ~10 seconds.
         is_full_refresh = force_full
         
-        # Always serialize the primary instance (it's actively streaming)
-        # and any instance whose version changed since last stream_update
-        if name == instance_name or current_version != _last_stream_versions.get(name) or is_full_refresh:
-            # Use streaming=False for full refresh to send complete state
-            all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=(not is_full_refresh), streaming_responses=inst_streaming_responses)
-            _last_stream_versions[name] = current_version
-            _cached_instance_data[name] = all_instances[name]
-        else:
-            # Reuse the previously serialized data for unchanged instances
-            all_instances[name] = _cached_instance_data.get(name)
-            # If for some reason the cached data is missing, serialize fresh
-            if all_instances[name] is None:
+        # C4: Atomic read-compare-write under lock to prevent TOCTOU race
+        with _stream_version_lock:
+            prev_version = _last_stream_versions.get(name)
+            
+            if name == instance_name or current_version != prev_version or is_full_refresh:
                 all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=(not is_full_refresh), streaming_responses=inst_streaming_responses)
-                _cached_instance_data[name] = all_instances[name]
                 _last_stream_versions[name] = current_version
+                _cached_instance_data[name] = all_instances[name]
+            else:
+                # Reuse the previously serialized data for unchanged instances
+                all_instances[name] = _cached_instance_data.get(name)
+                if all_instances[name] is None:
+                    all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=(not is_full_refresh), streaming_responses=inst_streaming_responses)
+                    _last_stream_versions[name] = current_version
+                    _cached_instance_data[name] = all_instances[name]
 
     # Get current model from template's LLM (for frontend display)
     template = pool.get_template(instance.agent_class)
@@ -1068,7 +1081,7 @@ def serialize_message(
     """
     # M1: Look up in module-level cache (keyed by id(msg)) instead of mutating input.
     # Cache stores truncated UI versions — only use when for_ui=True.
-    msg_id = id(msg) if isinstance(msg, dict) else None
+    msg_id = id(msg)  # Works for both dicts and Message objects
     with _ui_cache_lock:
         cached = _ui_serialization_cache.get(msg_id)
     if cached is not None and for_ui:
@@ -1292,21 +1305,23 @@ def _serialize_instance(
     if stream_responses:
         all_msgs_for_stats.extend(stream_responses)
     
-    if cache_key not in _token_stats_cache:
-        active_msgs = pool.slice_history_for_llm(all_msgs_for_stats) if all_msgs_for_stats else all_msgs_for_stats
-        try:
-            from agent_cascade.utils.utils import get_history_stats
-            stats = get_history_stats(active_msgs)
-        except Exception as e:
-            logger.debug(f"Token stats calculation failed for {inst.instance_name} (using estimate): {e}")
-            stats = {'tokens': len(all_msgs_for_stats) * 4, 'words': 0}
-        # BUG31 Fix #1: Evict oldest entry if cache is full (increased from 100 to 5000)
-        if len(_token_stats_cache) >= _TOKEN_STATS_CACHE_MAXSIZE:
-            oldest_key = next(iter(_token_stats_cache))
-            del _token_stats_cache[oldest_key]
-        _token_stats_cache[cache_key] = stats
-    else:
-        stats = _token_stats_cache[cache_key]
+    # Thread-safe check and read of _token_stats_cache
+    with _token_stats_lock:
+        if cache_key not in _token_stats_cache:
+            active_msgs = pool.slice_history_for_llm(all_msgs_for_stats) if all_msgs_for_stats else all_msgs_for_stats
+            try:
+                from agent_cascade.utils.utils import get_history_stats
+                stats = get_history_stats(active_msgs)
+            except Exception as e:
+                logger.debug(f"Token stats calculation failed for {inst.instance_name} (using estimate): {e}")
+                stats = {'tokens': len(all_msgs_for_stats) * 4, 'words': 0}
+            # BUG31 Fix #1: Evict oldest entry if cache is full (increased from 100 to 5000)
+            if len(_token_stats_cache) >= _TOKEN_STATS_CACHE_MAXSIZE:
+                oldest_key = next(iter(_token_stats_cache))
+                del _token_stats_cache[oldest_key]
+            _token_stats_cache[cache_key] = stats
+        else:
+            stats = _token_stats_cache[cache_key]
 
     # Get max tokens via direct call to avoid staleness when endpoints change at runtime
     max_tokens = _get_max_tokens_for_instance(pool, inst)

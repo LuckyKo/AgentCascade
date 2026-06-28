@@ -181,6 +181,10 @@ if __name__ == '__main__':
 
     import signal
 
+    # Use Config + Server pattern for graceful shutdown support (host 0.0.0.0 allows LAN access)
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+
     def handle_shutdown(signum, frame):
         logger.info("\n[INFO] Initiating graceful shutdown...")
         agent_pool.stopped = True
@@ -189,15 +193,18 @@ if __name__ == '__main__':
                 agent_pool.operation_manager.cleanup_backups()
             except Exception as e:
                 logger.warning("Cleanup backups failed during shutdown: %s", e)
-        logger.info("[INFO] Terminated.")
-        sys.exit(0)
+        # Set should_exit for graceful uvicorn shutdown (avoids resource leaks from sys.exit)
+        server.should_exit = True
 
     signal.signal(signal.SIGINT, handle_shutdown)
     if os.name != 'nt':
         signal.signal(signal.SIGTERM, handle_shutdown)
 
+    # Prevent uvicorn from installing its own signal handlers (ours are already registered)
+    server.install_signal_handlers = lambda: None
+
     try:
-        uvicorn.run(app, host='0.0.0.0', port=port, log_level='info')
+        server.run()
     except OSError as e:
         if e.errno == 98 or 'address already in use' in str(e).lower():
             logger.error("[FATAL] Port %d is already in use. Change QWEN_AGENT_PORT env var or stop the other process.", port)

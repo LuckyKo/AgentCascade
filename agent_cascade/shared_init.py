@@ -215,6 +215,8 @@ def load_tools_shared(
     except Exception as e:
         logger.debug("[INIT] CodeInterpreter tool skipped (not available): %s", e)
 
+    if not tools:
+        logger.warning("[INIT] No tools were successfully loaded — agents will have limited capabilities")
     return tools
 
 
@@ -299,6 +301,12 @@ def load_tools_per_agent(
     unhandled = set(default_tools) - HANDLED_TOOLS
     if unhandled:
         logger.debug("[INIT] Ignoring non-built-in tools for %s: %s", label, sorted(unhandled))
+
+    loaded_count = len([t for t in default_tools if t in agent.function_map])
+    if default_tools and loaded_count == 0:
+        logger.warning(
+            "[INIT] No tools were successfully loaded for %s — agent will have limited capabilities", label
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

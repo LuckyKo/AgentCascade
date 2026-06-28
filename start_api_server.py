@@ -157,6 +157,10 @@ if __name__ == '__main__':
 
     import signal
 
+    # Create server first so signal handler can reference it
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+
     def handle_shutdown(signum, frame):
         logger.info("\n[INFO] Initiating graceful shutdown...")
         agent_pool.stopped = True
@@ -165,18 +169,14 @@ if __name__ == '__main__':
                 agent_pool.operation_manager.cleanup_backups()
             except Exception as e:
                 logger.warning("Cleanup backups failed during shutdown: %s", e)
-        logger.info("[INFO] Terminated.")
-        sys.exit(0)
+        # Set should_exit for graceful uvicorn shutdown (avoids resource leaks from sys.exit)
+        server.should_exit = True
 
     signal.signal(signal.SIGINT, handle_shutdown)
     if os.name != 'nt':
         signal.signal(signal.SIGTERM, handle_shutdown)
 
-    # Note: Uvicorn overrides signal handlers. We need to tell it not to, or wrap it.
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-    server = uvicorn.Server(config)
-
-    # Overwrite uvicorn's signal handlers so ours runs
+    # Prevent uvicorn from installing its own signal handlers (ours are already registered)
     server.install_signal_handlers = lambda: None
 
     try:

@@ -79,7 +79,6 @@ from agent_cascade.agent_instance import AgentState, InvalidStateTransition
 
 # Module-level lock used by helper functions before create_app() runs.
 # Overwritten inside create_app() for the per-app instance, but safe as a fallback.
-import threading
 session_lock = threading.Lock()
 
 # LLM config keys for update_config optimization (defense-in-depth)
