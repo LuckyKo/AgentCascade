@@ -32,7 +32,7 @@ from .grep import _compile_grep_pattern, _check_tool_availability
 # Import mixins
 from .approval import ApprovalMixin
 from .path_security import PathSecurityMixin
-from .file_ops import FileOpsMixin
+from .file_operations import FileOpsMixin
 from .grep import GrepMixin
 from .shell import ShellMixin
 
