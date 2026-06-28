@@ -799,11 +799,11 @@ class ExecutionEngine:
                     else:
                         logger.warning(f"[MSG_VALIDATION] Skipping non-Message in LLM response for {instance.instance_name}: type={type(msg).__name__}, value={str(msg)[:100]}")
 
-                # Check generation change (old run superseded by newer one) alongside stop/halt
+                # Check generation change (old run superseded by newer one) alongside stop/pause
                 if self._is_stopped(instance.instance_name):
                     logger.debug("halted/stopped/superseded - %s", instance.instance_name)
-                    # Sleep to prevent tight loop when halted (Issue #6 fix)
-                    time.sleep(0.5)
+                    # Sleep 100ms to prevent tight loop when paused/stopped
+                    time.sleep(0.1)
                     yield response
                     continue
 
@@ -1092,7 +1092,7 @@ class ExecutionEngine:
         return self._is_stopped(inst_name)
 
     def _is_stopped(self, inst_name: str) -> bool:
-        """Check if pool is stopped, run superseded, or instance halted/terminated.
+        """Check if pool is stopped, paused, run superseded, or instance terminated.
         
         Centralized stop condition check used throughout execution_engine.py to avoid
         duplicated 4-condition checks across 8+ locations. Returns True immediately
@@ -1106,7 +1106,8 @@ class ExecutionEngine:
         """
         return (self.pool.stopped or 
                 self._my_generation != self.pool._run_generation or
-                self.pool.is_instance_halted(inst_name) or 
+                self.pool.is_paused() or
+                inst_name in self.pool._halted_instances or
                 self.pool.is_instance_terminated(inst_name))
 
     def _inject_async_messages(

@@ -977,9 +977,9 @@ def create_app(agents, agent_pool, config=None):
 
     @app.post("/api/resume_all")
     async def api_resume_all():
-        """Resume all halted agent instances."""
-        if agent_pool and hasattr(agent_pool, 'resume_all_instances'):
-            agent_pool.resume_all_instances()
+        """Resume all paused agent instances."""
+        if agent_pool:
+            agent_pool.resume()
             return {"status": "ok", "message": "All instances resumed"}
         return {"status": "error", "message": "Agent pool not available"}
 
@@ -1410,19 +1410,14 @@ def create_app(agents, agent_pool, config=None):
                     await broadcast({'type': 'done', **build_state()})
 
                 elif msg_type == 'pause':
-                    # Pause ALL running instances — not just the current one
+                    # Pause ALL running instances by setting global flag
                     if agent_pool:
-                        # Use lock to prevent race condition where new agents spawn during pause (Issue #3)
-                        with agent_pool._execution._state_lock:
-                            inst_names = list(agent_pool.instances.keys())
-                            for name in inst_names:
-                                agent_pool.halt_instance(name)
+                        inst_names = list(agent_pool.instances.keys())
+                        agent_pool.pause()
                         logger.info(f"Paused all instances: {inst_names}")
                         # Mark session as not generating while paused (Issue #7)
                         with session_lock:
                             session['generating'] = False
-                        # Also set pool.stopped for defense-in-depth (Issue #5 fix)
-                        agent_pool.stopped = True
                     # Broadcast updated state so frontend reflects paused status for all agents
                     try:
                         await broadcast({'type': 'state', **build_state(generating=False)})
@@ -1430,71 +1425,23 @@ def create_app(agents, agent_pool, config=None):
                         logger.warning(f"Failed to broadcast pause state: {e}")
 
                 elif msg_type == 'resume_all':
-                    # Resume ALL halted instances (not just compression-halted ones)
-                    # Note: This clears halt flags for sub-agents but doesn't restart their threads.
-                    # Sub-agents will resume execution when the orchestrator calls them again via call_agent().
-                    # If a sub-agent's thread exited during pause, it may need manual resume from its tab.
-                    resumed_instances = []
+                    # Resume ALL paused instances by clearing the global flag.
+                    # Agents wake up naturally from their 100ms sleep loop — no thread restart needed.
                     if agent_pool:
-                        # Use public API to get halted instances (Issue #4 fix)
-                        halted_before = agent_pool.get_halted_instances()
-                        for name in halted_before:
-                            agent_pool.resume_instance(name)
-                            resumed_instances.append(name)
-                        logger.info(f"Resumed all previously halted instances: {resumed_instances}")
-                    
-                    # Resume the main session (orchestrator) and restart its generation
-                    target_instance = session['session_name']
+                        agent_pool.resume()
+                        logger.info("Cleared global pause flag — all agents will resume naturally")
+                
+                    # Enqueue continuation message for all running instances so they know to continue
+                    cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
+                    parsed_content = _parse_multimodal_content(cont_msg)
+                    if agent_pool:
+                        for inst_name in list(agent_pool.instances.keys()):
+                            agent_pool.enqueue_message(inst_name, parsed_content)
+                
+                    # Mark session as generating again
                     with session_lock:
-                        is_generating = session['generating']
-                    
-                    was_halted = False
-                    if agent_pool:
-                        was_halted = agent_pool.is_halted(target_instance)
-                    
-                    # Restart generation for main session if it was halted or still generating
-                    if is_generating or was_halted:
-                        # Signal stop first if currently generating (Issue #1 fix)
-                        if is_generating:
-                            logger.info(f"Main session was still generating — signalling stop before resume.")
-                            with session_lock:
-                                session['stop_requested'] = True
-                            agent_pool.stopped = True
-                            await asyncio.sleep(0.1)
-                        
-                        # Enqueue continuation message — same queue drained during turn loop
-                        cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
-                        parsed_content = _parse_multimodal_content(cont_msg)
-                        if agent_pool:
-                            agent_pool.enqueue_message(target_instance, parsed_content)
-                        
-                        # Increment generation_id BEFORE starting new thread (Issue #1 fix)
-                        # This ensures the old thread detects stale gen_id and exits before new thread starts
-                        with session_lock:
-                            # FIX 1e: Re-check is_generating right before thread start
-                            # Another handler may have started between the initial check (line 1516) and here
-                            if session['generating']:
-                                pass  # Skip thread start - another run is already in progress
-                            else:
-                                session['stop_requested'] = False
-                                session['generation_id'] += 1
-                                session['generating'] = True  # FIX 1b-resume_all: Set flag for race protection
-                                gen_id = session['generation_id']
-                                
-                                agent_runner = get_agent()
-                                loop = asyncio.get_event_loop()
-
-                                thread = threading.Thread(
-                                    target=run_agent_thread,
-                                    args=(None, agent_runner, gen_id, loop, target_instance),
-                                    daemon=True,
-                                )
-                                thread.start()
-                                
-                                # Set pool.stopped=False AFTER new thread starts (Issue #1 fix)
-                                if agent_pool:
-                                    agent_pool.stopped = False
-                                
+                        session['generating'] = True
+                
                     # Broadcast updated state so frontend reflects resumed status
                     try:
                         await broadcast({'type': 'state', **build_state(generating=True)})
@@ -1502,7 +1449,7 @@ def create_app(agents, agent_pool, config=None):
                         logger.warning(f"Failed to broadcast resume_all state: {e}")
                                 
                 elif msg_type == 'resume':
-                    # Resume a halted instance and restart its generation from where it left off
+                    # Resume a paused instance — clear the global flag so agents wake up naturally
                     target_instance = data.get('instance_name', session['session_name'])
                     with session_lock:
                         is_generating = session['generating']
@@ -1510,7 +1457,7 @@ def create_app(agents, agent_pool, config=None):
                     was_halted = False
                     if agent_pool:
                         was_halted = agent_pool.is_halted(target_instance)
-                        agent_pool.resume_instance(target_instance)
+                        agent_pool.resume()
                         logger.info(f"Instance {target_instance} resumed by user. Was halted: {was_halted}")
                     
                     # For the main session: only restart generation if it was actually halted
