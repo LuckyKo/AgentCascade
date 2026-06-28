@@ -499,7 +499,7 @@ class AgentPool:
 
         for inst_name in self.instances:
             if inst_name not in skip:
-                was_already_halted = self.is_instance_halted(inst_name)
+                was_already_halted = inst_name in self._halted_instances  # check per-instance only, not global pause
                 self.halt_instance(inst_name)
                 # Only track instances that weren't already halted — preserves manual halts
                 if not was_already_halted:
@@ -1757,29 +1757,23 @@ class AgentPool:
         """Check if the pool is currently paused."""
         return self._paused.is_set()
 
-    # ── Legacy per-instance halt methods (kept for backward compat) ──────────
-    # NOTE: is_instance_halted() returns True if EITHER _paused is set OR the
-    # instance is in _halted_instances. Therefore resume_instance(name) won't
-    # actually "un-halt" an agent while the global pause flag is still set —
-    # you must call resume() first to clear the global flag.
+    # ── Instance halt check (checks both global pause + per-instance halt) ───
+
+    def is_instance_halted(self, instance_name: str) -> bool:
+        """Check if an instance is halted. Returns True if globally paused or per-instance halted.
+        
+        Note: resume_instance() only clears per-instance halt; call resume() first to clear _paused."""
+        return self._paused.is_set() or instance_name in self._halted_instances
+    
+    # (internal helpers used by compression handler and REST endpoints)
 
     def halt_instance(self, instance_name: str):
-        """Halt a specific instance (per-instance tracking only)."""
+        """Halt a specific instance (per-instance tracking)."""
         self._halted_instances.add(instance_name)
 
     def resume_instance(self, instance_name: str):
         """Resume a halted instance."""
         self._halted_instances.discard(instance_name)
-
-    def is_instance_halted(self, instance_name: str) -> bool:
-        """Query halt state for an instance. Checks both global pause and per-instance halt."""
-        return self._paused.is_set() or instance_name in self._halted_instances
-    
-    def get_halted_instances(self) -> list:
-        """Get a list of all currently halted instance names (Issue #4 fix)."""
-        if self._paused.is_set():
-            return list(self.instances.keys())
-        return list(self._halted_instances)
 
     # ── Activity tracking ──────────────────────────────────────────────────
 

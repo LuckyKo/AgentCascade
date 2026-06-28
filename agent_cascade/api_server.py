@@ -979,8 +979,15 @@ def create_app(agents, agent_pool, config=None):
     async def api_resume_all():
         """Resume all paused agent instances."""
         if agent_pool:
-            agent_pool.resume()
-            return {"status": "ok", "message": "All instances resumed"}
+            halted_before = [n for n in agent_pool.instances.keys() if agent_pool.is_halted(n)]
+            agent_pool.resume()  # clear global pause flag after capture
+            
+            cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
+            parsed_content = _parse_multimodal_content(cont_msg)
+            for inst_name in halted_before:
+                agent_pool.enqueue_message(inst_name, parsed_content)
+            
+            return {"status": "ok", "message": f"Resumed {len(halted_before)} instances"}
         return {"status": "error", "message": "Agent pool not available"}
 
     @app.get("/api/sessions")
@@ -1428,17 +1435,20 @@ def create_app(agents, agent_pool, config=None):
                     # Resume ALL paused instances by clearing the global flag.
                     # Agents wake up naturally from their 100ms sleep loop — no thread restart needed.
                     if agent_pool:
-                        agent_pool.resume()
-                        logger.info("Cleared global pause flag — all agents will resume naturally")
-                
-                    # Enqueue continuation message only for paused/halted instances (not idle ones)
-                    cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
-                    parsed_content = _parse_multimodal_content(cont_msg)
-                    if agent_pool:
-                        for inst_name in list(agent_pool.instances.keys()):
-                            if agent_pool.is_halted(inst_name):  # only paused/halted ones
-                                agent_pool.enqueue_message(inst_name, parsed_content)
-                
+                        # Capture halted list BEFORE clearing _paused (is_halted checks _paused)
+                        halted_before = [n for n in agent_pool.instances.keys() if agent_pool.is_halted(n)]
+                        agent_pool.resume()  # clear global pause flag
+                        
+                        cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
+                        parsed_content = _parse_multimodal_content(cont_msg)
+                        for inst_name in halted_before:
+                            agent_pool.enqueue_message(inst_name, parsed_content)
+                        
+                        if not halted_before:
+                            logger.info("resume_all called but no instances were paused — skipping continuation messages")
+                        else:
+                            logger.info(f"Resumed {len(halted_before)} paused instances: {halted_before}")
+                    
                     # Mark session as generating again
                     with session_lock:
                         session['generating'] = True
