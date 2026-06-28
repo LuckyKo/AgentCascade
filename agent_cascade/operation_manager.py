@@ -67,9 +67,6 @@ class PendingApproval:
     outcome_reason: str = ""
 
 
-# Timeout for user approval (seconds). Auto-rejects after this.
-APPROVAL_TIMEOUT_SECONDS = 300  # 5 minutes
-
 # Timeout for security advisor checks (seconds). If the security advisor takes longer
 # than this, it is terminated and the operation is auto-rejected to prevent AFK rejection cascades.
 SECURITY_ADVISOR_TIMEOUT_SECONDS = 180   # 3 minutes — gives slow models breathing room
@@ -241,6 +238,7 @@ class OperationManager:
         
         # User toggleable timeout
         self.enable_timeout: bool = True
+        self.approval_timeout_seconds: int = 300  # Default 5 minutes (can be overridden from UI)
 
         import atexit
         atexit.register(self.cleanup_backups)
@@ -257,6 +255,14 @@ class OperationManager:
         else:
             logger.debug("[Workspace] Base dir unchanged (%s), skipping notification", new_path)
         return False
+
+    def set_approval_timeout(self, seconds):
+        """Set the approval timeout duration in seconds (clamped 10s–2h)."""
+        self.approval_timeout_seconds = max(10, min(int(seconds), 7200))
+
+    def set_enable_timeout(self, enabled):
+        """Enable or disable approval timeout."""
+        self.enable_timeout = bool(enabled)
 
     def cleanup_backups(self, agent_name: Optional[str] = None):
         """Archive .bak backup files into zip archives and remove the originals.
@@ -471,7 +477,7 @@ class OperationManager:
             self.pending[request_id] = approval
 
         # Block until user responds, timeout, or agent is stopped (FIX 5)
-        timeout_val = APPROVAL_TIMEOUT_SECONDS if self.enable_timeout else 3600
+        timeout_val = self.approval_timeout_seconds if self.enable_timeout else 3600
         start_time = time.time()
         got_response = False
         

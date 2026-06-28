@@ -1813,6 +1813,17 @@ def create_app(agents, agent_pool, config=None):
                         if 'idle_timeout_seconds' in ui_cfg and agent_pool and hasattr(agent_pool, 'settings'):
                             val = float(ui_cfg['idle_timeout_seconds'])
                             agent_pool.settings.idle_timeout_seconds = max(0.0, val)  # 0 disables auto-dismissal
+                        # Update approval timeout from UI settings
+                        if 'approval_timeout_seconds' in ui_cfg and agent_pool:
+                            try:
+                                agent_pool.operation_manager.set_approval_timeout(int(ui_cfg['approval_timeout_seconds']))
+                            except Exception as e:
+                                logger.warning(f"Failed to set approval timeout: {e}")
+                        if 'enable_approval_timeout' in ui_cfg and agent_pool:
+                            try:
+                                agent_pool.operation_manager.set_enable_timeout(bool(ui_cfg['enable_approval_timeout']))
+                            except Exception as e:
+                                logger.warning(f"Failed to set approval timeout toggle: {e}")
                         # Update max parallel agents — resize ThreadPoolExecutor (Bug #16 fix)
                         if 'max_parallel_agents' in ui_cfg and agent_pool and hasattr(agent_pool, 'settings'):
                             val = int(ui_cfg['max_parallel_agents'])

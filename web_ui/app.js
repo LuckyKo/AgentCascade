@@ -367,6 +367,10 @@ const afkToggle = $('#afkToggle');
 const autoSecurityToggle = $('#autoSecurityToggle');
 const settingAfkMessage = $('#setting-afk-message');
 
+// Approval timeout settings
+const approvalTimeoutEnabled = $('#settingApprovalTimeoutEnabled');
+const approvalTimeoutSeconds = $('#settingApprovalTimeoutSeconds');
+
 
 // Range outputs
 const ranges = [
@@ -638,6 +642,10 @@ function saveSettings() {
   if (settingAfkMessage) s['afk-message'] = settingAfkMessage.value;
   if (autoSecurityToggle) s['auto-security'] = autoSecurityToggle.checked;
 
+  // Approval timeout settings
+  if (approvalTimeoutEnabled) s['approval-timeout-enabled'] = approvalTimeoutEnabled.checked;
+  if (approvalTimeoutSeconds) s['approval-timeout-seconds'] = approvalTimeoutSeconds.value;
+
   localStorage.setItem('agent-cascade-settings', JSON.stringify(s));
   
   if (state.connected) {
@@ -745,6 +753,14 @@ function loadSettings() {
 
     if (settingMcpServers && s['setting-mcp-servers'] !== undefined) {
       settingMcpServers.value = s['setting-mcp-servers'];
+    }
+
+    // Approval timeout settings
+    if (approvalTimeoutEnabled && s['approval-timeout-enabled'] !== undefined) {
+      approvalTimeoutEnabled.checked = !!s['approval-timeout-enabled'];
+    }
+    if (approvalTimeoutSeconds && s['approval-timeout-seconds'] !== undefined) {
+      approvalTimeoutSeconds.value = s['approval-timeout-seconds'];
     }
 
     if (workAccessFoldersRW) {
@@ -3712,6 +3728,10 @@ function getGenerateCfg() {
   if ($('#setting-grep-spillover')) cfg.grep_spillover = $('#setting-grep-spillover').checked;
   if ($('#setting-shell-char-limit')) cfg.shell_char_limit = parseInt($('#setting-shell-char-limit').value);
   if ($('#setting-code-char-limit')) cfg.code_char_limit = parseInt($('#setting-code-char-limit').value);
+
+  // Approval timeout settings
+  if (approvalTimeoutSeconds && approvalTimeoutSeconds.value) cfg.approval_timeout_seconds = parseInt(approvalTimeoutSeconds.value) || 300;
+  if (approvalTimeoutEnabled.length) cfg.enable_approval_timeout = approvalTimeoutEnabled.checked;
 
   if ($('#setting-mcp-enabled') && !$('#setting-mcp-enabled').checked) {
     // MCP is disabled
