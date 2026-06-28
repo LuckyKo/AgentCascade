@@ -663,7 +663,7 @@ def extract_text_from_message(
         msg = Message(**msg)
     
     # Now msg should be a Message object - extract content safely
-    if not hasattr(msg, 'content'):
+    if not msg_has_field(msg, 'content'):
         logger.debug(f"extract_text_from_message: message has no 'content' attribute: {type(msg)}")
         return ""
         

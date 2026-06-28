@@ -275,7 +275,8 @@ def _load_tool_for_agent(name, registry, agent, label, work_dir=None, llm_cfg=No
 
     try:
         instance = factory(**kwargs)
-        agent.function_map[name] = instance
+        if instance is not None:
+            agent.function_map[name] = instance
         logger.debug("[INIT] %s loaded for %s", display_name, label)
         return instance
     except Exception as e:
