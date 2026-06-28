@@ -28,19 +28,7 @@ from agent_cascade.tool_utils import (
     mark_tool_call_truncated,
     generate_spillover_filename,
 )
-
-
-# ── Module-level helper functions ────────────────────────────────────────────
-
-def _msg_role(msg: dict | Any) -> str:
-    """Safely get role from dict or Message object."""
-    return msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-
-
-def _msg_content(msg: dict | Any) -> str:
-    """Safely get content from dict or Message object."""
-    return msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-
+from agent_cascade.utils.utils import msg_field
 
 # ── ToolDispatcher Class ─────────────────────────────────────────────────────
 
@@ -620,7 +608,7 @@ class ToolDispatcher:
                     # Skip unexpected list objects to prevent incorrect processing
                     continue
                 
-                role = _msg_role(msg)
+                role = msg_field(msg, 'role')
                 msg_obj = Message(**msg) if isinstance(msg, dict) else msg
                 text = extract_text_from_message(msg_obj, add_upload_info=True)
                 tokens = qwen_count(text)

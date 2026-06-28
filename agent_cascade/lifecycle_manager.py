@@ -15,23 +15,12 @@ from typing import Tuple, Optional, TYPE_CHECKING
 from agent_cascade.agent_instance import AgentInstance, AgentState
 from agent_cascade.llm.schema import Message, SYSTEM, USER, IMAGE
 from agent_cascade.log import logger
-from agent_cascade.utils.utils import get_basename_from_url
+from agent_cascade.utils.utils import get_basename_from_url, msg_field
 
 
 if TYPE_CHECKING:
     from agent_cascade.agent_pool import AgentPool
     from agent_cascade.execution_engine import ExecutionEngine
-
-
-# ── Module-level helper functions (FIX #4 - reviewer) ────────────────────────
-def _msg_role(msg: dict | Message) -> str:  # FIX #3 + tighter type annotation
-    """Get role from message dict or object."""
-    return msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-
-
-def _msg_content(msg: dict | Message) -> str:  # FIX #3 + tighter type annotation
-    """Get content from message dict or object."""
-    return msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
 
 
 def _inject_metadata_into_message(sys_msg: Message, pool: 'AgentPool', instance: AgentInstance) -> None:
@@ -281,7 +270,7 @@ class AgentLifecycleManager:
         seen_images = {}
         if caller_conv:
             for msg in caller_conv:
-                content = _msg_content(msg)
+                content = msg_field(msg, 'content')
                 if isinstance(content, list):
                     for item in content:
                         item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
@@ -306,11 +295,11 @@ class AgentLifecycleManager:
         if caller_conv:
             last_user_msg = None
             for m in reversed(caller_conv):
-                if _msg_role(m) == USER:
+                if msg_field(m, 'role') == USER:
                     last_user_msg = m
                     break
             if last_user_msg:
-                content = _msg_content(last_user_msg)
+                content = msg_field(last_user_msg, 'content')
                 if isinstance(content, list):
                     for item in content:
                         item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
