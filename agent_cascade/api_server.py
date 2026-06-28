@@ -245,6 +245,39 @@ def serialize_message(msg, index=None):
 
 # ─── App factory ──────────────────────────────────────────────────────────────
 
+def _is_generating(session: dict) -> bool:
+    """Check if currently generating (thread-safe)."""
+    with session_lock:
+        return session.get('generating', False)
+
+
+def _start_generation(session: dict) -> int:
+    """Atomically start generation and return the new generation_id."""
+    with session_lock:
+        session['stop_requested'] = False
+        session['generation_id'] += 1
+        session['generating'] = True
+        return session['generation_id']
+
+
+def _stop_generation(session: dict) -> None:
+    """Atomically stop generation."""
+    with session_lock:
+        session['generating'] = False
+
+
+def _signal_stop(session: dict) -> None:
+    """Signal that a stop is requested."""
+    with session_lock:
+        session['stop_requested'] = True
+
+
+def _set_generating_true(session: dict) -> None:
+    """Atomically mark session as generating."""
+    with session_lock:
+        session['generating'] = True
+
+
 def create_app(agents, agent_pool, config=None):
     """
     Create the FastAPI application.
@@ -291,16 +324,6 @@ def create_app(agents, agent_pool, config=None):
     )
 
     # ── Helpers ───────────────────────────────────────────────────────────
-    # DEPRECATED: get_agent_max_tokens() is dead code — never called anywhere.
-    # Kept for API compatibility; may be removed in a future version.
-    def get_agent_max_tokens(agent, pool=None) -> int:
-        """Resolve the effective max_input_tokens from agent LLM config.
-
-        Delegates to shared helper _resolve_max_tokens to eliminate code
-        duplication and fix OAI detection read-path bug.
-        """
-        return _resolve_max_tokens(pool or agent_pool, None)
-
     def _save_session_history():
         try:
             if not agent_pool:
@@ -515,8 +538,7 @@ def create_app(agents, agent_pool, config=None):
         instance_name = session['session_name']
         # FIX B: Protect session['generating'] read with lock (consistent with Fix 1/4)
         if generating is None:
-            with session_lock:
-                gen = session['generating']
+            gen = _is_generating(session)
         else:
             gen = generating
         
@@ -728,8 +750,7 @@ def create_app(agents, agent_pool, config=None):
         finally:
             # FIX 2 (Cleanup): Reset session['generating'] when thread completes
             # This ensures the flag is cleared automatically after execution finishes
-            with session_lock:
-                session['generating'] = False
+            _stop_generation(session)
 
 
     # ── Background tasks ──────────────────────────────────────────────────
@@ -928,10 +949,8 @@ def create_app(agents, agent_pool, config=None):
         # Phase 6: No need to clear session['history'] — pool is the source of truth
         # Fix #1 & #3: Clear performance caches on session reset
         try:
-            from agent_cascade import api_integration
-            api_integration._token_stats_cache.clear()
-            api_integration._last_stream_versions.clear()
-            api_integration._cached_instance_data.clear()
+            from agent_cascade.api_integration import _clear_performance_caches
+            _clear_performance_caches()
         except Exception:
             pass  # Non-critical — caches will self-correct
         
@@ -1168,8 +1187,7 @@ def create_app(agents, agent_pool, config=None):
                     # to prevent two concurrent engine.run() calls for the same instance.
                     # Without this lock, two WebSocket messages arriving nearly simultaneously
                     # could both read generating=False and start separate runs.
-                    with session_lock:
-                        is_generating = session['generating']
+                    is_generating = _is_generating(session)
 
                     if is_generating:
                         # Async injection while agent is running — route to target agent
@@ -1229,11 +1247,7 @@ def create_app(agents, agent_pool, config=None):
                         agent_pool.enqueue_message(instance_name, parsed_content)
 
                     # Start agent generation
-                    with session_lock:
-                        session['stop_requested'] = False
-                        session['generation_id'] += 1
-                        session['generating'] = True  # FIX 1b: Set flag so WebSocket handler can detect running state
-                        gen_id = session['generation_id']
+                    gen_id = _start_generation(session)
                     if agent_pool:
                         agent_pool.stopped = False
                     
@@ -1255,8 +1269,7 @@ def create_app(agents, agent_pool, config=None):
                     
                     # FIX 1d: Protect session['generating'] read with lock (consistent with Fix 1)
                     # Continue DOES start threads - concurrent continue messages need the same guard.
-                    with session_lock:
-                        is_generating = session['generating']
+                    is_generating = _is_generating(session)
                     if is_generating:
                         continue
                     
@@ -1276,11 +1289,7 @@ def create_app(agents, agent_pool, config=None):
                         inst = agent_pool.get_instance(continue_instance_name)
                     
                     # Start agent generation with existing history (no new user message)
-                    with session_lock:
-                        session['stop_requested'] = False
-                        session['generation_id'] += 1
-                        session['generating'] = True  # FIX 1b-continue: Set flag for race protection
-                        gen_id = session['generation_id']
+                    gen_id = _start_generation(session)
                     if agent_pool:
                         agent_pool.stopped = False
 
@@ -1321,9 +1330,6 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'stop':
                     # Stop all streaming and set ALL active agents to IDLE state.
                     with session_lock:
-                        # CRIT-2 FIX: Document lifecycle - stop_requested is set here by stop handler,
-                        # cleared by continue handler (line ~1353). If user never clicks continue, 
-                        # it stays True. This is by design - the flag persists until explicit resume.
                         session['stop_requested'] = True
                         session['generating'] = False
                         session['generation_id'] += 1
@@ -1400,8 +1406,7 @@ def create_app(agents, agent_pool, config=None):
                         agent_pool.pause()
                         logger.info(f"Paused all instances: {inst_names}")
                         # Mark session as not generating while paused (Issue #7)
-                        with session_lock:
-                            session['generating'] = False
+                        _stop_generation(session)
                     # Broadcast updated state so frontend reflects paused status for all agents
                     try:
                         await broadcast({'type': 'state', **build_state(generating=False)})
@@ -1416,8 +1421,7 @@ def create_app(agents, agent_pool, config=None):
                         logger.info("Cleared global pause flag — all agents will resume naturally")
                     
                     # Mark session as generating again
-                    with session_lock:
-                        session['generating'] = True
+                    _set_generating_true(session)
                 
                     # Broadcast updated state so frontend reflects resumed status
                     try:
@@ -1428,8 +1432,7 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'resume':
                     # Resume a paused instance — clear the global flag so agents wake up naturally
                     target_instance = data.get('instance_name', session['session_name'])
-                    with session_lock:
-                        is_generating = session['generating']
+                    is_generating = _is_generating(session)
                     
                     was_halted = False
                     if agent_pool:
@@ -1442,8 +1445,7 @@ def create_app(agents, agent_pool, config=None):
                         if is_generating and was_halted:
                             # Currently generating but was halted — stop old thread first, then restart generation
                             logger.info(f"Main session was still generating — signalling stop before resume.")
-                            with session_lock:
-                                session['stop_requested'] = True
+                            _signal_stop(session)
                             agent_pool.stopped = True
                             # Brief delay to allow old thread to observe the stop signal
                             await asyncio.sleep(0.1)
@@ -1529,24 +1531,18 @@ def create_app(agents, agent_pool, config=None):
                                 # ── End Fix 3 ──
                             
                             # Fix #3 (Feature 020): Wrap session state modifications with session_lock to prevent race condition
-                            with session_lock:
-                                # FIX 1f: Re-check is_generating right before thread start (consistency with other handlers)
-                                if session['generating']:
-                                    pass  # Skip thread start - another run is already in progress
-                                else:
-                                    session['generation_id'] += 1
-                                    session['generating'] = True  # FIX 1b-resume: Set flag for race protection
-                                    gen_id = session['generation_id']
-                                    
-                                    agent_runner = get_agent()
-                                    loop = asyncio.get_event_loop()
+                            if not _is_generating(session):
+                                gen_id = _start_generation(session)
+                                
+                                agent_runner = get_agent()
+                                loop = asyncio.get_event_loop()
 
-                                    thread = threading.Thread(
-                                        target=run_agent_thread,
-                                        args=(None, agent_runner, gen_id, loop, target_instance),
-                                        daemon=True,
-                                    )
-                                    thread.start()
+                                thread = threading.Thread(
+                                    target=run_agent_thread,
+                                    args=(None, agent_runner, gen_id, loop, target_instance),
+                                    daemon=True,
+                                )
+                                thread.start()
 
                             # FIX 2: Move await broadcast outside session_lock to avoid holding lock during async I/O
                             await broadcast({'type': 'state', **build_state(generating=True)})
@@ -1558,10 +1554,7 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type in ('terminate_agent_instance', 'terminate_sub_agent'):
                     """Terminate the specified agent instance and set it to TERMINATED state."""
                     # Add session_lock guard for consistency with other handlers (Finding #5)
-                    with session_lock:
-                        if session.get('stop_requested', False):
-                            logger.debug(f"Skip terminate {data.get('instance_name')} - stop already requested")
-                            continue
+                    is_generating = _is_generating(session)
                     
                     instance_name = data.get('instance_name')
                     if instance_name and agent_pool:
@@ -1609,8 +1602,7 @@ def create_app(agents, agent_pool, config=None):
                 elif msg_type == 'retry':
                     # FIX 1c: Protect session['generating'] read with lock (consistent with Fix 1)
                     # Retry DOES start threads - concurrent retry messages need the same guard.
-                    with session_lock:
-                        is_generating = session['generating']
+                    is_generating = _is_generating(session)
                     if is_generating:
                         continue
                     
@@ -1698,13 +1690,9 @@ def create_app(agents, agent_pool, config=None):
                     if 'generate_cfg' in data:
                         session['generate_cfg'] = data['generate_cfg']
 
-                    with session_lock:
-                        session['stop_requested'] = False
-                        session['generation_id'] += 1
-                        session['generating'] = True  # FIX 1b-edit_message: Set flag for race protection
+                    gen_id = _start_generation(session)
                     if agent_pool:
                         agent_pool.stopped = False
-                    gen_id = session['generation_id']
                     agent_runner = get_agent()
                     loop = asyncio.get_event_loop()
 
@@ -1732,8 +1720,8 @@ def create_app(agents, agent_pool, config=None):
                     
                     with session_lock:
                         # Phase 6: No need to clear session['history'] — pool is the source of truth
+                        session['stop_requested'] = True
                         session['generating'] = False
-                        session['stop_requested'] = False
                         session['generation_id'] += 1
                     if agent_pool:
                         agent_pool.stopped = True
@@ -2364,10 +2352,8 @@ def create_app(agents, agent_pool, config=None):
                     
                     # Fix #1 & #3: Clear performance caches on message edit
                     try:
-                        from agent_cascade import api_integration
-                        api_integration._token_stats_cache.clear()
-                        api_integration._last_stream_versions.clear()
-                        api_integration._cached_instance_data.clear()
+                        from agent_cascade.api_integration import _clear_performance_caches
+                        _clear_performance_caches()
                     except Exception:
                         pass
                     
@@ -2408,10 +2394,8 @@ def create_app(agents, agent_pool, config=None):
                     
                     # Fix #1 & #3: Clear performance caches on message deletion
                     try:
-                        from agent_cascade import api_integration
-                        api_integration._token_stats_cache.clear()
-                        api_integration._last_stream_versions.clear()
-                        api_integration._cached_instance_data.clear()
+                        from agent_cascade.api_integration import _clear_performance_caches
+                        _clear_performance_caches()
                     except Exception:
                         pass
                     
@@ -2453,17 +2437,14 @@ def create_app(agents, agent_pool, config=None):
                             inst = agent_pool.get_instance(instance_name)
                             if inst is not None:
                                 # Fix #3 (Feature 020): Wrap session state modifications with session_lock to prevent race condition
-                                with session_lock:
-                                    session['generating'] = False
-                                    session['stop_requested'] = False
+                                _stop_generation(session)
+                                _signal_stop(session)
                                 if agent_pool:
                                     agent_pool.stopped = False
                                 # Fix #1 & #3: Clear performance caches on session load
                                 try:
-                                    from agent_cascade import api_integration
-                                    api_integration._token_stats_cache.clear()
-                                    api_integration._last_stream_versions.clear()
-                                    api_integration._cached_instance_data.clear()
+                                    from agent_cascade.api_integration import _clear_performance_caches
+                                    _clear_performance_caches()
                                 except Exception:
                                     pass
                                 await broadcast({'type': 'state', **build_state()})

@@ -56,95 +56,11 @@ _STREAM_TOKEN_STATS_CACHE_MAXSIZE = 100  # Bounded cache (FIFO eviction) to prev
 
 def _clear_performance_caches():
     """Clear all module-level performance caches. Called during session reset."""
-    global _token_stats_cache, _cached_instance_data, _stream_token_stats_cache
+    global _token_stats_cache, _cached_instance_data, _stream_token_stats_cache, _last_stream_versions
     _token_stats_cache.clear()
     _cached_instance_data.clear()
     _stream_token_stats_cache.clear()
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Activity Update Helper — lightweight streaming updates for UI banner
-# ═══════════════════════════════════════════════════════════════════════
-
-# DEPRECATED: _build_activity_update is no longer used by the unified execution path.
-# The dual update paths (activity_update + stream_update) created a split perception where
-# the banner updated faster than the conversation. Removed in favor of stream_update only.
-# Kept for potential future use or other code paths.
-
-def _build_activity_update(
-    pool: 'AgentPool',
-    instance_name: str,
-    streaming_text: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    """Build a lightweight activity update for the UI banner.
-    
-    DEPRECATED: No longer used by run_agent_unified.py. The 50ms activity_update path
-    was removed to eliminate split perception (banner updates fast, conversation lags).
-    
-    This is a minimal payload that updates the activity banner without
-    building the full state. Used for near-real-time feedback during LLM streaming.
-    
-    Args:
-        pool: The AgentPool managing all instances.
-        instance_name: Name of the active instance.
-        streaming_text: Current partial text being generated (if any).
-        
-    Returns:
-        Dictionary with activity update data, or None if instance not found.
-    
-    Example:
-            # No longer called by unified path — kept for reference only
-            # activity = _build_activity_update(pool, "Maine", "Thinking about...")
-            # asyncio.run_coroutine_threadsafe(...)
-    """
-    instance = pool.get_instance(instance_name)
-    if instance is None:
-        return None
-    
-    # Extract preview from streaming text or last message
-    preview = ''
-    if streaming_text and streaming_text.strip():
-        # Use the streaming text directly (last N chars for brevity)
-        preview = streaming_text[-200:] if len(streaming_text) > 200 else streaming_text
-    else:
-        # Fallback to last message content
-        with instance._compression_lock:
-            if instance.conversation:
-                last_msg = instance.conversation[-1]
-                last_content = (
-                    last_msg.get('content', '') if isinstance(last_msg, dict)
-                    else getattr(last_msg, 'content', '')
-                )
-                if last_content:
-                    # Clean up markdown for display
-                    preview = str(last_content).replace('\n', ' ').strip()
-                    preview = preview[-200:] if len(preview) > 200 else preview
-    
-    # Check if instance is waiting for API slot (Major Issue #4: inline logic to avoid circular import)
-    is_waiting = False
-    api_router = getattr(pool, 'api_router', None)
-    if api_router and callable(getattr(api_router, 'is_waiting', None)):
-        try:
-            is_waiting = api_router.is_waiting(instance_name)
-        except Exception as e:
-            logger.debug(f"is_waiting check failed for {instance_name}: {e}")
-    
-    # Get token count for display (use cached value if available)
-    token_count = 0
-    if hasattr(instance, '_last_actual_token_count') and instance._last_actual_token_count > 0:
-        token_count = instance._last_actual_token_count
-    
-    # FIX 3: Thread-safe state read - snapshot under lock before returning
-    with instance._state_lock:
-        current_state = instance.state
-    
-    return {
-        'instance_name': instance_name,
-        'preview': preview,
-        'is_active': current_state == AgentState.RUNNING,
-        'is_waiting': is_waiting,
-        'token_count': token_count,
-    }
+    _last_stream_versions.clear()
 
 
 # ═══════════════════════════════════════════════════════════════════════
