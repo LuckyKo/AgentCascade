@@ -1431,12 +1431,13 @@ def create_app(agents, agent_pool, config=None):
                         agent_pool.resume()
                         logger.info("Cleared global pause flag — all agents will resume naturally")
                 
-                    # Enqueue continuation message for all running instances so they know to continue
+                    # Enqueue continuation message only for paused/halted instances (not idle ones)
                     cont_msg = "[SYSTEM]: You were paused. Please continue from where you left off."
                     parsed_content = _parse_multimodal_content(cont_msg)
                     if agent_pool:
                         for inst_name in list(agent_pool.instances.keys()):
-                            agent_pool.enqueue_message(inst_name, parsed_content)
+                            if agent_pool.is_halted(inst_name):  # only paused/halted ones
+                                agent_pool.enqueue_message(inst_name, parsed_content)
                 
                     # Mark session as generating again
                     with session_lock:

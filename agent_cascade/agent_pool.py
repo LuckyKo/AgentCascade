@@ -270,7 +270,7 @@ class AgentPool:
         self._idle = IdleManager(self)                      # idle detection and auto-dismissal
 
         # ── Simple state (owned directly by pool, no separate manager) ───────
-        self._paused: bool = False                         # global pause flag for all instances
+        self._paused = threading.Event()                   # global pause flag (thread-safe Event)
         self._halted_instances: set = set()                # per-instance halt state (legacy, kept for compat)
         self._compression_halted: set = set()              # instances halted by forced compression (not manual)
         self.terminated_instances: set = set()             # instances marked for immediate termination
@@ -510,7 +510,6 @@ class AgentPool:
         for inst_name in list(self._compression_halted):
             self.resume_instance(inst_name)
         self._compression_halted.clear()
-        self._paused = False  # Clear global pause flag after compression resume
 
     def terminate_instance(self, instance_name: str, set_global_stopped: bool = False):
         """Mark an instance for immediate termination.
@@ -611,7 +610,7 @@ class AgentPool:
 
     def is_halted(self, instance_name: str) -> bool:
         """Check if an instance is halted (checks global pause + per-instance halt)."""
-        return self._paused or instance_name in self._halted_instances
+        return self._paused.is_set() or instance_name in self._halted_instances
 
     def list_agents(self) -> List[str]:
         """Return all available agent template names."""
@@ -713,7 +712,7 @@ class AgentPool:
         self._instances_version += 1
 
         # ── Step 5: Clear per-instance state ────────────────────────────────
-        self._paused = False
+        self._paused.clear()
         self._halted_instances.clear()
         self._compression_halted.clear()
         self.terminated_instances.clear()
@@ -1742,18 +1741,27 @@ class AgentPool:
     # ── Pause/Resume state management ───────────────────────────────────────
 
     def pause(self):
-        """Pause ALL instances by setting the global pause flag."""
-        self._paused = True
+        """Pause ALL instances by setting the global pause flag.
+        
+        Sets _paused Event so all agents spin in a 100ms sleep loop until resumed.
+        Unlike stop(), this does NOT trigger idle.stop() or async_registry.shutdown() —
+        those are side effects of pool.stopped=True (the stop path), not pause.
+        """
+        self._paused.set()
 
     def resume(self):
         """Resume all paused instances by clearing the global pause flag."""
-        self._paused = False
+        self._paused.clear()
 
     def is_paused(self) -> bool:
         """Check if the pool is currently paused."""
-        return self._paused
+        return self._paused.is_set()
 
     # ── Legacy per-instance halt methods (kept for backward compat) ──────────
+    # NOTE: is_instance_halted() returns True if EITHER _paused is set OR the
+    # instance is in _halted_instances. Therefore resume_instance(name) won't
+    # actually "un-halt" an agent while the global pause flag is still set —
+    # you must call resume() first to clear the global flag.
 
     def halt_instance(self, instance_name: str):
         """Halt a specific instance (per-instance tracking only)."""
@@ -1765,11 +1773,11 @@ class AgentPool:
 
     def is_instance_halted(self, instance_name: str) -> bool:
         """Query halt state for an instance. Checks both global pause and per-instance halt."""
-        return self._paused or instance_name in self._halted_instances
+        return self._paused.is_set() or instance_name in self._halted_instances
     
     def get_halted_instances(self) -> list:
         """Get a list of all currently halted instance names (Issue #4 fix)."""
-        if self._paused:
+        if self._paused.is_set():
             return list(self.instances.keys())
         return list(self._halted_instances)
 
