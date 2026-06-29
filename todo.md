@@ -22,7 +22,9 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] improve list_dir tool — FIXED (3ec490c): added recursive listing, glob filtering (include/exclude), sorting (name/size/date/type), human-readable sizes, timestamps, summary stats, max_entries cap, symlink cycle detection
 [ ] add a banner above the user chat entry that shows queued messages (with an X to dismiss each one individually)
 [ ] change USE_PREV_ARG system to an argument and (certain) tool output caching system. all tool arguments and certain outputs (like the result of a call_agent) longer than a certain threshold (line 1000 chars) get cached in a pool and can be inserted with {**USE_CACHED_ENTRY_N**} in other tool arguments. system_info will display the truncated state of the cache pool. we'll use a rolling index to overwrite old entries in the pool with new ones. the system will use a toggle on/off in settings.
-
+[x] add `delete_and_insert` match_mode to edit_file tool: the `old_content` argument takes a python range `start:end` (but start with 1) that will be deleted before the new content is inserted at position `start`. leaving `new_content` empty will just delete that line range, providing just `start` in range will be pure insert of `new_content`. range can go negative, a start of -1 will insert at tail-1, 0 will append at the end, 1 will insert at start.
+[ ] add `shift` mode to re_indet tool, a mode where we just add or remove indent unints from the start of the line. (the old `shit` mode will be renamed to `min`)
+ 
 # Message stack update rules:
 
 - add message/tool response/user msg (append): agent_pool - add; logs - add; UI - add
@@ -46,9 +48,9 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] retry is broken, it deleted the user message too
 - [ ] max tokens does not change when a new API endpoint is acquired 
 - [ ] randomly duplicated compression markers in agent log sometimes
-- [ ] first compression doesn't send to compressor the first user message
+- [ ] first compression doesn't include the first user message
 - [x] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck
-- [ ] loop detector is appending to agent pool the first user message on rollback instead of surgically removing the loop only; no debug logging on event
+- [ ] loop detector is appending to agent pool the first user message on rollback; no debug logging on event
 - [ ] images don't get properly pasted in chat
 - [ ] session load must also load the type of agent and instance name from the json file and use that
 - [ ] max_tokens does not get updated when the API endpoint changes

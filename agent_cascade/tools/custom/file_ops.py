@@ -624,7 +624,7 @@ class EditFile(BaseTool):
             },
             'match_mode': {
                 'type': 'string',
-                'enum': ['exact', 'heuristic', 'heuristic_agnostic'],
+                'enum': ['exact', 'heuristic', 'heuristic_agnostic', 'delete_and_insert'],
                 'default': 'exact',
                 'description': TOOL_METADATA['edit_file']['parameters']['match_mode']
             },
@@ -633,7 +633,7 @@ class EditFile(BaseTool):
                 'description': 'Why you need to edit this file'
             }
         },
-        'required': ['path', 'old_content', 'new_content'],
+        'required': ['path', 'old_content'],
     }
 
     def __init__(self, cfg=None, **kwargs):
@@ -685,7 +685,11 @@ class EditFile(BaseTool):
             return "ERROR: Missing 'path'."
         if not old_content:
             return "ERROR: Missing 'old_content'. Please provide the exact text you want to replace."
-        if new_content is None:
+        # For delete_and_insert mode, empty new_content means delete-only
+        if match_mode == 'delete_and_insert':
+            if new_content is None:
+                new_content = ''
+        elif new_content is None:
             return "ERROR: Missing 'new_content'. Please provide the text you want to replace old_content with."
 
         return self.agent_pool.operation_manager.edit_file(

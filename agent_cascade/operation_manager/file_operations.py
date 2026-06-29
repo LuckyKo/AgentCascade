@@ -482,6 +482,78 @@ class FileOpsMixin:
         from agent_cascade.settings import DEFAULT_HEURISTIC_MATCH_THRESHOLD
         import difflib
 
+        # ── Helper: parse range spec for delete_and_insert mode ──────────────
+        def _parse_range(range_str: str, total_lines: int) -> tuple:
+            """Parse old_content as a line range for delete_and_insert mode.
+            
+            Returns (start_idx, end_idx) as 0-based Python slice indices.
+            - start is inclusive, end is exclusive.
+            - 1-indexed input: '3:7' means lines 3 through 7.
+            - Single number '4' means insert before line 4 (empty delete range).
+            - Negative numbers count from end: -1 = last line.
+            - 0 means append at end of file.
+            """
+            range_str = range_str.strip()
+            
+            if ':' in range_str:
+                parts = range_str.split(':')
+                if len(parts) != 2:
+                    raise ValueError(f"Range must have exactly one ':'. Got '{range_str}'")
+                
+                start_part, end_part = parts
+                
+                # Parse start (empty means delete all from beginning, i.e., start at line 1)
+                if start_part.strip() == '':
+                    start = 1  # Delete from the very first line
+                elif start_part.strip() == '0':
+                    start = total_lines + 1  # Append beyond last line
+                else:
+                    start = int(start_part)
+                
+                # Parse end (empty means delete all from start to end of file)
+                if end_part.strip() == '':
+                    end = total_lines + 1  # Delete everything from start onward
+                elif end_part.strip() == '0':
+                    end = total_lines + 1  # Append at end (same as empty)
+                else:
+                    end = int(end_part)
+                if start < 0:
+                    start = total_lines + 1 + start  # 1-indexed: -1 → last line
+                if end < 0:
+                    end = total_lines + end  # exclusive end: -1 → stop before last
+                
+                # Clamp to valid bounds
+                start = max(0, min(start, total_lines + 1))
+                end = max(0, min(end, total_lines + 1))
+                
+                if start > end:
+                    raise ValueError(f"Start ({start}) must be <= end ({end})")
+                
+                # Convert to 0-based slice indices
+                return start - 1, end
+                
+            else:
+                # Single number = insert-only (or delete single line if new_content is empty)
+                if range_str == '0':
+                    return total_lines, total_lines  # Append at end
+                start = int(range_str)
+                if start < 0:
+                    start = total_lines + 1 + start
+                # Clamp to [1, total_lines+1] so that out-of-range means append
+                start = max(1, min(start, total_lines + 1))
+                zero_idx = start - 1  # Convert to 0-based index
+                return zero_idx, zero_idx  # Empty range at position (insert point)
+
+        def _detect_line_ending(line: str) -> str:
+            """Detect the line ending style of a line."""
+            if '\r\n' in line:
+                return '\r\n'
+            elif '\n' in line:
+                return '\n'
+            elif '\r' in line:
+                return '\r'
+            return ''
+
         if match_mode == 'exact':
             count = file_content.count(old_content)
             if count == 0:
@@ -786,6 +858,42 @@ class FileOpsMixin:
                     else:
                         ending = '\r'
                     new_content = new_content + ending
+        elif match_mode == 'delete_and_insert':
+            # ── delete_and_insert mode: line-range-based surgery ─────────────
+            file_lines = file_content.splitlines(keepends=True)
+            total_lines = len(file_lines)
+
+            # Check for empty file — only "0" (append) makes sense on an empty file
+            if total_lines == 0 and old_content.strip() != '0':
+                return f"ERROR: Cannot use delete_and_insert mode on an empty file unless old_content='0' (append)."
+
+            try:
+                start_idx, end_idx = _parse_range(old_content, total_lines)
+            except (ValueError, IndexError) as e:
+                return f"ERROR: Invalid range '{old_content}' for delete_and_insert mode: {str(e)}"
+
+            # Split file into before/deleted/after sections
+            before = file_lines[:start_idx]
+            after = file_lines[end_idx:]  # end_idx is exclusive (Python slice semantics)
+
+            if new_content:
+                inserted = new_content.splitlines(keepends=True)
+                # Preserve line ending style from surrounding context for ALL inserted lines
+                if after:
+                    ref_ending = _detect_line_ending(after[0])
+                    if not ref_ending and before:
+                        ref_ending = _detect_line_ending(before[-1])
+                    if ref_ending:
+                        for i in range(len(inserted)):
+                            # Normalize each line's ending to match file style
+                            inserted[i] = inserted[i].rstrip('\r\n') + ref_ending
+                file_lines = before + inserted + after
+            else:
+                # Delete-only: no insertion
+                file_lines = before + after
+
+            new_file_content = ''.join(file_lines)
+
         else:
             return f"ERROR: Invalid match_mode '{match_mode}'."
 
@@ -818,13 +926,19 @@ class FileOpsMixin:
                 backup_path_str = str(backup_path)
 
             file_content = resolved.read_text(encoding='utf-8')
-            new_file_content = file_content.replace(actual_old_content, new_content, 1)
+            if match_mode == 'delete_and_insert':
+                # new_file_content was already computed above — skip string replace
+                pass
+            else:
+                new_file_content = file_content.replace(actual_old_content, new_content, 1)
             resolved.write_text(new_file_content, encoding='utf-8')
 
             self.file_ownership[str(resolved)] = agent_name
 
             res_msg = f"APPROVED: Edited {path}"
-            if match_mode in ('heuristic', 'heuristic_agnostic'):
+            if match_mode == 'delete_and_insert':
+                res_msg += " (delete_and_insert mode)"
+            elif match_mode in ('heuristic', 'heuristic_agnostic'):
                 res_msg += f" (Heuristic match similarity: {match_ratio:.1%})"
                 resolved_path_str = resolved.as_posix()
                 edit_count = self._heuristic_edit_counts.get(resolved_path_str, 0)
