@@ -688,8 +688,9 @@ class WsMessageHandler:
         """Handle 'restart_server' — restart the server process."""
         from agent_cascade.log import logger
         logger.warning("Server restart requested via UI")
+        import sys
         await self.broadcast_fn({'type': 'error', 'message': 'Server is restarting... Please wait.'})
-        os.execl(__import__('sys').executable, __import__('sys').executable, *__import__('sys').argv)
+        os.execl(sys.executable, sys.executable, *sys.argv)
 
     async def handle_update_config(self, data: dict) -> None:
         """Handle 'update_config' — delegate to ConfigUpdateRouter for key dispatch."""
@@ -817,11 +818,11 @@ class WsMessageHandler:
                 if inst is not None:
                     inst.rebuild_conversation(history)
 
-                logger_inst = self.agent_pool.get_logger(
-                    target_name,
-                    'Orchestrator' if target_name == self.session['session_name'] else 'SubAgent'
-                )
-                logger_inst.reset_history(history, rewrite=True)
+                    logger_inst = self.agent_pool.get_logger(
+                        target_name,
+                        'Orchestrator' if target_name == self.session['session_name'] else 'SubAgent'
+                    )
+                    logger_inst.reset_history(history, rewrite=True)
 
                 # Sync instance_state so build_state() sees the edit
                 if target_name != self.session['session_name'] and target_name in self.agent_pool.instance_state:

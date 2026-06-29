@@ -237,6 +237,7 @@ def create_app(agents, agent_pool, config=None):
 
     # ── Unified architecture imports (Phase 5) ───────────────────────────
     from agent_cascade.run_agent_unified import run_agent_thread_unified
+    from agent_cascade.ws_handlers import WsMessageHandler
     from agent_cascade.api_integration import (
         broadcast_stream_update,
         build_state_from_pool,
@@ -1083,6 +1084,10 @@ def create_app(agents, agent_pool, config=None):
         await _broadcast_state()
         return {"status": "ok"}
 
+    # ── start_gen wrapper: spawns run_agent_thread in a daemon thread ─────
+    def start_gen(history, runner, gen_id, loop, target=None):
+        threading.Thread(target=run_agent_thread, args=(history, runner, gen_id, loop, target), daemon=True).start()
+
     # ── WebSocket ─────────────────────────────────────────────────────────
 
     @app.websocket("/ws/chat")
@@ -1108,1172 +1113,13 @@ def create_app(agents, agent_pool, config=None):
                     logger.warning(f"Malformed WebSocket message received (skipping): {e}")
                     continue
 
-                # Extract msg_type for the if/elif dispatch chain below
-                msg_type = data.get('type', '')
-
-                if msg_type == 'continue':
-                    # Continue generation WITHOUT inserting a new user message.
-                    # Just send the existing conversation to the LLM so it can resume if it wants.
-                    
-                    # Protect session['generating'] read with lock (consistent with Fix 1)
-                    is_generating = _is_generating(session)
-                    if is_generating:
-                        continue
-                    
-                    # Update session config if provided
-                    if 'agent_index' in data:
-                        session['agent_index'] = int(data['agent_index'])
-                    if 'session_name' in data:
-                        session['session_name'] = data['session_name']
-                    if 'generate_cfg' in data:
-                        _validate_disabled_tools(data['generate_cfg'])
-                        session['generate_cfg'] = data['generate_cfg']
-
-                    # Resolve the target instance (prefer target_agent from frontend, fallback to session)
-                    continue_instance_name = data.get('target_agent') or session['session_name']
-                    inst = None
-                    if agent_pool:
-                        inst = agent_pool.get_instance(continue_instance_name)
-                    
-                    # Start agent generation with existing history (no new user message)
-                    gen_id = _start_generation(session)
-                    if agent_pool:
-                        agent_pool.stopped = False
-
-                    agent_runner = get_agent()
-                    loop = asyncio.get_event_loop()
-
-                    # Get the current history from the pool (unified path)
-                    if inst is None:
-                        await broadcast({'type': 'error', 'message': 'No agent instance found to continue'})
-                        continue
-                    
-                    # Pop trailing assistant message before deepcopying history.
-                    saved_assistant_msg = None
-                    with inst._compression_lock:
-                        if inst.conversation:
-                            last_msg = inst.conversation[-1]
-                            last_role = msg_field(last_msg, 'role')
-                            if last_role == ASSISTANT:
-                                saved_assistant_msg = inst.conversation.pop()
-                                # Store on instance for merging in execution_engine._process_response
-                                inst._continue_saved_msg = saved_assistant_msg
-                    
-                    history_copy = copy.deepcopy(inst.conversation)
-
-                    thread = threading.Thread(
-                        target=run_agent_thread,
-                        args=(history_copy, agent_runner, gen_id, loop, continue_instance_name),
-                        daemon=True,
-                    )
-                    thread.start()
-
-                    await _broadcast_state(generating=True)
-
-                elif msg_type == 'stop':
-                    # Stop all streaming and set ALL active agents to IDLE state.
-                    with session_lock:
-                        session['stop_requested'] = True
-                        session['generating'] = False
-                        session['generation_id'] += 1
-                    
-                    if agent_pool:
-                        # Transition ALL active agents to IDLE state (not just reset)
-                        for inst_name, instance in list(agent_pool.instances.items()):
-                            try:
-                                # CRITICAL FIX: Mark activity BEFORE transitioning to IDLE so idle timer starts from stop event
-                                agent_pool._mark_activity(inst_name)
-                                
-                                # Read state INSIDE lock to avoid race condition (Reviewer Finding #2)
-                                with instance._state_lock:
-                                    current_state = instance.state
-                                    if current_state in ACTIVE_STATES:
-                                        # Use _transition() instead of direct assignment for proper validation (Finding #1)
-                                        instance._transition(AgentState.IDLE)
-                                        logger.info(f"Stop: Transitioned {inst_name} from {current_state.name} to IDLE")
-                                
-                                # Clear any pending continue merge state on stop
-                                with instance._compression_lock:
-                                    if instance._continue_saved_msg is not None:
-                                        logger.debug(f"[CONTINUE_FIX] Stop handler cleared _continue_saved_msg for {inst_name}")
-                                        instance._continue_saved_msg = None
-                            except InvalidStateTransition as e:
-                                logger.warning(f"Invalid state transition for {inst_name}: {e}")
-                            except Exception as e:
-                                logger.warning(f"Failed to transition {inst_name} to IDLE: {e}")
-                        
-                        # Halt threads, release slots, and unblock pending approvals (non-destructive — preserves sessions)
-                        agent_pool.stop_session()
-
-                        # Increment run generation AFTER slot release so old threads see both signals:
-                        # pool.stopped=True + _run_generation bumped. New resume threads snapshot the
-                        # incremented value; stale threads detect mismatch on next _is_stopped() check.
-                        agent_pool._run_generation += 1
-                    
-                    # Clean up active stack and halted state after stop_session()
-                    if agent_pool:
-                        try:
-                            from agent_cascade.agent_instance import AgentState as InstanceAgentState
-                            
-                            # Slot release is handled by stop_session() — no need to duplicate here.
-                            # Just clean up active_stack and _halted_instances.
-                            
-                            # CRIT-3 FIX: Use active_stack[:] = [...] to mutate list in place, not replace it.
-                            # Other code may hold references to the old list; mutation ensures all refs see updates.
-                            if hasattr(agent_pool, '_execution') and hasattr(agent_pool._execution, 'active_stack'):
-                                with agent_pool._execution._state_lock:
-                                    logger.debug(f"[STOP_STACK_CLEANUP] Cleaning active_stack: {agent_pool._execution.active_stack}")
-                                    original_len = len(agent_pool._execution.active_stack)
-                                    # Mutate in place instead of replacing the list
-                                    agent_pool._execution.active_stack[:] = [
-                                        (name, depth) for name, depth in agent_pool._execution.active_stack
-                                        if name not in agent_pool.terminated_instances
-                                    ]
-                                    removed_count = original_len - len(agent_pool._execution.active_stack)
-                                    if removed_count > 0:
-                                        logger.debug(f"[STOP_STACK_CLEANUP] Removed {removed_count} terminated entries from active_stack")
-                            
-                            # MINOR-4 FIX: Clear _halted_instances to prevent stale pause state after stop
-                            if hasattr(agent_pool, '_halted_instances'):
-                                agent_pool._halted_instances.clear()
-                                logger.debug("[STOP_HALTED_CLEANUP] Cleared _halted_instances")
-                        except Exception as e:
-                            logger.warning(f"[STOP_CLEANUP_ERROR] Error during slot/stack cleanup: {e}")
-                    
-                    await _broadcast_state('done')
-
-                elif msg_type == 'pause':
-                    # Pause ALL running instances by setting global flag
-                    if agent_pool:
-                        inst_names = list(agent_pool.instances.keys())
-                        agent_pool.pause()
-                        logger.info(f"Paused all instances: {inst_names}")
-                        # Mark session as not generating while paused (Issue #7)
-                        _stop_generation(session)
-                    # Broadcast updated state so frontend reflects paused status for all agents
-                    try:
-                        await _broadcast_state(generating=False)
-                    except Exception as e:
-                        logger.warning(f"Failed to broadcast pause state: {e}")
-
-                elif msg_type == 'resume_all':
-                    # Resume ALL paused instances by clearing the global flag.
-                    # Agents wake up naturally from their 100ms sleep loop — no thread restart needed.
-                    if agent_pool:
-                        agent_pool.resume()  # clear global pause flag
-                        logger.info("Cleared global pause flag — all agents will resume naturally")
-                    
-                    # Mark session as generating again
-                    _set_generating_true(session)
-                
-                    # Broadcast updated state so frontend reflects resumed status
-                    try:
-                        await _broadcast_state(generating=True)
-                    except Exception as e:
-                        logger.warning(f"Failed to broadcast resume_all state: {e}")
-                                
-                elif msg_type == 'resume':
-                    # Resume a paused instance — clear the global flag so agents wake up naturally
-                    target_instance = data.get('instance_name', session['session_name'])
-                    is_generating = _is_generating(session)
-                    
-                    was_halted = False
-                    if agent_pool:
-                        was_halted = agent_pool.is_instance_halted(target_instance)
-                        agent_pool.resume()  # clear global pause flag
-                        logger.info(f"Instance {target_instance} resumed by user. Was halted: {was_halted}")
-                    
-                    # For the main session: only restart generation if it was actually halted
-                    if target_instance == session['session_name']:
-                        if is_generating and was_halted:
-                            # Currently generating but was halted — stop old thread first, then restart generation
-                            logger.info(f"Main session was still generating — signalling stop before resume.")
-                            _signal_stop(session)
-                            agent_pool.stopped = True
-                            # Brief delay to allow old thread to observe the stop signal
-                            await asyncio.sleep(0.1)
-                        
-                        if was_halted:
-                            # Was halted — agents wake naturally from sleep loop, no continuation message needed
-                            # Start agent generation
-                            with session_lock:
-                                session['stop_requested'] = False
-                            if agent_pool:
-                                agent_pool.stopped = False
-                                
-                                # ── Fix 3: Restore agent instance conversations from JSONL logs if corrupted ──
-                                # After a failed forced compression cycle, agent instance pools may be empty/corrupted.
-                                # Read directly from log files on disk to recover.
-                                # Import validate_message_pool locally (moved to utils/pool_validation.py in Phase 2)
-                                from agent_cascade.utils.pool_validation import validate_message_pool
-                                
-                                for sa_name, agent_class in list(agent_pool.instance_classes.items()):
-                                        if sa_name == session['session_name']:
-                                            continue  # Skip main session — already synced above
-                                        
-                                        # Skip orphaned or root instances (only recover agent instances)
-                                        sa_inst = agent_pool.get_instance(sa_name)
-                                        if sa_inst is None:
-                                            continue  # Instance not found, skip
-                                        
-                                        try:
-                                            # Check if current conversation is valid before restoring
-                                            with sa_inst._compression_lock:
-                                                conv_snapshot = list(sa_inst.conversation)
-                                            if validate_message_pool(conv_snapshot, sa_name):
-                                                continue  # Conversation is fine, no need to restore
-                                            
-                                            # Find the actual log file via existing logger or glob
-                                            recov = []
-                                            logger_inst = agent_pool.instance_loggers.get(sa_name)
-                                            
-                                            if logger_inst and hasattr(logger_inst, 'log_path') and logger_inst.log_path:
-                                                actual_log_path = logger_inst.log_path
-                                            else:
-                                                # Search for the most recent log file matching this agent instance
-                                                if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-                                                    log_dir = agent_pool.operation_manager.base_dir / 'logs'
-                                                else:
-                                                    log_dir = Path(DEFAULT_WORKSPACE) / 'logs'
-                                                pattern = f"{agent_class}_{sa_name}_*.jsonl"
-                                                matches = sorted(glob.glob(str(log_dir / pattern)), reverse=True)
-                                                actual_log_path = matches[0] if matches else None
-                                            
-                                            # Read messages from log file
-                                            if actual_log_path and os.path.exists(actual_log_path):
-                                                with open(actual_log_path, 'r', encoding='utf-8') as f:
-                                                    for line in f:
-                                                        line = line.strip()
-                                                        if not line:
-                                                            continue
-                                                        try:
-                                                            item = json.loads(line)
-                                                            if "metadata" not in item and "event" not in item:  # Skip metadata lines and event entries
-                                                                recov.append(item)
-                                                        except json.JSONDecodeError as e:
-                                                            logger.debug(f"Skipping malformed JSONL line in agent pool recovery: {e}")
-                                                            continue
-                                            
-                                            # Only overwrite pool if recovered data is valid
-                                            if recov and validate_message_pool(recov, sa_name):
-                                                logger.info(
-                                                    f"Restoring agent instance {sa_name} conversation from log during resume "
-                                                    f"({len(recov)} messages)"
-                                                )
-                                                sa_inst = agent_pool.get_instance(sa_name)
-                                                if sa_inst is not None:
-                                                    sa_inst.rebuild_conversation(recov)  # PR3: centralized API handles full rebuild with cache sync
-                                            else:
-                                                logger.warning(
-                                                    f"Could not restore agent instance {sa_name} pool — "
-                                                    f"no valid recovery data found in logs"
-                                                )
-                                        except Exception as _e:
-                                            # Single agent failure shouldn't block resume for others
-                                            logger.warning(f"Failed to restore agent instance {sa_name} pool: {_e}")
-                                # ── End Fix 3 ──
-                            
-                            # Wrap session state modifications with session_lock to prevent race condition
-                            if not _is_generating(session):
-                                gen_id = _start_generation(session)
-                                
-                                agent_runner = get_agent()
-                                loop = asyncio.get_event_loop()
-
-                                thread = threading.Thread(
-                                    target=run_agent_thread,
-                                    args=(None, agent_runner, gen_id, loop, target_instance),
-                                    daemon=True,
-                                )
-                                thread.start()
-
-                            # Move await broadcast outside session_lock to avoid holding lock during async I/O
-                            await _broadcast_state(generating=True)
-                        elif not is_generating:
-                            # Not halted and not generating — just update UI state (no-op from user's perspective)
-                            await _broadcast_state()
-                    
-                    # For agent instances: agents wake naturally from sleep loop, no continuation message needed
-                elif msg_type in ('terminate_agent_instance', 'terminate_sub_agent'):
-                    """Terminate the specified agent instance and set it to TERMINATED state."""
-                    # Add session_lock guard for consistency with other handlers (Finding #5)
-                    is_generating = _is_generating(session)
-                    
-                    instance_name = data.get('instance_name')
-                    if instance_name and agent_pool:
-                        # SAFEGUARD: Never allow terminating the root orchestrator — it breaks the session.
-                        # If a frontend bug sends the session name, just transition it to IDLE instead.
-                        inst = agent_pool.get_instance(instance_name)
-                        is_root = (inst is not None and inst.parent_instance is None)
-                        
-                        if is_root:
-                            logger.warning(f"Terminate requested for root orchestrator '{instance_name}' — blocked. Transitioning to IDLE instead.")
-                            with session_lock:
-                                session['stop_requested'] = True
-                                session['generating'] = False
-                                session['generation_id'] += 1
-                            agent_pool._stopped_event.set()
-                            
-                            # CRITICAL FIX: Mark activity BEFORE transitioning to IDLE so idle timer starts from stop event
-                            agent_pool._mark_activity(instance_name)
-                            
-                            with inst._state_lock:
-                                current_state = inst.state
-                                if current_state in ACTIVE_STATES:
-                                    inst._transition(AgentState.IDLE)
-                            await _broadcast_state('done')
-                            continue
-                        
-                        # Get parent instance name for feedback BEFORE dismissal (Finding #4)
-                        parent_instance = getattr(inst, 'parent_instance', None) if inst else None
-                        
-                        # Enqueue feedback message to parent/caller agent BEFORE dismiss_instance() removes it
-                        if parent_instance and parent_instance != instance_name:
-                            feedback_msg = f"[SYSTEM]: Agent '{instance_name}' has been terminated by user."
-                            agent_pool.enqueue_message(parent_instance, feedback_msg)
-                            logger.info(f"Enqueued termination feedback to {parent_instance}: {feedback_msg}")
-                        
-                        # dismiss_instance() handles:
-                        # - Recursive dismissal of child agents (cascade termination)
-                        # - State transition to TERMINATED for active agents
-                        # - Removal from the pool
-                        agent_pool.dismiss_instance(instance_name)
-                        
-                        # Broadcast updated state immediately so frontend reflects terminated agent
-                        await _broadcast_state()
-
-                elif msg_type == 'retry':
-                    # Protect session['generating'] read with lock (consistent with Fix 1)
-                    is_generating = _is_generating(session)
-                    if is_generating:
-                        continue
-                    
-                    instance_name = data.get('target_agent') or session['session_name']
-                    
-                    # Remove trailing assistant/function messages from the pool instance's conversation (unified path)
-                    if agent_pool:
-                        inst = agent_pool.get_instance(instance_name)
-                        if inst is not None:
-                            # PR3 migration: Use centralized API for retry rollback
-                            # Count trailing assistant/function messages first, then trim once (reviewer optimization)
-                            count_to_trim = 0
-                            while inst.conversation and count_to_trim < len(inst.conversation) and msg_field(inst.conversation[-1 - count_to_trim], 'role') in (ASSISTANT, FUNCTION):
-                                count_to_trim += 1
-                            if count_to_trim > 0:
-                                removed = inst.trim_tail(count_to_trim)
-
-                    # Roll back one more (the user message) to allow a clean re-trigger
-                    last_user_msg = None
-                    inst = agent_pool.get_instance(instance_name)
-                    if inst is not None and inst.conversation and msg_field(inst.conversation[-1], 'role') == USER:
-                        # PR3 migration: Use centralized API for removing user message
-                        removed = inst.trim_tail(1)
-                        last_user_msg = removed[0] if removed else None
-
-                    # Sync JSONL log with trimmed conversation state to prevent ghost entries (desync fix)
-                    if agent_pool and inst is not None:
-                        try:
-                            log_inst = agent_pool.get_logger(instance_name, inst.agent_class)
-                            log_inst.reset_history(list(inst.conversation), rewrite=True)
-                        except Exception as e:
-                            logger.debug(f"Logger sync after retry trim failed for {instance_name} (non-critical): {e}")
-
-                    # Post-unification: use pool instance directly — no legacy fallback needed
-                    inst = agent_pool.get_instance(instance_name) if agent_pool else None
-                    if not inst and not (inst.conversation if inst else []) and not last_user_msg:
-                        _save_session_history()
-                        await _broadcast_state()
-                        continue
-                    
-                    # Clear active tools/agent stack since we are retrying from the main input level
-                    if agent_pool:
-                        agent_pool.active_stack_clear()  # active_stack property returns defensive copy; use mutation method
-                        agent_pool.last_tool_args.clear()
-
-                        # 1. Rollback agent instances to the start of the last turn
-                        if session.get('last_turn_snapshots'):
-                            agent_pool.rollback_to_snapshots(session['last_turn_snapshots'], reason="User retry")
-                            
-                            # Sync instance_state so build_state() sees the rolled-back histories
-                            for name in session['last_turn_snapshots']:
-                                if name != session['session_name'] and name in agent_pool.instance_state:
-                                    sa_inst = agent_pool.get_instance(name)
-                                    if sa_inst is not None:
-                                        with sa_inst._compression_lock:
-                                            conv_snapshot = list(sa_inst.conversation)
-                                        agent_pool.instance_state[name]['messages'] = conv_snapshot
-
-                    # Now "send it again": re-append the user message to pool instance (unified path)
-                    if last_user_msg and agent_pool:
-                        inst = agent_pool.get_instance(instance_name)
-                        if inst is not None:
-                            # PR3 migration: Use centralized API for insert at arbitrary position
-                            # Use insertion point logic to avoid splitting tool call/response pairs
-                            insert_pos = _find_user_message_insertion_point(inst.conversation)
-                            inst.insert_message_at(insert_pos, last_user_msg)
-                            
-                            # Log the re-inserted user message to JSONL (desync fix)
-                            try:
-                                log_inst = agent_pool.get_logger(instance_name, inst.agent_class)
-                                with inst._compression_lock:
-                                    conv_snapshot = list(inst.conversation)
-                                log_inst.update_history(conv_snapshot)
-                            except Exception as e:
-                                logger.debug(f"Logger sync after retry re-insert failed for {instance_name} (non-critical): {e}")
-                        else:
-                            # Fallback: create the instance first, then enqueue the message
-                            create_main_agent_instance(
-                                pool=agent_pool,
-                                instance_name=instance_name,
-                                system_message_content="",
-                            )
-                            agent_pool.enqueue_message(instance_name, last_user_msg.content)
-
-                    if 'generate_cfg' in data:
-                        session['generate_cfg'] = data['generate_cfg']
-
-                    gen_id = _start_generation(session)
-                    if agent_pool:
-                        agent_pool.stopped = False
-                    agent_runner = get_agent()
-                    loop = asyncio.get_event_loop()
-
-                    thread = threading.Thread(
-                        target=run_agent_thread,
-                        args=(None, agent_runner, gen_id, loop, instance_name),
-                        daemon=True,
-                    )
-                    thread.start()
-                    await _broadcast_state(generating=True)
-
-                elif msg_type == 'reset':
-                    # Clear pool instance conversation (unified path)
-                    if agent_pool:
-                        inst = agent_pool.get_instance(session['session_name'])
-                        if inst is not None:
-                            inst.reset_conversation()  # PR3: centralized API handles full reset with cache sync
-                            # Create a new logger session so messages go to a new JSONL file (Fix: New Session was appending to old logs)
-                            try:
-                                agent_pool._logger.create_new_session(
-                                    session['session_name'], inst.agent_class
-                                )
-                            except Exception as e:
-                                logger.debug(f"Logger reset during stop failed (non-critical): {e}")
-                    
-                    with session_lock:
-                        # Phase 6: No need to clear session['history'] — pool is the source of truth
-                        session['stop_requested'] = True
-                        session['generating'] = False
-                        session['generation_id'] += 1
-                    if agent_pool:
-                        agent_pool.stopped = True
-                        agent_pool.reset()
-                    await _broadcast_state('done')
-
-                elif msg_type == 'refresh_souls':
-                    if agent_pool:
-                        agent_pool.refresh_agents()
-                        # Update the global agents list used by build_state
-                        nonlocal agents
-                        agents = [agent_pool.get_agent(name) for name in agent_pool.list_agents()]
-                        # Ensure orchestrator is at index 0 if possible
-                        if 'orchestrator' in agent_pool.agents:
-                            orch = agent_pool.agents['orchestrator']
-                            agents = [orch] + [a for a in agents if a != orch]
-                    await _broadcast_state()
-
-                elif msg_type == 'restart_server':
-                    logger.warning("Server restart requested via UI")
-                    await broadcast({'type': 'error', 'message': 'Server is restarting... Please wait.'})
-                    os.execl(sys.executable, sys.executable, *sys.argv)
-
-                elif msg_type == 'update_config':
-                    if 'generate_cfg' in data:
-                        session['generate_cfg'] = data['generate_cfg']
-                        ui_cfg = data['generate_cfg']
-                        if 'mcpServers' in ui_cfg:
-                            mcp_servers = ui_cfg['mcpServers']
-                            try:
-                                from agent_cascade.tools.mcp_manager import MCPManager
-                                mcp_tools = MCPManager().initConfig({'mcpServers': mcp_servers})
-                                for tool in mcp_tools:
-                                    for agent_inst in agents:
-                                        if tool.name not in agent_inst.function_map:
-                                            agent_inst.function_map[tool.name] = tool
-                                logger.info("[MCP] Eagerly loaded %d tools.", len(mcp_tools))
-                            except Exception as e:
-                                logger.warning("[MCP] Eager initialization failed: %s", e)
-                        # Defense-in-depth optimization: only call set_extra_work_folders if values actually changed
-                        # This avoids unnecessary function calls when UI sends full config on any setting change (font size, colors, etc.)
-                        if 'work_access_folders_ro' in ui_cfg or 'work_access_folders_rw' in ui_cfg:
-                            if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-                                om = agent_pool.operation_manager
-                                ro_new = [p.strip() for p in ui_cfg.get('work_access_folders_ro', []) if p.strip()]
-                                rw_new = [p.strip() for p in ui_cfg.get('work_access_folders_rw', []) if p.strip()]
-                                # Compare against current state (normalized to strings for comparison)
-                                ro_current = [str(p) for p in om.extra_work_folders_ro]
-                                rw_current = [str(p) for p in om.extra_work_folders_rw]
-                                # Sort and lowercase for order-independent, case-insensitive comparison
-                                # Note: This is intentionally more aggressive than the setter's frozenset comparison.
-                                # On Windows (case-insensitive FS), this prevents unnecessary calls even when casing differs.
-                                ro_sorted = sorted([p.lower() for p in ro_new])
-                                rw_sorted = sorted([p.lower() for p in rw_new])
-                                ro_curr_sorted = sorted([p.lower() for p in ro_current])
-                                rw_curr_sorted = sorted([p.lower() for p in rw_current])
-                                if ro_sorted != ro_curr_sorted or rw_sorted != rw_curr_sorted:
-                                    om.set_extra_work_folders(ro_new, rw_new)
-                                else:
-                                    logger.debug("[update_config] Extra work folders unchanged (RO=%d, RW=%d), skipping set_extra_work_folders", len(ro_new), len(rw_new))
-                        # Defense-in-depth optimization: only call set_base_dir if value actually changed
-                        if 'default_workspace' in ui_cfg:
-                            if agent_pool and hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-                                new_ws = ui_cfg['default_workspace']
-                                if not new_ws:
-                                    logger.debug("[update_config] Empty default_workspace received, skipping set_base_dir")
-                                else:
-                                    # Compare against current base_dir before calling setter
-                                    new_ws_path = Path(new_ws).resolve()
-                                    if new_ws_path != agent_pool.operation_manager.base_dir:
-                                        agent_pool.operation_manager.set_base_dir(new_ws)
-                                    else:
-                                        logger.debug("[update_config] Base workspace unchanged (%s), skipping set_base_dir", new_ws)
-                        # Update idle timeout from UI settings (Bug #3 fix)
-                        if 'idle_timeout_seconds' in ui_cfg and agent_pool and hasattr(agent_pool, 'settings'):
-                            val = float(ui_cfg['idle_timeout_seconds'])
-                            agent_pool.settings.idle_timeout_seconds = max(0.0, val)  # 0 disables auto-dismissal
-                        # Update approval timeout from UI settings
-                        if 'approval_timeout_seconds' in ui_cfg and agent_pool:
-                            try:
-                                agent_pool.operation_manager.set_approval_timeout(int(ui_cfg['approval_timeout_seconds']))
-                            except Exception as e:
-                                logger.warning(f"Failed to set approval timeout: {e}")
-                        if 'enable_approval_timeout' in ui_cfg and agent_pool:
-                            try:
-                                agent_pool.operation_manager.set_enable_timeout(bool(ui_cfg['enable_approval_timeout']))
-                            except Exception as e:
-                                logger.warning(f"Failed to set approval timeout toggle: {e}")
-                        # Update max parallel agents — resize ThreadPoolExecutor (Bug #16 fix)
-                        if 'max_parallel_agents' in ui_cfg and agent_pool and hasattr(agent_pool, 'settings'):
-                            val = int(ui_cfg['max_parallel_agents'])
-                            agent_pool.settings.max_workers = max(1, val)  # Clamp to at least 1
-                            # Resize the executor if it exists
-                            if hasattr(agent_pool._execution, 'executor') and agent_pool._execution.executor is not None:
-                                agent_pool._execution.resize_executor(agent_pool.settings.max_workers)
-                            else:
-                                logger.warning("[THREAD_POOL] resize_executor skipped — executor is None (pool just initialized?)")
-                        # Apply auto_continue immediately (takes effect without waiting for next agent run)
-                        if 'auto_continue' in ui_cfg and agent_pool and hasattr(agent_pool, 'settings'):
-                            agent_pool.settings.auto_continue = bool(ui_cfg['auto_continue'])
-                        # Defense-in-depth optimization: only call update_default_llm_cfg if LLM-related keys changed
-                        # This avoids unnecessary function calls when UI sends full config on non-LLM setting changes (font size, colors, etc.)
-                        if agent_pool and hasattr(agent_pool, 'api_router'):
-                            # Extract only LLM-relevant keys from ui_cfg to compare
-                            # Note: Only checks keys present in new_llm_cfg (partial update semantics), matching update_default_llm_cfg behavior
-                            new_llm_cfg = {k: v for k, v in ui_cfg.items() if k in LLM_CONFIG_KEYS}
-                            current_llm_cfg = agent_pool.api_router.default_llm_cfg or {}  # Defensive: handle None
-                            # Compare only the LLM-relevant keys
-                            if new_llm_cfg != {k: current_llm_cfg.get(k) for k in new_llm_cfg}:
-                                # BUG FIX: Pass only LLM-relevant keys to prevent polluting default_llm_cfg with non-LLM settings
-                                agent_pool.api_router.update_default_llm_cfg(new_llm_cfg)
-                            else:
-                                logger.debug("[update_config] LLM config unchanged (%d keys), skipping update_default_llm_cfg", len(new_llm_cfg))
-                    await _broadcast_state()
-
-                elif msg_type == 'update_endpoints':
-                    # Bulk update all endpoints and priorities from UI
-                    if agent_pool and hasattr(agent_pool, 'api_router'):
-                        ep_count = len(data.get('endpoints', []))
-                        ap_count = len(data.get('agent_priorities', {}))
-                        logger.info(f"[update_endpoints] Received: {ep_count} endpoints, {ap_count} agent priority mappings")
-                        agent_pool.api_router.from_dict(data)
-                    await _broadcast_state()
-
-                elif msg_type == 'update_api_priorities':
-                    # Update just the agent-type → endpoint priority mappings
-                    if agent_pool and hasattr(agent_pool, 'api_router'):
-                        priorities = data.get('agent_priorities', {})
-                        logger.info(f"[update_api_priorities] Received {len(priorities)} priority mappings: "
-                                   f"{list(priorities.keys())}")
-                        for agent_type, endpoint_ids in priorities.items():
-                            agent_pool.api_router.set_agent_priorities(agent_type, endpoint_ids)
-                    await _broadcast_state()
-
-                elif msg_type == 'approve':
-                    rid = data.get('request_id')
-                    if rid and agent_pool:
-                        is_auto = data.get('automated', False)
-                        logger.info(f"[{'AUTO' if is_auto else 'USER'}] Approving request: {rid}")
-                        agent_pool.operation_manager.user_approve(rid)
-                        # Immediate broadcast after approve to update UI instantly (~300ms latency reduction)
-                        await _broadcast_state()
-
-                elif msg_type == 'reject':
-                    rid = data.get('request_id')
-                    reason = data.get('reason', 'Rejected by user')
-                    if rid and agent_pool:
-                        is_auto = data.get('automated', False)
-                        logger.info(f"[{'AUTO' if is_auto else 'USER'}] Rejecting request: {rid}. Reason: {reason}")
-                        agent_pool.operation_manager.user_reject(rid, reason)
-                        # Immediate broadcast after reject to update UI instantly (~300ms latency reduction)
-                        await _broadcast_state()
-
-                elif msg_type == 'ask_security':
-                    if not hasattr(app, 'security_check_lock'):
-                        app.security_check_lock = threading.Lock()
-                        
-                    rid = data.get('request_id')
-                    auto_apply = data.get('auto_apply', False)
-                    if rid and agent_pool:
-                        pending = agent_pool.operation_manager.list_pending_approvals()
-                        ap = next((a for a in pending if a['request_id'] == rid), None)
-                        if ap:
-                            if not hasattr(app, 'active_security_checks_lock'):
-                                app.active_security_checks_lock = threading.Lock()
-                            if not hasattr(app, 'active_security_checks'):
-                                app.active_security_checks = set()
-                            
-                            with app.active_security_checks_lock:
-                                if rid in app.active_security_checks:
-                                    logger.warning(f"Security check already active for request {rid}, ignoring duplicate.")
-                                    continue
-                                app.active_security_checks.add(rid)
-
-                            loop = asyncio.get_running_loop()
-                            def _security_check(rid=rid, auto_apply=auto_apply, ap=ap, loop=loop):
-                                sec_state_key = None  # Defined early so finally can reference it directly (Fix #4)
-                                sec_instance = None   # Pre-initialize for defensive programming
-                                engine = None         # Pre-initialize for defensive programming
-                                try:
-                                    with app.security_check_lock:
-                                        workspace_info = f"Main workspace: {agent_pool.operation_manager.base_dir}\n"
-                                        if agent_pool.operation_manager.extra_work_folders_ro:
-                                            extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_ro]
-                                            workspace_info += f"Additional RO folders: {', '.join(extra)}\n"
-                                        if agent_pool.operation_manager.extra_work_folders_rw:
-                                            extra = [str(p) for p in agent_pool.operation_manager.extra_work_folders_rw]
-                                            workspace_info += f"Additional RW folders: {', '.join(extra)}\n"
-                                    
-                                        prompt = SECURITY_ADVISOR_PROMPT.format(
-                                            tool_name=ap.get('tool_name', 'unknown'),
-                                            description=ap.get('description', ''),
-                                            arguments=json.dumps(ap.get('tool_args', {})),
-                                            os_info=f"{platform.system()} {platform.release()}",
-                                            workspace_info=workspace_info
-                                        )
-
-                                        # Use unique instance name per request_id to prevent state corruption
-                                        sec_state_key = f'Security_{rid}'  # e.g., 'Security_op_091f048b'
-                                        
-                                        # Create engine and instance INSIDE the lock to prevent race conditions
-                                        # Previously, instances were created before semaphore acquire, causing lifecycle_manager collisions
-                                        engine = ExecutionEngine(agent_pool)
-                                        # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
-                                        sec_instance = engine._create_system_agent(
-                                            agent_class='Security',  # Agent CLASS name (NOT instance name — that's sec_state_key)
-                                            instance_name=sec_state_key,  # Use unique name from FIX 1
-                                            task=prompt,
-                                            caller=session.get('session_name', 'Orchestrator')
-                                        )
-
-                                        # Configure with UI settings using centralized constants and utilities.
-                                        # Note: propagate_settings() already ran inside _create_system_agent(), but we
-                                        # intentionally replace its disabled_tools result with ui_cfg + defense-in-depth
-                                        # defaults to ensure auto-launched agents never get more tools than intended.
-                                        from agent_cascade.constants import NON_LLM_KEYS, DEFAULT_SECURITY_DISABLED_TOOLS
-                                        from agent_cascade.utils import merge_disabled_tools_for_auto_agent
-                                        
-                                        ui_cfg = copy.deepcopy(session.get('generate_cfg', {}))
-                                        llm_safe_cfg = {k: v for k, v in ui_cfg.items() if k not in NON_LLM_KEYS}
-                                        # Add disabled_tools back — needed for tool filtering but must not leak to LLM API
-                                        if 'disabled_tools' in ui_cfg:
-                                            llm_safe_cfg['disabled_tools'] = ui_cfg['disabled_tools']
-                                        # Defense-in-depth: disable user-approval tools for auto-launched Security agent
-                                        existing_disabled = llm_safe_cfg.get('disabled_tools', [])
-                                        llm_safe_cfg['disabled_tools'] = merge_disabled_tools_for_auto_agent(
-                                            existing_disabled, 'Security', DEFAULT_SECURITY_DISABLED_TOOLS
-                                        )
-                                    
-                                        template = agent_pool.get_template('Security')  # Template lookup by CLASS name (NOT instance name)
-                                        if template and hasattr(template, 'llm'):
-                                            cfg = (template.llm.generate_cfg or {}).copy()
-                                            # logger.debug(f"[SECURITY] Before update - llm_safe_cfg disabled_tools: {llm_safe_cfg.get('disabled_tools', 'MISSING')}")
-                                            cfg.update(llm_safe_cfg)
-                                            sec_instance._generate_cfg_override = cfg
-                                            # logger.info(f"[SECURITY] Set _generate_cfg_override for '{sec_state_key}': disabled_tools={cfg.get('disabled_tools', 'NOT SET')}")
-                                        else:
-                                            logger.warning(f"[SECURITY] Template missing or has no llm attribute for '{sec_state_key}'")
-                                            # Fallback: set disabled_tools directly even without template
-                                            sec_instance._generate_cfg_override = {'disabled_tools': llm_safe_cfg.get('disabled_tools', [])}
-
-                                        logger.info(f"[SECURITY] Created AgentInstance '{sec_state_key}' for request {rid}")
-                                        # Initialize variables for engine.run() flow
-                                        sec_timeout_reached = False
-                                        sec_elapsed_at_timeout = None
-                                        sec_start_time = time.monotonic()
-
-                                        # Schedule warning timer (keep existing _sec_warning_injector logic)
-                                        def _sec_warning_injector():
-                                            try:
-                                                # Use unique sec_state_key for message routing
-                                                agent_pool.enqueue_message(
-                                                    sec_state_key,
-                                                    "[SYSTEM WARNING] Your analysis is taking longer than expected. "
-                                                    "Please provide a verdict as soon as possible — the approval request may timeout soon."
-                                                )
-                                            except Exception as e:
-                                                logger.debug(f"Security advisor warning injection failed (non-critical): {e}")
-
-                                        sec_warning_timer = threading.Timer(SECURITY_ADVISOR_WARNING_SECONDS, _sec_warning_injector)
-                                        sec_warning_timer.daemon = True
-                                        sec_warning_timer.start()
-
-                                    # ── SLOT BYPASS FOR SECURITY ADVISOR ──
-                                    # The Security agent runs on a separate daemon thread (line 2252).
-                                    # The caller's concurrency slot is bound to the caller's execution context
-                                    # and cannot be acquired from a different thread — attempting so would either
-                                    # bypass the intended serialization or deadlock.
-                                    #
-                                    # Set _skip_slot_acquire=True so engine.run() skips slot acquisition.
-                                    # Concurrency is controlled by app.security_check_semaphore (Semaphore(1)) instead,
-                                    # which is a standard cross-thread synchronization primitive.
-                                    
-                                    # Get caller name from session for logging/debugging
-                                    caller_name_sec = session.get('session_name', 'Orchestrator')
-                                    caller_inst_sec = agent_pool.get_instance(caller_name_sec) if caller_name_sec else None
-                                    
-                                    # Log warning if caller_name couldn't be resolved properly (consistent with Compressor pattern)
-                                    if caller_name_sec == 'Orchestrator' and not hasattr(agent_pool, 'session_name'):
-                                        logger.warning(
-                                            f"[SECURITY] Using fallback caller_name='Orchestrator' - "
-                                            f"slot management may not work correctly. Pass caller_name explicitly."
-                                        )
-                                    
-                                    # Set skip flag so engine.run() bypasses slot acquisition
-                                    sec_instance._skip_slot_acquire = True
-                                    logger.debug(
-                                        f"[SECURITY_SLOT_BYPASS] Skipping slot acquire for Security - "
-                                        f"caller={caller_name_sec}, caller_holds_slot={(getattr(caller_inst_sec, '_slot_release', None) is not None) if caller_inst_sec else False}"
-                                    )
-
-                                    # Acquire concurrency semaphore for Security checks (prevents unlimited parallelism)
-                                    app.security_check_semaphore.acquire()
-                                    try:
-                                        # Log instance state before running (debug level to reduce log noise)
-                                        # override_disabled = getattr(sec_instance, '_generate_cfg_override', {}).get('disabled_tools', 'NOT SET')
-                                        # logger.debug(f"[SECURITY] Before engine.run - sec_instance._generate_cfg_override['disabled_tools']={override_disabled}")
-                                        
-                                        # Execute via engine.run() — this handles LLM call, retries, and streaming
-                                        _last_sec_send = 0.0
-                                        _sec_tick_num = 0
-                                        _sec_last_resp_len = 0
-                                        for resp in engine.run(sec_instance):
-                                            # Check for pool shutdown / generation change
-                                            if agent_pool.stopped:
-                                                break
-
-                                            elapsed = time.monotonic() - sec_start_time
-                                            if elapsed > SECURITY_ADVISOR_TIMEOUT_SECONDS:
-                                                sec_timeout_reached = True
-                                                sec_elapsed_at_timeout = elapsed
-                                                logger.warning(
-                                                    f"[SECURITY] Timeout reached after {elapsed:.0f}s for request {rid}. "
-                                                    f"Terminating security advisor to prevent AFK rejection."
-                                                )
-                                                break
-
-                                            now_sec = time.monotonic()
-
-                                            # Unpack (turn_output, is_streaming_tick) from engine.run() yield
-                                            if isinstance(resp, tuple) and len(resp) == 2:
-                                                sec_turn_output, sec_is_streaming_tick = resp
-                                            else:
-                                                sec_turn_output, sec_is_streaming_tick = resp, False
-
-                                            # ── WebSocket broadcast for Security agent (shared helper) ──
-                                            _last_sec_send, _sec_last_resp_len = broadcast_stream_update(
-                                                pool=agent_pool,
-                                                instance_name=sec_state_key,
-                                                turn_output=sec_turn_output,
-                                                is_streaming_tick=sec_is_streaming_tick,
-                                                tick_num=_sec_tick_num,
-                                                now_sec=now_sec,
-                                                last_send=_last_sec_send,
-                                                last_resp_len=_sec_last_resp_len,
-                                            )
-
-                                            _sec_tick_num += 1
-
-                                            # Update instance_state for UI visibility (thread-safe)
-                                            with agent_pool._execution._state_lock:
-                                                if sec_state_key in agent_pool.instance_state:
-                                                    agent_pool.instance_state[sec_state_key]['message_count'] = len(sec_instance.conversation)
-
-                                    except Exception as e:
-                                        logger.error(f"Security agent execution error: {e}")
-                                        raise
-                                    finally:
-                                        # Release concurrency semaphore for Security checks
-                                        app.security_check_semaphore.release()
-                                        
-                                        # Cancel the warning timer (keep existing cleanup)
-                                        sec_warning_timer.cancel()
-
-                                        # Note: engine.run() handles IDLE state transition internally.
-
-                                    # Extract output using helper function
-                                    from agent_cascade.compression.helpers import extract_instance_output
-                                    parsing_response = extract_instance_output(sec_instance.conversation, sec_state_key)
-                                        
-                                    # Clean up: Remove thinking blocks before [YES]/[NO] parsing
-                                    clean_text = parsing_response
-                                    try:
-                                        if '<think' in clean_text.lower() or '<thought' in clean_text.lower():
-                                            clean_text = _THINK_BLOCK_RE.sub('', clean_text)
-                                        if '[think' in clean_text.lower() or '[thought' in clean_text.lower():
-                                            clean_text = _THINK_BLOCK_BRACKET_RE.sub('', clean_text).strip()
-                                    except Exception as e:
-                                        logger.debug(f"Thinking block stripping failed (non-critical): {e}")
-                                        
-                                    # Initialize verdict defaults before parsing
-                                    is_yes = False
-                                    is_no = False
-                                    justification = ""
-                                    try:
-                                        
-                                        # 2. Simplified Verdict Extraction: Check ONLY the last non-empty line
-                                        lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
-                                        last_line = lines[-1] if lines else ""
-                                        
-                                        # Remove markdown bolding if present (e.g. **[YES]**)
-                                        last_line_clean = _MARKDOWN_BOLD_RE.sub('', last_line).strip()
-                                        last_line_upper = last_line_clean.upper()
-                                        
-                                        is_yes = last_line_upper.startswith('[YES]')
-                                        is_no = last_line_upper.startswith('[NO]')
-                                        
-                                        justification = ""
-                                        if is_yes:
-                                            justification = last_line_clean[5:].strip()
-                                        elif is_no:
-                                            justification = last_line_clean[4:].strip()
-                                            
-                                        if is_yes or is_no:
-                                            # Strip "Reason:", "Justification:", etc.
-                                            justification = _JUSTIFICATION_PREFIX_RE.sub('', justification).strip()
-                                        
-                                        # Fallback 1: if no [YES]/[NO] on last line, check if the entire response is JUST the verdict
-                                        if not is_yes and not is_no and len(lines) == 1:
-                                            if last_line_upper == 'YES' or last_line_upper == 'SAFE':
-                                                is_yes = True
-                                                justification = last_line
-                                            elif last_line_upper == 'NO' or last_line_upper == 'UNSAFE':
-                                                is_no = True
-                                                justification = last_line
-                                        
-                                        # Fallback 2: LLM may add text after verdict — find whichever [YES]/[NO] appears LAST
-                                        if not is_yes and not is_no:
-                                            upper_text = clean_text.upper()
-                                            yes_pos = upper_text.rfind('[YES]')
-                                            no_pos = upper_text.rfind('[NO]')
-                                            if yes_pos > no_pos:
-                                                is_yes = True
-                                            elif no_pos > yes_pos:
-                                                is_no = True
-                                            if is_yes or is_no:
-                                                # Extract justification from the matching line
-                                                for line in lines:
-                                                    lc = _MARKDOWN_BOLD_RE.sub('', line).strip().upper()
-                                                    if (is_yes and '[YES]' in lc) or (is_no and '[NO]' in lc):
-                                                        just_text = lc.replace('[YES]', '', 1).replace('[NO]', '', 1).strip()
-                                                        justification = _JUSTIFICATION_PREFIX_RE.sub('', just_text).strip()
-                                                        break
-                                    except Exception as e:
-                                        logger.error(f"Error extracting security verdict from {sec_state_key}: {e}")
-                                        is_yes = False
-                                        is_no = False
-                                        justification = ""
-                                    
-                                    # ── Handle security advisor timeout ──
-                                    if sec_timeout_reached:
-                                        elapsed = sec_elapsed_at_timeout  # Guaranteed non-None since timeout was just hit
-                                        logger.info(f"[SECURITY] Timeout after {elapsed:.0f}s for request {rid}. Auto-rejecting to prevent AFK rejection cascade.")
-                                        
-                                        # Halt the security advisor instance to stop it cleanly.
-                                        # Note: This is best-effort — only works between turns, not during active LLM calls.
-                                        # The actual timeout enforcement happens inside the for loop via `break` + generator.close().
-                                        # Use unique sec_state_key instead of hardcoded 'Security'
-                                        if sec_state_key:
-                                            agent_pool.halt_instance(sec_state_key)
-                                        
-                                        # Common timeout handling for BOTH modes: reject and notify UI
-                                        reject_msg = (
-                                            "SECURITY ADVISOR TIMEOUT: The security check took too long to complete. "
-                                            "This may indicate an overly complex request or insufficient justification. "
-                                            "Please resubmit the request with a clearer, more specific justification "
-                                            "to help the security advisor reach a verdict faster."
-                                        )
-                                        agent_pool.operation_manager.user_reject(rid, reject_msg)
-
-                                        # Build response text — manual mode adds extra guidance for UI display
-                                        response_text = f"[TIMEOUT] Security check exceeded {SECURITY_ADVISOR_TIMEOUT_SECONDS}s limit after {elapsed:.0f}s."
-                                        if not auto_apply:
-                                            response_text += " Please resubmit with clearer justification if needed."
-
-                                        # Notify UI about the timeout
-                                        asyncio.run_coroutine_threadsafe(
-                                            send_queue.put({
-                                                'type': 'security_response',
-                                                'request_id': rid,
-                                                'response': response_text,
-                                                'verdict': 'TIMEOUT'
-                                            }),
-                                            loop
-                                        )
-
-                                        # Broadcast updated approval list so stale card is removed from frontend after timeout rejection
-                                        asyncio.run_coroutine_threadsafe(
-                                            send_queue.put({
-                                                'type': 'approvals',
-                                                'approvals': agent_pool.operation_manager.list_pending_approvals()
-                                            }),
-                                            loop
-                                        )
-
-                                    elif is_yes or is_no:
-                                        # Check if Auto-Ask is still enabled BEFORE auto-applying
-                                        auto_ask_still_on = getattr(app, 'current_auto_security', True)
-                                        
-                                        if auto_apply and auto_ask_still_on:
-                                            if is_yes:
-                                                logger.info(f"[SECURITY] Automatic Approval for {rid} with justification: {justification[:50]}...")
-                                                agent_pool.operation_manager.user_approve(rid, reason=justification)
-                                            else:
-                                                logger.info(f"[SECURITY] Automatic Rejection for {rid} with reason: {justification[:50]}...")
-                                                # Auto-rejection message
-                                                reject_msg = f"SECURITY REJECTED: {justification}" if justification else "SECURITY REJECTED: The security advisor flagged this operation as unsafe."
-                                                agent_pool.operation_manager.user_reject(rid, reject_msg)
-                                            
-                                            # Broadcast updated approvals list to UI after auto-apply
-                                            asyncio.run_coroutine_threadsafe(
-                                                send_queue.put({
-                                                    'type': 'approvals',
-                                                    'approvals': agent_pool.operation_manager.list_pending_approvals()
-                                                }),
-                                                loop
-                                            )
-                                        else:
-                                            # Auto-Ask toggled off — send to UI for manual confirmation instead
-                                            asyncio.run_coroutine_threadsafe(
-                                                send_queue.put({
-                                                    'type': 'security_response', 
-                                                    'request_id': rid, 
-                                                    'response': parsing_response,
-                                                    'verdict': 'YES' if is_yes else 'NO',
-                                                    'reason': justification if is_no else ""
-                                                }),
-                                                loop
-                                                )
-                                    else:
-                                        if auto_apply:
-                                            # Strict enforcement: Invalid format = Automatic NO (Safety)
-                                            logger.info(f"[SECURITY] Automatic Rejection for {rid} (Ambiguous/Invalid Format)")
-                                            reject_msg = f"SECURITY VERIFICATION FAILED: The security advisor provided an ambiguous response without a clear [YES] or [NO] verdict. For safety, the operation has been automatically rejected. Please try a different method or provide a clearer justification."
-                                            agent_pool.operation_manager.user_reject(rid, reject_msg)
-                                            
-                                            # Also notify the UI
-                                            asyncio.run_coroutine_threadsafe(
-                                                send_queue.put({'type': 'security_response', 'request_id': rid, 'response': parsing_response + f"\n\n**[AUTO-REJECTED: Ambiguous Format]**", 'verdict': 'AMBIGUOUS'}),
-                                                loop
-                                            )
-                                        else:
-                                            # Manual mode: Let the user see the ambiguous response and decide
-                                            logger.info(f"[SECURITY] Ambiguous response for {rid} in manual mode. Waiting for user decision.")
-                                            asyncio.run_coroutine_threadsafe(
-                                                send_queue.put({'type': 'security_response', 'request_id': rid, 'response': parsing_response, 'verdict': 'AMBIGUOUS'}),
-                                                loop
-                                            )
-                                except Exception as e:
-                                    logger.error(f"Security check failed: {e}")
-                                    if auto_apply:
-                                        agent_pool.operation_manager.user_reject(rid, f"Security check error: {e}")
-                                    else:
-                                        asyncio.run_coroutine_threadsafe(
-                                            send_queue.put({'type': 'security_response', 'request_id': rid, 'response': f"Error during security check: {e}"}),
-                                            loop
-                                        )
-                                finally:
-                                    # Always clean up security advisor state when done (thread-safe)
-                                    if sec_state_key and sec_state_key in agent_pool.instance_state:
-                                        with agent_pool._execution._state_lock:
-                                            agent_pool.instance_state[sec_state_key]['active'] = False
-                                        try:
-                                            agent_pool.active_stack_remove(sec_state_key)
-                                        except Exception as e:
-                                            logger.debug(f"Active stack removal failed for {sec_state_key} (non-critical): {e}")
-
-                                    # Release endpoint slot when done
-                                    if hasattr(app, 'active_security_checks') and rid:
-                                        with app.active_security_checks_lock:
-                                            app.active_security_checks.discard(rid)
-                                        logger.debug(f"[SECURITY] Released active check for {rid}")
-                            
-                            threading.Thread(target=_security_check, daemon=True).start()
-
-                elif msg_type == 'set_auto_security':
-                    # User toggled Auto-Ask on/off — store current state for security checks to reference
-                    enabled = data.get('enabled', False)
-                    app.current_auto_security = enabled
-
-                elif msg_type == 'edit_message':
-                    idx = data.get('index')
-                    content = data.get('content', '')
-                    target_name = data.get('instance_name') or session['session_name']
-                    
-                    # Get the conversation from pool instance (unified path)
-                    history = []
-                    if agent_pool:
-                        inst = agent_pool.get_instance(target_name)
-                        if inst is not None:
-                            with inst._compression_lock:
-                                history = list(inst.conversation)  # Defensive copy under lock
-                    
-                    # Phase 6: No fallback to session['history'] — pool is the source of truth
-                    
-                    # Note: session_lock check removed (2026-06-16 simplification).
-                    # Message edit doesn't start new threads, no race condition protection needed.
-                    
-                    if (idx is not None
-                            and 0 <= idx < len(history)):
-                        msg = history[idx]
-                        
-                        # Get current content regardless of message type (dict or Message object)
-                        old_content = msg_field(msg, CONTENT, "")
-                        new_parsed_content = _parse_multimodal_content(content)
-                        
-                        # If this is a compression marker, ensure tags are preserved
-                        is_compression_msg = str(old_content).startswith(COMPRESSION_MARKER)
-                        if is_compression_msg:
-                            if COMPRESSION_MARKER in content or "<context_summary>" in content:
-                                new_parsed_content = content
-                            else:
-                                new_parsed_content = f"{COMPRESSION_MARKER}\n\n<context_summary>\n{content}\n</context_summary>"
-                            
-                            # Sync the summary tracker
-                            match = _CONTEXT_SUMMARY_RE.search(new_parsed_content)
-                            if match and agent_pool:
-                                agent_pool.instance_summaries[target_name] = match.group(1).strip()
-                        
-                        # Apply edit — handle both dict and Message object types
-                        if isinstance(msg, dict):
-                            msg[CONTENT] = new_parsed_content
-                            if '_ui_cache' in msg:
-                                del msg['_ui_cache']
-                        elif hasattr(msg, 'content'):
-                            # Pydantic Message object or dataclass — set content directly
-                            msg.content = new_parsed_content
-                        
-                        if agent_pool:
-                            # Write back the edited history using centralized API (PR3 migration)
-                            inst = agent_pool.get_instance(target_name)
-                            if inst is not None:
-                                inst.rebuild_conversation(history)  # PR3: centralized API handles full rebuild with cache sync
-                            
-                            logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
-                            logger_inst.reset_history(history, rewrite=True)
-                            
-                            # Sync instance_state so build_state() sees the edit
-                            if target_name != session['session_name'] and target_name in agent_pool.instance_state:
-                                agent_pool.instance_state[target_name]['messages'] = list(history)
-                    
-                    _clear_caches_safely()
-                    
-                    await _broadcast_state()
-                            
-                elif msg_type == 'delete_messages':
-                    # Note: session_lock check removed (2026-06-16 simplification).
-                    # Message delete doesn't start new threads, no race condition protection needed.
-                    
-                    target_name = data.get('instance_name') or session['session_name']
-                    
-                    # Get the conversation from pool instance (unified path)
-                    history = []
-                    if agent_pool:
-                        inst = agent_pool.get_instance(target_name)
-                        if inst is not None:
-                            with inst._compression_lock:
-                                history = list(inst.conversation)  # Defensive copy under lock
-                    
-                    # Phase 6: No fallback to session['history'] — pool is the source of truth
-                    
-                    indices = sorted(data.get('indices', []), reverse=True)
-                    for idx in indices:
-                        if 0 <= idx < len(history):
-                            history.pop(idx)
-                    if agent_pool:
-                        # Write back the pruned history using centralized API (PR3 migration)
-                        inst = agent_pool.get_instance(target_name)
-                        if inst is not None:
-                            inst.rebuild_conversation(history)  # PR3: centralized API handles full rebuild with cache sync
-                        
-                        logger_inst = agent_pool.get_logger(target_name, 'Orchestrator' if target_name == session['session_name'] else 'SubAgent')
-                        logger_inst.reset_history(history, rewrite=True)
-                        
-                        # Sync instance_state so build_state() sees the deletion
-                        if target_name != session['session_name'] and target_name in agent_pool.instance_state:
-                            agent_pool.instance_state[target_name]['messages'] = list(history)
-                    
-                    _clear_caches_safely()
-                    
-                    await _broadcast_state()
-
-                elif msg_type == 'select_agent':
-                    session['agent_index'] = int(data.get('index', 0))
-                    await _broadcast_state()
-
-                elif msg_type == 'set_session_name':
-                    old_name = session['session_name']
-                    new_name = data.get('name', 'Maine')
-                    session['session_name'] = new_name
-                    if agent_pool:
-                        # Migrate instance_summaries to new name in pool
-                        if old_name in agent_pool.instance_summaries:
-                            agent_pool.instance_summaries[new_name] = agent_pool.instance_summaries.pop(old_name)
-                    
-                    await _broadcast_state()
-
-
-
-                elif msg_type == 'load_session':
-                    path = data.get('path')
-                    if path and agent_pool:
-                        # Issue 4 fix: Wrap pool modifications with session_lock for thread safety
-                        with session_lock:
-                            # Issue 1 fix: Use clear_sub_agents_before_load parameter instead of separate call
-                            status = agent_pool.load_session_from_log(
-                                path, 
-                                target_instance=session.get('session_name'),
-                                clear_sub_agents_before_load=True
-                            )
-                        if status.startswith("Error"):
-                            await websocket.send_text(json.dumps({"type": "error", "message": status}, ensure_ascii=False))
-                        else:
-                            # Phase 6: Pool is already loaded by load_session_from_log — no need to sync to session
-                            instance_name = session.get('session_name', 'Maine')
-                            inst = agent_pool.get_instance(instance_name)
-                            if inst is not None:
-                                # Wrap session state modifications with session_lock to prevent race condition
-                                _stop_generation(session)
-                                _signal_stop(session)
-                                if agent_pool:
-                                    agent_pool.stopped = False
-                                _clear_caches_safely()
-                                await _broadcast_state()
-
-                elif msg_type == 'inject':
-                    text = data.get('text', '').strip()
-                    target = data.get('target_agent') or session.get('session_name', 'Maine')
-                    if text and agent_pool:
-                        agent_pool.enqueue_message(target, text)
+                # ── Dispatch to WsMessageHandler (Phase 2 wiring) ───────────
+                handler = WsMessageHandler(
+                    session=session, agent_pool=agent_pool, agents=agents, send_queue=send_queue,
+                    broadcast_fn=broadcast, build_state_fn=build_state, start_gen_fn=start_gen,
+                    session_lock=session_lock, app=app,
+                )
+                await handler.dispatch(data)
 
         except WebSocketDisconnect:
             pass
@@ -2373,66 +1219,126 @@ def create_app(agents, agent_pool, config=None):
 
 
 if __name__ == "__main__":
-    # Minimal test harness for direct invocation (e.g., python -m agent_cascade.api_server).
-    # The canonical production entry point is start_api_server.py.
-    import argparse as _argparse  # only used here — avoid polluting module namespace
     import uvicorn
+    from agent_cascade.agent_pool import AgentPool
 
-    from agent_cascade.shared_init import initialize_infrastructure, setup_signal_handler, load_orchestrator, build_all_agents_list
-
+    # Resolve project root: api_server.py lives inside agent_cascade/, so go up one level
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-    parser = _argparse.ArgumentParser(description="AgentCascade API Server (test harness)")
+    parser = argparse.ArgumentParser(description="AgentCascade API Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=12345, help="Port to bind to")
+    parser.add_argument("--workspace", type=str, default=str(DEFAULT_WORKSPACE), help="Workspace directory")
+    parser.add_argument("--idle-timeout", type=float, default=None,
+                        help="Seconds of inactivity before auto-dismissing an idle agent (default: 300). "
+                             "Also settable via QWEN_AGENT_IDLE_TIMEOUT env var.")
+    parser.add_argument("--idle-check-interval", type=float, default=None,
+                        help="Seconds between idle-check sweeps (default: 60). "
+                             "Also settable via QWEN_AGENT_IDLE_CHECK_INTERVAL env var.")
     args = parser.parse_args()
 
-    # LLM config from environment (same pattern as start_api_server.py)
-    llm_cfg = {
+    # Initialize the global agent_pool
+    initial_llm_cfg = {
         'model': os.getenv('QWEN_AGENT_MODEL', 'gpt-4o'),
         'api_base': os.getenv('QWEN_AGENT_API_BASE', 'https://api.openai.com/v1'),
         'api_key': os.getenv('QWEN_AGENT_API_KEY', 'EMPTY'),
     }
 
-    # Delegate infrastructure init to shared module (Phase 5C — eliminate duplication)
-    operation_mgr, agent_pool, shared_tools = initialize_infrastructure(PROJECT_ROOT, llm_cfg)
+    # Resolve idle timeout settings: CLI > env var > default
+    idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
+    idle_check_interval = args.idle_check_interval if args.idle_check_interval is not None else float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
 
-    # Distribute shared tools to all agents (matching start_api_server.py pattern)
-    if shared_tools:
-        for agent_name in agent_pool.list_agents():
-            agent = agent_pool.get_agent(agent_name)
-            if agent:
-                for tool_name, tool_inst in shared_tools.items():
-                    agent.function_map[tool_name] = tool_inst
+    # Create OperationManager for blocking user approvals on mutating operations
+    from agent_cascade.operation_manager import OperationManager
+    try:
+        operation_mgr = OperationManager(base_dir=args.workspace)
+        logger.debug("OperationManager initialized with base_dir: %s", args.workspace)
+    except Exception as e:
+        logger.error("[FATAL] OperationManager initialization failed: %s", e)
+        raise SystemExit(1)
 
-    # Load orchestrator and build full agents list (matching start_api_server.py pattern)
-    orch_agent = load_orchestrator(agent_pool)
-    all_agents = build_all_agents_list(agent_pool, orch_agent)
+    try:
+        agent_pool = AgentPool(
+            llm_cfg=initial_llm_cfg,
+            agents_dir=str(PROJECT_ROOT / 'agents'),
+            workspace_dir=args.workspace,
+            operation_manager=operation_mgr,
+        )
+        logger.debug("AgentPool created successfully")
+    except Exception as e:
+        logger.error("[FATAL] AgentPool creation failed: %s", e)
+        raise SystemExit(1)
 
-    # Inject system message into Maine's conversation so the soul content flows in
+    operation_mgr.agent_pool = agent_pool
+
+    # Set idle timeout settings via PoolSettings (new pool uses PoolSettings instead of constructor args)
+    agent_pool.settings.idle_timeout_seconds = idle_timeout
+    agent_pool.settings.idle_check_interval = idle_check_interval
+
+    # Create the root orchestrator instance in the new pool (use lowercase to match template key)
+    try:
+        agent_pool.create_instance('Maine', 'orchestrator')
+        logger.debug("Orchestrator instance 'Maine' created")
+    except Exception as e:
+        logger.error("[FATAL] Failed to create orchestrator instance: %s", e)
+        raise SystemExit(1)
+
+    # Start background services (idle checker thread, etc.)
+    try:
+        agent_pool.start()
+        logger.debug("AgentPool background services started")
+    except Exception as e:
+        logger.error("[FATAL] Failed to start AgentPool background services: %s", e)
+        raise SystemExit(1)
+
+    # Get the orchestrator agent template for create_app (new pool separates instances from templates)
+    orch_agent = agent_pool.get_agent('orchestrator')
+
+    # Inject system message into Maine's conversation so the soul content flows into the instance
     sys_msg_content = _extract_system_message(orch_agent)
+
     if sys_msg_content:
         from agent_cascade.llm.schema import Message, SYSTEM
         maine_inst = agent_pool.get_instance('Maine')
         if maine_inst and not maine_inst.conversation:
+            # PR3 migration: Use centralized API for system message append at server startup
             maine_inst.append_messages([Message(role=SYSTEM, content=sys_msg_content)])
 
-    app = create_app(agents=all_agents, agent_pool=agent_pool)
+    try:
+        app = create_app(agents=[orch_agent], agent_pool=agent_pool)
+        logger.debug("FastAPI app created successfully")
+    except Exception as e:
+        logger.error("[FATAL] Failed to create API server app: %s", e)
+        raise SystemExit(1)
 
+    port = args.port
     logger.info("\n[OK] API Server ready!")
-    logger.info("    -> Open http://127.0.0.1:%d in your browser", args.port)
-    logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", args.port)
-    logger.info("    -> REST API at http://127.0.0.1:%d/api/", args.port)
+    logger.info("    -> Open http://127.0.0.1:%d in your browser", port)
+    logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", port)
+    logger.info("    -> REST API at http://127.0.0.1:%d/api/", port)
     logger.info("=" * 50)
 
-    # Use shared signal handler (Phase 5B — deduplicated shutdown logic)
-    setup_signal_handler(agent_pool)
+    # Set up graceful shutdown handler
+    def handle_shutdown(signum, frame):
+        logger.info("\n[INFO] Initiating graceful shutdown...")
+        agent_pool.stopped = True
+        if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
+            try:
+                agent_pool.operation_manager.cleanup_backups()
+            except Exception as e:
+                logger.debug(f"Backup cleanup failed during shutdown (non-critical): {e}")
+        logger.info("[INFO] Terminated.")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, handle_shutdown)
+    if os.name != 'nt':
+        signal.signal(signal.SIGTERM, handle_shutdown)
 
     try:
-        uvicorn.run(app, host=args.host, port=args.port, install_signal_handlers=False)
+        uvicorn.run(app, host=args.host, port=port)
     except OSError as e:
         if e.errno == 98 or 'address already in use' in str(e).lower():
-            logger.error("[FATAL] Port %d is already in use. Use --port to specify a different port.", args.port)
+            logger.error("[FATAL] Port %d is already in use. Use --port to specify a different port.", port)
         else:
             logger.error("[FATAL] Server failed to start: %s", e)
         raise SystemExit(1)
