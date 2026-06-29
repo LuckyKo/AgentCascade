@@ -90,6 +90,26 @@ LLM_CONFIG_KEYS = frozenset({
 })
 
 
+def _extract_system_message(agent) -> str:
+    """Extract system message content from an agent.
+    
+    Priority: base_system_message > system_message > llm.cfg['system'].
+    Returns '' (empty string) if no system message found — consistent with
+    how downstream callers check truthiness via `if sys_content:`.
+    Never returns None.
+    """
+    if hasattr(agent, 'base_system_message') and agent.base_system_message:
+        return str(agent.base_system_message)
+    if hasattr(agent, 'system_message') and agent.system_message:
+        return str(agent.system_message)
+    if hasattr(agent, 'llm') and hasattr(agent.llm, 'cfg'):
+        cfg = agent.llm.cfg
+        val = cfg.get('system', '') or cfg.get('system_message', '')
+        if val:
+            return val
+    return ''
+
+
 def _parse_multimodal_content(text):
     """
     Parse markdown images ![alt](data:...) and return a list of content items.
@@ -364,13 +384,7 @@ def create_app(agents, agent_pool, config=None):
         if not loaded and agent_pool.get_instance(default_session_name) is None:
             try:
                 # Extract system message from the orchestrator agent (first in agents list)
-                sys_content = None
-                if agents:
-                    orch = agents[0]
-                    if hasattr(orch, 'base_system_message') and orch.base_system_message:
-                        sys_content = str(orch.base_system_message)
-                    elif hasattr(orch, 'system_message') and orch.system_message:
-                        sys_content = str(orch.system_message)
+                sys_content = _extract_system_message(agents[0]) if agents else ''
                 if sys_content:
                     create_main_agent_instance(
                         pool=agent_pool,
@@ -436,6 +450,25 @@ def create_app(agents, agent_pool, config=None):
             logger.debug(f"Telemetry fetch failed (non-critical): {e}")
         return None
 
+    async def _broadcast_state(ws_type: str = 'state', generating=None):
+        """Broadcast a state update to all WebSocket clients.
+        
+        Consolidates the repeated pattern: await broadcast({'type': ..., **build_state(...)})
+        
+        Args:
+            ws_type: WebSocket message type ('state' or 'done').
+            generating: Override generating flag. None = read from session via _is_generating().
+        """
+        await broadcast({'type': ws_type, **build_state(generating=generating)})
+
+    def _clear_caches_safely() -> None:
+        """Clear performance caches with error suppression."""
+        try:
+            from agent_cascade.api_integration import _clear_performance_caches
+            _clear_performance_caches()
+        except Exception as e:
+            logger.debug(f"Cache clearing failed (non-critical): {e}")
+
     def build_state(responses=None, generating=None):
         """Build a full state snapshot for the frontend.
         
@@ -443,7 +476,6 @@ def create_app(agents, agent_pool, config=None):
         instead of session['history']. This is the unified single-source path.
         """
         instance_name = session['session_name']
-        # FIX B: Protect session['generating'] read with lock (consistent with Fix 1/4)
         if generating is None:
             gen = _is_generating(session)
         else:
@@ -655,7 +687,7 @@ def create_app(agents, agent_pool, config=None):
                 loop=loop,
             )
         finally:
-            # FIX 2 (Cleanup): Reset session['generating'] when thread completes
+            # Reset session['generating'] when thread completes
             # This ensures the flag is cleared automatically after execution finishes
             _stop_generation(session)
 
@@ -696,7 +728,7 @@ def create_app(agents, agent_pool, config=None):
                 # Handle dismissal signal: build full state and broadcast (real-time tab removal)
                 if data.get('type') == 'dismissal':
                     try:
-                        await broadcast({'type': 'state', **build_state()})
+                        await _broadcast_state()
                     except Exception as e:
                         logger.error(f"Failed to build state for dismissal broadcast: {e}")
                 else:
@@ -806,7 +838,7 @@ def create_app(agents, agent_pool, config=None):
         if not token or token not in api_sessions:
              return JSONResponse(status_code=401, content={"message": "Invalid session token"})
         
-        # FIX 1: Protect session reads with session_lock to prevent race condition
+        # Protect session reads with session_lock to prevent race condition
         with session_lock:
             gen = session['generating']
             sess_name = session['session_name']
@@ -858,21 +890,16 @@ def create_app(agents, agent_pool, config=None):
                     logger.debug(f"Logger reset during new session failed (non-critical): {e}")
         
         # Phase 6: No need to clear session['history'] — pool is the source of truth
-        # Fix #1 & #3: Clear performance caches on session reset
-        try:
-            from agent_cascade.api_integration import _clear_performance_caches
-            _clear_performance_caches()
-        except Exception as e:
-            logger.debug(f"Cache clearing failed during session reset (non-critical): {e}")
+        _clear_caches_safely()
         
-        # Fix #3 (Feature 020): Wrap session state modifications with session_lock to prevent race condition
+        # Wrap session state modifications with session_lock to prevent race condition
         with session_lock:
             session['generating'] = False
             session['generation_id'] += 1
         
         if agent_pool:
             agent_pool.reset()
-        await broadcast({'type': 'done', **build_state()})
+        await _broadcast_state('done')
         return {"status": "ok"}
 
     @app.post("/api/approve/{request_id}")
@@ -999,7 +1026,7 @@ def create_app(agents, agent_pool, config=None):
                 max_retries=data.get('max_retries', 2),
             )
             ep_id = agent_pool.api_router.add_endpoint(ep)
-            await broadcast({'type': 'state', **build_state()})
+            await _broadcast_state()
             return {"status": "ok", "endpoint_id": ep_id}
         except Exception as e:
             return JSONResponse(status_code=400, content={"message": str(e)})
@@ -1012,7 +1039,7 @@ def create_app(agents, agent_pool, config=None):
         
         ok = agent_pool.api_router.update_endpoint(endpoint_id, data)
         if ok:
-            await broadcast({'type': 'state', **build_state()})
+            await _broadcast_state()
             return {"status": "ok"}
         return JSONResponse(status_code=404, content={"message": "Endpoint not found"})
 
@@ -1024,7 +1051,7 @@ def create_app(agents, agent_pool, config=None):
         
         ok = agent_pool.api_router.remove_endpoint(endpoint_id)
         if ok:
-            await broadcast({'type': 'state', **build_state()})
+            await _broadcast_state()
             return {"status": "ok"}
         return JSONResponse(status_code=404, content={"message": "Endpoint not found"})
 
@@ -1040,7 +1067,7 @@ def create_app(agents, agent_pool, config=None):
         priorities = data.get('agent_priorities', {})
         for agent_type, endpoint_ids in priorities.items():
             agent_pool.api_router.set_agent_priorities(agent_type, endpoint_ids)
-        await broadcast({'type': 'state', **build_state()})
+        await _broadcast_state()
         return {"status": "ok"}
 
     @app.post("/api/endpoints/bulk")
@@ -1053,7 +1080,7 @@ def create_app(agents, agent_pool, config=None):
             return JSONResponse(status_code=500, content={"message": "No API router"})
         
         agent_pool.api_router.from_dict(data)
-        await broadcast({'type': 'state', **build_state()})
+        await _broadcast_state()
         return {"status": "ok"}
 
     # ── WebSocket ─────────────────────────────────────────────────────────
@@ -1089,10 +1116,7 @@ def create_app(agents, agent_pool, config=None):
                     if not text:
                         continue
 
-                    # FIX 1 (Race Condition): Protect session['generating'] check with session_lock
-                    # to prevent two concurrent engine.run() calls for the same instance.
-                    # Without this lock, two WebSocket messages arriving nearly simultaneously
-                    # could both read generating=False and start separate runs.
+                    # Protect session['generating'] check with session_lock to prevent race condition.
                     is_generating = _is_generating(session)
 
                     if is_generating:
@@ -1124,15 +1148,7 @@ def create_app(agents, agent_pool, config=None):
                         inst = agent_pool.get_instance(instance_name)
                         if inst is None or not inst.conversation:
                             # Extract system message content from the active agent runner
-                            # Priority: base_system_message > system_message (the actual attribute names on Agent)
-                            sys_content = None
-                            agent_runner = get_agent()
-                            if hasattr(agent_runner, 'base_system_message') and agent_runner.base_system_message:
-                                sys_content = str(agent_runner.base_system_message)
-                            elif hasattr(agent_runner, 'system_message') and agent_runner.system_message:
-                                sys_content = str(agent_runner.system_message)
-                            elif hasattr(agent_runner, 'llm') and hasattr(agent_runner.llm, 'cfg'):
-                                sys_content = agent_runner.llm.cfg.get('system', '') or agent_runner.llm.cfg.get('system_message', '')
+                            sys_content = _extract_system_message(get_agent())
                             
                             if sys_content:
                                 create_main_agent_instance(
@@ -1141,7 +1157,7 @@ def create_app(agents, agent_pool, config=None):
                                     system_message_content=sys_content,
                                 )
                         
-                        # FIX Major #4: Clear any stale continue state for fresh turn
+                        # Clear any stale continue state for fresh turn
                         inst = agent_pool.get_instance(instance_name)  # Re-get for fresh turn (may differ from continue handler's instance ref)
                         if inst is not None:
                             with inst._compression_lock:
@@ -1167,14 +1183,13 @@ def create_app(agents, agent_pool, config=None):
                     )
                     thread.start()
 
-                    await broadcast({'type': 'state', **build_state(generating=True)})
+                    await _broadcast_state(generating=True)
 
                 elif msg_type == 'continue':
                     # Continue generation WITHOUT inserting a new user message.
                     # Just send the existing conversation to the LLM so it can resume if it wants.
                     
-                    # FIX 1d: Protect session['generating'] read with lock (consistent with Fix 1)
-                    # Continue DOES start threads - concurrent continue messages need the same guard.
+                    # Protect session['generating'] read with lock (consistent with Fix 1)
                     is_generating = _is_generating(session)
                     if is_generating:
                         continue
@@ -1207,11 +1222,7 @@ def create_app(agents, agent_pool, config=None):
                         await broadcast({'type': 'error', 'message': 'No agent instance found to continue'})
                         continue
                     
-                    # FIX: Option B - Pop trailing assistant message before deepcopying history.
-                    # This prevents duplication because when Continue is clicked, the engine sends 
-                    # the full conversation (including last assistant message) to LLM, which then 
-                    # generates a NEW assistant message that gets appended separately. By popping 
-                    # it first and merging after LLM responds, we get a single concatenated message.
+                    # Pop trailing assistant message before deepcopying history.
                     saved_assistant_msg = None
                     with inst._compression_lock:
                         if inst.conversation:
@@ -1231,7 +1242,7 @@ def create_app(agents, agent_pool, config=None):
                     )
                     thread.start()
 
-                    await broadcast({'type': 'state', **build_state(generating=True)})
+                    await _broadcast_state(generating=True)
 
                 elif msg_type == 'stop':
                     # Stop all streaming and set ALL active agents to IDLE state.
@@ -1255,7 +1266,7 @@ def create_app(agents, agent_pool, config=None):
                                         instance._transition(AgentState.IDLE)
                                         logger.info(f"Stop: Transitioned {inst_name} from {current_state.name} to IDLE")
                                 
-                                # FIX Critical #1: Clear any pending continue merge state on stop
+                                # Clear any pending continue merge state on stop
                                 with instance._compression_lock:
                                     if instance._continue_saved_msg is not None:
                                         logger.debug(f"[CONTINUE_FIX] Stop handler cleared _continue_saved_msg for {inst_name}")
@@ -1273,7 +1284,7 @@ def create_app(agents, agent_pool, config=None):
                         # incremented value; stale threads detect mismatch on next _is_stopped() check.
                         agent_pool._run_generation += 1
                     
-                    # FIX 1 & 2: Clean up active stack and halted state after stop_session()
+                    # Clean up active stack and halted state after stop_session()
                     if agent_pool:
                         try:
                             from agent_cascade.agent_instance import AgentState as InstanceAgentState
@@ -1303,7 +1314,7 @@ def create_app(agents, agent_pool, config=None):
                         except Exception as e:
                             logger.warning(f"[STOP_CLEANUP_ERROR] Error during slot/stack cleanup: {e}")
                     
-                    await broadcast({'type': 'done', **build_state()})
+                    await _broadcast_state('done')
 
                 elif msg_type == 'pause':
                     # Pause ALL running instances by setting global flag
@@ -1315,7 +1326,7 @@ def create_app(agents, agent_pool, config=None):
                         _stop_generation(session)
                     # Broadcast updated state so frontend reflects paused status for all agents
                     try:
-                        await broadcast({'type': 'state', **build_state(generating=False)})
+                        await _broadcast_state(generating=False)
                     except Exception as e:
                         logger.warning(f"Failed to broadcast pause state: {e}")
 
@@ -1331,7 +1342,7 @@ def create_app(agents, agent_pool, config=None):
                 
                     # Broadcast updated state so frontend reflects resumed status
                     try:
-                        await broadcast({'type': 'state', **build_state(generating=True)})
+                        await _broadcast_state(generating=True)
                     except Exception as e:
                         logger.warning(f"Failed to broadcast resume_all state: {e}")
                                 
@@ -1436,7 +1447,7 @@ def create_app(agents, agent_pool, config=None):
                                             logger.warning(f"Failed to restore agent instance {sa_name} pool: {_e}")
                                 # ── End Fix 3 ──
                             
-                            # Fix #3 (Feature 020): Wrap session state modifications with session_lock to prevent race condition
+                            # Wrap session state modifications with session_lock to prevent race condition
                             if not _is_generating(session):
                                 gen_id = _start_generation(session)
                                 
@@ -1450,11 +1461,11 @@ def create_app(agents, agent_pool, config=None):
                                 )
                                 thread.start()
 
-                            # FIX 2: Move await broadcast outside session_lock to avoid holding lock during async I/O
-                            await broadcast({'type': 'state', **build_state(generating=True)})
+                            # Move await broadcast outside session_lock to avoid holding lock during async I/O
+                            await _broadcast_state(generating=True)
                         elif not is_generating:
                             # Not halted and not generating — just update UI state (no-op from user's perspective)
-                            await broadcast({'type': 'state', **build_state()})
+                            await _broadcast_state()
                     
                     # For agent instances: agents wake naturally from sleep loop, no continuation message needed
                 elif msg_type in ('terminate_agent_instance', 'terminate_sub_agent'):
@@ -1484,7 +1495,7 @@ def create_app(agents, agent_pool, config=None):
                                 current_state = inst.state
                                 if current_state in ACTIVE_STATES:
                                     inst._transition(AgentState.IDLE)
-                            await broadcast({'type': 'done', **build_state()})
+                            await _broadcast_state('done')
                             continue
                         
                         # Get parent instance name for feedback BEFORE dismissal (Finding #4)
@@ -1503,11 +1514,10 @@ def create_app(agents, agent_pool, config=None):
                         agent_pool.dismiss_instance(instance_name)
                         
                         # Broadcast updated state immediately so frontend reflects terminated agent
-                        await broadcast({'type': 'state', **build_state()})
+                        await _broadcast_state()
 
                 elif msg_type == 'retry':
-                    # FIX 1c: Protect session['generating'] read with lock (consistent with Fix 1)
-                    # Retry DOES start threads - concurrent retry messages need the same guard.
+                    # Protect session['generating'] read with lock (consistent with Fix 1)
                     is_generating = _is_generating(session)
                     if is_generating:
                         continue
@@ -1546,7 +1556,7 @@ def create_app(agents, agent_pool, config=None):
                     inst = agent_pool.get_instance(instance_name) if agent_pool else None
                     if not inst and not (inst.conversation if inst else []) and not last_user_msg:
                         _save_session_history()
-                        await broadcast({'type': 'state', **build_state()})
+                        await _broadcast_state()
                         continue
                     
                     # Clear active tools/agent stack since we are retrying from the main input level
@@ -1608,7 +1618,7 @@ def create_app(agents, agent_pool, config=None):
                         daemon=True,
                     )
                     thread.start()
-                    await broadcast({'type': 'state', **build_state(generating=True)})
+                    await _broadcast_state(generating=True)
 
                 elif msg_type == 'reset':
                     # Clear pool instance conversation (unified path)
@@ -1632,7 +1642,7 @@ def create_app(agents, agent_pool, config=None):
                     if agent_pool:
                         agent_pool.stopped = True
                         agent_pool.reset()
-                    await broadcast({'type': 'done', **build_state()})
+                    await _broadcast_state('done')
 
                 elif msg_type == 'refresh_souls':
                     if agent_pool:
@@ -1644,7 +1654,7 @@ def create_app(agents, agent_pool, config=None):
                         if 'orchestrator' in agent_pool.agents:
                             orch = agent_pool.agents['orchestrator']
                             agents = [orch] + [a for a in agents if a != orch]
-                    await broadcast({'type': 'state', **build_state()})
+                    await _broadcast_state()
 
                 elif msg_type == 'restart_server':
                     logger.warning("Server restart requested via UI")
@@ -1741,7 +1751,7 @@ def create_app(agents, agent_pool, config=None):
                                 agent_pool.api_router.update_default_llm_cfg(new_llm_cfg)
                             else:
                                 logger.debug("[update_config] LLM config unchanged (%d keys), skipping update_default_llm_cfg", len(new_llm_cfg))
-                    await broadcast({'type': 'state', **build_state()})
+                    await _broadcast_state()
 
                 elif msg_type == 'update_endpoints':
                     # Bulk update all endpoints and priorities from UI
@@ -1750,7 +1760,7 @@ def create_app(agents, agent_pool, config=None):
                         ap_count = len(data.get('agent_priorities', {}))
                         logger.info(f"[update_endpoints] Received: {ep_count} endpoints, {ap_count} agent priority mappings")
                         agent_pool.api_router.from_dict(data)
-                    await broadcast({'type': 'state', **build_state()})
+                    await _broadcast_state()
 
                 elif msg_type == 'update_api_priorities':
                     # Update just the agent-type → endpoint priority mappings
@@ -1760,7 +1770,7 @@ def create_app(agents, agent_pool, config=None):
                                    f"{list(priorities.keys())}")
                         for agent_type, endpoint_ids in priorities.items():
                             agent_pool.api_router.set_agent_priorities(agent_type, endpoint_ids)
-                    await broadcast({'type': 'state', **build_state()})
+                    await _broadcast_state()
 
                 elif msg_type == 'approve':
                     rid = data.get('request_id')
@@ -1768,8 +1778,8 @@ def create_app(agents, agent_pool, config=None):
                         is_auto = data.get('automated', False)
                         logger.info(f"[{'AUTO' if is_auto else 'USER'}] Approving request: {rid}")
                         agent_pool.operation_manager.user_approve(rid)
-                        # Fix #7: Immediate broadcast after approve to update UI instantly (~300ms latency reduction)
-                        await broadcast({'type': 'state', **build_state()})
+                        # Immediate broadcast after approve to update UI instantly (~300ms latency reduction)
+                        await _broadcast_state()
 
                 elif msg_type == 'reject':
                     rid = data.get('request_id')
@@ -1778,8 +1788,8 @@ def create_app(agents, agent_pool, config=None):
                         is_auto = data.get('automated', False)
                         logger.info(f"[{'AUTO' if is_auto else 'USER'}] Rejecting request: {rid}. Reason: {reason}")
                         agent_pool.operation_manager.user_reject(rid, reason)
-                        # Fix #7: Immediate broadcast after reject to update UI instantly (~300ms latency reduction)
-                        await broadcast({'type': 'state', **build_state()})
+                        # Immediate broadcast after reject to update UI instantly (~300ms latency reduction)
+                        await _broadcast_state()
 
                 elif msg_type == 'ask_security':
                     if not hasattr(app, 'security_check_lock'):
@@ -1825,11 +1835,10 @@ def create_app(agents, agent_pool, config=None):
                                             workspace_info=workspace_info
                                         )
 
-                                        # FIX 1: Use unique instance name per request_id to prevent state corruption
-                                        # This ensures concurrent security checks don't overwrite each other's state
+                                        # Use unique instance name per request_id to prevent state corruption
                                         sec_state_key = f'Security_{rid}'  # e.g., 'Security_op_091f048b'
                                         
-                                        # FIX 2: Create engine and instance INSIDE the lock to prevent race conditions
+                                        # Create engine and instance INSIDE the lock to prevent race conditions
                                         # Previously, instances were created before semaphore acquire, causing lifecycle_manager collisions
                                         engine = ExecutionEngine(agent_pool)
                                         # initialize() now called automatically in __init__ (Phase 4.5 cleanup)
@@ -1879,7 +1888,7 @@ def create_app(agents, agent_pool, config=None):
                                         # Schedule warning timer (keep existing _sec_warning_injector logic)
                                         def _sec_warning_injector():
                                             try:
-                                                # FIX 1 continuation: Use unique sec_state_key for message routing
+                                                # Use unique sec_state_key for message routing
                                                 agent_pool.enqueue_message(
                                                     sec_state_key,
                                                     "[SYSTEM WARNING] Your analysis is taking longer than expected. "
@@ -1898,7 +1907,7 @@ def create_app(agents, agent_pool, config=None):
                                     # and cannot be acquired from a different thread — attempting so would either
                                     # bypass the intended serialization or deadlock.
                                     #
-                                    # Fix: Set _skip_slot_acquire=True so engine.run() skips slot acquisition.
+                                    # Set _skip_slot_acquire=True so engine.run() skips slot acquisition.
                                     # Concurrency is controlled by app.security_check_semaphore (Semaphore(1)) instead,
                                     # which is a standard cross-thread synchronization primitive.
                                     
@@ -2066,7 +2075,7 @@ def create_app(agents, agent_pool, config=None):
                                         # Halt the security advisor instance to stop it cleanly.
                                         # Note: This is best-effort — only works between turns, not during active LLM calls.
                                         # The actual timeout enforcement happens inside the for loop via `break` + generator.close().
-                                        # FIX 1: Use unique sec_state_key instead of hardcoded 'Security'
+                                        # Use unique sec_state_key instead of hardcoded 'Security'
                                         if sec_state_key:
                                             agent_pool.halt_instance(sec_state_key)
                                         
@@ -2176,7 +2185,7 @@ def create_app(agents, agent_pool, config=None):
                                         except Exception as e:
                                             logger.debug(f"Active stack removal failed for {sec_state_key} (non-critical): {e}")
 
-                                    # Fix #3: Release endpoint slot when done
+                                    # Release endpoint slot when done
                                     if hasattr(app, 'active_security_checks') and rid:
                                         with app.active_security_checks_lock:
                                             app.active_security_checks.discard(rid)
@@ -2250,14 +2259,9 @@ def create_app(agents, agent_pool, config=None):
                             if target_name != session['session_name'] and target_name in agent_pool.instance_state:
                                 agent_pool.instance_state[target_name]['messages'] = list(history)
                     
-                    # Fix #1 & #3: Clear performance caches on message edit
-                    try:
-                        from agent_cascade.api_integration import _clear_performance_caches
-                        _clear_performance_caches()
-                    except Exception as e:
-                        logger.debug(f"Cache clearing failed during message edit (non-critical): {e}")
+                    _clear_caches_safely()
                     
-                    await broadcast({'type': 'state', **build_state()})
+                    await _broadcast_state()
                             
                 elif msg_type == 'delete_messages':
                     # Note: session_lock check removed (2026-06-16 simplification).
@@ -2292,18 +2296,13 @@ def create_app(agents, agent_pool, config=None):
                         if target_name != session['session_name'] and target_name in agent_pool.instance_state:
                             agent_pool.instance_state[target_name]['messages'] = list(history)
                     
-                    # Fix #1 & #3: Clear performance caches on message deletion
-                    try:
-                        from agent_cascade.api_integration import _clear_performance_caches
-                        _clear_performance_caches()
-                    except Exception as e:
-                        logger.debug(f"Cache clearing failed during message deletion (non-critical): {e}")
+                    _clear_caches_safely()
                     
-                    await broadcast({'type': 'state', **build_state()})
+                    await _broadcast_state()
 
                 elif msg_type == 'select_agent':
                     session['agent_index'] = int(data.get('index', 0))
-                    await broadcast({'type': 'state', **build_state()})
+                    await _broadcast_state()
 
                 elif msg_type == 'set_session_name':
                     old_name = session['session_name']
@@ -2314,7 +2313,7 @@ def create_app(agents, agent_pool, config=None):
                         if old_name in agent_pool.instance_summaries:
                             agent_pool.instance_summaries[new_name] = agent_pool.instance_summaries.pop(old_name)
                     
-                    await broadcast({'type': 'state', **build_state()})
+                    await _broadcast_state()
 
 
 
@@ -2336,18 +2335,13 @@ def create_app(agents, agent_pool, config=None):
                             instance_name = session.get('session_name', 'Maine')
                             inst = agent_pool.get_instance(instance_name)
                             if inst is not None:
-                                # Fix #3 (Feature 020): Wrap session state modifications with session_lock to prevent race condition
+                                # Wrap session state modifications with session_lock to prevent race condition
                                 _stop_generation(session)
                                 _signal_stop(session)
                                 if agent_pool:
                                     agent_pool.stopped = False
-                                # Fix #1 & #3: Clear performance caches on session load
-                                try:
-                                    from agent_cascade.api_integration import _clear_performance_caches
-                                    _clear_performance_caches()
-                                except Exception as e:
-                                    logger.debug(f"Cache clearing failed during session load (non-critical): {e}")
-                                await broadcast({'type': 'state', **build_state()})
+                                _clear_caches_safely()
+                                await _broadcast_state()
 
                 elif msg_type == 'inject':
                     text = data.get('text', '').strip()
@@ -2529,12 +2523,7 @@ if __name__ == "__main__":
     orch_agent = agent_pool.get_agent('orchestrator')
 
     # Inject system message into Maine's conversation so the soul content flows into the instance
-    # Priority: base_system_message > system_message (matches the priority chain in run_agent_thread)
-    sys_msg_content = None
-    if hasattr(orch_agent, 'base_system_message') and orch_agent.base_system_message:
-        sys_msg_content = str(orch_agent.base_system_message)
-    elif hasattr(orch_agent, 'system_message') and orch_agent.system_message:
-        sys_msg_content = str(orch_agent.system_message)
+    sys_msg_content = _extract_system_message(orch_agent)
 
     if sys_msg_content:
         from agent_cascade.llm.schema import Message, SYSTEM
