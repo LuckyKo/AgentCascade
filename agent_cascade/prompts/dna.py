@@ -136,7 +136,7 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
-            'old_content': "For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). For delete_and_insert mode: A line range 'start:end' (1-indexed) specifying which lines to delete before inserting new_content.",
+            'old_content': "For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). For delete_and_insert mode: A line range 'start:end' (1-indexed) specifying which lines to delete before inserting new_content, `start` only for insert without delete, `0` for append at end of file.",
             'new_content': 'The exact literal text to replace old_content with.',
             'match_mode': "Match mode for editing. Options: 'exact' (default, character-for-character match), 'heuristic' (Python-aware structure matching), 'heuristic_agnostic' (whitespace-only normalization), or 'delete_and_insert' (old_content is a line range start:end to delete before inserting new_content).",
             'justification': 'Why you need to edit this file'
@@ -145,14 +145,14 @@ TOOL_METADATA = {
     're_indent': {
         'description': (
             'Re-indents a specific block of code in a file. '
-            'It allows shifting, flattening, or converting indentation between tabs and spaces.'
+            'It allows shifting, flattening, converting indentation between tabs and spaces, or adjusting base indentation.'
         ),
         'parameters': {
             'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
             'lines': "Line range to re-indent, 1-based inclusive (e.g., '1:10', '5:', ':20').",
-            'indent': "Target indent unit size: number of spaces per indent level (for 'shift'/'flat' modes), or tab width in columns (for 'convert' mode).",
+            'indent': "Target indent unit size: number of spaces per indent level (for 'min'/'flat' modes), or tab width in columns (for 'convert' mode). For 'shift' mode: number of indent characters to add/remove per line — positive adds, negative removes; result clamped to no leading whitespace minimum.",
             'indent_type': "Indentation character type: 'space' or 'tab'.",
-            'mode': "Optional: Re-alignment mode. Can be 'shift' (default, preserves relative indentation from smallest indent), 'flat' (flattens entire block to target indent), or 'convert' (converts between tabs and spaces using visual column alignment where 1 tab = indent spaces)."
+            'mode': "Optional: Re-alignment mode. Can be 'min' (default, trims to minimum indentation level then applies target indent while preserving relative hierarchy), 'shift' (adds or removes indent units from each line; positive adds, negative removes), 'flat' (flattens entire block to target indent), or 'convert' (converts between tabs and spaces using visual column alignment where 1 tab = indent spaces)."
         }
     },
     'list_dir': {

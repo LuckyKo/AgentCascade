@@ -990,8 +990,8 @@ class ReIndent(BaseTool):
             },
             'mode': {
                 'type': 'string',
-                'enum': ['shift', 'flat', 'convert'],
-                'default': 'shift',
+                'enum': ['shift', 'min', 'flat', 'convert'],
+                'default': 'min',
                 'description': TOOL_METADATA['re_indent']['parameters']['mode']
             }
         },
@@ -1012,7 +1012,7 @@ class ReIndent(BaseTool):
         lines = params_json.get('lines')
         indent = params_json.get('indent')
         type_ = params_json.get('indent_type')
-        mode = params_json.get('mode', 'shift')
+        mode = params_json.get('mode', 'min')
 
         if not path:
             return "ERROR: Missing 'path'."
@@ -1026,7 +1026,7 @@ class ReIndent(BaseTool):
         # FIX 7: Explicit validation for type_ and mode
         if type_ not in ('space', 'tab'):
             return "ERROR: 'indent_type' must be 'space' or 'tab'."
-        VALID_MODES = ('shift', 'flat', 'convert')
+        VALID_MODES = ('shift', 'min', 'flat', 'convert')
         if mode not in VALID_MODES:
             return f"ERROR: 'mode' must be one of {VALID_MODES}. Got '{mode}'."
 

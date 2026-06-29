@@ -958,7 +958,7 @@ class FileOpsMixin:
 
     # ─── Re-indent ────────────────────────────────────────────────────────
 
-    def re_indent(self, path: str, agent_name: str, lines: str, indent: int, indent_type: str, mode: str = "shift") -> str:
+    def re_indent(self, path: str, agent_name: str, lines: str, indent: int, indent_type: str, mode: str = "min") -> str:
         """Re-indents a block of code in a file."""
         try:
             resolved = self._resolve_path(path, mode="rw")
@@ -1041,65 +1041,99 @@ class FileOpsMixin:
             new_block_lines = block_lines
             base_trim = 0
         else:
-            if mode == 'shift':
+            # --- Mode dispatch: determine base_trim and validate indent ---
+            if mode == 'min':
                 base_trim = min(ws_counts)
+            elif mode == 'shift':
+                base_trim = None  # shift mode is self-contained below
             elif mode == 'flat':
                 base_trim = None
             elif mode == 'convert':
                 base_trim = min_visual_col
             else:
-                return f"ERROR: Invalid mode '{mode}'. Choose 'shift', 'flat', or 'convert'."
+                return f"ERROR: Invalid mode '{mode}'. Choose 'shift' (add/remove), 'min' (default, trim-to-min then apply target), 'flat', or 'convert'."
 
-            if indent < 0:
-                return f"ERROR: indent must be non-negative, got {indent}."
+            # Negative indent is only allowed in shift mode
+            if mode != 'shift' and indent < 0:
+                return f"ERROR: indent must be non-negative in {mode} mode, got {indent}."
 
             if mode == 'convert' and indent_type == 'tab' and indent == 0:
                 return "ERROR: indent must be > 0 when indent_type='tab' in convert mode (used as tab width)."
 
-            new_block_lines = []
+            # --- shift mode: self-contained logic, no base_trim ---
+            if mode == 'shift':
+                if indent > 0:
+                    # Prepend N characters of the specified type to each non-blank line
+                    prefix = ('\t' * indent) if indent_type == 'tab' else (' ' * indent)
+                    new_block_lines = []
+                    for i, info in enumerate(ws_info_list):
+                        if info is None:
+                            new_block_lines.append(block_lines[i])  # blank lines pass through unchanged
+                            continue
+                        _, stripped_content = info
+                        new_block_lines.append(prefix + stripped_content)
 
-            for i, info in enumerate(ws_info_list):
-                if info is None:
-                    original_line = block_lines[i]
-                    suffix = ""
-                    if original_line.endswith('\r\n'):
-                        suffix = '\r\n'
-                    elif original_line.endswith('\n'):
-                        suffix = '\n'
-                    elif original_line.endswith('\r'):
-                        suffix = '\r'
-                    new_block_lines.append(suffix)
-                    continue
+                elif indent < 0:
+                    # Strip up to N leading whitespace characters from each non-blank line (type-agnostic removal)
+                    remove_n = abs(indent)
+                    new_block_lines = []
+                    for i, info in enumerate(ws_info_list):
+                        if info is None:
+                            new_block_lines.append(block_lines[i])  # blank lines pass through unchanged
+                            continue
+                        ws_count, stripped_content = info
+                        actual_ws = block_lines[i][:ws_count]
+                        chars_to_remove = min(remove_n, len(actual_ws))
+                        remaining_ws = actual_ws[chars_to_remove:]
+                        new_block_lines.append(remaining_ws + stripped_content)
 
-                ws_count, stripped_content = info
+                else:  # indent == 0
+                    new_block_lines = list(block_lines)  # no-op, copy as-is
+            else:
+                # --- min/flat/convert modes: shared processing loop ---
+                new_block_lines = []
+                for i, info in enumerate(ws_info_list):
+                    if info is None:
+                        original_line = block_lines[i]
+                        suffix = ""
+                        if original_line.endswith('\r\n'):
+                            suffix = '\r\n'
+                        elif original_line.endswith('\n'):
+                            suffix = '\n'
+                        elif original_line.endswith('\r'):
+                            suffix = '\r'
+                        new_block_lines.append(suffix)
+                        continue
 
-                if mode == 'flat':
-                    relative_offset = 0
-                elif mode == 'convert':
-                    visual_col, _ = ws_info_visual[i]
-                    relative_offset = visual_col - base_trim
-                    total_visual_columns = indent + relative_offset
+                    ws_count, stripped_content = info
+
+                    if mode == 'flat':
+                        relative_offset = 0
+                    elif mode == 'convert':
+                        visual_col, _ = ws_info_visual[i]
+                        relative_offset = visual_col - base_trim
+                        total_visual_columns = indent + relative_offset
+
+                        if indent_type == 'tab':
+                            num_tabs = total_visual_columns // indent
+                            remainder_spaces = total_visual_columns % indent
+                            new_ws = '\t' * num_tabs + ' ' * remainder_spaces
+                        else:
+                            new_ws = ' ' * total_visual_columns
+
+                        new_block_lines.append(new_ws + stripped_content)
+                        continue
+                    else:  # mode == 'min'
+                        relative_offset = ws_count - base_trim
+
+                    total_indent_units = indent + relative_offset
 
                     if indent_type == 'tab':
-                        num_tabs = total_visual_columns // indent
-                        remainder_spaces = total_visual_columns % indent
-                        new_ws = '\t' * num_tabs + ' ' * remainder_spaces
+                        new_ws = '\t' * total_indent_units
                     else:
-                        new_ws = ' ' * total_visual_columns
+                        new_ws = ' ' * total_indent_units
 
                     new_block_lines.append(new_ws + stripped_content)
-                    continue
-                else:
-                    relative_offset = ws_count - base_trim
-
-                total_indent_units = indent + relative_offset
-
-                if indent_type == 'tab':
-                    new_ws = '\t' * total_indent_units
-                else:
-                    new_ws = ' ' * total_indent_units
-
-                new_block_lines.append(new_ws + stripped_content)
 
         # Track original whitespace unit for feedback message
         if ws_counts:
@@ -1156,12 +1190,23 @@ class FileOpsMixin:
             self.file_ownership[str(resolved)] = agent_name
 
             display_start = start + 1
-            if mode == 'flat':
+            if not ws_counts:
+                res_msg = f"APPROVED: No non-blank lines found in block {display_start}:{end} of {path}. Block unchanged."
+            elif mode == 'shift':
+                if indent > 0:
+                    res_msg = f"APPROVED: Shifted lines {display_start}:{end} in {path}. Added {indent} leading character(s) per line ({indent_type}s)."
+                elif indent < 0:
+                    res_msg = f"APPROVED: Shifted lines {display_start}:{end} in {path}. Removed up to {abs(indent)} leading whitespace character(s) per line."
+                else:
+                    res_msg = f"APPROVED: Shifted lines {display_start}:{end} in {path}. No change (indent=0)."
+            elif mode == 'min':
+                res_msg = f"APPROVED: Re-indented lines {display_start}:{end} in {path}. Block had base indent of {base_trim} {original_ws_unit}s, now indented to {indent} {indent_type}s."
+            elif mode == 'flat':
                 res_msg = f"APPROVED: Re-indented lines {display_start}:{end} in {path}. Block had varying indents (trimmed all), now flattened to {indent} {indent_type}s."
             elif mode == 'convert':
                 res_msg = f"APPROVED: Converted lines {display_start}:{end} in {path}. Used visual column alignment with tab width={indent}. Minimum indent was {base_trim} columns, re-aligned and converted to {indent_type}s."
             else:
-                res_msg = f"APPROVED: Re-indented lines {display_start}:{end} in {path}. Block had base indent of {base_trim} {original_ws_unit}s, now indented to {indent} {indent_type}s."
+                res_msg = f"APPROVED: Re-indented lines {display_start}:{end} in {path} (mode: {mode})."
 
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"

@@ -417,3 +417,164 @@ def test_delete_and_insert_mode():
         content = file_path.read_text(encoding='utf-8')
         assert content == "appended\n", f"Test 18 assertion: got [{content}]"
 
+
+def test_re_indent_shift_mode():
+    """Test all scenarios for the new shift mode of re_indent.
+
+    Shift mode behavior:
+      - Positive indent: strips existing leading whitespace, prepends N chars of specified type
+      - Negative indent: removes up to N leading whitespace chars (type-agnostic)
+      - Zero indent: no-op, lines unchanged
+      - Blank lines always pass through unchanged regardless of sign
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        file_path = Path(tmpdir) / "shift_test.py"
+
+        # ── Test 1: Positive shift (add spaces) ────────────────────────
+        # Existing whitespace is stripped; N new space chars are prepended.
+        file_path.write_text(
+            "    def foo():\n"
+            "        bar()\n"
+            "        baz()\n",
+            encoding='utf-8'
+        )
+        op_mgr.file_ownership[str(file_path.resolve())] = "test_agent"
+
+        res = op_mgr.re_indent(
+            path="shift_test.py", agent_name="test_agent",
+            lines="1:3", indent=2, indent_type="space", mode="shift"
+        )
+        assert "APPROVED" in res, f"Test 1 failed: {res}"
+        content = file_path.read_text(encoding='utf-8')
+        # Each line's ws stripped → prefix "  " prepended to bare content
+        expected = (
+            "  def foo():\n"
+            "  bar()\n"
+            "  baz()\n"
+        )
+        assert content == expected, f"Test 1 assertion: got [{content}]"
+
+        # ── Test 2: Negative shift (remove leading chars) ──────────────
+        file_path.write_text(
+            "        def foo():\n"     # 8 spaces
+            "            bar()\n"      # 12 spaces
+            "            baz()\n",     # 12 spaces
+            encoding='utf-8'
+        )
+
+        res = op_mgr.re_indent(
+            path="shift_test.py", agent_name="test_agent",
+            lines="1:3", indent=-4, indent_type="space", mode="shift"
+        )
+        assert "APPROVED" in res, f"Test 2 failed: {res}"
+        content = file_path.read_text(encoding='utf-8')
+        # Remove min(4, ws_count) leading chars from each line
+        expected = (
+            "    def foo():\n"      # 8 - 4 = 4 spaces remain
+            "        bar()\n"       # 12 - 4 = 8 spaces remain
+            "        baz()\n"
+        )
+        assert content == expected, f"Test 2 assertion: got [{content}]"
+
+        # ── Test 3: Negative shift removes all (clamp to 0) ────────────
+        file_path.write_text(
+            "  def foo():\n"         # 2 spaces
+            "    bar()\n",           # 4 spaces
+            encoding='utf-8'
+        )
+
+        res = op_mgr.re_indent(
+            path="shift_test.py", agent_name="test_agent",
+            lines="1:2", indent=-5, indent_type="space", mode="shift"
+        )
+        assert "APPROVED" in res, f"Test 3 failed: {res}"
+        content = file_path.read_text(encoding='utf-8')
+        # All leading whitespace removed (min(5,2)=2 and min(5,4)=4)
+        expected = (
+            "def foo():\n"
+            "bar()\n"
+        )
+        assert content == expected, f"Test 3 assertion: got [{content}]"
+
+        # ── Test 4: Mixed indentation preserved during positive shift ──
+        file_path.write_text(
+            "\tdef foo():\n"
+            "\t\tbar()\n",
+            encoding='utf-8'
+        )
+
+        res = op_mgr.re_indent(
+            path="shift_test.py", agent_name="test_agent",
+            lines="1:2", indent=2, indent_type="space", mode="shift"
+        )
+        assert "APPROVED" in res, f"Test 4 failed: {res}"
+        content = file_path.read_text(encoding='utf-8')
+        # Positive shift strips ws then prepends → tabs replaced by spaces
+        expected = (
+            "  def foo():\n"
+            "  bar()\n"
+        )
+        assert content == expected, f"Test 4 assertion: got [{content}]"
+
+        # ── Test 5: Blank lines preserved ──────────────────────────────
+        file_path.write_text(
+            "    def foo():\n"
+            "\n"
+            "        bar()\n",
+            encoding='utf-8'
+        )
+
+        res = op_mgr.re_indent(
+            path="shift_test.py", agent_name="test_agent",
+            lines="1:3", indent=3, indent_type="space", mode="shift"
+        )
+        assert "APPROVED" in res, f"Test 5 failed: {res}"
+        content = file_path.read_text(encoding='utf-8')
+        expected = (
+            "   def foo():\n"    # stripped + 3 spaces
+            "\n"                 # blank line unchanged
+            "   bar()\n"         # stripped + 3 spaces
+        )
+        assert content == expected, f"Test 5 assertion: got [{content}]"
+
+        # ── Test 6: Zero indent (no-op) ────────────────────────────────
+        file_path.write_text(
+            "    def foo():\n"
+            "\t\tbar()\n",
+            encoding='utf-8'
+        )
+
+        res = op_mgr.re_indent(
+            path="shift_test.py", agent_name="test_agent",
+            lines="1:2", indent=0, indent_type="space", mode="shift"
+        )
+        assert "APPROVED" in res, f"Test 6 failed: {res}"
+        content = file_path.read_text(encoding='utf-8')
+        expected = (
+            "    def foo():\n"   # unchanged
+            "\t\tbar()\n"       # unchanged
+        )
+        assert content == expected, f"Test 6 assertion: got [{content}]"
+
+        # ── Test 7: Tab addition ───────────────────────────────────────
+        file_path.write_text(
+            "def foo():\n"
+            "bar()\n",
+            encoding='utf-8'
+        )
+
+        res = op_mgr.re_indent(
+            path="shift_test.py", agent_name="test_agent",
+            lines="1:2", indent=2, indent_type="tab", mode="shift"
+        )
+        assert "APPROVED" in res, f"Test 7 failed: {res}"
+        content = file_path.read_text(encoding='utf-8')
+        expected = (
+            "\t\tdef foo():\n"   # 2 tabs prepended + stripped content
+            "\t\tbar()\n"       # same
+        )
+        assert content == expected, f"Test 7 assertion: got [{content}]"
+
