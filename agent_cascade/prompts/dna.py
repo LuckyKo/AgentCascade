@@ -383,7 +383,7 @@ TOOL_METADATA = {
         'description': (
             'Retroactively truncate the output of the last N tool call responses in the active conversation history. '
             'Each truncated response is shortened to ~100 characters max, with a marker indicating truncation. '
-            'This frees up context space without losing the fact that the tool was called. '
+            'This frees up context space from outputs that are useless to the task at hand. '
             'Affects both the in-memory pool and the log file.'
         ),
         'parameters': {

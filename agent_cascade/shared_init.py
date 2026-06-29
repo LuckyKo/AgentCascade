@@ -9,6 +9,7 @@ Issue: C2 - Extract shared initialization code
 """
 
 import os
+import signal as _signal_mod  # internal alias — avoids polluting module namespace with bare 'signal'
 from pathlib import Path
 
 from agent_cascade.log import logger
@@ -445,3 +446,35 @@ def initialize_infrastructure(project_root: Path, llm_cfg, use_shared_tools: boo
         shared_tools = None
 
     return operation_mgr, agent_pool, shared_tools
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  8. Signal handler for graceful shutdown (shared across entry points)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def setup_signal_handler(agent_pool, server=None):
+    """Set up graceful shutdown signal handlers for SIGINT and SIGTERM.
+
+    Parameters
+    ----------
+    agent_pool : AgentPool
+        The agent pool whose ``stopped`` flag will be set on shutdown.
+    server : uvicorn.Server | None
+        Optional uvicorn server object. If provided, its ``should_exit`` flag
+        is set for a clean uvicorn shutdown (avoids resource leaks from sys.exit).
+    """
+    def handle_shutdown(signum, frame):
+        logger.info("\n[INFO] Initiating graceful shutdown...")
+        agent_pool.stopped = True
+        if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
+            try:
+                agent_pool.operation_manager.cleanup_backups()
+            except Exception as e:
+                logger.warning("Cleanup backups failed during shutdown: %s", e)
+        if server is not None:
+            # Set should_exit for graceful uvicorn shutdown (avoids resource leaks from sys.exit)
+            server.should_exit = True
+
+    _signal_mod.signal(_signal_mod.SIGINT, handle_shutdown)
+    if os.name != 'nt':
+        _signal_mod.signal(_signal_mod.SIGTERM, handle_shutdown)

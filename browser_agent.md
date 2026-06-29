@@ -92,16 +92,17 @@ If you are using DashScope's model service, then please execute the following co
 #   - qwen1.5-7b/14b/72b-chat (the same as the open-sourced Qwen1.5 7B/14B/72B Chat model)
 #   - qwen-turbo, qwen-plus, qwen-max (qwen-max is recommended)
 # "YOUR_DASHSCOPE_API_KEY" is a placeholder. The user should replace it with their actual key.
-python run_server.py --llm qwen-max --model_server dashscope --workstation_port 7864 --api_key YOUR_DASHSCOPE_API_KEY
+# The legacy run_server.py has been replaced by start_api_server.py.
+# For the browser agent workstation, use the API server entry point instead:
+python start_api_server.py
 ```
 
-If you are using your own model service instead of DashScope, then please execute the following command:
+If you need to specify a custom port, set an environment variable before launching:
 
 ```bash
-# Specify the model service, and start the database service.
-# Example: Assuming Qwen1.5-72B-Chat is deployed at http://localhost:8000/v1 using vLLM, you can specify the model service as:
-#   --llm Qwen1.5-72B-Chat --model_server http://localhost:8000/v1 --api_key EMPTY
-python run_server.py --llm {MODEL} --model_server {API_BASE} --workstation_port 7864 --api_key {API_KEY}
+# Example: Use a different port for the API server
+set QWEN_AGENT_PORT=8765
+python start_api_server.py
 ```
 
 Now you can access [http://127.0.0.1:7864/](http://127.0.0.1:7864/) to use the Workstation's Editor mode and Chat mode.

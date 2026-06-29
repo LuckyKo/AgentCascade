@@ -2373,126 +2373,66 @@ def create_app(agents, agent_pool, config=None):
 
 
 if __name__ == "__main__":
+    # Minimal test harness for direct invocation (e.g., python -m agent_cascade.api_server).
+    # The canonical production entry point is start_api_server.py.
+    import argparse as _argparse  # only used here — avoid polluting module namespace
     import uvicorn
-    from agent_cascade.agent_pool import AgentPool
 
-    # Resolve project root: api_server.py lives inside agent_cascade/, so go up one level
+    from agent_cascade.shared_init import initialize_infrastructure, setup_signal_handler, load_orchestrator, build_all_agents_list
+
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-    parser = argparse.ArgumentParser(description="AgentCascade API Server")
+    parser = _argparse.ArgumentParser(description="AgentCascade API Server (test harness)")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=12345, help="Port to bind to")
-    parser.add_argument("--workspace", type=str, default=str(DEFAULT_WORKSPACE), help="Workspace directory")
-    parser.add_argument("--idle-timeout", type=float, default=None,
-                        help="Seconds of inactivity before auto-dismissing an idle agent (default: 300). "
-                             "Also settable via QWEN_AGENT_IDLE_TIMEOUT env var.")
-    parser.add_argument("--idle-check-interval", type=float, default=None,
-                        help="Seconds between idle-check sweeps (default: 60). "
-                             "Also settable via QWEN_AGENT_IDLE_CHECK_INTERVAL env var.")
     args = parser.parse_args()
 
-    # Initialize the global agent_pool
-    initial_llm_cfg = {
+    # LLM config from environment (same pattern as start_api_server.py)
+    llm_cfg = {
         'model': os.getenv('QWEN_AGENT_MODEL', 'gpt-4o'),
         'api_base': os.getenv('QWEN_AGENT_API_BASE', 'https://api.openai.com/v1'),
         'api_key': os.getenv('QWEN_AGENT_API_KEY', 'EMPTY'),
     }
 
-    # Resolve idle timeout settings: CLI > env var > default
-    idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
-    idle_check_interval = args.idle_check_interval if args.idle_check_interval is not None else float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
+    # Delegate infrastructure init to shared module (Phase 5C — eliminate duplication)
+    operation_mgr, agent_pool, shared_tools = initialize_infrastructure(PROJECT_ROOT, llm_cfg)
 
-    # Create OperationManager for blocking user approvals on mutating operations
-    from agent_cascade.operation_manager import OperationManager
-    try:
-        operation_mgr = OperationManager(base_dir=args.workspace)
-        logger.debug("OperationManager initialized with base_dir: %s", args.workspace)
-    except Exception as e:
-        logger.error("[FATAL] OperationManager initialization failed: %s", e)
-        raise SystemExit(1)
+    # Distribute shared tools to all agents (matching start_api_server.py pattern)
+    if shared_tools:
+        for agent_name in agent_pool.list_agents():
+            agent = agent_pool.get_agent(agent_name)
+            if agent:
+                for tool_name, tool_inst in shared_tools.items():
+                    agent.function_map[tool_name] = tool_inst
 
-    try:
-        agent_pool = AgentPool(
-            llm_cfg=initial_llm_cfg,
-            agents_dir=str(PROJECT_ROOT / 'agents'),
-            workspace_dir=args.workspace,
-            operation_manager=operation_mgr,
-        )
-        logger.debug("AgentPool created successfully")
-    except Exception as e:
-        logger.error("[FATAL] AgentPool creation failed: %s", e)
-        raise SystemExit(1)
+    # Load orchestrator and build full agents list (matching start_api_server.py pattern)
+    orch_agent = load_orchestrator(agent_pool)
+    all_agents = build_all_agents_list(agent_pool, orch_agent)
 
-    operation_mgr.agent_pool = agent_pool
-
-    # Set idle timeout settings via PoolSettings (new pool uses PoolSettings instead of constructor args)
-    agent_pool.settings.idle_timeout_seconds = idle_timeout
-    agent_pool.settings.idle_check_interval = idle_check_interval
-
-    # Create the root orchestrator instance in the new pool (use lowercase to match template key)
-    try:
-        agent_pool.create_instance('Maine', 'orchestrator')
-        logger.debug("Orchestrator instance 'Maine' created")
-    except Exception as e:
-        logger.error("[FATAL] Failed to create orchestrator instance: %s", e)
-        raise SystemExit(1)
-
-    # Start background services (idle checker thread, etc.)
-    try:
-        agent_pool.start()
-        logger.debug("AgentPool background services started")
-    except Exception as e:
-        logger.error("[FATAL] Failed to start AgentPool background services: %s", e)
-        raise SystemExit(1)
-
-    # Get the orchestrator agent template for create_app (new pool separates instances from templates)
-    orch_agent = agent_pool.get_agent('orchestrator')
-
-    # Inject system message into Maine's conversation so the soul content flows into the instance
+    # Inject system message into Maine's conversation so the soul content flows in
     sys_msg_content = _extract_system_message(orch_agent)
-
     if sys_msg_content:
         from agent_cascade.llm.schema import Message, SYSTEM
         maine_inst = agent_pool.get_instance('Maine')
         if maine_inst and not maine_inst.conversation:
-            # PR3 migration: Use centralized API for system message append at server startup
             maine_inst.append_messages([Message(role=SYSTEM, content=sys_msg_content)])
 
-    try:
-        app = create_app(agents=[orch_agent], agent_pool=agent_pool)
-        logger.debug("FastAPI app created successfully")
-    except Exception as e:
-        logger.error("[FATAL] Failed to create API server app: %s", e)
-        raise SystemExit(1)
+    app = create_app(agents=all_agents, agent_pool=agent_pool)
 
-    port = args.port
     logger.info("\n[OK] API Server ready!")
-    logger.info("    -> Open http://127.0.0.1:%d in your browser", port)
-    logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", port)
-    logger.info("    -> REST API at http://127.0.0.1:%d/api/", port)
+    logger.info("    -> Open http://127.0.0.1:%d in your browser", args.port)
+    logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", args.port)
+    logger.info("    -> REST API at http://127.0.0.1:%d/api/", args.port)
     logger.info("=" * 50)
 
-    # Set up graceful shutdown handler
-    def handle_shutdown(signum, frame):
-        logger.info("\n[INFO] Initiating graceful shutdown...")
-        agent_pool.stopped = True
-        if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-            try:
-                agent_pool.operation_manager.cleanup_backups()
-            except Exception as e:
-                logger.debug(f"Backup cleanup failed during shutdown (non-critical): {e}")
-        logger.info("[INFO] Terminated.")
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, handle_shutdown)
-    if os.name != 'nt':
-        signal.signal(signal.SIGTERM, handle_shutdown)
+    # Use shared signal handler (Phase 5B — deduplicated shutdown logic)
+    setup_signal_handler(agent_pool)
 
     try:
-        uvicorn.run(app, host=args.host, port=port)
+        uvicorn.run(app, host=args.host, port=args.port, install_signal_handlers=False)
     except OSError as e:
         if e.errno == 98 or 'address already in use' in str(e).lower():
-            logger.error("[FATAL] Port %d is already in use. Use --port to specify a different port.", port)
+            logger.error("[FATAL] Port %d is already in use. Use --port to specify a different port.", args.port)
         else:
             logger.error("[FATAL] Server failed to start: %s", e)
         raise SystemExit(1)

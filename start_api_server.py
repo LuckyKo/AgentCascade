@@ -155,26 +155,13 @@ if __name__ == '__main__':
     logger.info("\n[TIP] Type in this terminal to inject messages into the active agent.")
     logger.info("=" * 50)
 
-    import signal
-
     # Create server first so signal handler can reference it
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)
 
-    def handle_shutdown(signum, frame):
-        logger.info("\n[INFO] Initiating graceful shutdown...")
-        agent_pool.stopped = True
-        if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
-            try:
-                agent_pool.operation_manager.cleanup_backups()
-            except Exception as e:
-                logger.warning("Cleanup backups failed during shutdown: %s", e)
-        # Set should_exit for graceful uvicorn shutdown (avoids resource leaks from sys.exit)
-        server.should_exit = True
-
-    signal.signal(signal.SIGINT, handle_shutdown)
-    if os.name != 'nt':
-        signal.signal(signal.SIGTERM, handle_shutdown)
+    # Use shared signal handler from shared_init (Phase 5B — deduplicated shutdown logic)
+    from agent_cascade.shared_init import setup_signal_handler
+    setup_signal_handler(agent_pool, server=server)
 
     # Prevent uvicorn from installing its own signal handlers (ours are already registered)
     server.install_signal_handlers = lambda: None

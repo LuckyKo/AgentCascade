@@ -42,17 +42,15 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 # BUGS:
 
 - [ ] Activity banner still doesn't change when tools are written
-- [x] loop detectors kicks back to parent agent instead of doing rollback — FIXED: added retry loop + shared _recover_from_loop() helper
-- [x] streaming seems to be odd (not really working) on Security and Compressor agents
 - [ ] reading logs from workspace with code_interpreter seems to be an impossible task, investigate wtf is happening with our path mapping
 - [ ] retry is broken, it deleted the user message too
 - [ ] max tokens does not change when a new API endpoint is acquired 
-- [x] randomly duplicated agent log entries for tool outputs
+- [ ] randomly duplicated compression markers in agent log sometimes
+- [ ] first compression doesn't send to compressor the first user message
 - [x] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck
-- [ ] loop detector is appending to agent pool the first user message on rollback instead of surgically removing the loop only
+- [ ] loop detector is appending to agent pool the first user message on rollback instead of surgically removing the loop only; no debug logging on event
 - [ ] images don't get properly pasted in chat
 - [ ] session load must also load the type of agent and instance name from the json file and use that
-- [x] dismiss: all_idle is borked — FIXED (8a1d3cf, 3064488): fixed tuple mismatch in active_stack check, hardcoded 'Maine' guard, missing SLEEPING/halted checks; replaced clear_conversation with dismiss_instance for full cleanup; extracted _capture_log_path helper; added null guards
 - [ ] max_tokens does not get updated when the API endpoint changes
 - [ ] investigate if we can make shell cmd accept special character and multi-line `python -c` commands
       ERROR: 'charmap' codec can't encode character '\u2717' in position 0: character maps to <undefined>

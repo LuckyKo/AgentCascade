@@ -86,16 +86,17 @@ limitations under the License.
 #   - qwen1.5-7b/14b/72b-chat （与开源的Qwen1.5-7B/14B/72B-Chat相同模型）
 #   - qwen-turbo, qwen-plus, qwen-max （推荐使用qwen-max）
 # 您需要将YOUR_DASHSCOPE_API_KEY替换为您的真实API-KEY。
-python run_server.py --llm qwen-max --model_server dashscope --workstation_port 7864 --api_key YOUR_DASHSCOPE_API_KEY
+# 旧版 run_server.py 已被 start_api_server.py 取代。
+# 请使用 API 服务器入口点代替：
+python start_api_server.py
 ```
 
-如果您没有在使用DashScope、而是部署了自己的模型服务的话，请执行以下命令：
+如需指定自定义端口，请在启动前设置环境变量：
 
 ```bash
-# 指定模型服务，并启动数据库服务。
-# 示例: 假设Qwen1.5-72B-Chat已经通过vLLM部署于http://localhost:8000/v1，则可用以下参数指定模型服务：
-#   --llm Qwen1.5-72B-Chat --model_server http://localhost:8000/v1 --api_key EMPTY
-python run_server.py --llm {MODEL} --model_server {API_BASE} --workstation_port 7864 --api_key {API_KEY}
+# 示例: 使用不同的端口启动 API 服务器
+set QWEN_AGENT_PORT=8765
+python start_api_server.py
 ```
 
 现在您可以访问 [http://127.0.0.1:7864/](http://127.0.0.1:7864/) 来使用工作台（Workstation）的创作模式（Editor模式）和对话模式（Chat模式）了。
