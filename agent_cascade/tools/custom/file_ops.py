@@ -249,12 +249,20 @@ class ReadFile(BaseTool):
                 current_chars += len(formatted)
                 total_lines = line_num
 
-        # Since empty files are caught below, actual_end is always valid here
-        actual_end = start_line + len(lines_read) - 1
+        # Count actual file lines to distinguish empty file from out-of-range start_line
+        if not lines_read and total_lines == 0:
+            with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
+                total_lines = sum(1 for _ in f)
+
         content = ''.join(lines_read)
 
         if not lines_read:
-            return f"File content ({path}) — empty file."
+            if total_lines == 0:
+                return f"File content ({path}) — empty file."
+            else:
+                return f"ERROR: start_line {start_line} is beyond the end of file ({total_lines} lines). Use a line number between 1 and {total_lines}."
+
+        actual_end = start_line + len(lines_read) - 1
 
         # Build header with total line count info
         header = f"File content ({path}), lines {start_line} to {actual_end} of {total_lines}:"
