@@ -380,20 +380,25 @@ class FileOpsMixin:
             if not resolved.is_file():
                 return f"Not a file: {path}"
 
+            # Count total lines first to validate start_line bounds
+            with open(resolved, 'r', encoding='utf-8', errors='ignore') as f:
+                all_lines = f.readlines()
+            total_lines = len(all_lines)
+
+            if start_line > total_lines:
+                return f"ERROR: start_line {start_line} is beyond the end of file ({total_lines} lines). Use a line number between 1 and {total_lines}."
+
             end_line = start_line + limit - 1
-            total_lines = 0
             hit_end = False
 
-            with open(resolved, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = []
-                for line_num, line in enumerate(f, 1):
-                    total_lines = line_num
-                    if line_num < start_line:
-                        continue
-                    if line_num > end_line:
-                        hit_end = True
-                        break
-                    lines.append(line.rstrip('\n'))
+            lines = []
+            for line_num, line in enumerate(all_lines, 1):
+                if line_num < start_line:
+                    continue
+                if line_num > end_line:
+                    hit_end = True
+                    break
+                lines.append(line.rstrip('\n'))
 
             if hit_end:
                 total_lines_str = f">{total_lines}"
@@ -989,18 +994,21 @@ class FileOpsMixin:
             if end < 1:
                 return f"ERROR: Line numbers must be >= 1. Got end={end}. Use 1-based format like '1:10'."
 
+            # Check bounds before clamping — give clear error messages
+            if start > total_lines:
+                return f"ERROR: start_line {start} exceeds file length ({total_lines} lines). Use a line number between 1 and {total_lines}."
+            if end > total_lines:
+                return f"ERROR: end_line {end} exceeds file length ({total_lines} lines). Use a line number between 1 and {total_lines}."
+
+            # Convert to 0-based indexing
             start = start - 1
 
-            if start < 0:
-                start += total_lines
-            if end < 0:
-                end += total_lines
-
+            # Clamp to valid range (handles edge cases where values equal total_lines)
             start = max(0, min(start, total_lines))
             end = max(0, min(end, total_lines))
 
             if start >= end:
-                return f"ERROR: Invalid lines range: {lines} (start={start+1}, end={end}). Start must be less than end."
+                return f"ERROR: Invalid lines range: {lines}. Start must be less than end."
         except Exception as e:
             return f"ERROR: Invalid lines format '{lines}': {str(e)}. Use 1-based line range (e.g., '1:10')."
 
