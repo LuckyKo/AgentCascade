@@ -190,7 +190,7 @@ TOOL_REGISTRY = {
     'simple_doc_parser':    (_instantiate_simple_doc_parser,   ['work_dir']),
     'doc_parser':           (_instantiate_doc_parser,          ['work_dir']),
     'extract_doc_vocabulary': (_instantiate_extract_doc_vocabulary, ['work_dir']),
-    'code_interpreter':     (_instantiate_code_interpreter,    ['work_dir']),
+    'code_interpreter':     (_instantiate_code_interpreter,    ['work_dir', 'operation_manager']),
     'system_info':          (_instantiate_system_info,         ['agent_pool']),
 }
 

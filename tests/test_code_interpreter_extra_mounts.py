@@ -57,15 +57,15 @@ class TestExtraMounts(unittest.TestCase):
         """Path mapping JSON should have correct structure via _build_path_mapping."""
         from agent_cascade.tools.code_interpreter import CodeInterpreter
         ci = CodeInterpreter(cfg={'work_dir': self.tmpdir})
-        mounted_rw = [{'host': self.extra_rw_dir, 'container': '/workspace/extra_rw_0'}]
-        mounted_ro = [{'host': self.extra_ro_dir, 'container': '/workspace/extra_ro_0'}]
+        mounted_rw = [{'host': self.extra_rw_dir, 'container': '/extra_rw_0'}]
+        mounted_ro = [{'host': self.extra_ro_dir, 'container': '/extra_ro_0'}]
         mapping = ci._build_path_mapping('test_kernel', mounted_rw, mounted_ro)
 
         self.assertEqual(mapping['work_dir'], '/workspace')
         self.assertEqual(len(mapping['extra_rw']), 1)
-        self.assertIn('/workspace/extra_rw_0', mapping['extra_rw'])
+        self.assertIn('/extra_rw_0', mapping['extra_rw'])
         self.assertEqual(len(mapping['extra_ro']), 1)
-        self.assertIn('/workspace/extra_ro_0', mapping['extra_ro'])
+        self.assertIn('/extra_ro_0', mapping['extra_ro'])
 
         h2c = mapping['host_to_container']
         self.assertEqual(h2c['extra_rw_0']['access'], 'read-write')
@@ -75,8 +75,8 @@ class TestExtraMounts(unittest.TestCase):
         """Path mapping should be JSON serializable via _build_path_mapping."""
         from agent_cascade.tools.code_interpreter import CodeInterpreter
         ci = CodeInterpreter(cfg={'work_dir': self.tmpdir})
-        mounted_rw = [{'host': self.extra_rw_dir, 'container': '/workspace/extra_rw_0'}]
-        mounted_ro = [{'host': self.extra_ro_dir, 'container': '/workspace/extra_ro_0'}]
+        mounted_rw = [{'host': self.extra_rw_dir, 'container': '/extra_rw_0'}]
+        mounted_ro = [{'host': self.extra_ro_dir, 'container': '/extra_ro_0'}]
         mapping = ci._build_path_mapping('test_kernel', mounted_rw, mounted_ro)
         json_str = json.dumps(mapping, indent=2)
         parsed = json.loads(json_str)
@@ -104,12 +104,12 @@ class TestExtraMounts(unittest.TestCase):
         os.makedirs(ro2)
 
         mounted_rw = [
-            {'host': self.extra_rw_dir, 'container': '/workspace/extra_rw_0'},
-            {'host': rw2, 'container': '/workspace/extra_rw_1'},
+            {'host': self.extra_rw_dir, 'container': '/extra_rw_0'},
+            {'host': rw2, 'container': '/extra_rw_1'},
         ]
         mounted_ro = [
-            {'host': self.extra_ro_dir, 'container': '/workspace/extra_ro_0'},
-            {'host': ro2, 'container': '/workspace/extra_ro_1'},
+            {'host': self.extra_ro_dir, 'container': '/extra_ro_0'},
+            {'host': ro2, 'container': '/extra_ro_1'},
         ]
         mapping = ci._build_path_mapping('test_kernel', mounted_rw, mounted_ro)
 
@@ -137,12 +137,73 @@ class TestExtraMounts(unittest.TestCase):
             abs_path = os.path.realpath(folder_path)
             if not os.path.isdir(abs_path):
                 continue
-            mount_point = f'/workspace/extra_rw_{len(mounted_rw)}'
+            mount_point = f'/extra_rw_{len(mounted_rw)}'
             docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}'])
             mounted_rw.append({'host': abs_path, 'container': mount_point})
 
         v_indices = [i for i, a in enumerate(docker_run_cmd) if a == '-v']
         self.assertEqual(len(v_indices), 1)
+
+    def test_docker_cmd_mount_ordering(self):
+        """Extra RW/RO mounts must appear BEFORE the work_dir mount in docker_run_cmd.
+
+        This verifies Fix MountStacking: Docker processes -v flags in order, so more specific
+        mounts (e.g., /extra_rw_0) must come before the broader
+        /workspace parent mount to avoid overlay filesystem stacking issues."""
+        from agent_cascade.tools.code_interpreter import CodeInterpreter
+
+        ci = CodeInterpreter(cfg={
+            'work_dir': self.tmpdir,
+            'extra_work_folders_rw': [self.extra_rw_dir],
+            'extra_work_folders_ro': [self.extra_ro_dir],
+        })
+
+        # Build docker_run_cmd the same way _start_kernel does (lines 738-802)
+        extra_rw, extra_ro = ci._resolve_extra_folders()
+        docker_run_cmd = ['docker', 'run', '-d']
+
+        # Extra RW mounts added first
+        mounted_rw = []
+        for folder_path in extra_rw:
+            abs_path = os.path.realpath(folder_path)
+            if not os.path.isdir(abs_path):
+                continue
+            mount_point = f'/extra_rw_{len(mounted_rw)}'
+            docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}'])
+            mounted_rw.append({'host': abs_path, 'container': mount_point})
+
+        # Extra RO mounts added next
+        mounted_ro = []
+        for folder_path in extra_ro:
+            abs_path = os.path.realpath(folder_path)
+            if not os.path.isdir(abs_path):
+                continue
+            mount_point = f'/extra_ro_{len(mounted_ro)}'
+            docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}:ro'])
+            mounted_ro.append({'host': abs_path, 'container': mount_point})
+
+        # Main work_dir mount added LAST (Fix MountStacking)
+        docker_run_cmd.extend([
+            '-v', f'{os.path.abspath(self.tmpdir)}:/workspace',
+            '-w', '/workspace',
+        ])
+
+        # Verify: all -v flags and their positions
+        v_entries = [(i, docker_run_cmd[i + 1]) for i in range(len(docker_run_cmd))
+                     if docker_run_cmd[i] == '-v']
+        self.assertEqual(len(v_entries), 3, "Should have exactly 3 volume mounts")
+
+        # The last -v should be the work_dir mount (mounting to /workspace)
+        last_v_idx, last_v_vol = v_entries[-1]
+        self.assertIn('/workspace', last_v_vol,
+                      f"Last -v flag should mount to /workspace, got: {last_v_vol}")
+
+        # The first two -v flags should be the extra mounts (mounting to /extra_* paths)
+        for idx, vol in v_entries[:-1]:
+            self.assertTrue(
+                'extra_rw_' in vol or 'extra_ro_' in vol,
+                f"Extra mounts should mount to /extra_* paths, got: {vol}",
+            )
 
     def test_docker_cmd_rw_mount_no_ro_flag(self):
         """RW mounts should NOT have :ro suffix."""
@@ -159,7 +220,7 @@ class TestExtraMounts(unittest.TestCase):
             abs_path = os.path.realpath(folder_path)
             if not os.path.isdir(abs_path):
                 continue
-            mount_point = f'/workspace/extra_rw_{len(mounted_rw)}'
+            mount_point = f'/extra_rw_{len(mounted_rw)}'
             docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}'])
             mounted_rw.append({'host': abs_path, 'container': mount_point})
 
@@ -183,7 +244,7 @@ class TestExtraMounts(unittest.TestCase):
             abs_path = os.path.realpath(folder_path)
             if not os.path.isdir(abs_path):
                 continue
-            mount_point = f'/workspace/extra_ro_{len(mounted_ro)}'
+            mount_point = f'/extra_ro_{len(mounted_ro)}'
             docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}:ro'])
             mounted_ro.append({'host': abs_path, 'container': mount_point})
 
@@ -208,7 +269,7 @@ class TestExtraMounts(unittest.TestCase):
             abs_path = os.path.realpath(folder_path)
             if not os.path.isdir(abs_path):
                 continue
-            mount_point = f'/workspace/extra_rw_{len(mounted_rw)}'
+            mount_point = f'/extra_rw_{len(mounted_rw)}'
             mounted_rw.append({'host': abs_path, 'container': mount_point})
 
         mounted_ro = []
@@ -216,7 +277,7 @@ class TestExtraMounts(unittest.TestCase):
             abs_path = os.path.realpath(folder_path)
             if not os.path.isdir(abs_path):
                 continue
-            mount_point = f'/workspace/extra_ro_{len(mounted_ro)}'
+            mount_point = f'/extra_ro_{len(mounted_ro)}'
             mounted_ro.append({'host': abs_path, 'container': mount_point})
 
         # Should have: 1 RW (the real one) + 1 RO = 2

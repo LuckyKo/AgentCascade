@@ -52,6 +52,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck
 - [ ] loop detector is appending to agent pool the first user message on rollback; no debug logging on event
 - [ ] images don't get properly pasted in chat
+- [ ] manually asking for security agent opinion does not fill it in and stop the security agent once it reached conclusion
 - [ ] session load must also load the type of agent and instance name from the json file and use that
 - [ ] max_tokens does not get updated when the API endpoint changes
 - [ ] investigate if we can make shell cmd accept special character and multi-line `python -c` commands

@@ -159,7 +159,7 @@ class SystemInfo(BaseTool):
         if has_docker_context:
             folders_info = f"Default Workspace (RW): {default_ws} → /workspace (Docker)\n"
             
-            # Filter and mount RW folders exactly like code_interpreter.py (lines 648-660)
+            # Filter and mount RW folders: validate dir exists + security check via _is_path_allowed
             allowed_prefixes = {os.path.realpath(default_ws)} if default_ws else set()
             for fp in [*rw_folders, *ro_folders]:  # include both RW and RO (mirrors code_interpreter.py:644)
                 allowed_prefixes.add(os.path.realpath(fp))
@@ -175,11 +175,11 @@ class SystemInfo(BaseTool):
                     # Skip if path is outside allowed directories (security check)
                     if not self._is_path_allowed(abs_path, allowed_prefixes):
                         continue
-                    docker_path = f"/workspace/extra_rw_{rw_idx}"
+                    docker_path = f'/extra_rw_{rw_idx}'
                     folders_info += f"  - {folder} → {docker_path} (Docker)\n"
                     rw_idx += 1
             
-            # Filter and mount RO folders exactly like code_interpreter.py (lines 662-674)
+            # Filter and mount RO folders: same validation as RW but with read-only Docker flag
             ro_idx = 0
             if ro_folders:
                 folders_info += "Additional RO Folders:\n"
@@ -191,7 +191,7 @@ class SystemInfo(BaseTool):
                     # Skip if path is outside allowed directories (security check)
                     if not self._is_path_allowed(abs_path, allowed_prefixes):
                         continue
-                    docker_path = f"/workspace/extra_ro_{ro_idx}"
+                    docker_path = f'/extra_ro_{ro_idx}'
                     folders_info += f"  - {folder} → {docker_path} (Docker, read-only)\n"
                     ro_idx += 1
         else:

@@ -1,47 +1,102 @@
-"""
+r"""
 Code Path Resolver for Code Interpreter Tool
 
 This module provides automatic path translation from Windows host paths (e.g., N:\work\WD\AgentWorkspace)
 to Docker container paths (/workspace) in Python code before execution. It uses regex-based 
 detection to find and replace Windows-style absolute paths within string literals.
 
-Path Mappings:
-    Host Path                                    -> Container Path
-    N:\work\WD\AgentWorkspace                    -> /workspace  
-    N:\work\WD\AgentCascade_unified              -> /workspace/extra_rw_0
-    
-Example:
-    N:\work\WD\AgentWorkspace\data.csv           -> /workspace/data.csv
-    N:\work\WD\AgentCascade_unified\file.txt     -> /workspace/extra_rw_0/file.txt
+Path Mappings are dynamic — set at runtime by the code interpreter when a Docker kernel starts,
+based on actual mount configuration. No hardcoded defaults exist.
 
-Usage:
-    from agent_cascade.utils.code_path_resolver import resolve_code_paths, build_path_resolution_notice
-    
-    code = "df = pd.read_csv(r'N:\\work\\WD\\AgentWorkspace\\data.csv')"
-    resolved_code, count = resolve_code_paths(code)
-    # resolved_code now has: df = pd.read_csv('/workspace/data.csv')
+Example:
+    >>> from agent_cascade.utils.code_path_resolver import set_active_mappings, resolve_code_paths
+    >>> set_active_mappings({'work_dir': {'host': 'N:/work/WD/AgentWorkspace', 'container': '/workspace'}})
+    >>> code = "df = pd.read_csv(r'N:\\\\work\\\\WD\\\\AgentWorkspace\\\\data.csv')"
+    >>> resolved_code, count = resolve_code_paths(code)
+    >>> count
+    1
 
 Author: PathAutoResolver (Fixed by Reviewer)
 Date: 2026-06-19  
-Version: 2.0 - Fixed regex bugs, consolidated into single location
+Version: 2.1 - Dynamic path mappings, no hardcoded defaults
 """
 
+import logging
 import re
 from typing import Tuple
+
+_logger = logging.getLogger(__name__)
 
 
 # ============================================================================
 # PATH MAPPINGS CONFIGURATION
 # ============================================================================
 
-PATH_MAPPINGS = {
-    "N:\\work\\WD\\AgentWorkspace": "/workspace",
-    "N:\\work\\WD\\AgentCascade_unified": "/workspace/extra_rw_0",
-}
+# Module-level active mappings — starts empty; populated by set_active_mappings() at runtime.
+_ACTIVE_PATH_MAPPINGS: dict = {}
+
+# Flag to warn only once when resolving paths with no active mappings
+_warnings_issued: bool = False
+
+
+def _clear_warnings():
+    """Reset the warnings flag (called internally after mappings are set)."""
+    global _warnings_issued
+    _warnings_issued = False
+
+
+def set_active_mappings(host_to_container: dict):
+    """Update the active path mappings used by resolve_code_paths().
+
+    Called after a Docker kernel starts, passing the host_to_container dict
+    from the kernel's _build_path_mapping() output.
+
+    Parameters
+    ----------
+    host_to_container : dict
+        Mapping of mount key → {'host': str, 'container': str} dicts.
+        E.g., {'work_dir': {...}, 'extra_rw_0': {...}}
+
+    Raises
+    ------
+    ValueError
+        If the input dict is empty or missing required keys in entries.
+    """
+    global _ACTIVE_PATH_MAPPINGS
+    if not host_to_container:
+        raise ValueError("set_active_mappings called with empty dict — no mounts available")
+
+    new_mappings = {}
+    for mount_key, mapping in host_to_container.items():
+        if 'host' not in mapping or 'container' not in mapping:
+            raise ValueError(
+                f"Mount entry '{mount_key}' missing required keys ('host', 'container'): {mapping}"
+            )
+        host_path = mapping['host']
+        container_path = mapping['container']
+        # Normalize host path to forward slashes for consistent matching
+        normalized_host = host_path.replace("\\", "/")
+
+        if normalized_host in new_mappings:
+            _logger.warning(
+                "Duplicate normalized host path '%s' from mount keys '%s' and '%s'. "
+                "The earlier entry will be overwritten.",
+                normalized_host, list(new_mappings.keys())[-1], mount_key,
+            )
+
+        new_mappings[normalized_host] = container_path
+
+    _ACTIVE_PATH_MAPPINGS = new_mappings
+    _clear_warnings()
+
+
+def get_active_mappings() -> dict:
+    """Return a copy of the current active path mappings."""
+    return dict(_ACTIVE_PATH_MAPPINGS)
 
 
 def _resolve_single_path(path: str) -> str:
-    """Resolve a single Windows path to its Docker container equivalent.
+    r"""Resolve a single Windows path to its Docker container equivalent.
     
     Uses longest-prefix matching to handle nested directory structures correctly.
     e.g., AgentCascade_unified (longer) matches before AgentWorkspace (shorter).
@@ -52,20 +107,18 @@ def _resolve_single_path(path: str) -> str:
     Returns:
         The resolved Docker container path, or original if no mapping found
         
-    Examples:
+    Examples (after set_active_mappings is called):
+        >>> set_active_mappings({'work_dir': {'host': 'N:/work/WD/AgentWorkspace', 'container': '/workspace'}})
         >>> _resolve_single_path(r"N:\work\WD\AgentWorkspace\data.csv")
         '/workspace/data.csv'
-        
-        >>> _resolve_single_path(r"N:\work\WD\AgentCascade_unified\file.txt")
-        '/workspace/extra_rw_0/file.txt'
     """
     # Normalize to forward slashes for consistent matching
     normalized = path.replace("\\", "/")
     
     # Sort by length descending so longer prefixes match first
     sorted_mappings = sorted(
-        PATH_MAPPINGS.items(), 
-        key=lambda x: len(x[0].replace("\\", "/")), 
+        _ACTIVE_PATH_MAPPINGS.items(), 
+        key=lambda x: len(x[0]), 
         reverse=True
     )
     
@@ -131,7 +184,16 @@ def resolve_code_paths(code_str: str) -> Tuple[str, int]:
     """
     if not code_str or not isinstance(code_str, str):
         return code_str, 0
-    
+
+    # Warn once (not per-call) if no active mappings are set
+    global _warnings_issued
+    if not _ACTIVE_PATH_MAPPINGS and not _warnings_issued:
+        _logger.warning(
+            "resolve_code_paths called with no active path mappings. "
+            "set_active_mappings() has not been called — paths will not be translated."
+        )
+        _warnings_issued = True
+
     total_replaced = 0
     lines = code_str.split("\n")
     resolved_lines = []
@@ -319,5 +381,6 @@ def build_path_resolution_notice(count: int) -> str:
 __all__ = [
     "resolve_code_paths",
     "build_path_resolution_notice",
-    "PATH_MAPPINGS",
+    "set_active_mappings",
+    "get_active_mappings",
 ]

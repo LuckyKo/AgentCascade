@@ -161,8 +161,8 @@ Workspace & Path Reference:
 - code_interpreter runs Python inside a Docker container where the workspace is mounted at "/workspace/".
   So a file at "src/main.py" (used by host tools) is available at "/workspace/src/main.py" inside Docker.
   The container's working directory is /workspace, so relative paths like "src/main.py" also work.
-  Additional mounted folders (if configured) appear as "/workspace/extra_rw_N" (writable) and
-  "/workspace/extra_ro_N" (read-only). A path mapping file "path_mapping_{kernel_id}.json" in the
+  Additional mounted folders (if configured) appear as "/extra_rw_N" (writable) and
+  "/extra_ro_N" (read-only). A path mapping file "path_mapping_{kernel_id}.json" in the
   work_dir lists all mounts with their host paths and access modes — read it to discover available folders.
 """
 

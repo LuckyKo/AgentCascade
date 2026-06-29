@@ -44,7 +44,7 @@ from agent_cascade.tool_utils import (
     generate_spillover_filename,  # Shared collision detection helper
 )
 from agent_cascade.utils.utils import append_signal_handler, extract_code, has_chinese_chars, json_loads, print_traceback
-from agent_cascade.utils.code_path_resolver import resolve_code_paths, build_path_resolution_notice
+from agent_cascade.utils.code_path_resolver import resolve_code_paths, build_path_resolution_notice, set_active_mappings
 
 
 # --- Timeout Configuration ---
@@ -738,9 +738,6 @@ class CodeInterpreter(BaseToolWithFileAccess):
         docker_run_cmd = [
             'docker', 'run', '-d',
             '--name', f'code_interpreter_{kernel_id}',
-            # Fix B3: Removed --add-host host.docker.internal:host-gateway (reduces network surface)
-            '-v', f'{os.path.abspath(self.work_dir)}:{self.container_work_dir}',
-            '-w', self.container_work_dir,
             # Fix B1: Drop all Linux capabilities and prevent privilege escalation
             '--cap-drop=ALL',
             '--security-opt=no-new-privileges',
@@ -749,7 +746,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
             '--cpus=' + str(CONTAINER_CPU_LIMIT),
             '--pids-limit=' + str(CONTAINER_PID_LIMIT),
         ]
-        
+
         # Resolve extra folders dynamically (picks up runtime config changes if operation_manager is set)
         extra_rw, extra_ro = self._resolve_extra_folders()
         
@@ -765,7 +762,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
             rp = os.path.realpath(fp)
             allowed_prefixes.add(rp)
         
-        # Mount extra RW work folders as /workspace/extra_rw_0, /workspace/extra_rw_1, etc.
+        # Mount extra RW work folders as /extra_rw_0, /extra_rw_1, etc.
+        # NOTE: These mounts are added BEFORE the main work_dir mount so Docker processes
+        # the more specific paths first, avoiding overlay filesystem stacking issues where
+        # writes to subdirectories don't persist back to the host disk (Fix MountStacking).
         for folder_path in extra_rw:
             abs_path = os.path.realpath(folder_path)  # resolves symlinks for security check
             if not os.path.isdir(abs_path):
@@ -775,11 +775,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
             if not self._is_path_allowed(abs_path, allowed_prefixes):
                 logger.warning("Extra RW mount path %s is outside allowed directories, skipping", abs_path)
                 continue
-            mount_point = f'{self.container_work_dir}/extra_rw_{len(mounted_rw)}'
+            mount_point = f'/extra_rw_{len(mounted_rw)}'
             docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}'])
             mounted_rw.append({'host': abs_path, 'container': mount_point})
-        
-        # Mount extra RO work folders as /workspace/extra_ro_0, /workspace/extra_ro_1, etc. (read-only)
+
+        # Mount extra RO work folders as /extra_ro_0, /extra_ro_1, etc. (read-only)
         for folder_path in extra_ro:
             abs_path = os.path.realpath(folder_path)  # resolves symlinks for security check
             if not os.path.isdir(abs_path):
@@ -789,10 +789,18 @@ class CodeInterpreter(BaseToolWithFileAccess):
             if not self._is_path_allowed(abs_path, allowed_prefixes):
                 logger.warning("Extra RO mount path %s is outside allowed directories, skipping", abs_path)
                 continue
-            mount_point = f'{self.container_work_dir}/extra_ro_{len(mounted_ro)}'
+            mount_point = f'/extra_ro_{len(mounted_ro)}'
             docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}:ro'])
             mounted_ro.append({'host': abs_path, 'container': mount_point})
-        
+
+        # Mount main work directory AFTER extra mounts so specific subdirectory mounts take precedence.
+        # Docker processes volume mounts in order; mounting /workspace first then its children
+        # creates an overlay that can prevent writes from propagating to the host (Fix MountStacking).
+        docker_run_cmd.extend([
+            '-v', f'{os.path.abspath(self.work_dir)}:{self.container_work_dir}',
+            '-w', self.container_work_dir,
+        ])
+
         # Create path mapping data (file is written AFTER container starts to avoid orphaned files)
         path_mapping = self._build_path_mapping(kernel_id, mounted_rw, mounted_ro)
         # Store file path for writing after container confirmation
@@ -827,6 +835,9 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Container started successfully — now write the path mapping file (avoids orphaned files on failure)
         with open(path_mapping_file, 'w') as f:
             json.dump(path_mapping, f, indent=2)
+
+        # Update code_path_resolver with actual mounts so path resolution matches reality
+        set_active_mappings(path_mapping['host_to_container'])
         
         container_id = result.stdout.strip()
         logger.info(f"INFO: Docker container ID = {container_id}")

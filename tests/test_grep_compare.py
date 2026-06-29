@@ -21,7 +21,7 @@ elif (_file_dir / "extra_rw_0" / "agent_cascade").exists():
     BASE_DIR = _file_dir / "extra_rw_0"
 else:
     # Fallback: try common Docker mount paths
-    for candidate in [Path("/workspace/extra_rw_0"), Path("/workspace/extra_ro_0")]:
+    for candidate in [Path("/extra_rw_0"), Path("/extra_ro_0")]:
         if (candidate / "agent_cascade").exists():
             BASE_DIR = candidate
             break
