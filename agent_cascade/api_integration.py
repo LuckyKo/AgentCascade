@@ -24,7 +24,7 @@ from agent_cascade.log import logger
 
 from .agent_instance import AgentInstance, AgentState
 from .agent_pool import AgentPool
-from .execution_engine import ExecutionEngine, _build_resources_block, _replace_resources_block, _build_session_metadata, _replace_section
+from .execution_engine import ExecutionEngine
 from .loop_detection import LoopDetectedError
 
 

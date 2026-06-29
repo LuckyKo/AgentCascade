@@ -12,8 +12,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 
-# ── LLM config key set (imported from api_server to avoid duplication) ────
-from agent_cascade.api_server import LLM_CONFIG_KEYS
+# ── LLM config key set (defined locally to avoid circular import with api_server) ────
+LLM_CONFIG_KEYS = frozenset({
+    'model', 'api_base', 'api_key', 'temperature', 'max_tokens',
+    'max_input_tokens', 'max_output_tokens', 'top_p', 'frequency_penalty',
+    'presence_penalty', 'stop', 'timeout', 'model_type'
+})
 
 
 # ── Registry of config key → handler function ────────────────────────────

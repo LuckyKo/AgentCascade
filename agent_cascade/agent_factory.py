@@ -164,7 +164,6 @@ Workspace & Path Reference:
   Additional mounted folders (if configured) appear as "/workspace/extra_rw_N" (writable) and
   "/workspace/extra_ro_N" (read-only). A path mapping file "path_mapping_{kernel_id}.json" in the
   work_dir lists all mounts with their host paths and access modes — read it to discover available folders.
-- NEVER use host-absolute paths (like "N:\\..." or "/home/user/...") in any tool — they will not resolve correctly.
 """
 
 
