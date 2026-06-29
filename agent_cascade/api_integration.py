@@ -29,54 +29,89 @@ from .loop_detection import LoopDetectedError
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Performance Caches — Fix #1 (Token Stat Caching) & Fix #3 (Incremental Serialization)
+# Performance Caches — Centralized CacheManager (Phase 1A refactoring)
 # ═══════════════════════════════════════════════════════════════════════
 
-# Fix #1: Token stat cache keyed by (msg_count, last_msg_id) → stats dict.
-# During LLM streaming, the conversation doesn't change — only partial streamed content changes.
-# So stats should be cached aggressively and only recalculated when a new message is added.
-# BUG31: Increased maxsize from 100 to 5000 to prevent premature cache eviction during multi-instance sessions.
-_token_stats_cache: Dict[tuple, dict] = {}
+class CacheManager:
+    """Centralized performance cache management for API integration.
+    
+    Consolidates 5 separate module-level caches (and their locks) into a single
+    thread-safe structure. This eliminates cache sprawl and makes clearing/eviction
+    atomic across all caches.
+    
+    PAIRED CACHE EVICTION NOTE:
+        The stream_versions and cached_instances caches are paired — they share
+        the same lock in the original code. When evicting from one, the corresponding
+        entry in the other is also removed to prevent orphaned data.
+    """
+    
+    def __init__(self):
+        self._lock = threading.RLock()  # Single reentrant lock for all caches
+        
+        # Token stats cache: (msg_count, last_msg_id, stream_len, content_len) -> stats dict
+        self.token_stats: Dict[tuple, dict] = {}
+        
+        # Stream version tracking: instance_name -> (msg_count, id, stream_len, content_len)
+        self.stream_versions: Dict[str, tuple] = {}
+        
+        # Cached serialized instance data: instance_name -> dict
+        self.cached_instances: Dict[str, dict] = {}
+        
+        # UI serialization cache: msg_id -> serialized dict
+        self.ui_serialization: Dict[int, dict] = {}
+        
+        # Stream token stats: instance_name -> (h_stats, r_stats) tuple of dicts
+        self.stream_token_stats: Dict[str, tuple] = {}
+    
+    def clear_all(self) -> None:
+        """Clear all caches. Called during session reset."""
+        with self._lock:
+            self.token_stats.clear()
+            self.stream_versions.clear()
+            self.cached_instances.clear()
+            self.ui_serialization.clear()
+            self.stream_token_stats.clear()
+    
+    def evict_if_full(self, cache_name: str, maxsize: int) -> None:
+        """Evict oldest entry if cache exceeds max size (FIFO).
+        
+        Handles paired cache eviction for stream_versions/cached_instances.
+        """
+        with self._lock:
+            target = getattr(self, cache_name, {})
+            
+            # Determine paired cache (stream_versions <-> cached_instances)
+            paired = None
+            if cache_name == 'stream_versions':
+                paired = ('cached_instances', self.cached_instances)
+            elif cache_name == 'cached_instances':
+                paired = ('stream_versions', self.stream_versions)
+            
+            while len(target) >= maxsize:
+                oldest_key = next(iter(target))
+                target.pop(oldest_key)
+                if paired and oldest_key in paired[1]:
+                    paired[1].pop(oldest_key, None)
+    
+    def evict_instance(self, instance_name: str) -> None:
+        """Evict all cached data for a specific instance (paired eviction)."""
+        with self._lock:
+            self.stream_versions.pop(instance_name, None)
+            self.cached_instances.pop(instance_name, None)
+            self.stream_token_stats.pop(instance_name, None)
+
+
+# Module-level CacheManager instance
+_cache_mgr = CacheManager()
+
 _TOKEN_STATS_CACHE_MAXSIZE = 5000
-_token_stats_lock = threading.Lock()  # Lock for _token_stats_cache (thread safety)
-
-# Fix #3: Version tracker per instance. Incremented each time a message is added.
-# Used to skip serializing instances whose conversation hasn't changed.
-# Key: instance_name, Value: (msg_count, id_of_last_msg)
-# NOTE: This dict serves dual purpose — it's used by both Fix #3 (serialization dedup
-# in build_stream_update_from_pool lines ~511-522) AND Fix #4 (token stats cache invalidation
-# at line ~459). Both use the same (msg_count, id(last_msg)) tuple format.
-_last_stream_versions: Dict[str, tuple] = {}
-# Cached serialized instance data for unchanged instances (reused across stream_updates)
-_cached_instance_data: Dict[str, dict] = {}
-
-# M1 Fix: UI serialization cache keyed by id(msg). Avoids mutating input dicts.
-_ui_serialization_cache: Dict[int, dict] = {}
-_UI_CACHE_MAXSIZE = 2000  # Bounded to prevent unbounded growth over long sessions
-_ui_cache_lock = threading.Lock()  # Thread-safe access for concurrent UI serialization calls
-
-# BUG31 Fix #4: Cache token stats per instance for build_stream_update_from_pool.
-# During active generation, the conversation doesn't change — skip expensive slice_history_for_llm + get_history_stats.
-# Key: instance_name, Value: (h_stats, r_stats) tuple of dicts
-_stream_token_stats_cache: Dict[str, tuple] = {}
-_STREAM_TOKEN_STATS_CACHE_MAXSIZE = 100  # Bounded cache (FIFO eviction) to prevent unbounded growth
-_stream_token_stats_lock = threading.Lock()  # C3: Dedicated lock for _stream_token_stats_cache
-
-# C4: Dedicated lock for _last_stream_versions and _cached_instance_data
-_stream_version_lock = threading.Lock()
+_UI_CACHE_MAXSIZE = 2000
+_STREAM_TOKEN_STATS_CACHE_MAXSIZE = 100
 
 
 def _clear_performance_caches():
     """Clear all module-level performance caches. Called during session reset."""
-    with _stream_token_stats_lock:
-        _stream_token_stats_cache.clear()
-    with _stream_version_lock:
-        _cached_instance_data.clear()
-        _last_stream_versions.clear()
-    with _token_stats_lock:
-        _token_stats_cache.clear()
-    with _ui_cache_lock:
-        _ui_serialization_cache.clear()
+    _cache_mgr.clear_all()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -461,6 +496,216 @@ def run_agent_in_pool_with_recovery(
 # 3. State Building from Pool (replacing session['history'] reads)
 # ═══════════════════════════════════════════════════════════════════════
 
+# ── Helper functions for build_state_from_pool / build_stream_update_from_pool ──
+
+def _get_instance_messages(pool: AgentPool, instance_name: str,
+                           responses: Optional[List[Message]] = None) -> List[Message]:
+    """Get messages list from pool instance, extending with optional responses."""
+    instance = pool.get_instance(instance_name)
+    if instance is None:
+        return []
+    with instance._compression_lock:
+        msgs = list(instance.conversation)
+    if responses:
+        msgs.extend(responses)
+    return msgs
+
+
+def _calc_token_stats(pool: AgentPool, full_conversation: List[Message],
+                      partial_responses: Optional[List[Message]] = None) -> tuple:
+    """Calculate h_stats and r_stats for a message list with error handling.
+    
+    Args:
+        pool: The AgentPool (used for slice_history_for_llm).
+        full_conversation: Complete conversation messages (used for h_stats via slicing).
+        partial_responses: Current partial response messages from engine (for r_stats).
+        
+    Returns:
+        (h_stats, r_stats) tuple of dicts with 'tokens' and 'words' keys.
+    """
+    active_h = pool.slice_history_for_llm(full_conversation) if full_conversation else full_conversation
+    
+    try:
+        from agent_cascade.utils.utils import get_history_stats
+        h_stats = get_history_stats(active_h)
+        r_stats = get_history_stats(partial_responses) if partial_responses else {'tokens': 0, 'words': 0}
+    except Exception as e:
+        logger.debug(f"Token stats calculation failed (using estimate): {e}")
+        h_stats = {'tokens': len(active_h) * 4, 'words': 0}
+        r_stats = {'tokens': 0, 'words': 0}
+    return h_stats, r_stats
+
+
+def _serialize_all_instances(pool: AgentPool, instance_snapshot: Dict[str, Any],
+                              streaming: bool = False) -> Dict[str, dict]:
+    """Serialize all instances in a pool snapshot.
+    
+    Args:
+        pool: The AgentPool managing all instances.
+        instance_snapshot: Snapshot of pool.instances for safe iteration.
+        streaming: If True, uses tail optimization within each instance's 
+            _serialize_instance call (partial messages only).
+    """
+    all_instances = {}
+    for name, inst in instance_snapshot.items():
+        with inst._compression_lock:
+            inst_streaming = list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
+        all_instances[name] = _serialize_instance(
+            inst, pool, include_messages=True, streaming=streaming,
+            streaming_responses=inst_streaming,
+        )
+    return all_instances
+
+
+def _get_session_name(instance_snapshot: Dict[str, Any], fallback: str) -> str:
+    """Derive session name from root instances (first parentless instance)."""
+    root_instances = [
+        name for name, inst in instance_snapshot.items()
+        if inst.parent_instance is None
+    ]
+    return root_instances[0] if root_instances else fallback
+
+
+def _get_current_model(pool: AgentPool, instance: AgentInstance) -> str:
+    """Get the current model name from the instance's template LLM."""
+    template = pool.get_template(instance.agent_class)
+    if template and hasattr(template, 'llm') and template.llm:
+        return getattr(template.llm, 'model', 'Unknown')
+    return 'Unknown'
+
+
+def _safe_get_telemetry(pool: AgentPool, instance_name: str) -> Optional[dict]:
+    """Get telemetry summary for an instance (never blocks state building)."""
+    if hasattr(pool, 'telemetry') and pool.telemetry:
+        try:
+            return pool.telemetry.get_summary(instance_name)
+        except Exception as e:
+            logger.debug(f"Telemetry summary fetch failed for {instance_name} (non-critical): {e}")
+    return None
+
+
+def _safe_get_api_router_state(pool: AgentPool) -> dict:
+    """Get API router state dict (never blocks state building)."""
+    if hasattr(pool, 'api_router') and pool.api_router:
+        try:
+            return pool.api_router.to_dict()
+        except Exception as e:
+            logger.debug(f"API router state serialization failed (using empty): {e}")
+    return {'endpoints': [], 'agent_priorities': {}}
+
+
+def _get_default_workspace(pool: AgentPool) -> str:
+    """Get default workspace path from pool or settings."""
+    from agent_cascade.settings import DEFAULT_WORKSPACE
+    default_workspace = str(DEFAULT_WORKSPACE)
+    if pool and hasattr(pool, 'operation_manager') and pool.operation_manager:
+        default_workspace = str(pool.operation_manager.base_dir)
+    return default_workspace
+
+
+def _build_active_stack(pool: AgentPool) -> list:
+    """Get the active execution stack from the pool."""
+    return list(pool._execution.active_stack) if hasattr(pool, '_execution') else []
+
+
+def _calc_stream_token_stats(
+    pool: AgentPool, instance_name: str,
+    conv_snapshot: List[Message], stream_resp_snapshot: Optional[List[Message]],
+    responses: Optional[List[Message]],
+) -> tuple:
+    """Calculate token stats for streaming updates with caching.
+    
+    Computes h_stats and r_stats from the combined conversation + streaming snapshot,
+    then caches them keyed by instance_name for reuse during active generation.
+    
+    Returns:
+        (h_stats, r_stats) tuple of dicts with 'tokens' and 'words' keys.
+    """
+    # Include streaming responses in combined snapshot for accurate stats
+    combined_snapshot = conv_snapshot + (stream_resp_snapshot if stream_resp_snapshot else [])
+    active_h = pool.slice_history_for_llm(combined_snapshot) if combined_snapshot else conv_snapshot
+
+    try:
+        from agent_cascade.utils.utils import get_history_stats
+        h_stats = get_history_stats(active_h)
+        r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
+    except Exception as e:
+        logger.debug(f"Token stats calculation failed for stream update (using estimate): {e}")
+        h_stats = {'tokens': len(active_h) * 4, 'words': 0}
+        r_stats = {'tokens': 0, 'words': 0}
+    
+    # Cache the computed stats for reuse during active generation
+    _cache_mgr.evict_if_full('stream_token_stats', _STREAM_TOKEN_STATS_CACHE_MAXSIZE)
+    with _cache_mgr._lock:
+        _cache_mgr.stream_token_stats[instance_name] = (h_stats, r_stats)
+    
+    return h_stats, r_stats
+
+
+def _serialize_instances_incremental(
+    pool: AgentPool, instance_name: str, force_full: bool,
+) -> Dict[str, dict]:
+    """Serialize all instances with incremental version-based deduplication.
+    
+    Only re-serializes instances whose conversation has changed since the last
+    stream_update. Version is derived from (msg_count, id_of_last_msg, 
+    streaming_response_len, content_len). During LLM streaming, the conversation
+    doesn't change so most instances are skipped.
+    
+    Every ~100 ticks (force_full=True) all instances are fully re-serialized to
+    recover from sync gaps where individual stream_update messages may have been
+    dropped due to queue-full conditions.
+    """
+    instance_snapshot_data = dict(pool.instances)
+    all_instances = {}
+    
+    for name, inst in instance_snapshot_data.items():
+        with inst._compression_lock:
+            current_msgs = list(inst.conversation)
+            inst_streaming_responses = (
+                list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
+            )
+        
+        # Calculate content length for this instance's streaming responses
+        inst_stream_content_len = _streaming_content_length(inst_streaming_responses)
+        current_version = (
+            len(current_msgs),
+            id(current_msgs[-1]) if current_msgs else None,
+            len(inst_streaming_responses) if inst_streaming_responses else 0,
+            inst_stream_content_len,
+        )
+
+        # C4: Atomic read-compare-write under lock to prevent TOCTOU race.
+        # Lock is acquired per-instance inside the loop — this allows concurrent
+        # instance dismissal (evict_instance) between iterations, which is correct
+        # but may cause re-serialization of dismissed instances. Acceptable trade-off
+        # since RLock prevents deadlocks and worst case is a slightly stale snapshot.
+        with _cache_mgr._lock:
+            prev_version = _cache_mgr.stream_versions.get(name)
+            
+            # Serialize if: active instance OR version changed OR forced full refresh
+            if name == instance_name or current_version != prev_version or force_full:
+                all_instances[name] = _serialize_instance(
+                    inst, pool, include_messages=True,
+                    streaming=(not force_full),
+                    streaming_responses=inst_streaming_responses,
+                )
+                _cache_mgr.stream_versions[name] = current_version
+                _cache_mgr.cached_instances[name] = all_instances[name]
+            else:
+                # Reuse the previously serialized data for unchanged instances
+                all_instances[name] = _cache_mgr.cached_instances.get(name)
+                if all_instances[name] is None:
+                    all_instances[name] = _serialize_instance(
+                        inst, pool, include_messages=True,
+                        streaming=(not force_full),
+                        streaming_responses=inst_streaming_responses,
+                    )
+                    _cache_mgr.stream_versions[name] = current_version
+                    _cache_mgr.cached_instances[name] = all_instances[name]
+    
+    return all_instances
+
 def build_state_from_pool(
     pool: AgentPool,
     instance_name: str,
@@ -496,91 +741,37 @@ def build_state_from_pool(
     if instance is None:
         return None
 
-    # Build messages list: conversation + any partial responses (single snapshot)
-    with instance._compression_lock:
-        msgs = list(instance.conversation)
-    if responses:
-        msgs.extend(responses)
-
-    # Calculate token stats for the active working set (after compression slicing)
-    active_h = pool.slice_history_for_llm(msgs) if msgs else msgs
+    # Build messages list and calculate token stats via helpers
+    msgs = _get_instance_messages(pool, instance_name, responses)
+    h_stats, r_stats = _calc_token_stats(pool, msgs, responses)
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
-    # Direct call without caching to avoid staleness when endpoints change at runtime
     max_tokens = _get_max_tokens_for_instance(pool, instance)
-
-    # Calculate history stats
-    try:
-        from agent_cascade.utils.utils import get_history_stats
-        h_stats = get_history_stats(active_h)
-        r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
-    except Exception as e:
-        logger.debug(f"Token stats calculation failed for {instance_name} (using estimate): {e}")
-        # Fallback: estimate ~4 tokens per message on average (conservative)
-        h_stats = {'tokens': len(active_h) * 4, 'words': 0}
-        r_stats = {'tokens': 0, 'words': 0}
 
     # Extract compression summary from conversation markers
     current_summary = instance.compression_summary or ""
 
     # Build sub-agent state snapshot (C3: take snapshot before iterating)
     instance_snapshot = dict(pool.instances)
-    all_instances = {}
-    for name, inst in instance_snapshot.items():
-        # Read _streaming_responses under lock and pass to _serialize_instance
-        with inst._compression_lock:
-            inst_streaming = list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
-        # Full state includes messages; use streaming parameter to control tail optimization
-        all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=streaming, streaming_responses=inst_streaming)
+    all_instances = _serialize_all_instances(pool, instance_snapshot, streaming=streaming)
 
-    # Derive session name from root instance (M1/M4 fix)
-    root_instances = [
-        name for name, inst in instance_snapshot.items()
-        if inst.parent_instance is None
-    ]
-    session_name = root_instances[0] if root_instances else instance_name
+    # Derive session name from root instance
+    session_name = _get_session_name(instance_snapshot, instance_name)
 
     # Build active stack
-    active_stack = list(pool._execution.active_stack) if hasattr(pool, '_execution') else []
+    active_stack = _build_active_stack(pool)
 
     # Build agents list for UI (from templates — the canonical source of agent definitions)
     agents_list = _build_agents_list(pool)
 
-    # Get current model from template's LLM (for frontend display)
-    current_model = 'Unknown'
-    template = pool.get_template(instance.agent_class)
-    if template and hasattr(template, 'llm') and template.llm:
-        current_model = getattr(template.llm, 'model', 'Unknown')
-
-    # Get telemetry (must never block state building)
-    telemetry_data = None
-    if hasattr(pool, 'telemetry') and pool.telemetry:
-        try:
-            telemetry_data = pool.telemetry.get_summary(instance_name)
-        except Exception as e:
-            logger.debug(f"Telemetry summary fetch failed for {instance_name} (non-critical): {e}")
-
-    # Get default workspace from operation manager or settings default
-    from agent_cascade.settings import DEFAULT_WORKSPACE
-    default_workspace = str(DEFAULT_WORKSPACE)
-    if pool and hasattr(pool, 'operation_manager') and pool.operation_manager:
-        default_workspace = str(pool.operation_manager.base_dir)
-
-    # Build API router state (must never block state building)
-    api_router_state = {'endpoints': [], 'agent_priorities': {}}
-    if hasattr(pool, 'api_router') and pool.api_router:
-        try:
-            api_router_state = pool.api_router.to_dict()
-        except Exception as e:
-            logger.debug(f"API router state serialization failed (using empty): {e}")
+    # Get current model, telemetry, workspace, API router state via helpers
+    current_model = _get_current_model(pool, instance)
+    telemetry_data = _safe_get_telemetry(pool, instance_name)
+    default_workspace = _get_default_workspace(pool)
+    api_router_state = _safe_get_api_router_state(pool)
 
     # Check if instance is waiting (endpoint slot blocked)
-    is_waiting = False
-    if hasattr(pool, 'api_router') and pool.api_router:
-        try:
-            is_waiting = pool.api_router.is_waiting(instance_name)
-        except Exception as e:
-            logger.debug(f"API router waiting check failed for {instance_name} (using default): {e}")
+    is_waiting = _check_is_waiting(pool, instance_name)
 
     # Get pending approvals (only include if non-empty to prevent UI flickering)
     pending_approvals = _get_approvals(pool)
@@ -645,124 +836,49 @@ def build_stream_update_from_pool(
         return None
 
     # Get active working set for token stats (single snapshot)
-    # Streaming UI Content Update Fix: Also read _streaming_responses under lock
     with instance._compression_lock:
         conv_snapshot = list(instance.conversation)
         stream_resp_snapshot = list(instance._streaming_responses) if instance._streaming_responses else None
     
-    # Streaming UI Content Update Fix: Calculate character length of streaming content
-    # to ensure token-by-token growth triggers version changes.
+    # Calculate character length of streaming content for version tracking
     stream_content_len = _streaming_content_length(stream_resp_snapshot)
 
-    # BUG31 Fix #4: Skip expensive slice_history_for_llm + get_history_stats during active
-    # generation when the conversation hasn't changed since last stream update.
-    # Streaming UI Step 3 Fix: Include streaming response length AND content length in cache key 
-    # so growing streaming content triggers cache invalidation and fresh stats computation
-    current_version = (len(conv_snapshot), id(conv_snapshot[-1]) if conv_snapshot else None, len(stream_resp_snapshot) if stream_resp_snapshot else 0, stream_content_len)
+    # BUG31 Fix #4: Skip expensive stats computation when conversation hasn't changed.
+    # Version includes msg count, last msg id, streaming response len, and content len.
+    current_version = (
+        len(conv_snapshot),
+        id(conv_snapshot[-1]) if conv_snapshot else None,
+        len(stream_resp_snapshot) if stream_resp_snapshot else 0,
+        stream_content_len,
+    )
     
-    # C3: Thread-safe read of _stream_token_stats_cache and _last_stream_versions
-    with _stream_token_stats_lock:
-        cached_stats = _stream_token_stats_cache.get(instance_name)
-    with _stream_version_lock:
-        last_version = _last_stream_versions.get(instance_name)
+    # Thread-safe read of cached token stats and last version via CacheManager
+    with _cache_mgr._lock:
+        cached_stats = _cache_mgr.stream_token_stats.get(instance_name)
+        last_version = _cache_mgr.stream_versions.get(instance_name)
     
     if cached_stats is not None and current_version == last_version:
         # Conversation unchanged — reuse previously computed token stats
         h_stats, r_stats = cached_stats
     else:
-        # Conversation changed or first call — compute fresh stats
-        from agent_cascade.utils.utils import get_history_stats
-
-        # Streaming UI Content Update Fix: Include streaming responses in combined snapshot
-        combined_snapshot = conv_snapshot + (stream_resp_snapshot if stream_resp_snapshot else [])
-        active_h = pool.slice_history_for_llm(combined_snapshot) if combined_snapshot else conv_snapshot
-
-        # Calculate token stats
-        try:
-            h_stats = get_history_stats(active_h)
-            r_stats = get_history_stats(responses) if responses else {'tokens': 0, 'words': 0}
-        except Exception as e:
-            logger.debug(f"Token stats calculation failed for stream update (using estimate): {e}")
-            # Fallback: estimate ~4 tokens per message on average (conservative)
-            h_stats = {'tokens': len(active_h) * 4, 'words': 0}
-            r_stats = {'tokens': 0, 'words': 0}
-        
-        # C3: Thread-safe write to _stream_token_stats_cache
-        with _stream_token_stats_lock:
-            if len(_stream_token_stats_cache) >= _STREAM_TOKEN_STATS_CACHE_MAXSIZE:
-                oldest_key = next(iter(_stream_token_stats_cache))
-                del _stream_token_stats_cache[oldest_key]
-            _stream_token_stats_cache[instance_name] = (h_stats, r_stats)
+        h_stats, r_stats = _calc_stream_token_stats(
+            pool, instance_name, conv_snapshot, stream_resp_snapshot, responses,
+        )
 
     # Get max tokens via module-level helper (avoids creating ExecutionEngine instance)
-    # Direct call without caching to avoid staleness when endpoints change at runtime
     max_tokens = _get_max_tokens_for_instance(pool, instance)
 
     # Build active stack
-    active_stack = list(pool._execution.active_stack) if hasattr(pool, '_execution') else []
+    active_stack = _build_active_stack(pool)
 
-    # Build ALL instances snapshot (C3: take snapshot before iterating)
-    # Root agent is included alongside sub-agents — no special treatment.
-    # Each agent carries its own messages/history_count via _serialize_instance.
-    # Note: dict(pool.instances) creates a shallow copy for safe iteration.
-    # Instance conversations are protected by inst._compression_lock inside
-    # _serialize_instance. Concurrent add/remove of instances during snapshot
-    # is acceptable — worst case is a stale or partially-complete snapshot,
-    # which the frontend handles gracefully via history_count merging.
-    instance_snapshot_data = dict(pool.instances)
+    # Build ALL instances snapshot with incremental serialization (Fix #3)
+    all_instances = _serialize_instances_incremental(
+        pool, instance_name, force_full,
+    )
 
-    # Fix #3: Incremental serialization — only serialize instances whose
-    # conversation changed since the last stream_update. Version is derived
-    # from (msg_count, id_of_last_msg) which changes only when a new message
-    # is appended. During LLM streaming, the conversation doesn't change.
-    
-    # Streaming UI Content Update Fix: Read _streaming_responses under compression lock for thread safety
-    all_instances = {}
-    for name, inst in instance_snapshot_data.items():
-        with inst._compression_lock:
-            current_msgs = list(inst.conversation)
-            # Read streaming responses for this instance (field always exists due to dataclass default_factory)
-            inst_streaming_responses = list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
-        
-        # Calculate content length for this instance's streaming responses
-        inst_stream_content_len = _streaming_content_length(inst_streaming_responses)
-        
-        current_version = (len(current_msgs), id(current_msgs[-1]) if current_msgs else None, len(inst_streaming_responses) if inst_streaming_responses else 0, inst_stream_content_len)
-
-        # Fix #2: Periodic full state refresh — every ~100 ticks force a complete
-        # serialization (streaming=False) to recover from sync gaps. This ensures
-        # any missed partial messages are recovered within ~10 seconds.
-        is_full_refresh = force_full
-        
-        # C4: Atomic read-compare-write under lock to prevent TOCTOU race
-        with _stream_version_lock:
-            prev_version = _last_stream_versions.get(name)
-            
-            if name == instance_name or current_version != prev_version or is_full_refresh:
-                all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=(not is_full_refresh), streaming_responses=inst_streaming_responses)
-                _last_stream_versions[name] = current_version
-                _cached_instance_data[name] = all_instances[name]
-            else:
-                # Reuse the previously serialized data for unchanged instances
-                all_instances[name] = _cached_instance_data.get(name)
-                if all_instances[name] is None:
-                    all_instances[name] = _serialize_instance(inst, pool, include_messages=True, streaming=(not is_full_refresh), streaming_responses=inst_streaming_responses)
-                    _last_stream_versions[name] = current_version
-                    _cached_instance_data[name] = all_instances[name]
-
-    # Get current model from template's LLM (for frontend display)
-    template = pool.get_template(instance.agent_class)
-    current_model = 'Unknown'
-    if template and hasattr(template, 'llm') and template.llm:
-        current_model = getattr(template.llm, 'model', 'Unknown')
-
-    # Get telemetry if available
-    telemetry_data = None
-    if hasattr(pool, 'telemetry') and pool.telemetry:
-        try:
-            telemetry_data = pool.telemetry.get_summary(instance_name)
-        except Exception as e:
-            logger.debug(f"Telemetry summary fetch failed for {instance_name} in stream (non-critical): {e}")
+    # Get current model and telemetry via shared helpers
+    current_model = _get_current_model(pool, instance)
+    telemetry_data = _safe_get_telemetry(pool, instance_name)
 
     # Get pending approvals (only include if non-empty to prevent UI flickering)
     pending_approvals = _get_approvals(pool)
@@ -1079,11 +1195,11 @@ def serialize_message(
     Returns:
         JSON-serializable dictionary.
     """
-    # M1: Look up in module-level cache (keyed by id(msg)) instead of mutating input.
+    # M1: Look up in CacheManager (keyed by id(msg)) instead of mutating input.
     # Cache stores truncated UI versions — only use when for_ui=True.
     msg_id = id(msg)  # Works for both dicts and Message objects
-    with _ui_cache_lock:
-        cached = _ui_serialization_cache.get(msg_id)
+    with _cache_mgr._lock:
+        cached = _cache_mgr.ui_serialization.get(msg_id)
     if cached is not None and for_ui:
         res = dict(cached)  # Copy to avoid mutating the cache entry
         # Strip internal keys that might leak from stale cache data
@@ -1177,16 +1293,16 @@ def serialize_message(
 
 
 def _store_ui_cache(msg_id: int, cached_data: dict) -> None:
-    """Store serialized message data in the module-level UI cache with bounded size.
+    """Store serialized message data in the CacheManager UI cache with bounded size.
     
     Uses a deep copy to prevent nested mutable leakage between cached entries.
-    Thread-safe via _ui_cache_lock."""
+    Thread-safe via CacheManager._lock."""
     import copy as _copy  # Lazy import — only used during serialization, not hot path
-    with _ui_cache_lock:
+    with _cache_mgr._lock:
         # Evict oldest entry when cache exceeds max size (FIFO via insertion order)
-        if len(_ui_serialization_cache) >= _UI_CACHE_MAXSIZE:
-            _ui_serialization_cache.pop(next(iter(_ui_serialization_cache)))
-        _ui_serialization_cache[msg_id] = _copy.deepcopy(cached_data)
+        if len(_cache_mgr.ui_serialization) >= _UI_CACHE_MAXSIZE:
+            _cache_mgr.ui_serialization.pop(next(iter(_cache_mgr.ui_serialization)))
+        _cache_mgr.ui_serialization[msg_id] = _copy.deepcopy(cached_data)
 
 
 def _check_is_waiting(pool: AgentPool, instance_name: str) -> bool:
@@ -1305,9 +1421,9 @@ def _serialize_instance(
     if stream_responses:
         all_msgs_for_stats.extend(stream_responses)
     
-    # Thread-safe check and read of _token_stats_cache
-    with _token_stats_lock:
-        if cache_key not in _token_stats_cache:
+    # Thread-safe check and read of token stats cache via CacheManager
+    with _cache_mgr._lock:
+        if cache_key not in _cache_mgr.token_stats:
             active_msgs = pool.slice_history_for_llm(all_msgs_for_stats) if all_msgs_for_stats else all_msgs_for_stats
             try:
                 from agent_cascade.utils.utils import get_history_stats
@@ -1316,12 +1432,12 @@ def _serialize_instance(
                 logger.debug(f"Token stats calculation failed for {inst.instance_name} (using estimate): {e}")
                 stats = {'tokens': len(all_msgs_for_stats) * 4, 'words': 0}
             # BUG31 Fix #1: Evict oldest entry if cache is full (increased from 100 to 5000)
-            if len(_token_stats_cache) >= _TOKEN_STATS_CACHE_MAXSIZE:
-                oldest_key = next(iter(_token_stats_cache))
-                del _token_stats_cache[oldest_key]
-            _token_stats_cache[cache_key] = stats
+            if len(_cache_mgr.token_stats) >= _TOKEN_STATS_CACHE_MAXSIZE:
+                oldest_key = next(iter(_cache_mgr.token_stats))
+                del _cache_mgr.token_stats[oldest_key]
+            _cache_mgr.token_stats[cache_key] = stats
         else:
-            stats = _token_stats_cache[cache_key]
+            stats = _cache_mgr.token_stats[cache_key]
 
     # Get max tokens via direct call to avoid staleness when endpoints change at runtime
     max_tokens = _get_max_tokens_for_instance(pool, inst)
