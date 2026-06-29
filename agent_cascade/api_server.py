@@ -1108,7 +1108,10 @@ def create_app(agents, agent_pool, config=None):
                     logger.warning(f"Malformed WebSocket message received (skipping): {e}")
                     continue
 
-                # Continue handling (kept inline for now — handled by dispatch above but need to remove duplicates below)
+                # Extract msg_type for the if/elif dispatch chain below
+                msg_type = data.get('type', '')
+
+                if msg_type == 'continue':
                     # Continue generation WITHOUT inserting a new user message.
                     # Just send the existing conversation to the LLM so it can resume if it wants.
                     

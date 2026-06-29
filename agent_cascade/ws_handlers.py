@@ -59,6 +59,7 @@ class WsMessageHandler:
         build_state_fn: Callable,  # build_state(responses=None, generating=None) -> dict
         start_gen_fn: Callable,  # Thread entry point for run_agent_thread
         session_lock: threading.Lock,
+        app,                 # FastAPI app object (holds security_check_semaphore, current_auto_security)
     ):
         self.session = session
         self.agent_pool = agent_pool
@@ -68,6 +69,7 @@ class WsMessageHandler:
         self.build_state_fn = build_state_fn
         self._start_gen_fn = start_gen_fn
         self._session_lock = session_lock
+        self.app = app  # Fix 1: store app reference for security handler wiring
 
     # ── Dispatch table ────────────────────────────────────────────────────
     @property
@@ -816,14 +818,27 @@ class WsMessageHandler:
             await self._broadcast()
 
     async def handle_ask_security(self, data: dict) -> None:
-        """Handle 'ask_security' — run Security advisor check for pending tool approvals."""
-        # Complex handler kept inline per plan. Extracted to SecurityAdvisorHandler in Phase 3.
-        await self._do_ask_security(data)
+        """Handle 'ask_security' — run Security advisor check for pending tool approvals.
+
+        Phase 3: Delegates to SecurityAdvisorHandler which manages the full lifecycle:
+          prompt building → instance creation → engine execution with streaming →
+          verdict parsing (multiple fallback strategies) → auto-apply/reject → cleanup.
+        """
+        from agent_cascade.security_handler import SecurityAdvisorHandler
+
+        # Fix 2 — pass correct args matching constructor signature:
+        #   __init__(self, agent_pool, session, app_state, send_queue, broadcast_fn)
+        sec = SecurityAdvisorHandler(
+            self.agent_pool, self.session, self.app,
+            self.send_queue, self.broadcast_fn,
+        )
+        await sec.run_check(data)
 
     async def handle_set_auto_security(self, data: dict) -> None:
         """Handle 'set_auto_security' — toggle Auto-Ask mode."""
         enabled = data.get('enabled', False)
-        self.session['_auto_security_enabled'] = enabled
+        # Store on app object so SecurityAdvisorHandler can read it via _get_auto_security_enabled()
+        self.app.current_auto_security = enabled
 
     async def handle_edit_message(self, data: dict) -> None:
         """Handle 'edit_message' — edit a message in conversation history."""
@@ -964,91 +979,4 @@ class WsMessageHandler:
         if text and self.agent_pool:
             self.agent_pool.enqueue_message(target, text)
 
-    # ── Internal helper for ask_security (kept inline per plan) ────────────
-    async def _do_ask_security(self, data: dict) -> None:
-        """Internal implementation of the security advisor check.
-
-        This is ~400 lines of complex logic. Kept as one method per Phase 2 plan;
-        will be extracted to SecurityAdvisorHandler in Phase 3.
-        """
-        from agent_cascade.log import logger
-        from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_MARKER
-        from agent_cascade.api_server import (
-            SECURITY_ADVISOR_TIMEOUT_SECONDS, SECURITY_ADVISOR_WARNING_SECONDS,
-        )
-        from agent_cascade.execution_engine import ExecutionEngine
-
-        instance_name = self.session.get('session_name', 'Maine')
-        inst = self.agent_pool.get_instance(instance_name) if self.agent_pool else None
-
-        # Determine target instance for the security check
-        sec_target = data.get('target_agent') or instance_name
-        sec_inst = self.agent_pool.get_instance(sec_target) if (self.agent_pool and sec_target != instance_name) else inst
-
-        # Get pending approvals
-        pending = self.agent_pool.operation_manager.list_pending_approvals()
-
-        # Determine which approval to check
-        rid = data.get('request_id')
-        auto_apply = data.get('auto_apply', False)
-
-        if not rid:
-            ap_list = pending
-        else:
-            ap_list = [a for a in pending if a['request_id'] == rid]
-
-        if not ap_list:
-            return
-
-        ap = ap_list[0]  # Check the first matching approval
-        rid = ap['request_id']
-        logger.info(f"[SECURITY] Checking request {rid} for tool '{ap.get('tool_name', 'unknown')}'")
-
-        # Build security prompt
-        from agent_cascade.utils.utils import get_message_stats, get_history_stats
-        stats_msg_count = len(sec_inst.conversation) if sec_inst else 0
-
-        prompt = self._build_security_prompt(ap)
-
-        # Create Security agent instance
-        sec_instance = self.agent_pool.create_instance(f"Security_{rid}", "security")
-
-        # Run security check in a thread
-        loop = asyncio.get_event_loop()
-        thread = threading.Thread(
-            target=self._run_security_check,
-            args=(sec_instance, ap, prompt, rid, auto_apply),
-            daemon=True,
-        )
-        thread.start()
-
-    def _build_security_prompt(self, approval: dict) -> str:
-        """Build the security advisor prompt from an approval dict."""
-        tool_name = approval.get('tool_name', 'unknown')
-        description = approval.get('description', '')
-        tool_args = approval.get('tool_args', {})
-
-        return (
-            f"Analyze the following tool call and determine if it's safe to execute:\n\n"
-            f"**Tool:** {tool_name}\n"
-            f"**Description:** {description}\n"
-            f"**Arguments:** {json.dumps(tool_args, indent=2)}\n\n"
-            "Respond with [YES] or [NO] and a brief justification."
-        )
-
-    def _run_security_check(self, sec_instance, approval, prompt, rid, auto_apply) -> None:
-        """Run the security check in a background thread."""
-        from agent_cascade.log import logger
-
-        try:
-            # Send prompt to security instance
-            sec_inst = self.agent_pool.get_instance(f"Security_{rid}")
-            if sec_inst is not None and hasattr(sec_inst, 'conversation'):
-                from agent_cascade.llm.schema import Message, USER
-                sec_inst.conversation.append(Message(role=USER, content=prompt))
-
-            # Trigger execution via the pool's turn mechanism
-            self.agent_pool.enqueue_message(f"Security_{rid}", prompt)
-
-        except Exception as e:
-            logger.error(f"[SECURITY] Check failed for {rid}: {e}")
+    # ── Internal helpers (none needed — SecurityAdvisorHandler handles everything) ──
