@@ -692,86 +692,15 @@ class WsMessageHandler:
         os.execl(__import__('sys').executable, __import__('sys').executable, *__import__('sys').argv)
 
     async def handle_update_config(self, data: dict) -> None:
-        """Handle 'update_config' — apply 12+ config key updates."""
-        from agent_cascade.log import logger as _logger
+        """Handle 'update_config' — delegate to ConfigUpdateRouter for key dispatch."""
+        from agent_cascade.config_handlers import ConfigUpdateRouter
+
         if 'generate_cfg' in data:
             self.session['generate_cfg'] = data['generate_cfg']
             ui_cfg = data['generate_cfg']
 
-            # Handle MCP servers
-            if 'mcpServers' in ui_cfg:
-                mcp_servers = ui_cfg['mcpServers']
-                try:
-                    from agent_cascade.tools.mcp_manager import MCPManager
-                    mcp_tools = MCPManager().initConfig({'mcpServers': mcp_servers})
-                    for tool in mcp_tools:
-                        for agent_inst in self.agents:
-                            if tool.name not in agent_inst.function_map:
-                                agent_inst.function_map[tool.name] = tool
-                    _logger.info("[MCP] Eagerly loaded %d tools.", len(mcp_tools))
-                except Exception as e:
-                    _logger.warning("[MCP] Eager initialization failed: %s", e)
-
-            # Defense-in-depth: only call set_extra_work_folders if values changed
-            if 'work_access_folders_ro' in ui_cfg or 'work_access_folders_rw' in ui_cfg:
-                if self.agent_pool and hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
-                    om = self.agent_pool.operation_manager
-                    ro_new = [p.strip() for p in ui_cfg.get('work_access_folders_ro', []) if p.strip()]
-                    rw_new = [p.strip() for p in ui_cfg.get('work_access_folders_rw', []) if p.strip()]
-                    ro_current = [str(p) for p in om.extra_work_folders_ro]
-                    rw_current = [str(p) for p in om.extra_work_folders_rw]
-                    ro_sorted = sorted([p.lower() for p in ro_new])
-                    rw_sorted = sorted([p.lower() for p in rw_new])
-                    ro_curr_sorted = sorted([p.lower() for p in ro_current])
-                    rw_curr_sorted = sorted([p.lower() for p in rw_current])
-                    if ro_sorted != ro_curr_sorted or rw_sorted != rw_curr_sorted:
-                        om.set_extra_work_folders(ro_new, rw_new)
-
-            # Update default workspace
-            if 'default_workspace' in ui_cfg:
-                if self.agent_pool and hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
-                    new_ws = ui_cfg['default_workspace']
-                    if new_ws:
-                        new_ws_path = Path(new_ws).resolve()
-                        if new_ws_path != self.agent_pool.operation_manager.base_dir:
-                            self.agent_pool.operation_manager.set_base_dir(new_ws)
-
-            # Update idle timeout
-            if 'idle_timeout_seconds' in ui_cfg and self.agent_pool and hasattr(self.agent_pool, 'settings'):
-                val = float(ui_cfg['idle_timeout_seconds'])
-                self.agent_pool.settings.idle_timeout_seconds = max(0.0, val)
-
-            # Update approval timeout
-            if 'approval_timeout_seconds' in ui_cfg and self.agent_pool:
-                try:
-                    self.agent_pool.operation_manager.set_approval_timeout(int(ui_cfg['approval_timeout_seconds']))
-                except Exception as e:
-                    _logger.warning(f"Failed to set approval timeout: {e}")
-
-            if 'enable_approval_timeout' in ui_cfg and self.agent_pool:
-                try:
-                    self.agent_pool.operation_manager.set_enable_timeout(bool(ui_cfg['enable_approval_timeout']))
-                except Exception as e:
-                    _logger.warning(f"Failed to set approval timeout toggle: {e}")
-
-            # Update max parallel agents
-            if 'max_parallel_agents' in ui_cfg and self.agent_pool and hasattr(self.agent_pool, 'settings'):
-                val = int(ui_cfg['max_parallel_agents'])
-                self.agent_pool.settings.max_workers = max(1, val)
-                if hasattr(self.agent_pool._execution, 'executor') and self.agent_pool._execution.executor is not None:
-                    self.agent_pool._execution.resize_executor(self.agent_pool.settings.max_workers)
-
-            # Apply auto_continue immediately
-            if 'auto_continue' in ui_cfg and self.agent_pool and hasattr(self.agent_pool, 'settings'):
-                self.agent_pool.settings.auto_continue = bool(ui_cfg['auto_continue'])
-
-            # Update LLM config (defense-in-depth optimization)
-            from agent_cascade.api_server import LLM_CONFIG_KEYS
-            if self.agent_pool and hasattr(self.agent_pool, 'api_router'):
-                new_llm_cfg = {k: v for k, v in ui_cfg.items() if k in LLM_CONFIG_KEYS}
-                current_llm_cfg = self.agent_pool.api_router.default_llm_cfg or {}
-                if new_llm_cfg != {k: current_llm_cfg.get(k) for k in new_llm_cfg}:
-                    self.agent_pool.api_router.update_default_llm_cfg(new_llm_cfg)
+            router = ConfigUpdateRouter(self.agent_pool, self.agents)
+            await router.apply(ui_cfg)
 
         await self._broadcast()
 
