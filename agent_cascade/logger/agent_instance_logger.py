@@ -472,6 +472,13 @@ class AgentInstanceLogger:
                         last_marker_idx = i
                         break
 
+                # ── Dedup guard: check if a compression marker already exists in the log file ──
+                # No role check — be conservative and skip insertion if *any* marker exists
+                existing_has_marker = any(
+                    isinstance(m.get('content', ''), str) and m['content'].startswith(COMPRESSION_MARKER)
+                    for m in existing_msgs
+                ) if last_marker_idx >= 0 else False
+
                 # ── Build result: existing log + marker inserted at mirrored tail offset ──
                 if last_marker_idx >= 0:
                     actual_tail_count = len(new_history) - last_marker_idx - 1  # Messages AFTER marker (not including marker itself)
@@ -479,8 +486,11 @@ class AgentInstanceLogger:
 
                     insert_pos = len(existing_msgs) - actual_tail_count  # Mirror tail distance in JSONL
                     insert_pos = max(0, min(insert_pos, len(existing_msgs)))
-                    
-                    result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
+
+                    if existing_has_marker:
+                        result_msgs = existing_msgs  # Marker already present — skip insertion to avoid duplicates
+                    else:
+                        result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
                 else:
                     # No markers — prefer new_history (pool state), but fall back to existing_msgs from file
                     if new_history:
