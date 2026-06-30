@@ -14,11 +14,11 @@
 
 from typing import Optional, Union
 
-from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.base import BaseTool
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.simple_doc_parser import SimpleDocParser
 
-@register_tool('web_extractor')
+
 class WebExtractor(BaseTool):
     description = TOOL_METADATA['web_extractor']['description']
     parameters = {

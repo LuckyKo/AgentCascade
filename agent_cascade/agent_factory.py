@@ -9,6 +9,7 @@ controlled via the disabled_tools policy, not by which loader function was used.
 
 from agent_cascade.log import logger
 from agent_cascade.tools.code_interpreter import CodeInterpreter
+from agent_cascade.tools.web_extractor import WebExtractor
 from agent_cascade.tools.custom import (
     ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep,
     DeleteFile, CopyFile, ReIndent, ListAgents, ShellCmd,
@@ -117,7 +118,6 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
         elif tool_name == 'ddg_search':
             tools_to_register[tool_name] = (DDGSearch(), False, False)
         elif tool_name == 'web_extractor':
-            from agent_cascade.tools.web_extractor import WebExtractor
             tools_to_register[tool_name] = (WebExtractor(cfg={'work_dir': DEFAULT_WORKSPACE}), False, False)
         elif tool_name == 'system_info':
             tools_to_register[tool_name] = (_SystemInfo(agent_pool=agent_pool), False, False)

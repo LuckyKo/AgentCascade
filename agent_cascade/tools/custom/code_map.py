@@ -3,7 +3,7 @@ import os
 import ast
 from typing import List, Dict, Any, Optional
 from pathlib import Path
-from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.base import BaseTool
 from agent_cascade.prompts.dna import TOOL_METADATA
 
 # Attempt to import Pygments for better cross-language tokenization
@@ -13,7 +13,7 @@ try:
 except ImportError:
     HAS_PYGMENTS = False
 
-@register_tool('code_map', allow_overwrite=True)
+
 class CodeMap(BaseTool):
     """Tool to quickly map large code files - with line numbers of functions, classes, and variables."""
 

@@ -92,7 +92,6 @@ def _check_deps_for_python_executor():
             'Please install the required dependencies by running: pip install "agent-cascade[python_executor]"') from e
 
 
-# @register_tool('python_executor')
 class PythonExecutor(BaseTool):
     name = 'python_executor'
     description = 'Executes Python code DIRECTLY on the host machine (NOT sandboxed). Use this ONLY when you need to access host-side services on 127.0.0.1 that Docker cannot reach. Highly dangerous, use with caution.'

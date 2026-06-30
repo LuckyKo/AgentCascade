@@ -6,14 +6,13 @@ agent_cascade.compression.compress_context(). See core.py for full compression l
 """
 import copy
 import logging
-from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.base import BaseTool
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.compression import compress_context, rebuild_working_set
 
 logger = logging.getLogger(__name__)
 
 
-@register_tool('compress_context', allow_overwrite=True)
 class CompressContext(BaseTool):
     """Tool that delegates to the unified compress_context() function."""
 

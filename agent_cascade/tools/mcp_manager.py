@@ -80,9 +80,11 @@ class MCPManager:
                 # Silently handle cross-task exceptions from MCP SSE connections
                 if (isinstance(exception, RuntimeError) and
                         'Attempted to exit cancel scope in a different task' in str(exception)):
+                    logger.debug("Silently ignoring MCP cross-task exception: %s", str(exception))
                     return  # Silently ignore this type of exception
                 if (isinstance(exception, BaseExceptionGroup) and  # noqa
                         'Attempted to exit cancel scope in a different task' in str(exception)):  # noqa
+                    logger.debug("Silently ignoring MCP cross-task exception: %s", str(exception))
                     return  # Silently ignore this type of exception
 
             # Other exceptions are handled normally
@@ -146,7 +148,7 @@ class MCPManager:
             result = future.result()  # You can specify a timeout if desired
             return result
         except Exception as e:
-            logger.info(f'Failed in initializing MCP tools: {e}')
+            logger.error(f'Failed in initializing MCP tools: {e}')
             raise e
 
     async def init_config_async(self, config: Dict):
@@ -235,7 +237,7 @@ class MCPManager:
                             str(template) for template in list_resource_templates.resourceTemplates)
 
                 except Exception as e:
-                    logger.info(f'Failed in listing MCP resource templates: {e}')
+                    logger.warning(f'Failed in listing MCP resource templates: {e}')
 
                 read_resource_tool_name = server_name + '-' + 'read_resource'
                 read_resource_params = {
@@ -285,7 +287,7 @@ class MCPManager:
                     result = future.result()
                     return result
                 except Exception as e:
-                    logger.info(f'Failed in executing MCP tool: {e}')
+                    logger.error(f'Failed in executing MCP tool: {e}')
                     raise e
 
         ToolClass.__name__ = f'{register_name}_Class'
