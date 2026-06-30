@@ -60,13 +60,14 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] approval window does not show justification for edit file operation (Fixed 2026-06-30: wired justification through tool classes → operation manager methods → tool_args → PendingApproval. Also fixed WriteFile non-JSON fallback path that silently dropped justification.)
 - [ ] investigate if we can make shell cmd accept special character and multi-line `python -c` commands
       ERROR: 'charmap' codec can't encode character '\u2717' in position 0: character maps to <undefined>
-- [ ] compressor does not receive the agent thoughts:
+- [x] compressor does not receive the agent thoughts:
 ```
 ASSISTANT:
 Now let me trace the recovery path more carefully:
 ASSISTANT: [TOOL CALL: read_file({"path":"N:/work/WD/AgentCascade_unified/agent_cascade/run_agent_unified.py"})]
 FUNCTION: OK: Read N:/work/WD/AgentCascade_unified/agent_cascade/run_agent_unified.py lines 1-250/344 (text, 14.9 KB) [TRUNCATED]
 ```
+(Fixed 2026-06-30: extended _format_tool_calls_for_text() and _format_messages_for_summary() to check reasoning_content, formatted as [THOUGHT: ...]. Also fixed extract_text_from_message() for accurate token counting.)
 (Fixed 2026-06-30: _format_messages_for_summary() now includes function_call and tool_calls data as [TOOL CALL: name(args)] in summary text. Also handles modern tool_calls array format, truncates large args to 2KB, uses None-safe checks.)
 
 # Errors to investigate:
