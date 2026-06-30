@@ -455,16 +455,12 @@ class ExecutionEngine:
             return
 
         try:
-            logger.debug(
-                f"[SLOT_ACQUIRE] {context} - instance={instance.instance_name}, "
-                f"class={instance.agent_class}"
-            )
             instance._slot_release = self.pool._acquire_slot(
                 instance.agent_class, instance.instance_name
             )
             logger.debug(
-                f"[SLOT_ACQUIRED] {context} - instance={instance.instance_name}, "
-                f"has_callback={instance._slot_release is not None}"
+                f"[SLOT_ACQUIRE] {context} - instance={instance.instance_name}, "
+                f"class={instance.agent_class}"
             )
         except Exception as e:
             logger.error(f"[SLOT_ACQUIRE_FAILED] {context} for {instance.instance_name}: {e}")
@@ -546,9 +542,6 @@ class ExecutionEngine:
 
         if not raw_data:
             return False
-
-        level = logger.info if log_level == "info" else logger.debug
-        level(f"Draining {len(raw_data)} item(s) for {inst_name}.")
 
         # Pre-process all items into messages to avoid calling factory() twice
         processed_messages = []
@@ -672,18 +665,11 @@ class ExecutionEngine:
 
             # Exit if stopped after slot acquire — prevents stale slot reuse post-stop
             if self._is_stopped(instance.instance_name):
-                logger.debug(
-                    f"[SLOT_STOP_CHECK] Stale slot detected after initial acquire for {instance.instance_name}, exiting"
-                )
                 self._release_slot(instance, instance.instance_name)
                 return  # Exit generator immediately instead of continuing with stale state
         else:
             # SKIP SLOT ACQUIRE — nested agent (Security/Compressor) inherits parent's slot.
-            # No STOP_CHECK needed here; parent thread handles stop detection for this turn.
-            logger.debug(
-                f"[SLOT_BYPASS] Skipping slot acquire - instance={instance.instance_name}, "
-                f"class={instance.agent_class} (nested invocation)"
-            )
+            pass
         
         try:
             # ── Phase 1: Setup ─────────────────────────────────────────────
@@ -824,22 +810,8 @@ class ExecutionEngine:
                     )
                     instance._continue_saved_msg = None
             
-            # SLOT_TIMEOUT FIX: Log slot state before release for debugging
-            if hasattr(instance, '_slot_release'):
-                logger.debug(
-                    f"[SLOT_FINAL] Before finally release - instance={instance.instance_name}, "
-                    f"slot_held={instance._slot_release is not None}"
-                )
-            
             # Release concurrency slot on exit if still held (using helper method FIX Mi3)
             self._release_slot(instance, instance.instance_name)
-            
-            # SLOT_TIMEOUT FIX: Verify release happened
-            if hasattr(instance, '_slot_release'):
-                logger.debug(
-                    f"[SLOT_FINAL] After finally release - instance={instance.instance_name}, "
-                    f"slot_still_held={instance._slot_release is not None}"
-                )
             
             # FIX LogAppendFixer: Final sync to ensure all messages in conversation are logged
             # This catches any injected messages that weren't followed by an LLM call triggering _process_response() sync
@@ -1683,10 +1655,7 @@ class ExecutionEngine:
                                         f"{endpoint_info}"
                                     )
                                 else:
-                                    logger.debug(
-                                        f"Endpoint confirmed for {agent_type}: "
-                                        f"{endpoint_info}"
-                                    )
+                                    pass  # Normal path — no need to log every successful resolution
                             else:
                                 logger.debug(
                                     f"No endpoint found by ID '{first_ep_id}' for {agent_type}, "
@@ -2537,8 +2506,6 @@ class ExecutionEngine:
         """
         # Defensive guard: handle objects without _slot_release attribute
         if not hasattr(slot_holder, '_slot_release'):
-            suffix = f" during {context}" if context else ""
-            logger.debug(f"[SLOT_RELEASE] No _slot_release attr for {holder_name}{suffix}")
             return
         
         context_suffix = f" during {context}" if context else ""
@@ -2547,14 +2514,11 @@ class ExecutionEngine:
             slot_holder._slot_release = None  # Capture ref first, then nullify to prevent double-release
             try:
                 release_callback()
-                logger.debug(f"[SLOT_RELEASE] Successfully released for {holder_name}{context_suffix}")
             except Exception as e:
                 logger.error(
                     f"[SLOT_RELEASE_ERROR] Failed to release slot for {holder_name}{context_suffix}: {e}",
                     exc_info=True
                 )
-        else:
-            logger.debug(f"[SLOT_RELEASE] _slot_release already None for {holder_name}{context_suffix}")
 
     def _transition_to_sleeping(self, instance: 'AgentInstance') -> None:
         """Transition an agent instance to SLEEPING state.

@@ -151,9 +151,12 @@ def validate_tool_names(
 
     unknown = tool_names - known_tools
     if unknown:
-        logger.warning(
+        # Downgraded from WARNING to DEBUG: it's expected that not all tools
+        # are available to every agent type, so listing disabled tools that
+        # aren't in the registry is normal (e.g. python_compiler for coders).
+        logger.debug(
             "Unknown tool names in disabled_tools: %s. "
-            "These will be silently ignored. Did you make a typo?",
+            "These will be silently ignored.",
             sorted(unknown),
         )
 
