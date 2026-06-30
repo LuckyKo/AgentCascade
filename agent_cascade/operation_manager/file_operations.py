@@ -139,6 +139,41 @@ class FileOpsMixin:
             return "?"
 
     @staticmethod
+    def _backup_path_str(backup_path) -> str:
+        """Return the absolute path string for backup reporting."""
+        return str(backup_path)
+
+    @staticmethod
+    def _detect_binary(path) -> bool:
+        """Check if file is binary by reading first 1 KiB for null bytes."""
+        try:
+            with open(path, 'rb') as f:
+                return b'\x00' in f.read(1024)
+        except OSError:
+            return False
+
+    @staticmethod
+    def _compute_scope_info(path) -> str:
+        """Compute pre-operation scope info string for reporting (file stats or directory count)."""
+        if path.is_dir():
+            file_count = sum(1 for _ in path.rglob('*') if _.is_file())
+            return f"(directory, {file_count} files)"
+
+        size_str = FileOpsMixin._format_size(path.stat().st_size)
+
+        # Binary check
+        if FileOpsMixin._detect_binary(path):
+            return f"(file, binary, {size_str})"
+
+        # Text file: count lines
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                line_count = sum(1 for _ in f)
+            return f"(file, {line_count} lines, {size_str})"
+        except (UnicodeDecodeError, OSError):
+            return f"(file, binary, {size_str})"
+
+    @staticmethod
     def _matches_filters(name: str, include_fn, exclude_fn) -> bool:
         """Check if a name passes both include and exclude filters."""
         if include_fn and not include_fn(name):
@@ -380,10 +415,11 @@ class FileOpsMixin:
             if not resolved.is_file():
                 return f"Not a file: {path}"
 
-            # Count total lines first to validate start_line bounds
+            start_line = max(1, start_line)  # Defensive: prevent negative/zero line numbers
+
+            # Count total lines first to validate start_line bounds (streaming, no memory)
             with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
-                all_lines = f.readlines()
-            total_lines = len(all_lines)
+                total_lines = sum(1 for _ in f)
 
             if total_lines == 0:
                 return f"OK: Read {path} (0 lines, {self._format_size(resolved.stat().st_size)})"
@@ -395,18 +431,19 @@ class FileOpsMixin:
             hit_end = False
 
             lines = []
-            for line_num, line in enumerate(all_lines, 1):
-                if line_num < start_line:
-                    continue
-                if line_num > end_line:
-                    hit_end = True
-                    break
-                lines.append(line.rstrip('\n'))
+            with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
+                for line_num, line in enumerate(f, 1):
+                    if line_num < start_line:
+                        continue
+                    if line_num > end_line:
+                        hit_end = True
+                        break
+                    lines.append(line.rstrip('\n'))
 
             actual_end = start_line + len(lines) - 1
             file_size_str = self._format_size(resolved.stat().st_size)
 
-            # M2: Encoding warning via replacement character count (changed errors='replace' above)
+            # Encoding warning via replacement character count
             content_text = "".join(lines)
             repl_count = content_text.count('\ufffd')
             encoding_note = f" [encoding: utf-8 with {repl_count} replacement(s)]" if repl_count > 0 else ""
@@ -418,7 +455,7 @@ class FileOpsMixin:
             content = "".join([f"{start_line + i}: {lines[i]}" for i in range(len(lines))])
             result = f"{header}\n```\n{content}\n```"
 
-            # m2: Compact pagination footer when truncated
+            # Compact pagination footer when truncated
             if hit_end:
                 result += f"\n→ continue at start_line={actual_end + 1}"
 
@@ -462,8 +499,7 @@ class FileOpsMixin:
                 backup_dir.mkdir(parents=True, exist_ok=True)
                 backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
                 shutil.copy2(resolved, backup_path)
-                # M5: Always use absolute path for backup
-                backup_path_str = str(backup_path)
+                backup_path_str = self._backup_path_str(backup_path)
 
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding='utf-8')
@@ -477,7 +513,6 @@ class FileOpsMixin:
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
 
-            # M3: Standardized backup line (absolute path)
             if backup_path_str:
                 msg += f'\n  backup → {backup_path_str}'
 
@@ -501,16 +536,21 @@ class FileOpsMixin:
         if not resolved.exists():
             return f"File not found for surgical edit: {path}"
 
-        file_content = resolved.read_text(encoding='utf-8')
+        try:
+            file_content = resolved.read_text(encoding='utf-8')
+        except UnicodeDecodeError:
+            return f"ERROR: File has invalid UTF-8 encoding: {path}"
+        except Exception as e:
+            return f"ERROR: Failed to read file: {str(e)}"
         actual_old_content = old_content
         match_ratio = 1.0
         # Initialize variables before match-mode dispatch (defensive scoping)
         exact_start_line = None
         exact_end_line = None
-        indent_warnings = []       # C1 fix: initialized to avoid NameError risk
-        start_idx = None           # C2 fix: d&i mode range indices
-        end_idx = None             # C2 fix: d&i mode range indices
-        delta_width = 0            # M1 fix: indent delta for heuristic feedback
+        indent_warnings = []       # Initialized to avoid NameError risk
+        start_idx = None           # d&i mode range indices
+        end_idx = None             # d&i mode range indices
+        delta_width = 0            # Indent delta for heuristic feedback
 
         from agent_cascade.settings import DEFAULT_HEURISTIC_MATCH_THRESHOLD
         import difflib
@@ -594,7 +634,7 @@ class FileOpsMixin:
             if count > 1:
                 return f"ERROR: Pattern found {count} times in {path} — add more context lines to old_content to disambiguate"
 
-            # C1: Record match position for feedback message (line range)
+            # Record match position for feedback message (line range)
             match_start_pos = file_content.index(old_content)
             match_end_pos = match_start_pos + len(actual_old_content)
             exact_start_line = file_content[:match_start_pos].count('\n') + 1
@@ -706,7 +746,7 @@ class FileOpsMixin:
             file_indent = get_leading_whitespace(actual_old_content)
             old_indent = get_leading_whitespace(old_content)
             indent_delta = get_indent_width(file_indent) - get_indent_width(old_indent)
-            # Store at method scope for response construction (M1: indent adjusted info)
+            # Store at method scope for response construction
             delta_width = indent_delta
 
             # Detect file type to choose appropriate normalization mode
@@ -970,17 +1010,16 @@ class FileOpsMixin:
             backup_dir.mkdir(parents=True, exist_ok=True)
             backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
             shutil.copy2(resolved, backup_path)
-            # M5: Always use absolute path for backup
-            backup_path_str = str(backup_path)
+            backup_path_str = self._backup_path_str(backup_path)
 
-            file_content = resolved.read_text(encoding='utf-8')
+            # Reuse file_content from first read (line 538) — no need to re-read
             if match_mode == 'delete_and_insert':
                 # new_file_content was already computed above — skip string replace
                 pass
             else:
                 new_file_content = file_content.replace(actual_old_content, new_content, 1)
 
-            # C5: Generate unified diff BEFORE writing the file (both old and new content available)
+            # Generate unified diff before writing (both old and new content available)
             old_lines = file_content.splitlines(keepends=True)
             new_lines = new_file_content.splitlines(keepends=True)
             diff_lines = list(difflib.unified_diff(
@@ -1000,7 +1039,7 @@ class FileOpsMixin:
             resolved.write_text(new_file_content, encoding='utf-8')
             self.file_ownership[str(resolved)] = agent_name
 
-            # M1: Line delta computation using splitlines()
+            # Line delta computation using splitlines()
             if match_mode == 'delete_and_insert':
                 # BUG FIX: In d&i mode, actual_old_content is the range string (e.g. "3:7"),
                 # not the deleted file content. Compute old_lc from the actual range.
@@ -1018,13 +1057,13 @@ class FileOpsMixin:
                 res_msg += f" lines {exact_start_line}-{exact_end_line} (exact, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
 
             elif match_mode in ('heuristic', 'heuristic_agnostic'):
-                # M2: Discriminated labels for heuristic vs heuristic_agnostic
+                # Discriminated labels for heuristic vs heuristic_agnostic
                 mode_label = "heuristic" if match_mode == 'heuristic' else "heur_ag"
                 resolved_path_str = resolved.as_posix()
 
                 res_msg += f" lines {exact_start_line}-{exact_end_line} ({mode_label} {match_ratio:.0%}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
 
-                # M1: Indent adjustment info (only if non-zero delta detected in heuristic mode)
+                # Indent adjustment info (only if non-zero delta detected in heuristic mode)
                 if match_mode == 'heuristic':
                     if delta_width != 0:
                         res_msg += f", indent adjusted"
@@ -1056,7 +1095,6 @@ class FileOpsMixin:
             if diff_content:
                 res_msg += f'\n--- a/{path}\n+++ b/{path}' + '\n' + diff_content
 
-            # M3: Standardized backup line (absolute path)
             if backup_path_str:
                 res_msg += f'\n  backup → {backup_path_str}'
 
@@ -1288,8 +1326,7 @@ class FileOpsMixin:
             backup_dir.mkdir(parents=True, exist_ok=True)
             backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
             shutil.copy2(resolved, backup_path)
-            # M5: Always use absolute path for backup
-            backup_path_str = str(backup_path)
+            backup_path_str = self._backup_path_str(backup_path)
 
             new_file_lines = list(file_lines)
             new_file_lines[start:end] = new_block_lines
@@ -1326,7 +1363,6 @@ class FileOpsMixin:
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
 
-            # M3: Standardized backup line (absolute path)
             if backup_path_str:
                 res_msg += f'\n  backup → {backup_path_str}'
 
@@ -1363,32 +1399,7 @@ class FileOpsMixin:
         try:
             is_directory = resolved.is_dir()
 
-            # C2: Compute pre-deletion stats BEFORE the file is moved/deleted
-            if is_directory:
-                file_count = sum(1 for _ in resolved.rglob('*') if _.is_file())
-                scope_info = f"(directory, {file_count} files)"
-            else:
-                file_size_str = self._format_size(resolved.stat().st_size)
-                # Check for binary content by reading first 1KB and looking for null bytes
-                is_binary = False
-                try:
-                    with open(resolved, 'rb') as f:
-                        chunk = f.read(1024)
-                    if b'\x00' in chunk:
-                        is_binary = True
-                except OSError:
-                    pass
-
-                if is_binary:
-                    scope_info = f"(file, binary, {file_size_str})"
-                else:
-                    try:
-                        with open(resolved, encoding='utf-8', errors='replace') as f:
-                            line_count = sum(1 for _ in f)
-                    except (UnicodeDecodeError, OSError):
-                        scope_info = f"(file, binary, {file_size_str})"
-                    else:
-                        scope_info = f"(file, {line_count} lines, {file_size_str})"
+            scope_info = self._compute_scope_info(resolved)
 
             safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
             backup_dir = self.base_dir / "logs" / "backups" / safe_agent
@@ -1416,8 +1427,7 @@ class FileOpsMixin:
                     shutil.copy2(resolved, backup_path)
                     resolved.unlink()
 
-            # M5: Always use absolute path for backup
-            backup_path_str = str(backup_path)
+            backup_path_str = self._backup_path_str(backup_path)
 
             if str(resolved) in self.file_ownership:
                 del self.file_ownership[str(resolved)]
@@ -1432,7 +1442,6 @@ class FileOpsMixin:
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
 
-            # M3: Standardized backup line (absolute path)
             msg += f'\n  backup → {backup_path_str}'
 
             return msg
@@ -1468,32 +1477,7 @@ class FileOpsMixin:
         try:
             dest_path = self._resolve_path(destination, mode="rw")
 
-            # C3: Compute pre-copy source stats BEFORE the copy operation
-            if src_path.is_dir():
-                file_count = sum(1 for _ in src_path.rglob('*') if _.is_file())
-                scope_info = f"(directory, {file_count} files)"
-            else:
-                file_size_str = self._format_size(src_path.stat().st_size)
-                # Check for binary content by reading first 1KB and looking for null bytes
-                is_binary = False
-                try:
-                    with open(src_path, 'rb') as f:
-                        chunk = f.read(1024)
-                    if b'\x00' in chunk:
-                        is_binary = True
-                except OSError:
-                    pass
-
-                if is_binary:
-                    scope_info = f"(file, binary, {file_size_str})"
-                else:
-                    try:
-                        with open(src_path, encoding='utf-8', errors='replace') as f:
-                            line_count = sum(1 for _ in f)
-                    except (UnicodeDecodeError, OSError):
-                        scope_info = f"(file, binary, {file_size_str})"
-                    else:
-                        scope_info = f"(file, {line_count} lines, {file_size_str})"
+            scope_info = self._compute_scope_info(src_path)
 
             backup_path_str = ""
             was_overwrite = False
@@ -1519,8 +1503,7 @@ class FileOpsMixin:
                 else:
                     shutil.copy2(dest_path, backup_path)
 
-                # M5: Always use absolute path for backup
-                backup_path_str = str(backup_path)
+                backup_path_str = self._backup_path_str(backup_path)
                 was_overwrite = True
 
             if src_path.is_dir():
@@ -1538,7 +1521,6 @@ class FileOpsMixin:
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
 
-            # M3: Standardized backup line (absolute path)
             if backup_path_str:
                 msg += f'\n  backup → {backup_path_str}'
 
@@ -1598,8 +1580,7 @@ class FileOpsMixin:
                 else:
                     shutil.copy2(dest_path, backup_path)
 
-                # M5: Always use absolute path for backup
-                backup_path_str = str(backup_path)
+                backup_path_str = self._backup_path_str(backup_path)
 
                 if dest_path.is_dir():
                     shutil.rmtree(dest_path)
@@ -1616,7 +1597,6 @@ class FileOpsMixin:
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
 
-            # M3: Standardized backup line (absolute path)
             if backup_path_str:
                 msg += f'\n  backup → {backup_path_str}'
 
