@@ -103,12 +103,6 @@ def detect_loop(
         if fc:
             name = fc.get('name') if isinstance(fc, dict) else getattr(fc, 'name', '')
             args = fc.get('arguments') if isinstance(fc, dict) else getattr(fc, 'arguments', '')
-            # Include a hash of reasoning/text content so two messages calling the same
-            # tool with identical args but different reasoning are distinguished.
-            text_part = (reasoning + '\n' + content).strip()
-            if text_part:
-                text_hash = hashlib.md5(text_part.encode(errors='replace')).hexdigest()[:_HASH_DIGITS]
-                return f"{role}:{name}:{args}:t{text_hash}"
             return f"{role}:{name}:{args}"
 
         # For FUNCTION role messages: include tool name + content hash to differentiate
@@ -144,7 +138,7 @@ def detect_loop(
         # Normal tool usage involves ASSISTANT→FUNCTION repeating many times with
         # DIFFERENT arguments, so we need higher thresholds to catch actual loops.
         if L < 3:
-            K = 4          # Need 4 repeats of a 1- or 2-step pattern (e.g., 8 msgs for L=2)
+            K = 3          # Need 3 repeats of a 1- or 2-step pattern (e.g., 6 msgs for L=2)
         elif L < 5:
             K = 3          # 3 repeats of a 3- or 4-step pattern
         else:

@@ -985,7 +985,8 @@ class CompressionHandler:
             return False
         
         # Step 2: Apply rollback using pool's surgical_rollback (unified path)
-        # Note: surgical_rollback() already handles cache invalidation internally (sets _last_token_count_conversation_length = -1)
+        # Note: surgical_rollback() handles cache invalidation internally — clears
+        # _cached_messages, _cached_llm_messages, and sets _last_token_count_conversation_length = -1
         try:
             actual_count = self.pool.surgical_rollback(inst_name, count, reason="Manual /rollback command")
             

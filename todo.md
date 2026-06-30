@@ -51,7 +51,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] randomly duplicated compression markers in agent log
 - [x] first compression doesn't include the first user message; compressions with existing markers include the last marker twice: once in existing summary, second time in history (FIXED 2026-06-30)
 - [ ] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck - it should clear up ALL the API slots. after 1000 fixed this still happens!
-- [ ] loop detector is appending to agent pool the first user message on rollback; no debug logging on event
+- [x] loop detector is appending to agent pool the first user message on rollback; no debug logging on event (FIXED 2026-07-01: surgical_rollback now clears _cached_messages/_cached_llm_messages, added debug logging in execution_engine.py and api_integration.py)
 - [ ] images don't get properly pasted in chat
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent once it reached conclusion
 - [ ] session load must also load the type of agent and instance name from the json file and use that
@@ -60,11 +60,12 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] approval window does not show justification for edit file operation (Fixed 2026-06-30: wired justification through tool classes → operation manager methods → tool_args → PendingApproval. Also fixed WriteFile non-JSON fallback path that silently dropped justification.)
 - [ ] investigate if we can make shell cmd accept special character and multi-line `python -c` commands
       ERROR: 'charmap' codec can't encode character '\u2717' in position 0: character maps to <undefined>
-- [x] compressor does not receive the tool content:
+- [ ] compressor does not receive the agent thoughts:
 ```
-ASSISTANT: Let me check that line in the TODO file.
 ASSISTANT:
-FUNCTION: File content (N:\work\WD\AgentCascade_unified\todo.md), lines 45 to 59 of 129: [TRUNCATED]
+Now let me trace the recovery path more carefully:
+ASSISTANT: [TOOL CALL: read_file({"path":"N:/work/WD/AgentCascade_unified/agent_cascade/run_agent_unified.py"})]
+FUNCTION: OK: Read N:/work/WD/AgentCascade_unified/agent_cascade/run_agent_unified.py lines 1-250/344 (text, 14.9 KB) [TRUNCATED]
 ```
 (Fixed 2026-06-30: _format_messages_for_summary() now includes function_call and tool_calls data as [TOOL CALL: name(args)] in summary text. Also handles modern tool_calls array format, truncates large args to 2KB, uses None-safe checks.)
 

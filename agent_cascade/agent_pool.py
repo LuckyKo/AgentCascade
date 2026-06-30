@@ -1870,6 +1870,11 @@ class AgentPool:
 
             new_len = max(keep_at_least, len(conv) - pop_count)
             del conv[new_len:]
+            
+            # Clear working set caches — conversation was trimmed so cached lists are stale.
+            # This prevents the cache extend path from appending stale messages on next turn.
+            inst._cached_messages.clear()
+            inst._cached_llm_messages.clear()
             # Invalidate token count cache — conversation length changed
             inst._last_token_count_conversation_length = -1
 

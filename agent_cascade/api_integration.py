@@ -447,6 +447,11 @@ def run_agent_in_pool_with_recovery(
         except LoopDetectedError as e:
             looped_agent = e.agent_name if e.agent_name else instance_name
 
+            logger.debug(
+                f"[LOOP_RECOVERY] {looped_agent}: reason={e.reason}, "
+                f"pop_count={e.pop_count}, retry={retry_count}/{max_auto_retries}"
+            )
+
             if not auto_rollback_enabled or retry_count >= max_auto_retries:
                 logger.warning(
                     f"Loop detected for {looped_agent}: {e.reason}. "

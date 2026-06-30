@@ -1200,6 +1200,10 @@ class ExecutionEngine:
             loop_info = _canonical_detect_loop(messages)
             if loop_info:
                 reason, pop_count = loop_info
+                logger.debug(
+                    f"[LOOP_DETECTED] {inst_name}: pattern={reason}, "
+                    f"pop_count={pop_count}, messages={len(messages)}"
+                )
                 logger.warning(f"Loop detected for {inst_name}: {reason}")
                 # Bug #1 fix: Add agent_name to LoopDetectedError for correct rollback target
                 raise LoopDetectedError(reason=reason, agent_name=inst_name, pop_count=pop_count)
