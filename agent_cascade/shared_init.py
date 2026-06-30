@@ -300,7 +300,7 @@ def load_tools_shared(
     All tools use DEFAULT_WORKSPACE from settings — no per-call work_dir needed.
     """
     # Shared tools subset: only the tools that make sense to share across agents
-    SHARED_TOOL_NAMES = ('system_info', 'image_gen', 'web_extractor', 'code_interpreter')
+    SHARED_TOOL_NAMES = ('system_info', 'web_extractor', 'code_interpreter')
 
     # Explicitly pass DEFAULT_WORKSPACE so the dependency is visible in the call site
     work_dir = DEFAULT_WORKSPACE

@@ -26,7 +26,6 @@ ensure_workspace(WORKSPACE_DIR)
 
 # Import built-in tools from agent_cascade (needed for per-agent tool loading)
 from agent_cascade.tools import (
-    image_gen,
     web_extractor,
     storage,
     simple_doc_parser,
