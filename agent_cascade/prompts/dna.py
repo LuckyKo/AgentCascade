@@ -54,6 +54,7 @@ AVAILABLE_TOOLS: List[str] = [
 #   doc_parser     — Document parser
 #   simple_doc_parser  — Simple document parser
 #   extract_doc_vocabulary — Vocabulary extraction
+#   move_file      — Move file/directory (copy+delete achieves same result)
 
 
 # --- XML Transport Settings ---
@@ -185,12 +186,12 @@ TOOL_METADATA = {
             'as it is safer and preserves the rest of the content. '
             'Requires user approval if you do not own the file. '
             'Always read the file content before attempting an edit.\n'
-            'Include at least 3 lines of context matching whitespace and indentation precisely.'
+            'Include at least 3 lines of context matching whitespace and indentation precisely when content matching.'
         ),
         'parameters': {
             'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py').",
-            'old_content': "For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). For delete_and_insert mode: A line range 'start:end' (1-indexed) specifying which lines to delete before inserting new_content, `start` only for insert without delete, `0` for append at end of file.",
-            'new_content': 'The exact literal text to replace old_content with.',
+            'old_content': "For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). For delete_and_insert match_mode: A line range 'start:end' (1-indexed) specifying which lines to delete before inserting new_content, use `start` index only for insertions without delete, `0` for append at end of file.",
+            'new_content': 'The exact literal text to replace old_content with. For delete_and_insert match_mode provide empty string to delete without inserting new content.',
             'match_mode': "Match mode for editing. Options: 'exact' (default, character-for-character match), 'heuristic' (Python-aware structure matching), 'heuristic_agnostic' (whitespace-only normalization), or 'delete_and_insert' (old_content is a line range start:end to delete before inserting new_content).",
             'justification': 'Why you need to edit this file'
         }

@@ -1,6 +1,5 @@
-from .file_ops import ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep, DeleteFile, CopyFile, MoveFile, ReIndent
+from .file_ops import ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep, DeleteFile, CopyFile, ReIndent
 from .manager_ops import (
-    CallAgent,
     ListAgents,
 )
 from .shell_cmd import ShellCmd
@@ -21,9 +20,7 @@ __all__ = [
     'Grep',
     'DeleteFile',
     'CopyFile',
-    'MoveFile',
     'ReIndent',
-    'CallAgent',
     'ListAgents',
     'ShellCmd',
     'SystemInfo',

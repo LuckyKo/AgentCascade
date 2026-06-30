@@ -931,45 +931,6 @@ class CopyFile(BaseTool):
         return self.agent_pool.operation_manager.copy_file(source, destination, self.agent_name)
 
 
-class MoveFile(BaseTool):
-    """Move a file or directory — creates timestamped backup before overwriting existing destination (requires user approval)."""
-
-    name = 'move_file'
-    description = (
-        'Move a file or directory to a new location. If the destination already exists, '
-        'a timestamped backup is created before overwriting. Requires user approval for any files not owned '
-        'by the current agent. Moving files you created in this session is auto-approved.'
-    )
-    parameters = {
-        'type': 'object',
-        'properties': {
-            'source': {
-                'type': 'string',
-                'description': "Path to the source file/directory, absolute or relative to workspace root"
-            },
-            'destination': {
-                'type': 'string',
-                'description': "Path to the destination, absolute or relative to workspace root"
-            }
-        },
-        'required': ['source', 'destination'],
-    }
-
-    def __init__(self, cfg=None, **kwargs):
-        try:
-            super().__init__(cfg)
-        except (ValueError, TypeError):
-            super().__init__()
-        self.agent_pool = kwargs.get('agent_pool')
-        self.agent_name = kwargs.get('agent_name')
-
-    def call(self, params: str, **kwargs) -> str:
-        params = self._verify_json_format_args(params)
-        source = params['source']
-        destination = params['destination']
-        return self.agent_pool.operation_manager.move_file(source, destination, self.agent_name)
-
-
 @register_tool('re_indent', allow_overwrite=True)
 class ReIndent(BaseTool):
     """Re-indents a block of code in a file."""
