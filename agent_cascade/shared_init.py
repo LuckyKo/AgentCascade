@@ -315,7 +315,7 @@ def build_all_agents_list(agent_pool, orchestrator):
 #  7. High-level convenience function (for callers that want one-liner init)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def initialize_infrastructure(project_root: Path, llm_cfg, use_shared_tools: bool = True):
+def initialize_infrastructure(project_root: Path, llm_cfg):
     """
     Full infrastructure initialization in a single call.
 
@@ -325,16 +325,11 @@ def initialize_infrastructure(project_root: Path, llm_cfg, use_shared_tools: boo
         Root of the AgentCascade project (parent of ``agents/`` directory).
     llm_cfg : dict
         LLM configuration dictionary.
-    use_shared_tools : bool
-        If True, tools are instantiated once and shared across agents
-        (start_api_server.py pattern).  If False, each agent gets its own
-        tool instances (start_multi_agent.py pattern).
 
     Returns
     -------
-    tuple[OperationManager, AgentPool, dict | None]
-        (operation_manager, agent_pool, shared_tools_dict)
-        ``shared_tools_dict`` is None when ``use_shared_tools=False``.
+    tuple[OperationManager, AgentPool]
+        (operation_manager, agent_pool)
     """
     workspace_dir = detect_workspace_dir(project_root)
     ensure_workspace(workspace_dir)
@@ -348,12 +343,7 @@ def initialize_infrastructure(project_root: Path, llm_cfg, use_shared_tools: boo
     agent_pool = create_agent_pool(llm_cfg, agents_path, workspace_dir, operation_mgr)
     configure_and_start_pool(agent_pool, idle_timeout, idle_check_interval)
 
-    if use_shared_tools:
-        shared_tools = load_tools_shared(llm_cfg, agent_pool, operation_mgr)
-    else:
-        shared_tools = None
-
-    return operation_mgr, agent_pool, shared_tools
+    return operation_mgr, agent_pool
 
 
 # ──────────────────────────────────────────────────────────────────────────────

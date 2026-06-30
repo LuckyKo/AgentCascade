@@ -40,9 +40,7 @@ def initialize_agents():
         initialize_infrastructure, load_orchestrator, build_all_agents_list,
     )
 
-    operation_mgr, agent_pool, _ = initialize_infrastructure(
-        PROJECT_ROOT, llm_cfg, use_shared_tools=True,
-    )
+    operation_mgr, agent_pool = initialize_infrastructure(PROJECT_ROOT, llm_cfg)
 
     # Tools are already registered by register_standard_tools() during agent loading
     # (via AgentPool._discover_agents → load_agent_template → load_agent).

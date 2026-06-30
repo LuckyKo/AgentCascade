@@ -48,9 +48,7 @@ if __name__ == '__main__':
         load_orchestrator, build_all_agents_list,
     )
 
-    operation_mgr, agent_pool, _ = initialize_infrastructure(
-        PROJECT_ROOT, llm_cfg, use_shared_tools=False,
-    )
+    operation_mgr, agent_pool = initialize_infrastructure(PROJECT_ROOT, llm_cfg)
 
     # Tools are already registered by register_standard_tools() during agent loading.
     # No need to double-load — the disabled_tools filter handles per-agent enable/disable.

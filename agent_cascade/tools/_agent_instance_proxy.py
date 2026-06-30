@@ -87,4 +87,6 @@ class _AgentInstanceFunctionProxy(BaseTool):
 
     def call(self, params=None, **kwargs):
         # Should never be reached — intercepted in ExecutionEngine._process_response
-        return "[SYSTEM ERROR] call_agent should be intercepted by ExecutionEngine, not executed directly."
+        raise RuntimeError(
+            f"Proxy '{self.name}' called directly (should be intercepted by ExecutionEngine)."
+        )
