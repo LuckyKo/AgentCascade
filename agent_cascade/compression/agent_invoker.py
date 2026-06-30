@@ -74,6 +74,20 @@ def _format_messages_for_summary(target_messages):
                         text_parts.append(str(text))
             content = " ".join(text_parts)
 
+        # Check for reasoning_content even if content is populated
+        if isinstance(msg, dict):
+            rc = msg.get('reasoning_content', '') or ''
+        else:
+            rc = getattr(msg, 'reasoning_content', '') or ''
+
+        if rc and isinstance(rc, str) and rc.strip():
+            if not _is_content_empty(content):
+                # Prepend reasoning before content for prominence
+                content = f"[THOUGHT: {rc}]\n{content}"
+            else:
+                # No content, use reasoning as the text
+                content = f"[THOUGHT: {rc}]"
+
         # If content is empty/missing, use shared helper to surface function_call/tool_calls as text
         if _is_content_empty(content):
             tool_text = _format_tool_calls_for_text(msg)

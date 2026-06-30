@@ -706,7 +706,12 @@ def _format_tool_calls_for_text(msg):
             call_parts.append(f"[TOOL CALL: {tc_name}({tc_args})]")
         
         return "\n".join(call_parts)
-    
+
+    # Check reasoning_content (OpenAI-style thinking/reasoning field)
+    rc = _get_field('reasoning_content')
+    if rc and isinstance(rc, str) and rc.strip():
+        return f"[THOUGHT: {rc}]"
+
     return ""
 
 
@@ -763,9 +768,13 @@ def extract_text_from_message(
         logger.debug(f"extract_text_from_message: unexpected content type {type(msg.content).__name__}")
         return ""
 
-    # For assistant messages with empty/missing text, surface function_call or tool_calls as readable text
+    # For assistant messages with empty/missing text, surface reasoning_content first, then function_call/tool_calls
     if not text.strip() and msg.role == 'assistant':
-        text = _format_tool_calls_for_text(msg)
+        rc = getattr(msg, 'reasoning_content', '') or ''
+        if isinstance(rc, str) and rc.strip():
+            text = f"[THOUGHT: {rc}]"
+        else:
+            text = _format_tool_calls_for_text(msg)
 
     return text.strip()
 

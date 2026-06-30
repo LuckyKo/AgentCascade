@@ -132,3 +132,77 @@ class TestExtractTextFunctionCall:
         """M1: Verify MAX_FC_ARGS_LEN is accessible as a module-level constant."""
         assert isinstance(MAX_FC_ARGS_LEN, int)
         assert MAX_FC_ARGS_LEN == 2048
+
+    # --- Reasoning content tests ---
+
+    def test_reasoning_content_included_empty_content(self):
+        """Test that reasoning_content is surfaced when content is empty (dict input)."""
+        msg = {"role": "assistant", "content": "", "reasoning_content": "Let me think about this..."}
+        result = extract_text_from_message(msg, add_upload_info=False)
+        assert "[THOUGHT: Let me think about this...]" in result
+
+    def test_reasoning_content_included_with_content(self):
+        """Test that reasoning_content is prepended when content also exists."""
+        msg = {"role": "assistant", "content": "The answer is 42", "reasoning_content": "I need to calculate this carefully"}
+        result = extract_text_from_message(msg, add_upload_info=False)
+        # extract_text_from_message returns content as-is when non-empty;
+        # prepending reasoning before content is handled by _format_messages_for_summary()
+        assert result == "The answer is 42"
+
+    def test_format_messages_prepends_reasoning(self):
+        """Test that _format_messages_for_summary prepends reasoning before content."""
+        from agent_cascade.compression.agent_invoker import _format_messages_for_summary
+        
+        messages = [
+            {"role": "assistant", "content": "The answer is 42", "reasoning_content": "I need to calculate this carefully"},
+        ]
+        result = _format_messages_for_summary(messages)
+        assert "[THOUGHT: I need to calculate this carefully]" in result
+        assert "The answer is 42" in result
+        # Reasoning should come before content
+        assert result.index("[THOUGHT:") < result.index("The answer")
+
+    def test_format_messages_reasoning_as_fallback(self):
+        """Test that _format_messages_for_summary uses reasoning when content is empty."""
+        from agent_cascade.compression.agent_invoker import _format_messages_for_summary
+        
+        messages = [
+            {"role": "assistant", "content": "", "reasoning_content": "Let me think about this..."},
+        ]
+        result = _format_messages_for_summary(messages)
+        assert "[THOUGHT: Let me think about this...]" in result
+
+    def test_reasoning_content_via_shared_helper(self):
+        """Test that _format_tool_calls_for_text also returns reasoning_content."""
+        msg = {"role": "assistant", "content": "", "reasoning_content": "Step by step analysis..."}
+        result = _format_tool_calls_for_text(msg)
+        assert "[THOUGHT: Step by step analysis...]" == result
+
+    def test_reasoning_content_priority_over_tool_calls(self):
+        """Test that reasoning_content takes priority over tool_calls when both present with empty content."""
+        msg = {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Let me reason through this",
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "search_web", "arguments": "{}"}}]
+        }
+        result = extract_text_from_message(msg, add_upload_info=False)
+        assert "[THOUGHT: Let me reason through this]" in result
+
+    def test_reasoning_content_on_message_object(self):
+        """Test reasoning_content works with Message objects."""
+        msg = Message(role="assistant", content="", extra={"reasoning_content": "Thinking process here"})
+        result = extract_text_from_message(msg, add_upload_info=False)
+        assert "[THOUGHT: Thinking process here]" in result
+
+    def test_reasoning_content_user_role_ignored(self):
+        """Test that reasoning_content for user messages is not surfaced (only assistant)."""
+        msg = {"role": "user", "content": "", "reasoning_content": "User thinking"}
+        result = extract_text_from_message(msg, add_upload_info=False)
+        assert result == ""
+
+    def test_reasoning_content_whitespace_only(self):
+        """Test that whitespace-only reasoning_content is treated as empty."""
+        msg = {"role": "assistant", "content": "", "reasoning_content": "   \n  "}
+        result = extract_text_from_message(msg, add_upload_info=False)
+        assert result == ""
