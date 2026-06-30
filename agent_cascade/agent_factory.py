@@ -36,8 +36,10 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
         agent_pool: The AgentPool instance (for file ops and approvals).
         agent_name: The role name (e.g. 'orchestrator', 'coder').
     """
-    from agent_cascade.tools._agent_instance_proxy import _AgentInstanceFunctionProxy, CALL_AGENT_SCHEMA
-    from agent_cascade.prompts.dna import TOOL_METADATA, AVAILABLE_TOOLS
+    from agent_cascade.tools._agent_instance_proxy import (
+        _AgentInstanceFunctionProxy, CALL_AGENT_SCHEMA, DISMISS_AGENT_SCHEMA,
+    )
+    from agent_cascade.prompts.dna import AVAILABLE_TOOLS
 
     # ── Tool factory: maps tool name → (instance, needs_pool, needs_name) ──────
     # needs_pool  = set agent_pool attribute on the tool instance
@@ -50,24 +52,7 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
         elif tool_name == 'list_agents':
             tools_to_register[tool_name] = (ListAgents(agent_pool=agent_pool), False, False)
         elif tool_name == 'dismiss_agent':
-            dismiss_schema = {
-                'name': 'dismiss_agent',
-                'description': TOOL_METADATA['dismiss_agent']['description'],
-                'parameters': {
-                    'type': 'object',
-                    'properties': {
-                        'instance_name': {
-                            'type': 'string',
-                            'description': TOOL_METADATA['dismiss_agent']['parameters']['instance_name']
-                        },
-                        'all_idle': {
-                            'type': 'boolean',
-                            'description': TOOL_METADATA['dismiss_agent']['parameters']['all_idle']
-                        }
-                    }
-                }
-            }
-            tools_to_register[tool_name] = (_AgentInstanceFunctionProxy(dismiss_schema), False, False)
+            tools_to_register[tool_name] = (_AgentInstanceFunctionProxy(DISMISS_AGENT_SCHEMA), False, False)
         elif tool_name == 'read_file':
             t = ReadFile()
             tools_to_register[tool_name] = (t, True, False)

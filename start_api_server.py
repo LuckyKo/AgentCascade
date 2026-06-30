@@ -20,40 +20,13 @@ from agent_cascade.shared_init import detect_workspace_dir, ensure_workspace
 WORKSPACE_DIR = detect_workspace_dir(PROJECT_ROOT)
 ensure_workspace(WORKSPACE_DIR)
 
-from agent_cascade.tools.custom import DDGSearch
+# Tool availability is driven by AVAILABLE_TOOLS in dna.py.
 llm_cfg = {
     'model': 'whatever_is_on',
     'model_server': 'http://localhost:1234/v1',
     'api_key': 'EMPTY',
     'model_type': 'qwenvl_oai',
     'max_input_tokens': 65536,
-}
-
-DEFAULT_TOOLS = {
-    'orchestrator': [
-        'call_agent', 'dismiss_agent', 'list_agents',
-        'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'read_file', 'view_image', 'list_dir', 'grep',
-        'ddg_search', 'web_extractor', 'system_info'
-    ],
-    'coder': [
-        'call_agent', 'list_agents',
-        'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'list_dir', 'grep', 'code_interpreter', 'shell_cmd',
-        'ddg_search', 'web_extractor'
-    ],
-    'researcher': [
-        'call_agent', 'list_agents',
-        'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'list_dir', 'grep', 'code_interpreter',
-        'ddg_search', 'web_extractor'
-    ],
-    'writer': [
-        'call_agent', 'list_agents',
-        'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'list_dir',
-        'ddg_search', 'web_extractor'
-    ],
-    'reviewer': [
-        'call_agent', 'list_agents',
-        'read_file', 'view_image', 'compress_context', 'list_dir', 'grep', 'code_interpreter',
-    ],
 }
 
 
@@ -67,36 +40,15 @@ def initialize_agents():
         initialize_infrastructure, load_orchestrator, build_all_agents_list,
     )
 
-    operation_mgr, agent_pool, shared_tools = initialize_infrastructure(
+    operation_mgr, agent_pool, _ = initialize_infrastructure(
         PROJECT_ROOT, llm_cfg, use_shared_tools=True,
     )
 
-    # Add DDGSearch to the shared tools dict (not loaded by shared_init since it's defined per-entry-point)
-    shared_tools['ddg_search'] = DDGSearch()
+    # Tools are already registered by register_standard_tools() during agent loading.
+    # Shared tools (system_info, web_extractor, code_interpreter) were distributed above
+    # but agents already have them via AVAILABLE_TOOLS — no double-loading needed.
 
-    # NOTE: storage, retrieval, simple_doc_parser, doc_parser, extract_doc_vocabulary are intentionally NOT added.
-    # They remain in TOOL_REGISTRY (needed by Memory/RAG internally) but are hidden from agents.
-
-    # Add tools to all agents based on their role
-    for agent_name in agent_pool.list_agents():
-        agent = agent_pool.get_agent(agent_name)
-        if agent:
-            default_tools = DEFAULT_TOOLS.get(agent_name, DEFAULT_TOOLS['writer'])
-            agent.default_tools = default_tools
-
-            for tool_name, tool_inst in shared_tools.items():
-                agent.function_map[tool_name] = tool_inst
-
-    # Load orchestrator from the pool (already discovered during AgentPool.__init__ → _discover_agents)
-    orchestrator = load_orchestrator(agent_pool)
-
-    default_orch_tools = DEFAULT_TOOLS['orchestrator']
-    orchestrator.default_tools = default_orch_tools
-
-    for tool_name, tool_inst in shared_tools.items():
-        orchestrator.function_map[tool_name] = tool_inst
-
-    all_agents = build_all_agents_list(agent_pool, orchestrator)
+    all_agents = build_all_agents_list(agent_pool, load_orchestrator(agent_pool))
 
     logger.info("[OK] Available agents: %s", [a.name for a in all_agents])
     logger.info("[OK] Loaded tools: %s", list(shared_tools.keys()))

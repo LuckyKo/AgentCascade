@@ -47,6 +47,28 @@ CALL_AGENT_SCHEMA = {
     },
 }
 
+DISMISS_AGENT_SCHEMA = {
+    'name': 'dismiss_agent',
+    'description': (
+        "End a sub-agent instance's current task and clear its conversation context. "
+        "Use when you're done with a sub-agent and don't need its context anymore."
+    ),
+    'parameters': {
+        'type': 'object',
+        'properties': {
+            'instance_name': {
+                'type': 'string',
+                'description': 'Name of the sub-agent instance to dismiss (optional if all_idle is true)'
+            },
+            'all_idle': {
+                'type': 'boolean',
+                'description': 'If true, dismiss all sub-agents that are currently IDLE. Default is false.'
+            },
+        },
+        'required': [],  # lenient: both params optional (all_idle=true works alone)
+    },
+}
+
 
 class _AgentInstanceFunctionProxy(BaseTool):
     """Schema-only proxy for call_agent function registration.
