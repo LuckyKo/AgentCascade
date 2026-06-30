@@ -472,10 +472,16 @@ class AgentInstanceLogger:
                         last_marker_idx = i
                         break
 
-                # ── Dedup guard: check if a compression marker already exists in the log file ──
-                # No role check — be conservative and skip insertion if *any* marker exists
-                existing_has_marker = any(
-                    isinstance(m.get('content', ''), str) and m['content'].startswith(COMPRESSION_MARKER)
+                # ── Extract the actual marker content from pool for exact dedup comparison ──
+                marker_content = ''
+                if last_marker_idx >= 0 and last_marker_idx < len(new_history):
+                    mh = new_history[last_marker_idx]
+                    marker_content = mh.get('content', '') if isinstance(mh, dict) else getattr(mh, 'content', '')
+
+                # ── Dedup guard: check if THIS specific marker content already exists in the log file ──
+                # Exact match (not prefix) so cumulative compression with different summaries still inserts new markers
+                marker_already_in_file = any(
+                    isinstance(m.get('content', ''), str) and m['content'] == marker_content
                     for m in existing_msgs
                 ) if last_marker_idx >= 0 else False
 
@@ -487,8 +493,8 @@ class AgentInstanceLogger:
                     insert_pos = len(existing_msgs) - actual_tail_count  # Mirror tail distance in JSONL
                     insert_pos = max(0, min(insert_pos, len(existing_msgs)))
 
-                    if existing_has_marker:
-                        result_msgs = existing_msgs  # Marker already present — skip insertion to avoid duplicates
+                    if marker_already_in_file:
+                        result_msgs = existing_msgs  # Same content already present — skip insertion to avoid duplicates
                     else:
                         result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
                 else:
