@@ -1,9 +1,8 @@
 """
 Shared initialization utilities for start_api_server.py and start_multi_agent.py.
 
-Extracts the common infrastructure setup (workspace creation, OperationManager,
-AgentPool, tool loading) into reusable functions to eliminate ~180 lines of
-duplicated code across both entry points.
+Extracts the common infrastructure setup (workspace detection, OperationManager,
+AgentPool) into reusable functions to eliminate duplicated code across both entry points.
 
 Issue: C2 - Extract shared initialization code
 """
@@ -13,7 +12,6 @@ import signal as _signal_mod  # internal alias — avoids polluting module names
 from pathlib import Path
 
 from agent_cascade.log import logger
-from agent_cascade.settings import DEFAULT_WORKSPACE
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -108,167 +106,7 @@ def configure_and_start_pool(agent_pool, idle_timeout: float, idle_check_interva
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  3. Tool instantiation helpers (one per tool)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _instantiate_web_extractor(work_dir: str):
-    """Instantiate the WebExtractor tool."""
-    from agent_cascade.tools import web_extractor
-    return web_extractor.WebExtractor(cfg={'work_dir': work_dir})
-
-
-def _instantiate_storage():
-    """Instantiate the Storage tool."""
-    from agent_cascade.tools import storage
-    return storage.Storage()
-
-
-def _instantiate_retrieval(work_dir: str):
-    """Instantiate the Retrieval tool."""
-    from agent_cascade.tools import retrieval as retrieval_mod
-    return retrieval_mod.Retrieval(cfg={'work_dir': work_dir})
-
-
-def _instantiate_simple_doc_parser(work_dir: str):
-    """Instantiate the SimpleDocParser tool."""
-    from agent_cascade.tools import simple_doc_parser
-    return simple_doc_parser.SimpleDocParser(cfg={'work_dir': work_dir})
-
-
-def _instantiate_doc_parser(work_dir: str):
-    """Instantiate the DocParser tool."""
-    from agent_cascade.tools import doc_parser
-    return doc_parser.DocParser(cfg={'work_dir': work_dir})
-
-
-def _instantiate_extract_doc_vocabulary(work_dir: str):
-    """Instantiate the ExtractDocVocabulary tool."""
-    from agent_cascade.tools import extract_doc_vocabulary
-    return extract_doc_vocabulary.ExtractDocVocabulary(cfg={'work_dir': work_dir})
-
-
-def _instantiate_code_interpreter(work_dir: str, operation_manager=None):
-    """Instantiate the CodeInterpreter tool and attach OperationManager if provided.
-
-    Note: CodeInterpreter.__init__ hardcodes self._operation_manager = None and does not
-    read it from the cfg dict, so direct attribute assignment is required. This is safe —
-    _operation_manager is an internal reference used only for dynamic extra-folder
-    resolution (_resolve_extra_folders) and is never mutated externally.
-    """
-    from agent_cascade.tools import code_interpreter
-    inst = code_interpreter.CodeInterpreter(cfg={'work_dir': work_dir})
-    if operation_manager:
-        inst._operation_manager = operation_manager  # cfg doesn't support this — direct assignment required
-    return inst
-
-
-def _instantiate_system_info(agent_pool):
-    """Instantiate the SystemInfo tool."""
-    from agent_cascade.tools.custom import SystemInfo
-    return SystemInfo(agent_pool=agent_pool)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  Tool registry: maps tool_name -> (factory_fn, list_of_required_param_names)
-#
-# Each entry declares which keyword arguments the factory needs. The loader
-# inspects this list and builds a kwargs dict from whatever is available at call
-# time. If a required param is None/missing the tool is skipped (logged at DEBUG).
-# ──────────────────────────────────────────────────────────────────────────────
-
-TOOL_REGISTRY = {
-    'web_extractor':          (_instantiate_web_extractor,     ['work_dir']),
-    'storage':                (_instantiate_storage,           []),
-    'retrieval':              (_instantiate_retrieval,         ['work_dir']),
-    'simple_doc_parser':      (_instantiate_simple_doc_parser, ['work_dir']),
-    'doc_parser':             (_instantiate_doc_parser,        ['work_dir']),
-    'extract_doc_vocabulary': (_instantiate_extract_doc_vocabulary, ['work_dir']),
-    'code_interpreter':       (_instantiate_code_interpreter,  ['work_dir', 'operation_manager']),
-    'system_info':            (_instantiate_system_info,       ['agent_pool']),
-}
-
-# Human-readable display names (used in log messages)
-TOOL_DISPLAY = {
-    'web_extractor':          'WebExtractor',
-    'storage':                'Storage',
-    'retrieval':              'Retrieval',
-    'simple_doc_parser':      'SimpleDocParser',
-    'doc_parser':             'DocParser',
-    'extract_doc_vocabulary': 'ExtractDocVocabulary',
-    'code_interpreter':       'CodeInterpreter',
-    'system_info':            'SystemInfo',
-}
-
-
-def _load_tool(name, registry, work_dir=None, llm_cfg=None, operation_manager=None, agent_pool=None):
-    """
-    Look up *name* in the tool registry and instantiate it.
-
-    Returns the tool instance on success, or ``None`` on failure (logged at WARNING).
-    """
-    if name not in registry:
-        return None
-
-    factory, required_params = registry[name]
-    display_name = TOOL_DISPLAY.get(name, name)
-
-    # Source pool of all available keyword arguments
-    param_pool = {
-        'work_dir': work_dir or DEFAULT_WORKSPACE,
-        'llm_cfg': llm_cfg,
-        'operation_manager': operation_manager,
-        'agent_pool': agent_pool,
-    }
-
-    # Build kwargs from the subset the factory actually needs
-    kwargs = {}
-    for p in required_params:
-        val = param_pool.get(p)
-        if val is None and p != 'work_dir':  # work_dir always has a default via DEFAULT_WORKSPACE
-            logger.debug("[INIT] %s skipped (missing required param '%s')", display_name, p)
-            return None
-        kwargs[p] = val
-
-    try:
-        instance = factory(**kwargs)
-        logger.debug("[INIT] %s tool loaded", display_name)
-        return instance
-    except Exception as e:
-        logger.warning("[INIT] %s tool skipped (not available): %s", display_name, e)
-        return None
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  4. Tool loading with error handling (returns dict of name -> instance)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def load_tools_shared(
-    llm_cfg, agent_pool=None, operation_manager=None
-):
-    """Instantiate *shared* tool instances that can be distributed across agents."""
-    SHARED_TOOL_NAMES = ('system_info', 'web_extractor', 'code_interpreter')
-    work_dir = DEFAULT_WORKSPACE
-
-    tools = {}
-    for name in SHARED_TOOL_NAMES:
-        instance = _load_tool(
-            name, TOOL_REGISTRY,
-            work_dir=work_dir, llm_cfg=llm_cfg,
-            operation_manager=operation_manager, agent_pool=agent_pool,
-        )
-        if instance is not None:
-            tools[name] = instance
-
-    missing = set(SHARED_TOOL_NAMES) - set(TOOL_REGISTRY)
-    if missing:
-        logger.debug("[INIT] Shared tools not in registry (likely a bug): %s", sorted(missing))
-
-    if not tools:
-        logger.warning("[INIT] No tools were successfully loaded — agents will have limited capabilities")
-    return tools
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  5. Orchestrator loading with fallback
+#  3. Orchestrator loading with fallback
 # ──────────────────────────────────────────────────────────────────────────────
 
 def load_orchestrator(agent_pool):
@@ -292,7 +130,7 @@ def load_orchestrator(agent_pool):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  6. Build the all_agents list from pool + orchestrator
+#  4. Build the all_agents list from pool + orchestrator
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_all_agents_list(agent_pool, orchestrator):
@@ -312,7 +150,7 @@ def build_all_agents_list(agent_pool, orchestrator):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  7. High-level convenience function (for callers that want one-liner init)
+#  5. High-level convenience function (for callers that want one-liner init)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def initialize_infrastructure(project_root: Path, llm_cfg):
@@ -347,7 +185,7 @@ def initialize_infrastructure(project_root: Path, llm_cfg):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  8. Signal handler for graceful shutdown (shared across entry points)
+#  6. Signal handler for graceful shutdown (shared across entry points)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def setup_signal_handler(agent_pool, server=None):
