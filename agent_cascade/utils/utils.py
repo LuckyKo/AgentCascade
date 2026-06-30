@@ -38,6 +38,9 @@ from pydantic import BaseModel
 from agent_cascade.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION, ROLE, SYSTEM, USER, ContentItem, Message
 from agent_cascade.log import logger
 
+# Max length for function/tool call arguments before truncation (shared across utils and agent_invoker)
+MAX_FC_ARGS_LEN = 2048
+
 
 # ── Message Field Accessor Helpers (consolidated from execution_engine, handler, api_server) ──
 
@@ -623,6 +626,90 @@ def save_audio_to_file(base_64: str, file_name: str):
     sf.write(file_name, audio_np, samplerate=24000)
 
 
+def _format_tool_calls_for_text(msg):
+    """Format function_call and tool_calls from an assistant message into readable text.
+    
+    Shared helper used by both extract_text_from_message() and agent_invoker._format_messages_for_summary().
+    Handles dict and Message objects, legacy function_call and modern tool_calls array formats.
+    Arguments exceeding MAX_FC_ARGS_LEN are truncated to prevent context blowup.
+    
+    Args:
+        msg: Message object or dict with message fields.
+        
+    Returns:
+        Formatted text like "[TOOL CALL: name(args)]" or empty string if no tool calls found.
+    """
+    # Helper to extract a field from msg (checks direct attribute/dict key, then extra dict)
+    def _get_field(field_name):
+        if isinstance(msg, dict):
+            val = msg.get(field_name)
+            if val is None and 'extra' in msg and isinstance(msg['extra'], dict):
+                val = msg['extra'].get(field_name)
+            return val
+        else:
+            val = getattr(msg, field_name, None)
+            # Also check extra dict on Message objects for non-schema fields like tool_calls
+            if val is None:
+                extra = getattr(msg, 'extra', None)
+                if isinstance(extra, dict):
+                    val = extra.get(field_name)
+            return val
+
+    # Check legacy single function_call (takes priority)
+    fc = _get_field('function_call')
+    
+    if fc is not None:
+        if isinstance(fc, dict):
+            fc_name = fc.get('name', 'unknown')
+            fc_args = fc.get('arguments', '')
+        else:
+            fc_name = getattr(fc, 'name', 'unknown')
+            fc_args = getattr(fc, 'arguments', '')
+        
+        # Truncate large arguments to avoid context blowup
+        if isinstance(fc_args, str) and len(fc_args) > MAX_FC_ARGS_LEN:
+            fc_args = fc_args[:MAX_FC_ARGS_LEN] + '... [TRUNCATED]'
+        
+        return f"[TOOL CALL: {fc_name}({fc_args})]"
+    
+    # Check modern tool_calls array
+    tc = _get_field('tool_calls')
+    
+    if tc is not None and isinstance(tc, list) and len(tc) > 0:
+        call_parts = []
+        for tc_item in tc:
+            # Extract function name and arguments from dict or object
+            if isinstance(tc_item, dict):
+                tc_func = tc_item.get('function', {})
+                if isinstance(tc_func, dict):
+                    tc_name = tc_func.get('name', 'unknown')
+                    tc_args = tc_func.get('arguments', '')
+                else:
+                    tc_name = getattr(tc_func, 'name', 'unknown')
+                    tc_args = getattr(tc_func, 'arguments', '')
+            elif hasattr(tc_item, 'function'):
+                tc_func = tc_item.function
+                if hasattr(tc_func, 'name'):
+                    tc_name = tc_func.name
+                    tc_args = tc_func.arguments if hasattr(tc_func, 'arguments') else ''
+                else:
+                    tc_name = 'unknown'
+                    tc_args = ''
+            else:
+                tc_name = 'unknown'
+                tc_args = ''
+            
+            # Truncate large arguments to avoid context blowup
+            if isinstance(tc_args, str) and len(tc_args) > MAX_FC_ARGS_LEN:
+                tc_args = tc_args[:MAX_FC_ARGS_LEN] + '... [TRUNCATED]'
+            
+            call_parts.append(f"[TOOL CALL: {tc_name}({tc_args})]")
+        
+        return "\n".join(call_parts)
+    
+    return ""
+
+
 def extract_text_from_message(
     msg: Union[Message, dict, list, bool, None],
     add_upload_info: bool,
@@ -642,8 +729,6 @@ def extract_text_from_message(
         Extracted text content, or empty string for unexpected types.
     """
     from agent_cascade.log import logger
-
-    MAX_FC_ARGS_LEN = 2048  # Truncate large function arguments to avoid context blowup
 
     # Handle None gracefully (defensive check)
     if msg is None:
@@ -679,53 +764,8 @@ def extract_text_from_message(
         return ""
 
     # For assistant messages with empty/missing text, surface function_call or tool_calls as readable text
-    if not text.strip():
-        if msg.role == 'assistant':
-            # Legacy single function_call
-            fc = msg.function_call if msg_has_field(msg, 'function_call') else None
-            if fc is not None:
-                if isinstance(fc, dict):
-                    fc_name = fc.get('name', 'unknown')
-                    fc_args = fc.get('arguments', '')
-                else:
-                    fc_name = getattr(fc, 'name', 'unknown')
-                    fc_args = getattr(fc, 'arguments', '')
-                # Truncate large arguments to avoid context blowup
-                if isinstance(fc_args, str) and len(fc_args) > MAX_FC_ARGS_LEN:
-                    fc_args = fc_args[:MAX_FC_ARGS_LEN] + '... [TRUNCATED]'
-                text = f"[TOOL CALL: {fc_name}({fc_args})]"
-
-            # Modern tool_calls array
-            if not text.strip():
-                tc = msg.tool_calls if msg_has_field(msg, 'tool_calls') else None
-                if tc is not None and isinstance(tc, list) and len(tc) > 0:
-                    call_parts = []
-                    for tc_item in tc:
-                        # Extract function name and arguments from dict or object
-                        if isinstance(tc_item, dict):
-                            tc_func = tc_item.get('function', {})
-                            if isinstance(tc_func, dict):
-                                tc_name = tc_func.get('name', 'unknown')
-                                tc_args = tc_func.get('arguments', '')
-                            else:
-                                tc_name = getattr(tc_func, 'name', 'unknown')
-                                tc_args = getattr(tc_func, 'arguments', '')
-                        elif hasattr(tc_item, 'function'):
-                            tc_func = tc_item.function
-                            if hasattr(tc_func, 'name'):
-                                tc_name = tc_func.name
-                                tc_args = tc_func.arguments if hasattr(tc_func, 'arguments') else ''
-                            else:
-                                tc_name = 'unknown'
-                                tc_args = ''
-                        else:
-                            tc_name = 'unknown'
-                            tc_args = ''
-                        # Truncate large arguments to avoid context blowup
-                        if isinstance(tc_args, str) and len(tc_args) > MAX_FC_ARGS_LEN:
-                            tc_args = tc_args[:MAX_FC_ARGS_LEN] + '... [TRUNCATED]'
-                        call_parts.append(f"[TOOL CALL: {tc_name}({tc_args})]")
-                    text = "\n".join(call_parts)
+    if not text.strip() and msg.role == 'assistant':
+        text = _format_tool_calls_for_text(msg)
 
     return text.strip()
 
