@@ -626,6 +626,34 @@ def save_audio_to_file(base_64: str, file_name: str):
     sf.write(file_name, audio_np, samplerate=24000)
 
 
+def _msg_field_or_extra(msg, field_name):
+    """Extract a field from msg, checking direct attribute/dict key first, then the extra dict.
+    
+    Shared helper for accessing message fields that may live on the message directly
+    or nested inside an 'extra' dict (common for non-schema fields like tool_calls).
+    
+    Args:
+        msg: Message object or dict with message fields.
+        field_name: Field name to look up.
+        
+    Returns:
+        Field value, or None if not found.
+    """
+    if isinstance(msg, dict):
+        val = msg.get(field_name)
+        if val is None and 'extra' in msg and isinstance(msg['extra'], dict):
+            val = msg['extra'].get(field_name)
+        return val
+    else:
+        val = getattr(msg, field_name, None)
+        # Also check extra dict on Message objects for non-schema fields like tool_calls
+        if val is None:
+            extra = getattr(msg, 'extra', None)
+            if isinstance(extra, dict):
+                val = extra.get(field_name)
+        return val
+
+
 def _format_tool_calls_for_text(msg):
     """Format function_call and tool_calls from an assistant message into readable text.
     
@@ -639,29 +667,8 @@ def _format_tool_calls_for_text(msg):
     Returns:
         Formatted text like "[TOOL CALL: name(args)]" or empty string if no tool calls found.
     """
-    # Helper to extract a field from msg (checks direct attribute/dict key, then extra dict)
-    def _get_field(field_name):
-        if isinstance(msg, dict):
-            val = msg.get(field_name)
-            if val is None and 'extra' in msg and isinstance(msg['extra'], dict):
-                val = msg['extra'].get(field_name)
-            return val
-        else:
-            val = getattr(msg, field_name, None)
-            # Also check extra dict on Message objects for non-schema fields like tool_calls
-            if val is None:
-                extra = getattr(msg, 'extra', None)
-                if isinstance(extra, dict):
-                    val = extra.get(field_name)
-            return val
-
-    # Extract reasoning_content once (OpenAI-style thinking/reasoning field) —
-    # it provides context for WHY tools were called, prepended to any tool call output
-    rc = _get_field('reasoning_content')
-    rc_text = _reasoning_to_text(rc)
-
     # Check legacy single function_call (takes highest priority)
-    fc = _get_field('function_call')
+    fc = _msg_field_or_extra(msg, 'function_call')
     
     if fc is not None:
         if isinstance(fc, dict):
@@ -675,11 +682,10 @@ def _format_tool_calls_for_text(msg):
         if isinstance(fc_args, str) and len(fc_args) > MAX_FC_ARGS_LEN:
             fc_args = fc_args[:MAX_FC_ARGS_LEN] + '... [TRUNCATED]'
         
-        result = f"[TOOL CALL: {fc_name}({fc_args})]"
-        return f"[THOUGHT: {rc_text}]\n{result}" if rc_text else result
+        return f"[TOOL CALL: {fc_name}({fc_args})]"
     
     # Check modern tool_calls array
-    tc = _get_field('tool_calls')
+    tc = _msg_field_or_extra(msg, 'tool_calls')
     
     if tc is not None and isinstance(tc, list) and len(tc) > 0:
         call_parts = []
@@ -711,12 +717,7 @@ def _format_tool_calls_for_text(msg):
             
             call_parts.append(f"[TOOL CALL: {tc_name}({tc_args})]")
         
-        result = "\n".join(call_parts)
-        return f"[THOUGHT: {rc_text}]\n{result}" if rc_text else result
-
-    # Only reasoning_content, no tool calls
-    if rc_text:
-        return f"[THOUGHT: {rc_text}]"
+        return "\n".join(call_parts)
 
     return ""
 
@@ -810,9 +811,16 @@ def extract_text_from_message(
         logger.debug(f"extract_text_from_message: unexpected content type {type(msg.content).__name__}")
         return ""
 
-    # For assistant messages with empty/missing text, surface tool calls or reasoning as readable text
+    # For assistant messages with empty/missing text, check reasoning first, then tool calls
     if not text.strip() and msg.role == 'assistant':
-        text = _format_tool_calls_for_text(msg)
+        # Check reasoning_content (OpenAI-style thinking/reasoning field)
+        rc = _msg_field_or_extra(msg, 'reasoning_content')
+        rc_text = _reasoning_to_text(rc)
+        if rc_text:
+            text = f"[THOUGHT: {rc_text}]"
+        else:
+            # Fall back to tool calls
+            text = _format_tool_calls_for_text(msg)
 
     return text.strip()
 

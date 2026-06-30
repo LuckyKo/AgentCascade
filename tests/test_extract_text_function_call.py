@@ -173,10 +173,10 @@ class TestExtractTextFunctionCall:
         assert "[THOUGHT: Let me think about this...]" in result
 
     def test_reasoning_content_via_shared_helper(self):
-        """Test that _format_tool_calls_for_text also returns reasoning_content."""
+        """Test that _format_tool_calls_for_text returns empty for reasoning-only messages."""
         msg = {"role": "assistant", "content": "", "reasoning_content": "Step by step analysis..."}
         result = _format_tool_calls_for_text(msg)
-        assert "[THOUGHT: Step by step analysis...]" == result
+        assert result == ""
 
     def test_reasoning_content_priority_over_tool_calls(self):
         """Test that reasoning_content takes priority over tool_calls when both present with empty content."""
@@ -223,7 +223,7 @@ class TestExtractTextFunctionCall:
         assert "Second thought" in result
 
     def test_reasoning_content_list_type_via_helper(self):
-        """Test that _format_tool_calls_for_text handles list-type reasoning."""
+        """Test that _format_tool_calls_for_text returns empty for list-type reasoning."""
         msg = {
             "role": "assistant",
             "content": "",
@@ -233,7 +233,7 @@ class TestExtractTextFunctionCall:
             ]
         }
         result = _format_tool_calls_for_text(msg)
-        assert "[THOUGHT: Step one Step two]" == result
+        assert result == ""
 
     def test_reasoning_content_list_empty_items(self):
         """Test that list-type reasoning with empty text items returns empty."""
@@ -259,11 +259,11 @@ class TestExtractTextFunctionCall:
         assert len(result) < 3100
 
     def test_reasoning_content_truncation_via_helper(self):
-        """Test that _format_tool_calls_for_text truncates large reasoning."""
+        """Test that _format_tool_calls_for_text returns empty for reasoning-only messages."""
         long_thought = "y" * 3000
         msg = {"role": "assistant", "content": "", "reasoning_content": long_thought}
         result = _format_tool_calls_for_text(msg)
-        assert "... [TRUNCATED]" in result
+        assert result == ""
 
     def test_reasoning_combined_with_tool_calls_on_message_object(self):
         """Test combined reasoning + tool_calls on Message object via extra dict."""
@@ -282,16 +282,17 @@ class TestExtractTextFunctionCall:
         assert "[THOUGHT:" in result or "[TOOL CALL:" in result
 
     def test_reasoning_content_list_truncation(self):
-        """Test that list-type reasoning_content is also truncated."""
+        """Test that list-type reasoning_content is also truncated via extract_text_from_message."""
         long_text = "z" * 3000
         msg = {
             "role": "assistant",
             "content": "",
             "reasoning_content": [
-                {"type": "text", "text": long_text}
+                {"text": long_text}
             ]
         }
-        result = _format_tool_calls_for_text(msg)
+        result = extract_text_from_message(msg, add_upload_info=False)
+        assert "[THOUGHT:" in result
         assert "... [TRUNCATED]" in result
 
     def test_format_messages_list_reasoning(self):

@@ -33,6 +33,13 @@ _SUMMARY_PREFIXES = [
 ]
 
 
+def _is_content_empty(val):
+    """Check if content is empty (handles whitespace-only strings and missing values)."""
+    if isinstance(val, str):
+        return val.strip() == ''
+    return not val
+
+
 def _format_messages_for_summary(target_messages):
     """
     Format a list of messages into plain text for the compression prompt.
@@ -53,12 +60,6 @@ def _format_messages_for_summary(target_messages):
         else:
             role = getattr(msg, 'role', 'unknown').upper()
             content = getattr(msg, 'content', '')
-
-        # Helper to check if content is empty (handles whitespace-only strings and missing values)
-        def _is_content_empty(val):
-            if isinstance(val, str):
-                return val.strip() == ''
-            return not val
 
         # Handle multi-modal content (list of items) — flatten to text string
         if isinstance(content, list):
