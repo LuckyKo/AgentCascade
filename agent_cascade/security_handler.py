@@ -15,6 +15,32 @@ from typing import Any, Dict, Optional
 # ── Module-level helpers used by the security handler ───────────────────────
 
 
+def _get_ws_loop(agent_pool):
+    """Get the running WebSocket event loop from the agent pool.
+
+    The security handler runs in background threads that have no event loop.
+    We use the pool's stored reference to the main event loop (set by
+    run_agent_unified.py) so that run_coroutine_threadsafe() can actually
+    execute scheduled coroutines on a running loop.
+
+    Returns None if unavailable — callers should skip WebSocket notifications
+    (they are best-effort UI feedback). Aligns with codebase-wide pattern used
+    in api_integration.py, stream_publisher.py, and api_server.py.
+    """
+    if agent_pool is None:
+        return None
+
+    ws_loop = getattr(agent_pool, '_ws_loop', None)
+    if ws_loop is not None:
+        try:
+            if not ws_loop.is_closed():
+                return ws_loop
+        except Exception:
+            pass  # Loop object may be corrupted; treat as unavailable
+
+    return None
+
+
 def _get_security_check_lock(app):
     """Get (creating if needed) the app-level security check lock."""
     if not hasattr(app, 'security_check_lock'):
@@ -153,14 +179,15 @@ class SecurityAdvisorHandler:
             if auto_apply:
                 self.agent_pool.operation_manager.user_reject(rid, f"Security check error: {e}")
             else:
-                loop = asyncio.get_event_loop()
-                asyncio.run_coroutine_threadsafe(
-                    self.send_queue.put({
-                        'type': 'security_response',
-                        'response': f"Error during security check: {e}",
-                    }),
-                    loop,
-                )
+                loop = _get_ws_loop(self.agent_pool)
+                if loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self.send_queue.put({
+                            'type': 'security_response',
+                            'response': f"Error during security check: {e}",
+                        }),
+                        loop,
+                    )
 
     # ── Core execution (extracted from the ~400-line inline block) ────────
     def _execute_check(
@@ -349,7 +376,7 @@ class SecurityAdvisorHandler:
             is_yes, is_no, justification = self._parse_verdict(parsing_response)
 
             # ── Handle result: timeout / verdict / ambiguous ───────────────
-            loop = asyncio.get_event_loop()
+            loop = _get_ws_loop(self.agent_pool)
             self._handle_result(
                 rid, auto_apply, sec_state_key, parsing_response,
                 is_yes, is_no, justification,
@@ -502,25 +529,26 @@ class SecurityAdvisorHandler:
         if not auto_apply:
             response_text += " Please resubmit with clearer justification if needed."
 
-        loop = asyncio.get_event_loop()
-        asyncio.run_coroutine_threadsafe(
-            self.send_queue.put({
-                'type': 'security_response',
-                'request_id': rid,
-                'response': response_text,
-                'verdict': 'TIMEOUT',
-            }),
-            loop,
-        )
+        loop = _get_ws_loop(self.agent_pool)
+        if loop:
+            asyncio.run_coroutine_threadsafe(
+                self.send_queue.put({
+                    'type': 'security_response',
+                    'request_id': rid,
+                    'response': response_text,
+                    'verdict': 'TIMEOUT',
+                }),
+                loop,
+            )
 
-        # Broadcast updated approval list so stale card is removed from frontend
-        asyncio.run_coroutine_threadsafe(
-            self.send_queue.put({
-                'type': 'approvals',
-                'approvals': self.agent_pool.operation_manager.list_pending_approvals(),
-            }),
-            loop,
-        )
+            # Broadcast updated approval list so stale card is removed from frontend
+            asyncio.run_coroutine_threadsafe(
+                self.send_queue.put({
+                    'type': 'approvals',
+                    'approvals': self.agent_pool.operation_manager.list_pending_approvals(),
+                }),
+                loop,
+            )
 
     def _handle_verdict(
         self, rid: str, auto_apply: bool, is_yes: bool, is_no: bool,
@@ -545,25 +573,27 @@ class SecurityAdvisorHandler:
                 self.agent_pool.operation_manager.user_reject(rid, reject_msg)
 
             # Broadcast updated approvals list to UI after auto-apply
-            asyncio.run_coroutine_threadsafe(
-                self.send_queue.put({
-                    'type': 'approvals',
-                    'approvals': self.agent_pool.operation_manager.list_pending_approvals(),
-                }),
-                loop,
-            )
+            if loop:
+                asyncio.run_coroutine_threadsafe(
+                    self.send_queue.put({
+                        'type': 'approvals',
+                        'approvals': self.agent_pool.operation_manager.list_pending_approvals(),
+                    }),
+                    loop,
+                )
         else:
             # Auto-Ask toggled off — send to UI for manual confirmation
-            asyncio.run_coroutine_threadsafe(
-                self.send_queue.put({
-                    'type': 'security_response',
-                    'request_id': rid,
-                    'response': parsing_response,
-                    'verdict': 'YES' if is_yes else 'NO',
-                    'reason': justification if is_no else "",
-                }),
-                loop,
-            )
+            if loop:
+                asyncio.run_coroutine_threadsafe(
+                    self.send_queue.put({
+                        'type': 'security_response',
+                        'request_id': rid,
+                        'response': parsing_response,
+                        'verdict': 'YES' if is_yes else 'NO',
+                        'reason': justification if is_no else "",
+                    }),
+                    loop,
+                )
 
     def _handle_ambiguous(
         self, rid: str, auto_apply: bool, parsing_response: str, loop,
@@ -581,18 +611,20 @@ class SecurityAdvisorHandler:
             )
             self.agent_pool.operation_manager.user_reject(rid, reject_msg)
 
-            asyncio.run_coroutine_threadsafe(
-                self.send_queue.put({
-                    'type': 'security_response',
-                    'request_id': rid,
-                    'response': parsing_response + "\n\n**[AUTO-REJECTED: Ambiguous Format]**",
-                    'verdict': 'AMBIGUOUS',
-                }),
-                loop,
-            )
+            if loop:
+                asyncio.run_coroutine_threadsafe(
+                    self.send_queue.put({
+                        'type': 'security_response',
+                        'request_id': rid,
+                        'response': parsing_response + "\n\n**[AUTO-REJECTED: Ambiguous Format]**",
+                        'verdict': 'AMBIGUOUS',
+                    }),
+                    loop,
+                )
         else:
             logger.info(f"[SECURITY] Ambiguous response for {rid} in manual mode. Waiting for user decision.")
-            asyncio.run_coroutine_threadsafe(
+            if loop:
+                asyncio.run_coroutine_threadsafe(
                 self.send_queue.put({
                     'type': 'security_response',
                     'request_id': rid,

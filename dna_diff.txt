@@ -1,0 +1,72 @@
+commit 1ba2de8413c07fd00a711802fafca46d1c05811d
+Author: LuckyKo <gunoimail@gmail.com>
+Date:   Tue Jun 30 03:26:53 2026 +0300
+
+    Fix tool configuration: activate dismiss_agent, deactivate image_gen, centralize tool registry in dna.py
+
+diff --git a/agent_cascade/prompts/dna.py b/agent_cascade/prompts/dna.py
+index 07f93d4..81134ea 100644
+--- a/agent_cascade/prompts/dna.py
++++ b/agent_cascade/prompts/dna.py
+@@ -1,7 +1,60 @@
+ # DNA Model for Agent Prompts and Instructions
+ # Centralizing all strings for easy A-B testing and consistency.
+ 
+-from typing import Dict, Set
++from typing import Dict, List, Set
++
++# ── Available Tools Registry ────────────────────────────────────────────────
++# Master list of ALL tools that agents can use. Toggle True/False to enable/disable
++# a tool system-wide. Per-agent enable/disable is handled via UI disabled_tools settings.
++#
++# Order: sub-agent management → file ops → search → code/shell → context mgmt → misc
++AVAILABLE_TOOLS: List[str] = [
++    # Sub-agent management
++    'call_agent',       # Delegate tasks to specialized agent instances
++    'dismiss_agent',    # End sub-agent sessions and clear context
++    'list_agents',      # List available agent classes and active instances
++
++    # Read-only file ops
++    'read_file',        # Read file contents
++    'view_image',       # View image files
++    'list_dir',         # List directory contents
++    'grep',             # Search for text patterns in files
++
++    # Mutating file ops
++    'write_file',       # Create or overwrite files
++    'edit_file',        # Surgical text replacement in existing files
++    're_indent',        # Re-indent code blocks
++    'delete_file',      # Delete files (with backup)
++    'copy_file',        # Copy files or directories
++
++    # Code & shell execution
++    'code_interpreter', # Python sandbox (Docker-based)
++    'shell_cmd',        # Execute host shell commands
++
++    # Web & search
++    'ddg_search',       # DuckDuckGo web search
++    'web_extractor',    # Extract webpage content
++
++    # Context management
++    'compress_context', # Summarize conversation history to free context space
++    'forget_last',      # Truncate recent tool call outputs
++
++    # Information & utilities
++    'system_info',      # System info, workspace paths, session stats
++    'read_logs',        # Read agent JSONL log files
++    'code_map',         # Quick file structure overview
++    'calculate',        # Evaluate mathematical expressions
++    'syntax_check',     # Check file syntax without execution
++]
++
++# Tools NOT in AVAILABLE_TOOLS (hidden from agents, used internally only):
++#   image_gen      — Image generation service
++#   storage        — Internal storage tool
++#   retrieval      — RAG retrieval engine
++#   doc_parser     — Document parser
++#   simple_doc_parser  — Simple document parser
++#   extract_doc_vocabulary — Vocabulary extraction
++
+ 
+ # --- XML Transport Settings ---
+ # Fields that should be placed in XML tags instead of inside JSON strings.

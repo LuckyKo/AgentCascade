@@ -1,0 +1,39 @@
+commit 997af6a96f75f839da2be2a5b90d4734e55372ea
+Author: LuckyKo <gunoimail@gmail.com>
+Date:   Tue Jun 30 03:44:31 2026 +0300
+
+    Address reviewer findings: consolidate tool loading, move dismiss schema, remove dead code
+
+diff --git a/agent_cascade/tools/_agent_instance_proxy.py b/agent_cascade/tools/_agent_instance_proxy.py
+index 8a26e9e..ea46178 100644
+--- a/agent_cascade/tools/_agent_instance_proxy.py
++++ b/agent_cascade/tools/_agent_instance_proxy.py
+@@ -47,6 +47,28 @@ CALL_AGENT_SCHEMA = {
+     },
+ }
+ 
++DISMISS_AGENT_SCHEMA = {
++    'name': 'dismiss_agent',
++    'description': (
++        "End a sub-agent instance's current task and clear its conversation context. "
++        "Use when you're done with a sub-agent and don't need its context anymore."
++    ),
++    'parameters': {
++        'type': 'object',
++        'properties': {
++            'instance_name': {
++                'type': 'string',
++                'description': 'Name of the sub-agent instance to dismiss (optional if all_idle is true)'
++            },
++            'all_idle': {
++                'type': 'boolean',
++                'description': 'If true, dismiss all sub-agents that are currently IDLE. Default is false.'
++            },
++        },
++        'required': [],  # lenient: both params optional (all_idle=true works alone)
++    },
++}
++
+ 
+ class _AgentInstanceFunctionProxy(BaseTool):
+     """Schema-only proxy for call_agent function registration.

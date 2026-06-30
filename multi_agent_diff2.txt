@@ -1,0 +1,130 @@
+commit 997af6a96f75f839da2be2a5b90d4734e55372ea
+Author: LuckyKo <gunoimail@gmail.com>
+Date:   Tue Jun 30 03:44:31 2026 +0300
+
+    Address reviewer findings: consolidate tool loading, move dismiss schema, remove dead code
+
+diff --git a/start_multi_agent.py b/start_multi_agent.py
+index 76beb3d..3697bd7 100644
+--- a/start_multi_agent.py
++++ b/start_multi_agent.py
+@@ -24,19 +24,10 @@ from agent_cascade.shared_init import detect_workspace_dir, ensure_workspace
+ WORKSPACE_DIR = detect_workspace_dir(PROJECT_ROOT)
+ ensure_workspace(WORKSPACE_DIR)
+ 
+-# Import built-in tools from agent_cascade (needed for per-agent tool loading)
+-from agent_cascade.tools import (
+-    web_extractor,
+-    storage,
+-    simple_doc_parser,
+-    doc_parser,
+-    extract_doc_vocabulary,
+-    code_interpreter,
+-)
+-from agent_cascade.settings import DEFAULT_WORKSPACE
+-
+-# DDGSearch is now a shared module — imported instead of defined inline
+-from agent_cascade.tools.custom import DDGSearch
++# Tool availability is driven by AVAILABLE_TOOLS in dna.py.
++# Each agent gets ALL tools registered via register_standard_tools().
++# Per-agent enable/disable is handled via UI disabled_tools settings applied at runtime.
++
+ llm_cfg = {
+     'model': 'whatever_is_on',  # or your preferred vision model
+     'model_server': 'http://localhost:1234/v1',
+@@ -45,46 +36,6 @@ llm_cfg = {
+     'max_input_tokens': 65536,   # Custom context window limit (override detection)
+ }
+ 
+-# Define default tools for each agent type
+-# All tools will be available in UI, but only these will be enabled by default
+-DEFAULT_TOOLS = {
+-    'orchestrator': [
+-        'call_agent', 'dismiss_agent', 'list_agents',
+-        'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'read_file', 'view_image', 'list_dir', 'grep',
+-        'ddg_search', 'web_extractor', 'storage', 'retrieval', 'system_info'
+-    ],
+-    'coder': [
+-        'call_agent', 'list_agents',
+-        'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'list_dir', 'grep', 'code_interpreter', 'shell_cmd',
+-        'ddg_search', 'web_extractor', 'storage'
+-    ],
+-    'researcher': [
+-        'call_agent', 'list_agents',
+-        'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'delete_file', 'copy_file', 'list_dir', 'grep', 'code_interpreter',
+-        'ddg_search', 'web_extractor', 'storage', 'retrieval',
+-        'doc_parser', 'simple_doc_parser', 'extract_doc_vocabulary'
+-    ],
+-    'writer': [
+-        'call_agent', 'list_agents',
+-        'read_file', 'view_image', 'compress_context', 'write_file', 'edit_file', 'list_dir',
+-        'ddg_search', 'web_extractor', 'storage',
+-        'doc_parser', 'simple_doc_parser'
+-    ],
+-    'reviewer': [
+-        'call_agent', 'list_agents',
+-        'read_file', 'view_image', 'compress_context', 'list_dir', 'grep', 'code_interpreter',
+-    ],
+-}
+-
+-# Tools available to ALL agents (shown in UI but disabled by default)
+-ALL_BUILTIN_TOOLS = [
+-    'image_gen', 'storage', 'retrieval', 'code_interpreter',
+-    'delete_file', 'shell_cmd', # These are powerful - enable manually
+-]
+-
+-
+-from agent_cascade.tools.custom import SystemInfo as _SystemInfo
+-
+ if __name__ == '__main__':
+     import sys
+ 
+@@ -93,7 +44,7 @@ if __name__ == '__main__':
+ 
+     # ── Infrastructure initialization (delegated to shared module) ────────────
+     from agent_cascade.shared_init import (
+-        initialize_infrastructure, load_tools_per_agent,
++        initialize_infrastructure,
+         load_orchestrator, build_all_agents_list,
+     )
+ 
+@@ -101,37 +52,12 @@ if __name__ == '__main__':
+         PROJECT_ROOT, llm_cfg, use_shared_tools=False,
+     )
+ 
+-    # Add tools to all agents based on their role (per-agent pattern)
+-    for agent_name in agent_pool.list_agents():
+-        agent = agent_pool.get_agent(agent_name)
+-        if agent:
+-            # Get default tools for this agent type
+-            default_tools = DEFAULT_TOOLS.get(agent_name, DEFAULT_TOOLS['writer'])
+-
+-            # Always add web tools and system info
+-            agent.function_map['ddg_search'] = DDGSearch()
+-            agent.function_map['system_info'] = _SystemInfo(agent_pool=agent_pool)
+-
+-            # Load built-in tools for this agent (delegated to shared module)
+-            load_tools_per_agent(
+-                agent, default_tools, llm_cfg, WORKSPACE_DIR,
+-                agent_pool, operation_mgr, agent_name=agent_name,
+-            )
++    # Tools are already registered by register_standard_tools() during agent loading.
++    # No need to double-load — the disabled_tools filter handles per-agent enable/disable.
+ 
+     # Load orchestrator from the pool
+     orchestrator = load_orchestrator(agent_pool)
+ 
+-    # Add web tools and system info to orchestrator
+-    orchestrator.function_map['ddg_search'] = DDGSearch()
+-    orchestrator.function_map['system_info'] = _SystemInfo(agent_pool=agent_pool)
+-
+-    # Load built-in tools for the orchestrator (delegated to shared module)
+-    default_orch_tools = DEFAULT_TOOLS['orchestrator']
+-    load_tools_per_agent(
+-        orchestrator, default_orch_tools, llm_cfg, WORKSPACE_DIR,
+-        agent_pool, operation_mgr, agent_name='',  # empty label → 'orchestrator'
+-    )
+-
+     # Also load all sub-agents for the agent selector
+     all_agents = build_all_agents_list(agent_pool, orchestrator)
+ 

@@ -1,0 +1,64 @@
+commit 997af6a96f75f839da2be2a5b90d4734e55372ea
+Author: LuckyKo <gunoimail@gmail.com>
+Date:   Tue Jun 30 03:44:31 2026 +0300
+
+    Address reviewer findings: consolidate tool loading, move dismiss schema, remove dead code
+
+diff --git a/agent_cascade/shared_init.py b/agent_cascade/shared_init.py
+index 85ed884..43263ea 100644
+--- a/agent_cascade/shared_init.py
++++ b/agent_cascade/shared_init.py
+@@ -111,12 +111,6 @@ def configure_and_start_pool(agent_pool, idle_timeout: float, idle_check_interva
+ #  3. Tool instantiation helpers (one per tool)
+ # ──────────────────────────────────────────────────────────────────────────────
+ 
+-def _instantiate_image_gen(llm_cfg):
+-    """Instantiate the ImageGen tool."""
+-    from agent_cascade.tools import image_gen
+-    return image_gen.ImageGen(cfg={'llm_cfg': llm_cfg})
+-
+-
+ def _instantiate_web_extractor(work_dir: str):
+     """Instantiate the WebExtractor tool."""
+     from agent_cascade.tools import web_extractor
+@@ -183,20 +177,18 @@ def _instantiate_system_info(agent_pool):
+ # ──────────────────────────────────────────────────────────────────────────────
+ 
+ TOOL_REGISTRY = {
+-    'image_gen':            (_instantiate_image_gen,           ['llm_cfg']),
+-    'web_extractor':        (_instantiate_web_extractor,       ['work_dir']),
+-    'storage':              (_instantiate_storage,             []),
+-    'retrieval':            (_instantiate_retrieval,           ['work_dir']),
+-    'simple_doc_parser':    (_instantiate_simple_doc_parser,   ['work_dir']),
+-    'doc_parser':           (_instantiate_doc_parser,          ['work_dir']),
++    'web_extractor':          (_instantiate_web_extractor,     ['work_dir']),
++    'storage':                (_instantiate_storage,           []),
++    'retrieval':              (_instantiate_retrieval,         ['work_dir']),
++    'simple_doc_parser':      (_instantiate_simple_doc_parser, ['work_dir']),
++    'doc_parser':             (_instantiate_doc_parser,        ['work_dir']),
+     'extract_doc_vocabulary': (_instantiate_extract_doc_vocabulary, ['work_dir']),
+-    'code_interpreter':     (_instantiate_code_interpreter,    ['work_dir', 'operation_manager']),
+-    'system_info':          (_instantiate_system_info,         ['agent_pool']),
++    'code_interpreter':       (_instantiate_code_interpreter,  ['work_dir', 'operation_manager']),
++    'system_info':            (_instantiate_system_info,       ['agent_pool']),
+ }
+ 
+ # Human-readable display names (used in log messages)
+ TOOL_DISPLAY = {
+-    'image_gen':              'ImageGen',
+     'web_extractor':          'WebExtractor',
+     'storage':                'Storage',
+     'retrieval':              'Retrieval',
+@@ -347,10 +339,10 @@ def load_tools_per_agent(
+             operation_manager=operation_manager, agent_pool=agent_pool,
+         )
+ 
+-    # Report any tool names in default_tools that this function doesn't handle
++    # Report tool names in default_tools that are handled by register_standard_tools instead
+     unhandled = set(default_tools) - set(TOOL_REGISTRY)
+     if unhandled:
+-        logger.debug("[INIT] Ignoring non-built-in tools for %s: %s", label, sorted(unhandled))
++        logger.debug("[INIT] Tools loaded via register_standard_tools for %s: %s", label, sorted(unhandled))
+ 
+     loaded_count = len([t for t in default_tools if t in agent.function_map])
+     if default_tools and loaded_count == 0:
