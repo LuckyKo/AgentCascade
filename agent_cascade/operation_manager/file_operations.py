@@ -1091,9 +1091,9 @@ class FileOpsMixin:
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
 
-            # Unified diff snippet
+            # Unified diff snippet in code block
             if diff_content:
-                res_msg += f'\n--- a/{path}\n+++ b/{path}' + '\n' + diff_content
+                res_msg += f'\n```\n--- a/{path}\n+++ b/{path}\n{diff_content}\n```'
 
             if backup_path_str:
                 res_msg += f'\n  backup → {backup_path_str}'
