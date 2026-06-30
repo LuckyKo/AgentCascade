@@ -1875,6 +1875,7 @@ class AgentPool:
             # This prevents the cache extend path from appending stale messages on next turn.
             inst._cached_messages.clear()
             inst._cached_llm_messages.clear()
+            inst._cached_token_count = 0
             # Invalidate token count cache — conversation length changed
             inst._last_token_count_conversation_length = -1
 
