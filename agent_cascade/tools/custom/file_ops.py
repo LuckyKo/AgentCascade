@@ -258,24 +258,36 @@ class ReadFile(BaseTool):
 
         if not lines_read:
             if total_lines == 0:
-                return f"File content ({path}) — empty file."
+                file_size = resolved.stat().st_size if resolved.exists() else 0
+                return f"OK: Read {path} (0 lines, {file_size} B)"
             else:
-                return f"ERROR: start_line {start_line} is beyond the end of file ({total_lines} lines). Use a line number between 1 and {total_lines}."
+                return f"ERROR: start_line {start_line} exceeds file length ({total_lines} lines)"
 
         actual_end = start_line + len(lines_read) - 1
 
-        # Build header with total line count info
-        header = f"File content ({path}), lines {start_line} to {actual_end} of {total_lines}:"
+        # m1: Encoding warning via replacement character U+FFFD count
+        repl_count = content.count('\ufffd')
+        encoding_note = f" [encoding: utf-8 with {repl_count} replacement(s)]" if repl_count > 0 else ""
+
+        # File size for text files (inline formatting, no external deps)
+        try:
+            file_size_bytes = resolved.stat().st_size
+            if file_size_bytes < 1024:
+                file_size_str = f"{file_size_bytes} B"
+            elif file_size_bytes < 1024 * 1024:
+                file_size_str = f"{file_size_bytes / 1024:.1f} KB"
+            else:
+                file_size_str = f"{file_size_bytes / (1024 * 1024):.1f} MB"
+        except OSError:
+            file_size_str = "?"
+
+        header = f"OK: Read {path} lines {start_line}-{actual_end}/{total_lines} (text, {file_size_str}){encoding_note}"
 
         truncated_msg = ""
         if hit_line_limit or hit_char_limit:
             header += " [TRUNCATED]"
-            remaining = max(0, total_lines - actual_end)
-            next_chunk = min(limit, remaining) if limit > 0 else remaining
-            truncated_msg = (
-                f"\n\n[PAGINATION NOTE: This file is large. Use read_file with "
-                f"start_line={actual_end + 1} to read the next {next_chunk} lines.]"
-            )
+            # m2: Compact pagination footer
+            truncated_msg = f"\n→ continue at start_line={actual_end + 1}"
 
         return f"{header}\n```\n{content}```{truncated_msg}"
 
@@ -293,14 +305,20 @@ class ReadFile(BaseTool):
             data = f.read(HEX_DUMP_BYTES)
 
         if not data:
-            return f"File content ({path}) — empty binary file."
+            return f"OK: Read {path} (binary, 0 B)"
 
         hex_view = _format_hex_dump(data)
-        size_str = f"{file_size:,}" if file_size > 0 else "unknown"
         
+        # Inline size formatting consistent with text files
+        if file_size < 1024:
+            size_str = f"{file_size} B"
+        elif file_size < 1024 * 1024:
+            size_str = f"{file_size / 1024:.1f} KB"
+        else:
+            size_str = f"{file_size / (1024 * 1024):.1f} MB"
+
         return (
-            f"Binary file ({path}), {size_str} bytes.\n"
-            f"Hex dump of first {len(data)} bytes:\n```\n{hex_view}\n```"
+            f"OK: Read {path} (binary, {size_str}) showing first {len(data)} bytes as hex dump\n```\n{hex_view}\n```"
         )
 
     # ------------------------------------------------------------------ #
@@ -384,14 +402,14 @@ class ReadFile(BaseTool):
 
         except ValueError as e:
             # Path resolution errors (outside allowed directories)
-            return f"Path error for '{path}': {e}"
+            return f"ERROR: Path error for '{path}' — {e}"
         except PermissionError as e:
-            return f"Permission denied reading '{path}': {e}"
+            return f"ERROR: Permission denied reading '{path}' — {e}"
         except OSError as e:
             # Catches FileNotFoundError, IOError, etc. — merged handler (Fix #6)
-            return f"OS error reading file '{path}': {e}"
+            return f"ERROR: OS error reading '{path}' — {e}"
         except Exception as e:
-            return f"Error reading file: {str(e)}"
+            return f"ERROR: Reading file — {str(e)}"
 
 
 @register_tool('view_image', allow_overwrite=True)

@@ -396,14 +396,14 @@ class SyntaxCheck(BaseTool):
             return f"Invalid parameters: {str(e)}"
 
         if not rel_path.strip():
-            return "Error: No file path provided."
+            return "ERROR: No file path provided."
 
         # Resolve absolute path with validation (same pattern as file_ops.py)
         if self.agent_pool and hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
             try:
                 abs_path = self.agent_pool.operation_manager._resolve_path(rel_path, mode="ro")
             except ValueError as e:
-                return f"Error: {str(e)}"
+                return f"ERROR: {str(e)}"
         else:
             # Fallback if no agent_pool (same pattern as read_file)
             from agent_cascade.settings import DEFAULT_WORKSPACE
@@ -416,21 +416,21 @@ class SyntaxCheck(BaseTool):
                 return f"Path '{rel_path}' is outside the allowed directory"
 
         if not abs_path.exists():
-            return f"Error: File not found at '{rel_path}'"
+            return f"ERROR: File not found at '{rel_path}'"
 
         if not abs_path.is_file():
-            return f"Error: '{rel_path}' is not a file."
+            return f"ERROR: '{rel_path}' is not a file."
 
         # Check file size (10MB limit)
         if abs_path.stat().st_size > 10 * 1024 * 1024:
-            return f"Error: File '{rel_path}' exceeds 10MB limit. Skipping syntax check."
+            return f"ERROR: File '{rel_path}' exceeds 10MB limit. Skipping syntax check."
 
         # Detect language
         lang = _detect_language(str(abs_path))
         if not lang:
             ext = abs_path.suffix
             return (
-                f"Error: Unsupported file type '{ext}'. "
+                f"ERROR: Unsupported file type '{ext}'. "
                 f"Supported extensions: {', '.join(sorted(_EXT_LANG_MAP.keys()))}"
             )
 
@@ -438,10 +438,10 @@ class SyntaxCheck(BaseTool):
         try:
             content = abs_path.read_text(encoding='utf-8', errors='replace')
         except Exception as e:
-            return f"Error reading file: {str(e)}"
+            return f"ERROR reading file: {str(e)}"
 
         if not content.strip():
-            return 'Valid'  # Empty files are syntactically valid
+            return f'OK: {rel_path} syntax valid ({lang}, 0 lines)'
 
         # Find and run the checker
         checker = _CHECKER_MAP.get(lang)
@@ -453,8 +453,9 @@ class SyntaxCheck(BaseTool):
 
         try:
             result = checker(content, str(abs_path))
+            line_count = len(content.splitlines())
             if result == 'Valid':
-                return f"Valid ({lang})"
-            return f"[{lang}] {result}"
+                return f"OK: {rel_path} syntax valid ({lang}, {line_count} lines)"
+            return f"ERROR: {rel_path} syntax error ({lang}) — {result}"
         except Exception as e:
             return f"Error during syntax check: {str(e)}"

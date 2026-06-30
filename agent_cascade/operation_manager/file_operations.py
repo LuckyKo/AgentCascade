@@ -381,12 +381,15 @@ class FileOpsMixin:
                 return f"Not a file: {path}"
 
             # Count total lines first to validate start_line bounds
-            with open(resolved, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
                 all_lines = f.readlines()
             total_lines = len(all_lines)
 
+            if total_lines == 0:
+                return f"OK: Read {path} (0 lines, {self._format_size(resolved.stat().st_size)})"
+
             if start_line > total_lines:
-                return f"ERROR: start_line {start_line} is beyond the end of file ({total_lines} lines). Use a line number between 1 and {total_lines}."
+                return f"ERROR: start_line {start_line} exceeds file length ({total_lines} lines)"
 
             end_line = start_line + limit - 1
             hit_end = False
@@ -400,18 +403,28 @@ class FileOpsMixin:
                     break
                 lines.append(line.rstrip('\n'))
 
-            if hit_end:
-                total_lines_str = f">{total_lines}"
-            else:
-                total_lines_str = str(total_lines)
-            content = "".join([f"{start_line + i}: {lines[i]}" for i in range(len(lines))])
-            header = f"File content ({path}), lines {start_line} to {start_line + len(lines) - 1} of {total_lines_str}:"
+            actual_end = start_line + len(lines) - 1
+            file_size_str = self._format_size(resolved.stat().st_size)
+
+            # M2: Encoding warning via replacement character count (changed errors='replace' above)
+            content_text = "".join(lines)
+            repl_count = content_text.count('\ufffd')
+            encoding_note = f" [encoding: utf-8 with {repl_count} replacement(s)]" if repl_count > 0 else ""
+
+            header = f"OK: Read {path} lines {start_line}-{actual_end}/{total_lines} (text, {file_size_str}){encoding_note}"
             if hit_end:
                 header += " [TRUNCATED]"
 
-            return f"{header}\n```\n{content}\n```"
+            content = "".join([f"{start_line + i}: {lines[i]}" for i in range(len(lines))])
+            result = f"{header}\n```\n{content}\n```"
+
+            # m2: Compact pagination footer when truncated
+            if hit_end:
+                result += f"\n→ continue at start_line={actual_end + 1}"
+
+            return result
         except Exception as e:
-            return f"Error reading file: {str(e)}"
+            return f"ERROR: {str(e)}"
 
     # ─── Write file ──────────────────────────────────────────────────────
 
@@ -442,25 +455,32 @@ class FileOpsMixin:
 
             # Backup if overwriting
             backup_path_str = ""
-            if resolved.exists():
+            is_new = not resolved.exists()
+            if not is_new:
                 safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
                 backup_dir = self.base_dir / "logs" / "backups" / safe_agent
                 backup_dir.mkdir(parents=True, exist_ok=True)
                 backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
                 shutil.copy2(resolved, backup_path)
-                try:
-                    backup_path_str = str(backup_path.relative_to(self.base_dir))
-                except ValueError:
-                    backup_path_str = str(backup_path)
+                # M5: Always use absolute path for backup
+                backup_path_str = str(backup_path)
 
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding='utf-8')
             self.file_ownership[str(resolved)] = agent_name
-            msg = f"APPROVED: Created {path} ({len(content)} characters)"
+
+            line_count = len(content.splitlines())
+            file_size_str = self._format_size(len(content.encode('utf-8')))
+            verb = "Created" if is_new else "Overwrote"
+            msg = f"OK: {verb} {path} ({line_count} lines, {file_size_str})"
+
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
+
+            # M3: Standardized backup line (absolute path)
             if backup_path_str:
-                msg += f". Backup created: {backup_path_str}"
+                msg += f'\n  backup → {backup_path_str}'
+
             return msg
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
@@ -484,6 +504,13 @@ class FileOpsMixin:
         file_content = resolved.read_text(encoding='utf-8')
         actual_old_content = old_content
         match_ratio = 1.0
+        # Initialize variables before match-mode dispatch (defensive scoping)
+        exact_start_line = None
+        exact_end_line = None
+        indent_warnings = []       # C1 fix: initialized to avoid NameError risk
+        start_idx = None           # C2 fix: d&i mode range indices
+        end_idx = None             # C2 fix: d&i mode range indices
+        delta_width = 0            # M1 fix: indent delta for heuristic feedback
 
         from agent_cascade.settings import DEFAULT_HEURISTIC_MATCH_THRESHOLD
         import difflib
@@ -563,9 +590,20 @@ class FileOpsMixin:
         if match_mode == 'exact':
             count = file_content.count(old_content)
             if count == 0:
-                return f"ERROR: Pattern not found in {path}. The 'old_content' string must exactly match the existing file content character-for-character, including whitespace and indentation, or consider using heuristic match mode."
+                return f"ERROR: Pattern not found in {path} (exact) — try heuristic match_mode or include more context lines"
             if count > 1:
-                return f"ERROR: Pattern found {count} times in {path}. The 'old_content' block must be unique. Please include more surrounding lines in 'old_content' to make it unique."
+                return f"ERROR: Pattern found {count} times in {path} — add more context lines to old_content to disambiguate"
+
+            # C1: Record match position for feedback message (line range)
+            match_start_pos = file_content.index(old_content)
+            match_end_pos = match_start_pos + len(actual_old_content)
+            exact_start_line = file_content[:match_start_pos].count('\n') + 1
+            # BUG FIX: Trailing newline is a terminator, not the start of a new line.
+            # Count newlines up to just before the trailing newline if present.
+            if actual_old_content and (actual_old_content[-1] == '\r' or actual_old_content[-1] == '\n'):
+                exact_end_line = file_content[:match_end_pos - 1].count('\n') + 1
+            else:
+                exact_end_line = file_content[:match_end_pos].count('\n') + 1
         elif match_mode in ('heuristic', 'heuristic_agnostic'):
             file_lines = file_content.splitlines(keepends=True)
 
@@ -604,7 +642,7 @@ class FileOpsMixin:
                                 candidates.add(start_list_idx)
 
             if len(candidates) > 100:
-                return f"ERROR: Heuristic pattern is too ambiguous (found {len(candidates)} candidate locations). Please include more unique surrounding lines of context."
+                return f"ERROR: Heuristic match found {len(candidates)} candidates in {path} — add more unique context to narrow down"
 
             norm_old_joined = "".join(old_line_info)
             threshold = DEFAULT_HEURISTIC_MATCH_THRESHOLD
@@ -632,13 +670,17 @@ class FileOpsMixin:
                     matches.append(best_match_info)
 
             if len(matches) == 0:
-                return f"ERROR: Heuristic pattern not found in {path} (threshold={threshold:.0%})."
+                return f"ERROR: Heuristic match not found in {path} (threshold={threshold:.0%}) — add more context or try exact mode"
             if len(matches) > 1:
-                return f"ERROR: Heuristic pattern found {len(matches)} times in {path} above the similarity threshold. The pattern must be unique."
+                return f"ERROR: Heuristic match found {len(matches)} times in {path} above threshold — add more unique context to narrow down"
 
             unique_match = matches[0]
             orig_start_idx = file_line_info[unique_match['start_list_idx']][0]
             orig_end_idx = file_line_info[unique_match['end_list_idx'] - 1][0]
+
+            # Store line range for response construction (1-based)
+            exact_start_line = orig_start_idx + 1
+            exact_end_line = orig_end_idx + 1
 
             actual_old_content = "".join(file_lines[orig_start_idx : orig_end_idx + 1])
             match_ratio = unique_match['ratio']
@@ -663,7 +705,9 @@ class FileOpsMixin:
 
             file_indent = get_leading_whitespace(actual_old_content)
             old_indent = get_leading_whitespace(old_content)
-            delta_width = get_indent_width(file_indent) - get_indent_width(old_indent)
+            indent_delta = get_indent_width(file_indent) - get_indent_width(old_indent)
+            # Store at method scope for response construction (M1: indent adjusted info)
+            delta_width = indent_delta
 
             # Detect file type to choose appropriate normalization mode
             _PYTHON_EXTENSIONS = frozenset(('.py', '.pyi', '.pyx'))
@@ -926,10 +970,8 @@ class FileOpsMixin:
             backup_dir.mkdir(parents=True, exist_ok=True)
             backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
             shutil.copy2(resolved, backup_path)
-            try:
-                backup_path_str = str(backup_path.relative_to(self.base_dir))
-            except ValueError:
-                backup_path_str = str(backup_path)
+            # M5: Always use absolute path for backup
+            backup_path_str = str(backup_path)
 
             file_content = resolved.read_text(encoding='utf-8')
             if match_mode == 'delete_and_insert':
@@ -937,27 +979,87 @@ class FileOpsMixin:
                 pass
             else:
                 new_file_content = file_content.replace(actual_old_content, new_content, 1)
-            resolved.write_text(new_file_content, encoding='utf-8')
 
+            # C5: Generate unified diff BEFORE writing the file (both old and new content available)
+            old_lines = file_content.splitlines(keepends=True)
+            new_lines = new_file_content.splitlines(keepends=True)
+            diff_lines = list(difflib.unified_diff(
+                old_lines, new_lines,
+                fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''
+            ))
+            # Skip --- and +++ headers (first 2), keep @@ headers and content
+            diff_content = '\n'.join(diff_lines[2:]) if len(diff_lines) > 2 else ''
+            # Limit to 20 lines max; truncate with ellipsis if longer
+            if diff_content:
+                all_diff_lines = diff_content.splitlines()
+                if len(all_diff_lines) > 20:
+                    first_lines = all_diff_lines[:8]
+                    last_lines = all_diff_lines[-8:]
+                    diff_content = '\n'.join(first_lines + ['...'] + last_lines)
+
+            resolved.write_text(new_file_content, encoding='utf-8')
             self.file_ownership[str(resolved)] = agent_name
 
-            res_msg = f"APPROVED: Edited {path}"
+            # M1: Line delta computation using splitlines()
             if match_mode == 'delete_and_insert':
-                res_msg += " (delete_and_insert mode)"
+                # BUG FIX: In d&i mode, actual_old_content is the range string (e.g. "3:7"),
+                # not the deleted file content. Compute old_lc from the actual range.
+                old_lc = end_idx - start_idx  # Actual lines in the deleted range
+            else:
+                old_lc = len(actual_old_content.splitlines()) if actual_old_content else 0
+            new_lc = len(new_content.splitlines()) if new_content else 0
+            net_delta = new_lc - old_lc
+            sign = '+' if net_delta >= 0 else ''
+
+            res_msg = f"OK: Edited {path}"
+
+            if match_mode == 'exact':
+                # Exact mode: line range + delta
+                res_msg += f" lines {exact_start_line}-{exact_end_line} (exact, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+
             elif match_mode in ('heuristic', 'heuristic_agnostic'):
-                res_msg += f" (Heuristic match similarity: {match_ratio:.1%})"
+                # M2: Discriminated labels for heuristic vs heuristic_agnostic
+                mode_label = "heuristic" if match_mode == 'heuristic' else "heur_ag"
                 resolved_path_str = resolved.as_posix()
-                edit_count = self._heuristic_edit_counts.get(resolved_path_str, 0)
-                if edit_count >= 3:
-                    res_msg += f" [NOTE: This file has been edited {edit_count} times in heuristic mode this session. Indentation drift may have accumulated.]"
-                if indent_warnings:
-                    for w in indent_warnings:
-                        res_msg += f"\n  ⚠ {w}"
-                res_msg += ". Please check the file to ensure the insertion was applied correctly."
+
+                res_msg += f" lines {exact_start_line}-{exact_end_line} ({mode_label} {match_ratio:.0%}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+
+                # M1: Indent adjustment info (only if non-zero delta detected in heuristic mode)
+                if match_mode == 'heuristic':
+                    if delta_width != 0:
+                        res_msg += f", indent adjusted"
+                    if indent_warnings:
+                        for w in indent_warnings:
+                            res_msg += f"\n  {w}"
+                    # Heuristic edit count warning
+                    edit_count = self._heuristic_edit_counts.get(resolved_path_str, 0)
+                    if edit_count >= 3:
+                        res_msg += f" [edit #{edit_count} this session]"
+
+            elif match_mode == 'delete_and_insert':
+                d_start = start_idx + 1  # 0-based to 1-based
+                d_end = end_idx          # exclusive in slice semantics
+                if start_idx == end_idx:
+                    # Insert-only variant
+                    res_msg += f" line {d_start} (d&i, inserted at line {d_start}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+                elif new_content:
+                    # Normal delete+insert
+                    res_msg += f" lines {d_start}-{d_end} (d&i, deleted {old_lc} lines, inserted at line {d_start}, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+                else:
+                    # Delete-only variant
+                    res_msg += f" lines {d_start}-{d_end} (d&i, deleted {old_lc} lines, -{old_lc} +{new_lc} = {sign}{net_delta}net)"
+
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
+
+            # Unified diff snippet
+            if diff_content:
+                res_msg += f'\n--- a/{path}\n+++ b/{path}' + '\n' + diff_content
+
+            # M3: Standardized backup line (absolute path)
             if backup_path_str:
-                res_msg += f" (Backup saved to: {backup_path_str})"
+                res_msg += f'\n  backup → {backup_path_str}'
+
             return res_msg
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
@@ -1186,10 +1288,8 @@ class FileOpsMixin:
             backup_dir.mkdir(parents=True, exist_ok=True)
             backup_path = backup_dir / f"{resolved.name}.{int(time.time())}.bak"
             shutil.copy2(resolved, backup_path)
-            try:
-                backup_path_str = str(backup_path.relative_to(self.base_dir))
-            except ValueError:
-                backup_path_str = str(backup_path)
+            # M5: Always use absolute path for backup
+            backup_path_str = str(backup_path)
 
             new_file_lines = list(file_lines)
             new_file_lines[start:end] = new_block_lines
@@ -1199,28 +1299,37 @@ class FileOpsMixin:
             self.file_ownership[str(resolved)] = agent_name
 
             display_start = start + 1
+            total_in_range = end - start  # lines in the requested range
+            changed_count = len(ws_counts) if ws_counts else 0  # non-blank lines re-indented
+            indent_type_label = 'sp' if indent_type == 'space' else 'tabs'
+
             if not ws_counts:
-                res_msg = f"APPROVED: No non-blank lines found in block {display_start}:{end} of {path}. Block unchanged."
+                # No-op: blank-only block
+                res_msg = f"OK: Re-indented {path} lines {display_start}-{end} ({mode}, no-op: {total_in_range} total / 0 changed)"
             elif mode == 'shift':
                 if indent > 0:
-                    res_msg = f"APPROVED: Shifted lines {display_start}:{end} in {path}. Added {indent} leading character(s) per line ({indent_type}s)."
+                    res_msg = f"OK: Re-indented {path} lines {display_start}-{end} (shift +{indent}{indent_type_label}, {total_in_range} total / {changed_count} changed)"
                 elif indent < 0:
-                    res_msg = f"APPROVED: Shifted lines {display_start}:{end} in {path}. Removed up to {abs(indent)} leading whitespace character(s) per line."
+                    res_msg = f"OK: Re-indented {path} lines {display_start}-{end} (shift -{abs(indent)}{indent_type_label}, {total_in_range} total / {changed_count} changed)"
                 else:
-                    res_msg = f"APPROVED: Shifted lines {display_start}:{end} in {path}. No change (indent=0)."
+                    res_msg = f"OK: Re-indented {path} lines {display_start}-{end} (shift 0, {total_in_range} total / {changed_count} changed)"
             elif mode == 'min':
-                res_msg = f"APPROVED: Re-indented lines {display_start}:{end} in {path}. Block had base indent of {base_trim} {original_ws_unit}s, now indented to {indent} {indent_type}s."
+                base_unit_label = 'sp' if original_ws_unit == 'space' else 'tabs'
+                res_msg = f"OK: Re-indented {path} lines {display_start}-{end} ({mode}, base {base_trim}{base_unit_label}→{indent}{indent_type_label}, {total_in_range} total / {changed_count} changed)"
             elif mode == 'flat':
-                res_msg = f"APPROVED: Re-indented lines {display_start}:{end} in {path}. Block had varying indents (trimmed all), now flattened to {indent} {indent_type}s."
+                res_msg = f"OK: Re-indented {path} lines {display_start}-{end} (flat→{indent}{indent_type_label}, {total_in_range} total / {changed_count} changed)"
             elif mode == 'convert':
-                res_msg = f"APPROVED: Converted lines {display_start}:{end} in {path}. Used visual column alignment with tab width={indent}. Minimum indent was {base_trim} columns, re-aligned and converted to {indent_type}s."
+                res_msg = f"OK: Re-indented {path} lines {display_start}-{end} (convert, tab-width={indent}→{indent_type_label}, {total_in_range} total / {changed_count} changed)"
             else:
-                res_msg = f"APPROVED: Re-indented lines {display_start}:{end} in {path} (mode: {mode})."
+                res_msg = f"OK: Re-indented {path} lines {display_start}-{end} ({mode}, {total_in_range} total / {changed_count} changed)"
 
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
+
+            # M3: Standardized backup line (absolute path)
             if backup_path_str:
-                res_msg += f" (Backup saved to: {backup_path_str})"
+                res_msg += f'\n  backup → {backup_path_str}'
+
             return res_msg
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
@@ -1254,6 +1363,33 @@ class FileOpsMixin:
         try:
             is_directory = resolved.is_dir()
 
+            # C2: Compute pre-deletion stats BEFORE the file is moved/deleted
+            if is_directory:
+                file_count = sum(1 for _ in resolved.rglob('*') if _.is_file())
+                scope_info = f"(directory, {file_count} files)"
+            else:
+                file_size_str = self._format_size(resolved.stat().st_size)
+                # Check for binary content by reading first 1KB and looking for null bytes
+                is_binary = False
+                try:
+                    with open(resolved, 'rb') as f:
+                        chunk = f.read(1024)
+                    if b'\x00' in chunk:
+                        is_binary = True
+                except OSError:
+                    pass
+
+                if is_binary:
+                    scope_info = f"(file, binary, {file_size_str})"
+                else:
+                    try:
+                        with open(resolved, encoding='utf-8', errors='replace') as f:
+                            line_count = sum(1 for _ in f)
+                    except (UnicodeDecodeError, OSError):
+                        scope_info = f"(file, binary, {file_size_str})"
+                    else:
+                        scope_info = f"(file, {line_count} lines, {file_size_str})"
+
             safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
             backup_dir = self.base_dir / "logs" / "backups" / safe_agent
             backup_dir.mkdir(parents=True, exist_ok=True)
@@ -1280,10 +1416,8 @@ class FileOpsMixin:
                     shutil.copy2(resolved, backup_path)
                     resolved.unlink()
 
-            try:
-                backup_path_str = str(backup_path.relative_to(self.base_dir))
-            except ValueError:
-                backup_path_str = str(backup_path)
+            # M5: Always use absolute path for backup
+            backup_path_str = str(backup_path)
 
             if str(resolved) in self.file_ownership:
                 del self.file_ownership[str(resolved)]
@@ -1294,10 +1428,13 @@ class FileOpsMixin:
                 for key in keys_to_remove:
                     del self.file_ownership[key]
 
-            msg = f"APPROVED: Deleted {path}"
+            msg = f"OK: Deleted {path} {scope_info}"
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
-            msg += f". Backup created: {backup_path_str}"
+
+            # M3: Standardized backup line (absolute path)
+            msg += f'\n  backup → {backup_path_str}'
+
             return msg
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
@@ -1331,7 +1468,35 @@ class FileOpsMixin:
         try:
             dest_path = self._resolve_path(destination, mode="rw")
 
+            # C3: Compute pre-copy source stats BEFORE the copy operation
+            if src_path.is_dir():
+                file_count = sum(1 for _ in src_path.rglob('*') if _.is_file())
+                scope_info = f"(directory, {file_count} files)"
+            else:
+                file_size_str = self._format_size(src_path.stat().st_size)
+                # Check for binary content by reading first 1KB and looking for null bytes
+                is_binary = False
+                try:
+                    with open(src_path, 'rb') as f:
+                        chunk = f.read(1024)
+                    if b'\x00' in chunk:
+                        is_binary = True
+                except OSError:
+                    pass
+
+                if is_binary:
+                    scope_info = f"(file, binary, {file_size_str})"
+                else:
+                    try:
+                        with open(src_path, encoding='utf-8', errors='replace') as f:
+                            line_count = sum(1 for _ in f)
+                    except (UnicodeDecodeError, OSError):
+                        scope_info = f"(file, binary, {file_size_str})"
+                    else:
+                        scope_info = f"(file, {line_count} lines, {file_size_str})"
+
             backup_path_str = ""
+            was_overwrite = False
             if dest_path.exists():
                 safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
                 backup_dir = self.base_dir / "logs" / "backups" / safe_agent
@@ -1354,10 +1519,9 @@ class FileOpsMixin:
                 else:
                     shutil.copy2(dest_path, backup_path)
 
-                try:
-                    backup_path_str = str(backup_path.relative_to(self.base_dir))
-                except ValueError:
-                    backup_path_str = str(backup_path)
+                # M5: Always use absolute path for backup
+                backup_path_str = str(backup_path)
+                was_overwrite = True
 
             if src_path.is_dir():
                 shutil.copytree(src_path, dest_path, dirs_exist_ok=True)
@@ -1365,11 +1529,19 @@ class FileOpsMixin:
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src_path, dest_path)
             self.file_ownership[str(dest_path)] = agent_name
-            msg = f"APPROVED: Copied {source} to {destination}"
+
+            if was_overwrite:
+                msg = f"OK: Copied {source} → {destination} (overwrote{scope_info})"
+            else:
+                msg = f"OK: Copied {source} → {destination} {scope_info}"
+
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
+
+            # M3: Standardized backup line (absolute path)
             if backup_path_str:
-                msg += f". Backup created: {backup_path_str}"
+                msg += f'\n  backup → {backup_path_str}'
+
             return msg
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
@@ -1426,10 +1598,8 @@ class FileOpsMixin:
                 else:
                     shutil.copy2(dest_path, backup_path)
 
-                try:
-                    backup_path_str = str(backup_path.relative_to(self.base_dir))
-                except ValueError:
-                    backup_path_str = str(backup_path)
+                # M5: Always use absolute path for backup
+                backup_path_str = str(backup_path)
 
                 if dest_path.is_dir():
                     shutil.rmtree(dest_path)
@@ -1441,11 +1611,15 @@ class FileOpsMixin:
             if str(src_path) in self.file_ownership:
                 del self.file_ownership[str(src_path)]
             self.file_ownership[str(dest_path)] = agent_name
-            msg = f"APPROVED: Moved {source} to {destination}"
+            msg = f"OK: Moved {source} → {destination}"
+
             if justification:
                 msg += f"\nSecurity Justification: {justification}"
+
+            # M3: Standardized backup line (absolute path)
             if backup_path_str:
-                msg += f". Backup created: {backup_path_str}"
+                msg += f'\n  backup → {backup_path_str}'
+
             return msg
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
