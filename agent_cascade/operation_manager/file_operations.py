@@ -415,7 +415,7 @@ class FileOpsMixin:
 
     # ─── Write file ──────────────────────────────────────────────────────
 
-    def write_file(self, path: str, content: str, agent_name: str) -> str:
+    def write_file(self, path: str, content: str, agent_name: str, justification: str = "") -> str:
         """Write a file — auto-approved for new files and owned files."""
         try:
             resolved = self._resolve_path(path, mode="rw")
@@ -428,7 +428,7 @@ class FileOpsMixin:
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='write_file',
-                tool_args={'path': path, 'content': content},
+                tool_args={'path': path, 'content': content, 'justification': justification},
                 description=description,
             )
             if not approved:
@@ -470,7 +470,8 @@ class FileOpsMixin:
     def edit_file(self, path: str, agent_name: str,
                   old_content: str,
                   new_content: str,
-                  match_mode: str = 'exact') -> str:
+                  match_mode: str = 'exact',
+                  justification: str = '') -> str:
         """Edit a file surgically — auto-approved for agent-owned files."""
         try:
             resolved = self._resolve_path(path, mode="rw")
@@ -903,7 +904,7 @@ class FileOpsMixin:
             return f"ERROR: Invalid match_mode '{match_mode}'."
 
         description = f"Surgical edit to: {path} (mode: {match_mode})"
-        tool_args = {'path': path, 'old_content': old_content, 'new_content': new_content, 'match_mode': match_mode}
+        tool_args = {'path': path, 'old_content': old_content, 'new_content': new_content, 'match_mode': match_mode, 'justification': justification}
 
         if not self._is_auto_approved(path, agent_name):
             approved, reason = self.request_user_approval(
@@ -963,7 +964,7 @@ class FileOpsMixin:
 
     # ─── Re-indent ────────────────────────────────────────────────────────
 
-    def re_indent(self, path: str, agent_name: str, lines: str, indent: int, indent_type: str, mode: str = "min") -> str:
+    def re_indent(self, path: str, agent_name: str, lines: str, indent: int, indent_type: str, mode: str = "min", justification: str = "") -> str:
         """Re-indents a block of code in a file."""
         try:
             resolved = self._resolve_path(path, mode="rw")
@@ -1160,7 +1161,7 @@ class FileOpsMixin:
             original_ws_unit = 'unknown'
 
         description = f"Re-indent block in: {path} (lines: {lines}, indent: {indent}, type: {indent_type}, mode: {mode})"
-        tool_args = {'path': path, 'lines': lines, 'indent': indent, 'indent_type': indent_type, 'mode': mode}
+        tool_args = {'path': path, 'lines': lines, 'indent': indent, 'indent_type': indent_type, 'mode': mode, 'justification': justification}
 
         if not self._is_auto_approved(path, agent_name):
             approved, reason = self.request_user_approval(
@@ -1226,7 +1227,7 @@ class FileOpsMixin:
 
     # ─── Delete file ──────────────────────────────────────────────────────
 
-    def delete_file(self, path: str, agent_name: str) -> str:
+    def delete_file(self, path: str, agent_name: str, justification: str = "") -> str:
         """Delete a file or directory — auto-approved for agent-owned files. Creates timestamped backup before deletion."""
         import os
         try:
@@ -1241,7 +1242,7 @@ class FileOpsMixin:
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='delete_file',
-                tool_args={'path': path},
+                tool_args={'path': path, 'justification': justification},
                 description=description,
             )
             if not approved:
@@ -1303,7 +1304,7 @@ class FileOpsMixin:
 
     # ─── Copy file ────────────────────────────────────────────────────────
 
-    def copy_file(self, source: str, destination: str, agent_name: str) -> str:
+    def copy_file(self, source: str, destination: str, agent_name: str, justification: str = "") -> str:
         """Copy a file — auto-approved if destination is new or agent-owned."""
         try:
             src_path = self._resolve_path(source, mode="ro")
@@ -1318,7 +1319,7 @@ class FileOpsMixin:
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='copy_file',
-                tool_args={'source': source, 'destination': destination},
+                tool_args={'source': source, 'destination': destination, 'justification': justification},
                 description=description,
             )
             if not approved:
@@ -1375,7 +1376,7 @@ class FileOpsMixin:
 
     # ─── Move file ────────────────────────────────────────────────────────
 
-    def move_file(self, source: str, destination: str, agent_name: str) -> str:
+    def move_file(self, source: str, destination: str, agent_name: str, justification: str = "") -> str:
         """Move a file — auto-approved if source is agent-owned."""
         try:
             src_path = self._resolve_path(source, mode="rw")
@@ -1390,7 +1391,7 @@ class FileOpsMixin:
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='move_file',
-                tool_args={'source': source, 'destination': destination},
+                tool_args={'source': source, 'destination': destination, 'justification': justification},
                 description=description,
             )
             if not approved:

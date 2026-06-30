@@ -45,10 +45,11 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 - [ ] Activity banner still doesn't change when tools are written
 - [ ] backup file paths in tool feedback need to be absolute path
+- [ ] edit_file (and other file operations) feedback message needs to be more useful to the LLM receiving it - plan a more informative and tighter message format
 - [ ] retry is broken, it deleted the user message too
 - [ ] max tokens does not change when a new API endpoint is acquired 
-- [ ] randomly duplicated compression markers in agent log sometimes
-- [ ] first compression doesn't include the first user message
+- [ ] randomly duplicated compression markers in agent log
+- [ ] first compression doesn't include the first user message; compressions with existing markers include the last marker twice: once in existing summary, second time in history
 - [ ] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck - it should clear up ALL the API slots. after 1000 fixed this still happens!
 - [ ] loop detector is appending to agent pool the first user message on rollback; no debug logging on event
 - [ ] images don't get properly pasted in chat
@@ -56,7 +57,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] session load must also load the type of agent and instance name from the json file and use that
 - [ ] max_tokens does not get updated when the API endpoint changes
 - [x] auto-ask security sometimes returns this even if the response was fine: REJECTED BY USER: Security check error: There is no current event loop in thread 'Thread-43 (_run_check_worker)'. (Fixed 2026-06-30: replaced asyncio.get_event_loop() with _get_ws_loop helper that uses agent_pool._ws_loop)
-- [ ] approval window does not show justification for edit file operation
+- [x] approval window does not show justification for edit file operation (Fixed 2026-06-30: wired justification through tool classes → operation manager methods → tool_args → PendingApproval. Also fixed WriteFile non-JSON fallback path that silently dropped justification.)
 - [ ] investigate if we can make shell cmd accept special character and multi-line `python -c` commands
       ERROR: 'charmap' codec can't encode character '\u2717' in position 0: character maps to <undefined>
 

@@ -589,12 +589,14 @@ class WriteFile(BaseTool):
                     path=path,
                     content=content,
                     agent_name=self.agent_name,
+                    justification="",  # Non-JSON fallback: no justification available from LLM
                 )
 
         # --- Standard JSON Path ---
         params_json = self._verify_json_format_args(params)
         path = params_json.get('path')
         content = params_json.get('content', '')
+        justification = params_json.get('justification', '')
 
         # Only strip markdown wrappers if content looks like it was JSON-embedded
         # (i.e., starts with ``` — this is a legacy fallback for when XML extraction
@@ -606,6 +608,7 @@ class WriteFile(BaseTool):
             path=path,
             content=content,
             agent_name=self.agent_name,
+            justification=justification,
         )
 
 
@@ -677,6 +680,7 @@ class EditFile(BaseTool):
         old_content = params_json.get('old_content')
         new_content = params_json.get('new_content')
         match_mode = params_json.get('match_mode', 'exact')
+        justification = params_json.get('justification', '')
         
         # Handle cases where model uses XML tags with old names
         if not old_content and params_json.get('old_string'):
@@ -706,6 +710,7 @@ class EditFile(BaseTool):
             old_content=old_content,
             new_content=new_content,
             match_mode=match_mode,
+            justification=justification,
         )
 
 
@@ -876,6 +881,10 @@ class DeleteFile(BaseTool):
             'path': {
                 'type': 'string',
                 'description': TOOL_METADATA['delete_file']['parameters']['path']
+            },
+            'justification': {
+                'type': 'string',
+                'description': 'Why you need to delete this file'
             }
         },
         'required': ['path'],
@@ -892,7 +901,8 @@ class DeleteFile(BaseTool):
     def call(self, params: str, **kwargs) -> str:
         params = self._verify_json_format_args(params)
         path = params['path']
-        return self.agent_pool.operation_manager.delete_file(path, self.agent_name)
+        justification = params.get('justification', '')
+        return self.agent_pool.operation_manager.delete_file(path, self.agent_name, justification=justification)
 
 
 @register_tool('copy_file', allow_overwrite=True)
@@ -911,6 +921,10 @@ class CopyFile(BaseTool):
             'destination': {
                 'type': 'string',
                 'description': TOOL_METADATA['copy_file']['parameters']['destination']
+            },
+            'justification': {
+                'type': 'string',
+                'description': 'Why you need to copy this file'
             }
         },
         'required': ['source', 'destination'],
@@ -928,7 +942,8 @@ class CopyFile(BaseTool):
         params = self._verify_json_format_args(params)
         source = params['source']
         destination = params['destination']
-        return self.agent_pool.operation_manager.copy_file(source, destination, self.agent_name)
+        justification = params.get('justification', '')
+        return self.agent_pool.operation_manager.copy_file(source, destination, self.agent_name, justification=justification)
 
 
 @register_tool('re_indent', allow_overwrite=True)
@@ -962,6 +977,10 @@ class ReIndent(BaseTool):
                 'enum': ['shift', 'min', 'flat', 'convert'],
                 'default': 'min',
                 'description': TOOL_METADATA['re_indent']['parameters']['mode']
+            },
+            'justification': {
+                'type': 'string',
+                'description': 'Why you need to re-indent this file'
             }
         },
         'required': ['path', 'lines', 'indent', 'indent_type'],
@@ -982,6 +1001,7 @@ class ReIndent(BaseTool):
         indent = params_json.get('indent')
         type_ = params_json.get('indent_type')
         mode = params_json.get('mode', 'min')
+        justification = params_json.get('justification', '')
 
         if not path:
             return "ERROR: Missing 'path'."
@@ -1006,5 +1026,6 @@ class ReIndent(BaseTool):
             indent=indent,
             indent_type=type_,  # FIX 6: Changed from type= to indent_type=
             mode=mode,
+            justification=justification,
         )
 
