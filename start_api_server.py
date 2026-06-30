@@ -44,14 +44,13 @@ def initialize_agents():
         PROJECT_ROOT, llm_cfg, use_shared_tools=True,
     )
 
-    # Tools are already registered by register_standard_tools() during agent loading.
-    # Shared tools (system_info, web_extractor, code_interpreter) were distributed above
-    # but agents already have them via AVAILABLE_TOOLS — no double-loading needed.
+    # Tools are already registered by register_standard_tools() during agent loading
+    # (via AgentPool._discover_agents → load_agent_template → load_agent).
+    # No additional tool distribution needed — AVAILABLE_TOOLS is the single source of truth.
 
     all_agents = build_all_agents_list(agent_pool, load_orchestrator(agent_pool))
 
     logger.info("[OK] Available agents: %s", [a.name for a in all_agents])
-    logger.info("[OK] Loaded tools: %s", list(shared_tools.keys()))
     logger.info("=" * 50)
 
     chatbot_config = {

@@ -71,11 +71,11 @@ DISMISS_AGENT_SCHEMA = {
 
 
 class _AgentInstanceFunctionProxy(BaseTool):
-    """Schema-only proxy for call_agent function registration.
+    """Schema-only proxy for agent instance function registration (call_agent, dismiss_agent).
 
-    This class exists solely so the LLM sees 'call_agent' in its function list
+    This class exists solely so the LLM sees these functions in its tool list
     (via self.function_map[].function). Actual execution is handled by
-    ExecutionEngine, which intercepts call_agent before it reaches this proxy.
+    ExecutionEngine, which intercepts them before they reach this proxy.
 
     The .call() method should never be invoked at runtime — if it is, something is wrong.
     """

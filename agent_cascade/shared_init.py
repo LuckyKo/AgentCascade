@@ -237,46 +237,6 @@ def _load_tool(name, registry, work_dir=None, llm_cfg=None, operation_manager=No
         logger.warning("[INIT] %s tool skipped (not available): %s", display_name, e)
         return None
 
-
-def _load_tool_for_agent(name, registry, agent, label, work_dir=None, llm_cfg=None, operation_manager=None, agent_pool=None):
-    """
-    Instantiate *name* for a single agent and store it in ``agent.function_map``.
-
-    Returns the tool instance on success, or ``None`` on failure (logged at WARNING).
-    """
-    if name not in registry:
-        return None
-
-    factory, required_params = registry[name]
-    display_name = TOOL_DISPLAY.get(name, name)
-
-    # Source pool of all available keyword arguments
-    param_pool = {
-        'work_dir': work_dir or DEFAULT_WORKSPACE,
-        'llm_cfg': llm_cfg,
-        'operation_manager': operation_manager,
-        'agent_pool': agent_pool,
-    }
-
-    kwargs = {}
-    for p in required_params:
-        val = param_pool.get(p)
-        if val is None and p != 'work_dir':  # work_dir always has a default via DEFAULT_WORKSPACE
-            logger.debug("[INIT] %s skipped for %s (missing required param '%s')", display_name, label, p)
-            return None
-        kwargs[p] = val
-
-    try:
-        instance = factory(**kwargs)
-        if instance is not None:
-            agent.function_map[name] = instance
-        logger.debug("[INIT] %s loaded for %s", display_name, label)
-        return instance
-    except Exception as e:
-        logger.warning("[INIT] %s skipped for %s: %s", display_name, label, e)
-        return None
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 #  4. Tool loading with error handling (returns dict of name -> instance)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -284,17 +244,8 @@ def _load_tool_for_agent(name, registry, agent, label, work_dir=None, llm_cfg=No
 def load_tools_shared(
     llm_cfg, agent_pool=None, operation_manager=None
 ):
-    """
-    Instantiate *shared* tool instances that can be distributed across agents.
-    Returns a dict {tool_name: instance}.
-
-    This is the pattern used by start_api_server.py (tools are shared in memory).
-    All tools use DEFAULT_WORKSPACE from settings — no per-call work_dir needed.
-    """
-    # Shared tools subset: only the tools that make sense to share across agents
+    """Instantiate *shared* tool instances that can be distributed across agents."""
     SHARED_TOOL_NAMES = ('system_info', 'web_extractor', 'code_interpreter')
-
-    # Explicitly pass DEFAULT_WORKSPACE so the dependency is visible in the call site
     work_dir = DEFAULT_WORKSPACE
 
     tools = {}
@@ -307,7 +258,6 @@ def load_tools_shared(
         if instance is not None:
             tools[name] = instance
 
-    # Safety net: catch SHARED_TOOL_NAMES entries missing from TOOL_REGISTRY
     missing = set(SHARED_TOOL_NAMES) - set(TOOL_REGISTRY)
     if missing:
         logger.debug("[INIT] Shared tools not in registry (likely a bug): %s", sorted(missing))
@@ -315,40 +265,6 @@ def load_tools_shared(
     if not tools:
         logger.warning("[INIT] No tools were successfully loaded — agents will have limited capabilities")
     return tools
-
-
-def load_tools_per_agent(
-    agent, default_tools, llm_cfg, work_dir: str,
-    agent_pool=None, operation_manager=None, agent_name: str = ''
-):
-    """
-    Instantiate tools for a *single* agent (per-agent pattern from start_multi_agent.py).
-
-    Only loads tools that are listed in ``default_tools``. Each tool gets its own
-    try/except block to avoid cascading failures.
-    """
-    label = f"agent '{agent_name}'" if agent_name else 'orchestrator'
-
-    # DDGSearch and system_info are added by callers directly (lightweight, no shared state)
-    # We only handle the built-in tools here.
-
-    for name in default_tools:
-        _load_tool_for_agent(
-            name, TOOL_REGISTRY, agent, label,
-            work_dir=work_dir, llm_cfg=llm_cfg,
-            operation_manager=operation_manager, agent_pool=agent_pool,
-        )
-
-    # Report tool names in default_tools that are handled by register_standard_tools instead
-    unhandled = set(default_tools) - set(TOOL_REGISTRY)
-    if unhandled:
-        logger.debug("[INIT] Tools loaded via register_standard_tools for %s: %s", label, sorted(unhandled))
-
-    loaded_count = len([t for t in default_tools if t in agent.function_map])
-    if default_tools and loaded_count == 0:
-        logger.warning(
-            "[INIT] No tools were successfully loaded for %s — agent will have limited capabilities", label
-        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
