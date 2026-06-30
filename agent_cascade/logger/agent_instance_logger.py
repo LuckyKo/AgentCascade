@@ -464,22 +464,19 @@ class AgentInstanceLogger:
                 # Role check matches load_session_from_log: markers must be USER role
                 from agent_cascade.llm.schema import USER as USER_ROLE
                 last_marker_idx = -1
+                marker_content = None
                 for i in range(len(new_history) - 1, -1, -1):
                     msg = new_history[i]
                     role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
                     content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
                     if role == USER_ROLE and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                         last_marker_idx = i
+                        marker_content = content
                         break
 
-                # ── Extract the actual marker content from pool for exact dedup comparison ──
-                marker_content = ''
-                if last_marker_idx >= 0 and last_marker_idx < len(new_history):
-                    mh = new_history[last_marker_idx]
-                    marker_content = mh.get('content', '') if isinstance(mh, dict) else getattr(mh, 'content', '')
-
                 # ── Dedup guard: check if THIS specific marker content already exists in the log file ──
-                # Exact match (not prefix) so cumulative compression with different summaries still inserts new markers
+                # Exact match (not prefix) ensures cumulative compressions with different summaries insert new markers,
+                # but identical re-calls (e.g., recovery re-sync) are safely deduplicated.
                 marker_already_in_file = any(
                     isinstance(m.get('content', ''), str) and m['content'] == marker_content
                     for m in existing_msgs
@@ -494,7 +491,8 @@ class AgentInstanceLogger:
                     insert_pos = max(0, min(insert_pos, len(existing_msgs)))
 
                     if marker_already_in_file:
-                        result_msgs = existing_msgs  # Same content already present — skip insertion to avoid duplicates
+                        logger.debug(f"Skipping duplicate marker insert — content already in {self.log_path}")
+                        result_msgs = existing_msgs
                     else:
                         result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
                 else:
