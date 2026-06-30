@@ -18,7 +18,9 @@ from .code_interpreter import CodeInterpreter
 from .doc_parser import DocParser
 from .image_gen import ImageGen
 from .python_executor import PythonExecutor
+from .retrieval import Retrieval
 from .search_tools import FrontPageSearch, HybridSearch, KeywordSearch, VectorSearch
+from .simple_doc_parser import SimpleDocParser
 from .web_extractor import WebExtractor
 from .mcp_manager import MCPManager
 from .web_search import WebSearch
@@ -31,6 +33,8 @@ __all__ = [
     'TOOL_REGISTRY',
     'DocParser',
     'KeywordSearch',
+    'Retrieval',
+    'SimpleDocParser',
     'WebExtractor',
     'VectorSearch',
     'HybridSearch',

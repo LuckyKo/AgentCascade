@@ -24,6 +24,7 @@ class ForgetLast(BaseTool):
     of the fail-open design.
     """
     
+    name = 'forget_last'
     description = (
         "Retroactively truncate the output of the last N tool call responses in the "
         "active conversation history. Each truncated response is shortened to "
