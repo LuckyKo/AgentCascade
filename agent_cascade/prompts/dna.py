@@ -271,13 +271,13 @@ TOOL_METADATA = {
     'code_interpreter': {
         'description': (
             'Python code sandbox (Docker-based). The workspace directory is mounted into the container. '
+            'Use this to test small snippets of code, for anything larger than a few lines write and edit py files that you can import here. DONT waste tokens writing the same code over and over in the prompt. Use the file tools to manage your code files efficiently. '
             'PATH MAPPING: Any path used with file tools (read_file, write_file, etc.) outside this tool '
             'maps to "/workspace/<path>" inside the container. For example, "src/main.py" becomes '
             '"/workspace/src/main.py". The container working directory is /workspace, so relative paths '
-            '"src/main.py" also work directly in your code. Use system_info to find exact folder mapping. '
-            'You can use write_file to create .py files and then import them here. '
+            '"src/main.py" also work directly in your code. Use system_info tool to find exact folder mapping for extra paths. '
             'To access services on the host machine (like local APIs), use "host.docker.internal" instead of "localhost". '
-            'Windows paths in code (e.g., N:\\work\\...) are auto-translated to container paths by default. '
+            'Absolute Windows style paths mapped to extra workspaces (e.g., N:\\work\\...) are auto-translated to container paths by default. '
             'Set fix_paths=false to disable this behavior.'
         ),
         'parameters': {

@@ -184,15 +184,19 @@ def compress_context(
         )
 
     # ── 6. Determine messages to send to the Compression Agent ──
+    history = agent_pool.get_conversation(target_agent_name)
+    
     if latest_summary_idx != -1:
-        # Include the latest summary marker + the new active messages being discarded
-        history = agent_pool.get_conversation(target_agent_name)
-        target_messages = history[
-            latest_summary_idx : latest_summary_idx + 1 + target_discard_count
-        ]
-    else:
-        # First compression: just send the messages we are about to compress
+        # Include the new active messages being discarded (NOT the marker — its summary
+        # is already extracted separately below and passed as existing_summary).
+        # Including both would duplicate the last marker's content in what the compressor sees.
         target_messages = active_set[:target_discard_count]
+    else:
+        # First compression: include U0 (first user message) so the summary captures
+        # the initial prompt/context, not just the messages being discarded.
+        # U0 is at index 1 if SYS exists (active_start_idx=2), or index 0 otherwise (active_start_idx=1).
+        u0_index = active_start_idx - 1
+        target_messages = [history[u0_index]] + list(active_set[:target_discard_count])
 
     # ── 6b. ACTUAL token count check: verify target messages fit in compressor's context window ──
     # This is the TRUE overfeeding detection — counts real tokens instead of using rough estimates.
@@ -222,7 +226,8 @@ def compress_context(
 
             prompt_overhead_tokens = sys_prompt_tokens + prompt_template_tokens
 
-            # Note: summary marker message is already included in target_messages, no need to count separately
+            # Note: for first compression U0 is included; for subsequent compressions the
+            # existing summary text (extracted at step 7) is prepended by agent_invoker.py.
             total_estimated = target_token_count + prompt_overhead_tokens
             if total_estimated > available_for_messages:
                 return CompressResult(
@@ -243,9 +248,9 @@ def compress_context(
             logger.debug(f"Token counting for overfeeding check failed (non-fatal): {e}")
 
     # ── 7. Get existing summary text from pool for compounding ──
+    # Reuse the history reference from step 6 instead of refetching it.
     existing_summary = None
     if latest_summary_idx != -1:
-        history = agent_pool.get_conversation(target_agent_name)
         summary_msg = history[latest_summary_idx]
         
         # Use extract_text_from_message to handle both string and multi-modal list content

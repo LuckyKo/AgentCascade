@@ -49,7 +49,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] retry is broken, it deleted the user message too
 - [ ] max tokens does not change when a new API endpoint is acquired 
 - [ ] randomly duplicated compression markers in agent log
-- [ ] first compression doesn't include the first user message; compressions with existing markers include the last marker twice: once in existing summary, second time in history
+- [x] first compression doesn't include the first user message; compressions with existing markers include the last marker twice: once in existing summary, second time in history (FIXED 2026-06-30)
 - [ ] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck - it should clear up ALL the API slots. after 1000 fixed this still happens!
 - [ ] loop detector is appending to agent pool the first user message on rollback; no debug logging on event
 - [ ] images don't get properly pasted in chat
