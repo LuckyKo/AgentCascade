@@ -45,17 +45,39 @@ def _format_messages_for_summary(target_messages):
     Returns:
         A single string with role-prefixed message contents.
     """
+    MAX_FC_ARGS_LEN = 2048  # Truncate large function arguments to avoid blowing up compressor context
+
     history_text = ""
     for msg in target_messages:
         if isinstance(msg, dict):
             role = msg.get('role', 'unknown').upper()
             content = msg.get('content', '')
+            fc = msg.get('function_call')
         else:
             role = getattr(msg, 'role', 'unknown').upper()
             content = getattr(msg, 'content', '')
+            fc = getattr(msg, 'function_call', None)
 
-        # Handle multi-modal content (list of items)
-        # Only include text parts; skip images and other non-text items to avoid "None" strings
+        # Helper to check if content is empty (handles whitespace-only strings and missing values)
+        def _is_content_empty(val):
+            if isinstance(val, str):
+                return val.strip() == ''
+            return not val
+
+        # If content is empty/missing, check for a legacy function_call (tool use) and include it
+        if fc is not None and _is_content_empty(content):
+            if isinstance(fc, dict):
+                fc_name = fc.get('name', 'unknown')
+                fc_args = fc.get('arguments', '')
+            else:
+                fc_name = getattr(fc, 'name', 'unknown')
+                fc_args = getattr(fc, 'arguments', '')
+            # Truncate large arguments to avoid blowing up compressor context
+            if isinstance(fc_args, str) and len(fc_args) > MAX_FC_ARGS_LEN:
+                fc_args = fc_args[:MAX_FC_ARGS_LEN] + '... [TRUNCATED]'
+            content = f"[TOOL CALL: {fc_name}({fc_args})]"
+
+        # Handle multi-modal content (list of items) — before tool_calls check so we can reuse emptiness guard
         if isinstance(content, list):
             text_parts = []
             for item in content:
@@ -68,6 +90,25 @@ def _format_messages_for_summary(target_messages):
                     if text:
                         text_parts.append(str(text))
             content = " ".join(text_parts)
+
+        # Check for modern tool_calls array format (OpenAI chat completions v1+)
+        tc = msg.get('tool_calls') if isinstance(msg, dict) else getattr(msg, 'tool_calls', None)
+        if tc is not None and _is_content_empty(content) and isinstance(tc, list) and len(tc) > 0:
+            call_parts = []
+            for tc_item in tc:
+                if isinstance(tc_item, dict):
+                    tc_name = tc_item.get('function', {}).get('name', 'unknown')
+                    tc_args = tc_item.get('function', {}).get('arguments', '')
+                else:
+                    tc_func = getattr(tc_item, 'function', None)
+                    tc_name = getattr(tc_func, 'name', 'unknown') if tc_func else 'unknown'
+                    tc_args = getattr(tc_func, 'arguments', '') if tc_func else ''
+                # Truncate large arguments to avoid blowing up compressor context
+                if isinstance(tc_args, str) and len(tc_args) > MAX_FC_ARGS_LEN:
+                    tc_args = tc_args[:MAX_FC_ARGS_LEN] + '... [TRUNCATED]'
+                call_parts.append(f"[TOOL CALL: {tc_name}({tc_args})]")
+            content = "\n".join(call_parts)
+
         history_text += f"{role}: {content}\n\n"
     return history_text
 
