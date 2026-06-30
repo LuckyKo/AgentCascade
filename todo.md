@@ -44,11 +44,11 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 # BUGS:
 
 - [ ] Activity banner still doesn't change when tools are written
-- [ ] backup file paths in tool feedback need to be absolute path
-- [ ] edit_file (and other file operations) feedback message needs to be more useful to the LLM receiving it - plan a more informative and tighter message format
+- [x] backup file paths in tool feedback need to be absolute path
+- [x] edit_file (and other file operations) feedback message needs to be more useful to the LLM receiving it - plan a more informative and tighter message format
 - [ ] retry is broken, it deleted the user message too
 - [ ] max tokens does not change when a new API endpoint is acquired 
-- [ ] randomly duplicated compression markers in agent log
+- [x] randomly duplicated compression markers in agent log
 - [x] first compression doesn't include the first user message; compressions with existing markers include the last marker twice: once in existing summary, second time in history (FIXED 2026-06-30)
 - [ ] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck - it should clear up ALL the API slots. after 1000 fixed this still happens!
 - [ ] loop detector is appending to agent pool the first user message on rollback; no debug logging on event
@@ -60,6 +60,13 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] approval window does not show justification for edit file operation (Fixed 2026-06-30: wired justification through tool classes → operation manager methods → tool_args → PendingApproval. Also fixed WriteFile non-JSON fallback path that silently dropped justification.)
 - [ ] investigate if we can make shell cmd accept special character and multi-line `python -c` commands
       ERROR: 'charmap' codec can't encode character '\u2717' in position 0: character maps to <undefined>
+- [x] compressor does not receive the tool content:
+```
+ASSISTANT: Let me check that line in the TODO file.
+ASSISTANT:
+FUNCTION: File content (N:\work\WD\AgentCascade_unified\todo.md), lines 45 to 59 of 129: [TRUNCATED]
+```
+(Fixed 2026-06-30: _format_messages_for_summary() now includes function_call and tool_calls data as [TOOL CALL: name(args)] in summary text. Also handles modern tool_calls array format, truncates large args to 2KB, uses None-safe checks.)
 
 # Errors to investigate:
 - multiple markers inserted on compression
