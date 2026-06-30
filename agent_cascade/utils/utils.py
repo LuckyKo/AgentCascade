@@ -655,7 +655,12 @@ def _format_tool_calls_for_text(msg):
                     val = extra.get(field_name)
             return val
 
-    # Check legacy single function_call (takes priority)
+    # Extract reasoning_content once (OpenAI-style thinking/reasoning field) —
+    # it provides context for WHY tools were called, prepended to any tool call output
+    rc = _get_field('reasoning_content')
+    rc_text = _reasoning_to_text(rc)
+
+    # Check legacy single function_call (takes highest priority)
     fc = _get_field('function_call')
     
     if fc is not None:
@@ -670,7 +675,8 @@ def _format_tool_calls_for_text(msg):
         if isinstance(fc_args, str) and len(fc_args) > MAX_FC_ARGS_LEN:
             fc_args = fc_args[:MAX_FC_ARGS_LEN] + '... [TRUNCATED]'
         
-        return f"[TOOL CALL: {fc_name}({fc_args})]"
+        result = f"[TOOL CALL: {fc_name}({fc_args})]"
+        return f"[THOUGHT: {rc_text}]\n{result}" if rc_text else result
     
     # Check modern tool_calls array
     tc = _get_field('tool_calls')
@@ -705,14 +711,50 @@ def _format_tool_calls_for_text(msg):
             
             call_parts.append(f"[TOOL CALL: {tc_name}({tc_args})]")
         
-        return "\n".join(call_parts)
+        result = "\n".join(call_parts)
+        return f"[THOUGHT: {rc_text}]\n{result}" if rc_text else result
 
-    # Check reasoning_content (OpenAI-style thinking/reasoning field)
-    rc = _get_field('reasoning_content')
-    if rc and isinstance(rc, str) and rc.strip():
-        return f"[THOUGHT: {rc}]"
+    # Only reasoning_content, no tool calls
+    if rc_text:
+        return f"[THOUGHT: {rc_text}]"
 
     return ""
+
+
+def _reasoning_to_text(rc, truncate=True) -> str:
+    """Convert reasoning_content to a text string, handling both str and list (multi-modal) types.
+
+    Args:
+        rc: reasoning_content value — can be a string or a list of ContentItems.
+        truncate: If True, truncate output at MAX_FC_ARGS_LEN to prevent context blowup.
+
+    Returns:
+        Plain text string (empty if no reasoning content found).
+    """
+    # Handle None/missing gracefully
+    if not rc and rc != '':
+        return ''
+
+    if isinstance(rc, str):
+        result = rc.strip()
+    elif isinstance(rc, list):
+        parts = []
+        for item in rc:
+            if isinstance(item, dict):
+                text = item.get('text', '') or ''
+            else:
+                text = getattr(item, 'text', None) or ''
+            if text:
+                parts.append(str(text))
+        result = ' '.join(parts).strip() if parts else ''
+    else:
+        result = rc
+
+    # Truncate to prevent context blowup (same limit as function_call args)
+    if truncate and isinstance(result, str) and len(result) > MAX_FC_ARGS_LEN:
+        result = result[:MAX_FC_ARGS_LEN] + '... [TRUNCATED]'
+
+    return result
 
 
 def extract_text_from_message(
@@ -768,13 +810,9 @@ def extract_text_from_message(
         logger.debug(f"extract_text_from_message: unexpected content type {type(msg.content).__name__}")
         return ""
 
-    # For assistant messages with empty/missing text, surface reasoning_content first, then function_call/tool_calls
+    # For assistant messages with empty/missing text, surface tool calls or reasoning as readable text
     if not text.strip() and msg.role == 'assistant':
-        rc = getattr(msg, 'reasoning_content', '') or ''
-        if isinstance(rc, str) and rc.strip():
-            text = f"[THOUGHT: {rc}]"
-        else:
-            text = _format_tool_calls_for_text(msg)
+        text = _format_tool_calls_for_text(msg)
 
     return text.strip()
 

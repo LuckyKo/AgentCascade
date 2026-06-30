@@ -206,3 +206,140 @@ class TestExtractTextFunctionCall:
         msg = {"role": "assistant", "content": "", "reasoning_content": "   \n  "}
         result = extract_text_from_message(msg, add_upload_info=False)
         assert result == ""
+
+    def test_reasoning_content_list_type(self):
+        """Test that list-type reasoning_content (multi-modal) is handled correctly."""
+        msg = {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": [
+                {"text": "First thought: the key"},
+                {"text": "Second thought: combine them"}
+            ]
+        }
+        result = extract_text_from_message(msg, add_upload_info=False)
+        assert "[THOUGHT:" in result
+        assert "First thought" in result
+        assert "Second thought" in result
+
+    def test_reasoning_content_list_type_via_helper(self):
+        """Test that _format_tool_calls_for_text handles list-type reasoning."""
+        msg = {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": [
+                {"text": "Step one"},
+                {"text": "Step two"}
+            ]
+        }
+        result = _format_tool_calls_for_text(msg)
+        assert "[THOUGHT: Step one Step two]" == result
+
+    def test_reasoning_content_list_empty_items(self):
+        """Test that list-type reasoning with empty text items returns empty."""
+        msg = {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": [
+                {"text": ""},
+                {"text": "  "}
+            ]
+        }
+        result = extract_text_from_message(msg, add_upload_info=False)
+        assert result == ""
+
+    def test_reasoning_content_truncation(self):
+        """Test that large reasoning_content is truncated at MAX_FC_ARGS_LEN (2048)."""
+        long_thought = "x" * 3000
+        msg = {"role": "assistant", "content": "", "reasoning_content": long_thought}
+        result = extract_text_from_message(msg, add_upload_info=False)
+        assert "[THOUGHT:" in result
+        assert "... [TRUNCATED]" in result
+        # Verify it's actually truncated (not full 3000 chars)
+        assert len(result) < 3100
+
+    def test_reasoning_content_truncation_via_helper(self):
+        """Test that _format_tool_calls_for_text truncates large reasoning."""
+        long_thought = "y" * 3000
+        msg = {"role": "assistant", "content": "", "reasoning_content": long_thought}
+        result = _format_tool_calls_for_text(msg)
+        assert "... [TRUNCATED]" in result
+
+    def test_reasoning_combined_with_tool_calls_on_message_object(self):
+        """Test combined reasoning + tool_calls on Message object via extra dict."""
+        msg = Message(
+            role="assistant",
+            content="",
+            extra={
+                "reasoning_content": "Let me think about this problem carefully",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "search_web", "arguments": '{"q":"test"}'}}
+                ]
+            }
+        )
+        result = extract_text_from_message(msg, add_upload_info=False)
+        # Both reasoning and tool calls should be accessible via the helper
+        assert "[THOUGHT:" in result or "[TOOL CALL:" in result
+
+    def test_reasoning_content_list_truncation(self):
+        """Test that list-type reasoning_content is also truncated."""
+        long_text = "z" * 3000
+        msg = {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": [
+                {"type": "text", "text": long_text}
+            ]
+        }
+        result = _format_tool_calls_for_text(msg)
+        assert "... [TRUNCATED]" in result
+
+    def test_format_messages_list_reasoning(self):
+        """Test that _format_messages_for_summary handles list-type reasoning."""
+        from agent_cascade.compression.agent_invoker import _format_messages_for_summary
+        
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": [
+                    {"text": "Analyzing the data"},
+                    {"text": "Found the pattern"}
+                ]
+            }
+        ]
+        result = _format_messages_for_summary(messages)
+        assert "[THOUGHT:" in result
+        assert "Analyzing" in result
+        assert "pattern" in result
+
+    def test_format_messages_large_reasoning_truncation(self):
+        """Test that _format_messages_for_summary truncates large reasoning."""
+        from agent_cascade.compression.agent_invoker import _format_messages_for_summary
+        
+        long_thought = "a" * 3000
+        messages = [
+            {"role": "assistant", "content": "", "reasoning_content": long_thought}
+        ]
+        result = _format_messages_for_summary(messages)
+        assert "... [TRUNCATED]" in result
+
+    def test_reasoning_to_text_helper_directly(self):
+        """Test the _reasoning_to_text helper function directly."""
+        from agent_cascade.utils.utils import _reasoning_to_text
+        
+        # String input
+        assert _reasoning_to_text("hello") == "hello"
+        
+        # List input with dicts
+        result = _reasoning_to_text([{"text": "a"}, {"text": "b"}])
+        assert "a b" in result
+        
+        # Empty list
+        assert _reasoning_to_text([]) == ""
+        
+        # None input
+        assert _reasoning_to_text(None) == ""
+        
+        # Whitespace string
+        assert _reasoning_to_text("  ") == ""
