@@ -47,10 +47,10 @@ class CacheManager:
     def __init__(self):
         self._lock = threading.RLock()  # Single reentrant lock for all caches
         
-        # Token stats cache: (msg_count, last_msg_id, stream_len, content_len) -> stats dict
+        # Token stats cache: (msg_count, last_msg_id, stream_len) -> stats dict
         self.token_stats: Dict[tuple, dict] = {}
         
-        # Stream version tracking: instance_name -> (msg_count, id, stream_len, content_len)
+        # Stream version tracking: instance_name -> (msg_count, id, stream_len)
         self.stream_versions: Dict[str, tuple] = {}
         
         # Cached serialized instance data: instance_name -> dict
@@ -579,7 +579,7 @@ def _serialize_instances_incremental(
     
     Only re-serializes instances whose conversation has changed since the last
     stream_update. Version is derived from (msg_count, id_of_last_msg, 
-    streaming_response_len, content_len). During LLM streaming, the conversation
+    streaming_response_len). During LLM streaming, the conversation
     doesn't change so most instances are skipped.
     
     Every ~100 ticks (force_full=True) all instances are fully re-serialized to
@@ -596,13 +596,11 @@ def _serialize_instances_incremental(
                 list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
             )
         
-        # Calculate content length for this instance's streaming responses
-        inst_stream_content_len = _streaming_content_length(inst_streaming_responses)
+        # Calculate content length for this instance's streaming responses (used for version tracking)
         current_version = (
             len(current_msgs),
             id(current_msgs[-1]) if current_msgs else None,
             len(inst_streaming_responses) if inst_streaming_responses else 0,
-            inst_stream_content_len,
         )
 
         # C4: Atomic read-compare-write under lock to prevent TOCTOU race.
@@ -771,16 +769,13 @@ def build_stream_update_from_pool(
         conv_snapshot = list(instance.conversation)
         stream_resp_snapshot = list(instance._streaming_responses) if instance._streaming_responses else None
     
-    # Calculate character length of streaming content for version tracking
-    stream_content_len = _streaming_content_length(stream_resp_snapshot)
-
     # BUG31 Fix #4: Skip expensive stats computation when conversation hasn't changed.
-    # Version includes msg count, last msg id, streaming response len, and content len.
+    # Version uses msg count, last msg id, and streaming response count — excluding
+    # stream_content_len which grows every tick and prevents cache reuse during active streaming.
     current_version = (
         len(conv_snapshot),
         id(conv_snapshot[-1]) if conv_snapshot else None,
         len(stream_resp_snapshot) if stream_resp_snapshot else 0,
-        stream_content_len,
     )
     
     # Thread-safe read of cached token stats and last version via CacheManager
@@ -1296,10 +1291,6 @@ def _serialize_instance(
     msgs = full_msgs_snapshot
     original_history_count = len(msgs)
     
-    # Streaming UI Content Update Fix: Include content length of streaming messages in the version key.
-    # Previously, the key only included message count, making it blind to token-by-token growth.
-    stream_content_len = _streaming_content_length(stream_responses)
-
     # Always send all messages — no tail optimization. The client properly merges partials,
     # and removing the tail cut avoids any risk of losing early context during streaming.
     start_idx = 0
@@ -1343,9 +1334,10 @@ def _serialize_instance(
     # So stats are only recalculated when a new message is appended.
     
     # Streaming UI Content Update Fix: Include streaming_responses length in cache key
-    # so that growing streaming content causes cache miss and fresh stats computation
+    # so that growing streaming content causes cache miss and fresh stats computation.
+    # Excluding stream_content_len (grows every tick) to allow cache reuse during active streaming.
     stream_resp_len = len(stream_responses) if stream_responses else 0
-    cache_key = (original_history_count, id(msgs[-1]) if msgs else None, stream_resp_len, stream_content_len)
+    cache_key = (original_history_count, id(msgs[-1]) if msgs else None, stream_resp_len)
     
     # Streaming UI Content Update Fix: Compute token stats from combined messages (conversation + streaming_responses)
     # Use full_msgs_snapshot (persisted history) to ensure stats reflect total usage, not just the tail.

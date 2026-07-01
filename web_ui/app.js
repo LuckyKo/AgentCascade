@@ -70,7 +70,7 @@ const state = {
     active: false,
     // Throttle timestamps for streaming performance
     lastGenStatsUpdate: 0,       // For updateGenStats throttling (~2Hz)
-        lastSubAgentRender: 0,      // For renderSubAgents throttling (~100ms during streaming)
+        lastSubAgentRender: 0,      // For renderSubAgents throttling (~150ms during streaming)
     lastContextBarUpdate: 0,    // For updateContextBar throttling (~1Hz during streaming)
     lastUiUpdate: 0,            // For activity bar throttling (~1Hz)
     lastControlsUpdate: 0,      // For updateControls throttling (~1Hz)
@@ -170,10 +170,11 @@ const ActivityBar = {
   el: null,          // DOM ref to #globalActivityBar
   fifoEl: null,      // DOM ref to .activity-fifo
   queuedEl: null,    // DOM ref to .activity-queued
-  lastRenderTime: 0, // Throttle: render() uses 200ms; pushImmediate() uses dedup instead
+  lastRenderTime: 0, // Throttle: render() uses 200ms; pushImmediate() uses dedup + throttle
   _lastImmediateKey: '', // Dedup key for pushImmediate() — skip if content hasn't changed
   _immediateLocked: false, // Atomic lock to prevent race between pushImmediate() and render()
   _currentInstance: null, // Track current agent instance for reset on filter change (Major Issue #5)
+  _lastPushTime: 0,      // Throttle timer for pushImmediate() DOM writes (~50ms interval)
   
   init() {
     this.el = document.getElementById('globalActivityBar');
@@ -207,6 +208,13 @@ const ActivityBar = {
     // Use JSON.stringify to avoid collision with '|' character in preview text (Major Issue #3)
     const key = JSON.stringify([instanceName, preview, isWaiting, tokenCount]);
     if (key === this._lastImmediateKey) return;
+  
+    // Throttle DOM writes to ~50ms intervals during rapid streaming (~20 ticks/sec)
+    // This reduces JSON.stringify + regex overhead while keeping updates responsive
+    const now = performance.now();
+    if (now - this._lastPushTime < 50) return;
+    this._lastPushTime = now;
+  
     this._lastImmediateKey = key;
     
     const activeInstance = this.getFilterInstance();
@@ -1167,7 +1175,7 @@ function handleServerMessage(data) {
       if (!state._debugLastThrottleLog || state._debugStreamCount - state._debugLastThrottleLog < 5) {
         const nowDebug = performance.now();
         const isSubActive = state.activeStack && state.activeStack.length > 0;
-              const throttleMs = isSubActive ? 100 : 750;  // Updated to match actual throttle value
+              const throttleMs = isSubActive ? 150 : 750;  // Matches render throttle: 150ms during streaming
         const elapsed = (state.genStats.lastSubAgentRender ? nowDebug - state.genStats.lastSubAgentRender : 999);
         if (elapsed > throttleMs) {
           console.log(`[STREAM #${state._debugStreamCount}] shouldRender=${true}, elapsed=${Math.round(elapsed)}ms, throttle=${throttleMs}ms, activeStack=[${(state.activeStack||[]).join(',')}]`);
@@ -1337,12 +1345,13 @@ function handleServerMessage(data) {
         state.genStats.lastControlsUpdate = now;
       }
 
-      // Throttle sub-agent rendering to ~100ms during streaming for smoother updates
+      // Throttle sub-agent rendering during streaming to reduce markdown re-parsing load.
       // (O(1) raw text append was fast, but we now always re-render markdown for quality)
-      // Reduced from 150ms to 100ms to reduce perceived latency in streaming
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
       const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
-      const subThrottleContent = isSubAgentActive ? 100 : 750;
+      // Reverted from 100ms to 150ms: the lower throttle caused ~6-7 full panel re-renders/sec
+      // with markdown parsing, which was a major contributor to UI jank during streaming.
+      const subThrottleContent = isSubAgentActive ? 150 : 750;
       
       // Force render on: completion detected, stack change, new visible message, 
       // or if the visible agent's content changed (bypass throttle for visible active agent).
