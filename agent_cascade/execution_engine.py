@@ -641,6 +641,7 @@ class ExecutionEngine:
         
         # Clear truncation state at the start of each agent turn to prevent stale markers
         clear_truncation_state()
+        instance._loop_rollback_count = 0
         
         # Initialize variables before try block to handle exceptions during _setup_turn
         messages = None

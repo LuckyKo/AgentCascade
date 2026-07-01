@@ -1035,12 +1035,18 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         return {'tokens': 0, 'words': 0}
     
     if isinstance(msg, dict):
+        if '_tokens' in msg and '_words' in msg:
+            return {'tokens': msg['_tokens'], 'words': msg['_words']}
         role = msg.get(ROLE, '')
         function_call = msg.get('function_call')
         if role == ASSISTANT and function_call:
             text = f'{function_call}'
-            return {'tokens': qwen_count(text), 'words': len(text.split())}
+            stats = {'tokens': qwen_count(text), 'words': len(text.split())}
+            msg['_tokens'] = stats['tokens']
+            msg['_words'] = stats['words']
+            return stats
         msg_obj = Message(**msg)
+        is_dict = True
     elif isinstance(msg, list):
         # BUG FIX: Handle unexpected list objects gracefully
         # This can happen when streaming responses or multimodal content creates nested structures
@@ -1059,105 +1065,81 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
             text = f'{function_call}'
             return {'tokens': qwen_count(text), 'words': len(text.split())}
         msg_obj = msg
+        is_dict = False
 
-    text = extract_text_from_message(msg_obj, add_upload_info=True)
-    image_tokens = 0
-    def repl(match):
-        nonlocal image_tokens
-        image_tokens += 255
-        return f"[Image: {match.group(1)}]"
+    # Initialize LRU Cache for Message object stats (survives across get_message_stats calls)
+    if not hasattr(get_message_stats, '_msg_stats'):
+        get_message_stats._msg_stats = OrderedDict()
+        get_message_stats._cache_max_size = 512
+        
+    msg_cache: OrderedDict = get_message_stats._msg_stats
+    cache_max = get_message_stats._cache_max_size
+
+    role = getattr(msg_obj, 'role', '')
+    content = getattr(msg_obj, 'content', '')
+    fc = getattr(msg_obj, 'function_call', None)
     
-    text_for_tokens = IMAGE_REGEX.sub(repl, text)
-    tokens = qwen_count(text_for_tokens) + image_tokens
-    words = len(text.split())
-    return {'tokens': tokens, 'words': words}
+    # Build a hashable key from the message content using MD5 of the full text
+    if fc:
+        content_key = ('fc', str(fc))
+    elif isinstance(content, list):
+        text_items = [item.text for item in content if hasattr(item, 'text') and item.text]
+        full_text = ''.join(text_items)
+        content_hash = hashlib.md5(full_text.encode('utf-8', errors='replace')).hexdigest()[:16]
+        content_key = ('multi', content_hash)
+    else:
+        full_text = str(content)
+        content_hash = hashlib.md5(full_text.encode('utf-8', errors='replace')).hexdigest()[:16]
+        content_key = ('text', content_hash)
+    
+    cache_key = (role, str(content_key))
+
+    # Check Message object LRU cache — move to end on hit (most recently used)
+    if cache_key in msg_cache:
+        stats = msg_cache[cache_key]
+        msg_cache.move_to_end(cache_key)
+    else:
+        text = extract_text_from_message(msg_obj, add_upload_info=True)
+        image_tokens = 0
+        def repl(match):
+            nonlocal image_tokens
+            image_tokens += 255
+            return f"[Image: {match.group(1)}]"
+        
+        text_for_tokens = IMAGE_REGEX.sub(repl, text)
+        tokens = qwen_count(text_for_tokens) + image_tokens
+        words = len(text.split())
+        stats = {'tokens': tokens, 'words': words}
+        
+        # Evict oldest entry if at capacity
+        if len(msg_cache) >= cache_max:
+            msg_cache.popitem(last=False)
+        msg_cache[cache_key] = stats
+
+    if is_dict and isinstance(msg, dict):
+        msg['_tokens'] = stats['tokens']
+        msg['_words'] = stats['words']
+
+    return stats
 
 
 def get_history_stats(messages: List[Union[Message, dict, list, bool, None]]) -> dict:
     """Calculate total tokens and words in a message list with caching.
     
     Caching strategy:
-    - Dict messages: cache _tokens/_words directly on the dict (mutates in place)
-    - Message objects: use an LRU content-based cache keyed by (role, md5_hash_of_content)
-      to avoid re-tokenizing identical messages across calls. Cache is bounded to prevent memory leaks.
-    - List items: skipped with debug logging (unexpected but handled gracefully)
-    - Boolean items: skipped with debug logging (can leak via JSON parsing or logger recovery)
-    - None values: skipped with debug logging (can occur from incomplete data)
+    - Delegates caching and statistics logic to get_message_stats which has
+      a built-in LRU cache for Message objects and inline cache mutation for dicts.
     """
     if not messages:
         return {'tokens': 0, 'words': 0}
     
-    # Module-level LRU cache for Message object stats (survives across get_history_stats calls)
-    # Uses OrderedDict for O(1) eviction of least-recently-used entries when max size is exceeded
-    if not hasattr(get_history_stats, '_msg_stats'):
-        get_history_stats._msg_stats = OrderedDict()
-        get_history_stats._cache_max_size = 512
-    
-    msg_cache: OrderedDict = get_history_stats._msg_stats
-    cache_max = get_history_stats._cache_max_size
-    
     total_tokens = 0
     total_words = 0
     for m in messages:
-        # FIX Mi5: Align type-check ordering with get_message_stats: None → dict → list → bool → Message
-        if m is None:
-            # BUG FIX: Skip None values in messages list
-            # Can occur from incomplete data or serialization issues
-            logger.debug("get_history_stats: skipping None value in messages list")
+        # Skip None, list, and bool values gracefully
+        if m is None or isinstance(m, (list, bool)):
             continue
-        elif isinstance(m, dict):
-            if '_tokens' in m and '_words' in m:
-                total_tokens += m['_tokens']
-                total_words += m['_words']
-            else:
-                stats = get_message_stats(m)
-                m['_tokens'] = stats['tokens']
-                m['_words'] = stats['words']
-                total_tokens += stats['tokens']
-                total_words += stats['words']
-        elif isinstance(m, list):
-            # BUG FIX: Skip unexpected list objects in messages list
-            # These can occur from streaming responses or multimodal content handling
-            logger.debug(f"get_history_stats: skipping unexpected list item in messages list")
-            continue
-        elif isinstance(m, bool):
-            # BUG FIX: Skip unexpected boolean values in messages list
-            # Booleans can leak via JSON parsing or logger recovery paths
-            logger.debug(f"get_history_stats: skipping unexpected bool value in messages list: {m}")
-            continue
-        else:
-            # Message object — use content-based LRU cache to avoid re-tokenizing
-            role = getattr(m, 'role', '')
-            content = getattr(m, 'content', '')
-            fc = getattr(m, 'function_call', None)
-            
-            # Build a hashable key from the message content using MD5 of the full text
-            # This avoids collisions that occurred with the old truncation-based keys
-            if fc:
-                content_key = ('fc', str(fc))
-            elif isinstance(content, list):
-                text_items = [item.text for item in content if hasattr(item, 'text') and item.text]
-                full_text = ''.join(text_items)
-                content_hash = hashlib.md5(full_text.encode('utf-8', errors='replace')).hexdigest()[:16]
-                content_key = ('multi', content_hash)
-            else:
-                full_text = str(content)
-                content_hash = hashlib.md5(full_text.encode('utf-8', errors='replace')).hexdigest()[:16]
-                content_key = ('text', content_hash)
-            
-            cache_key = (role, str(content_key))
-            
-            # Check Message object LRU cache — move to end on hit (most recently used)
-            if cache_key in msg_cache:
-                stats = msg_cache[cache_key]
-                msg_cache.move_to_end(cache_key)
-            else:
-                stats = get_message_stats(m)
-                # Evict oldest entry if at capacity
-                if len(msg_cache) >= cache_max:
-                    msg_cache.popitem(last=False)
-                msg_cache[cache_key] = stats
-            
-            total_tokens += stats['tokens']
-            total_words += stats['words']
+        stats = get_message_stats(m)
+        total_tokens += stats['tokens']
+        total_words += stats['words']
     return {'tokens': total_tokens, 'words': total_words}

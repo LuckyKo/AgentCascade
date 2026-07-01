@@ -137,6 +137,7 @@ class AgentInstance:
     # After compression/rollback, the conversation state has concentrated patterns that can trigger
     # false-positive loop detection. This flag suppresses loop detection on the next turn only.
     _suppress_loop_detection_next_turn: bool = field(default=False)     # Cooldown flag for loop detection after compression/rollback
+    _loop_rollback_count: int = field(default=0)                       # Track rollback count to prevent infinite recovery loops
 
     # ── Continue Button Message Merge (Fix Duplication Bug Option B) ───────────
     # When Continue is clicked, the last assistant message is popped from conversation
