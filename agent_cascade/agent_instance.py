@@ -133,9 +133,6 @@ class AgentInstance:
     _cached_llm_messages: List[Message] = field(default_factory=list)  # Sliced working set for LLM
     _last_config_version: int = field(default=-1)                      # Pool config version at last rebuild
     
-    # ── Session Restoration Tracking (Fix session load-on-restart bug) ────────
-    # Replaced by explicit from_external_load parameter in initialize_conversation().
-
     # ── Loop Detection Cooldown (Fix /compress Bug) ───────────────────────────
     # After compression/rollback, the conversation state has concentrated patterns that can trigger
     # false-positive loop detection. This flag suppresses loop detection on the next turn only.

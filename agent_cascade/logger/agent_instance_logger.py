@@ -568,14 +568,13 @@ class AgentInstanceLogger:
     def reset_history(self, new_history: List[Any], rewrite: bool = False):
         """Update internal tracking after a compression event or manual edit.
 
-        If rewrite=True, delegates to sync_compression_marker() which reads the existing
-        log from disk and inserts any new compression marker at a mirrored tail position,
-        preserving all original messages in the JSONL file.
+        If rewrite=True, delegates to rewrite_log_with_history() which replaces the
+        log file on disk with the provided history (including all markers).
         Otherwise, appends a compression baseline to the end of the log.
         """
         if rewrite:
             self.rewrite_log_with_history(new_history)
-            return self.sync_compression_marker(new_history)
+            return True
 
         # Find the summary message in new_history
         summary_msg = None

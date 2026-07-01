@@ -1275,9 +1275,9 @@ class AgentPool:
                 log_path=new_log_path,  # Point to the copy (or None for fresh)
             )
 
-            # 3. Rewrite the copy with restored messages (reset_history handles truncation and new metadata)
+            # 3. Rewrite the copy with restored messages (rewrite_log_with_history handles truncation and new metadata)
             # BUG FIX: Pass cleaned_messages (full history from JSONL) instead of restored_messages (partial working set).
-            # This ensures reset_history has complete marker context for accurate insert_pos calculation,
+            # This ensures rewrite_log_with_history has complete marker context for accurate insert_pos calculation,
             # preventing permanent loss of pre-marker history when copy fails or file is inaccessible.
             log_inst.rewrite_log_with_history(cleaned_messages)
             
@@ -1288,6 +1288,7 @@ class AgentPool:
             logger.warning(f"Logger setup after log load failed for {instance_name} (non-critical): {e}")
             logger_setup_ok = False
 
+        log_source = "file" if Path(log_input).exists() else "JSON input"
         return f"Successfully loaded {len(restored_messages)} messages for instance '{instance_name}' ({agent_class}) from {log_source}."
 
     def _compute_template_hash(self, template_name: str) -> Optional[str]:
