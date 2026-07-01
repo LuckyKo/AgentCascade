@@ -7,7 +7,7 @@ import logging
 import threading
 import time as _time
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
-from agent_cascade.llm.schema import SYSTEM, USER
+from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
 from agent_cascade.utils.utils import extract_text_from_message, _format_tool_calls_for_text, _reasoning_to_text
 
@@ -76,13 +76,14 @@ def _format_messages_for_summary(target_messages):
             content = " ".join(text_parts)
 
         # Check for reasoning_content even if content is populated (handles str and list types)
+        # Only process reasoning for assistant messages — matches extract_text_from_message behavior
         if isinstance(msg, dict):
             rc = msg.get('reasoning_content', '') or ''
         else:
             rc = getattr(msg, 'reasoning_content', '') or ''
 
         rc_text = _reasoning_to_text(rc)
-        if rc_text:
+        if rc_text and role == ASSISTANT.upper():
             if not _is_content_empty(content):
                 # Prepend reasoning before content for prominence
                 content = f"[THOUGHT: {rc_text}]\n{content}"

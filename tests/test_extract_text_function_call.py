@@ -344,3 +344,15 @@ class TestExtractTextFunctionCall:
         
         # Whitespace string
         assert _reasoning_to_text("  ") == ""
+
+    def test_format_messages_user_reasoning_not_leaked(self):
+        """Test that user messages with reasoning_content don't leak into summary."""
+        from agent_cascade.compression.agent_invoker import _format_messages_for_summary
+        
+        msgs = [
+            {"role": "user", "content": "", "reasoning_content": "Secret user thought"},
+            {"role": "assistant", "content": "Hello", "reasoning_content": "Assistant thought"},
+        ]
+        result = _format_messages_for_summary(msgs)
+        assert "Secret user thought" not in result
+        assert "Assistant thought" in result
