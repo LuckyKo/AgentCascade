@@ -763,13 +763,16 @@ class ExecutionEngine:
                     else:
                         logger.warning(f"[MSG_VALIDATION] Skipping non-Message in LLM response for {instance.instance_name}: type={type(msg).__name__}, value={str(msg)[:100]}")
 
-                # Check generation change (old run superseded by newer one) alongside stop/pause
+                # Cooperatively wait if paused — don't break execution flow, just wait
+                if self.pool.is_paused():
+                    while self.pool.is_paused():
+                        time.sleep(0.1)
+                    # Fall through to stop check and Phase 4 after unpause
+                
+                # Check generation change (old run superseded by newer one) alongside stop
                 if self._is_stopped(instance.instance_name):
                     logger.debug("halted/stopped/superseded - %s", instance.instance_name)
-                    if self.pool.is_paused():
-                        self.pool.wait_if_paused(timeout=1.0)
-                    else:
-                        time.sleep(0.1)
+                    time.sleep(0.1)
                     yield response
                     continue
 
@@ -1041,15 +1044,15 @@ class ExecutionEngine:
         return self._is_stopped(inst_name)
 
     def _is_stopped(self, inst_name: str) -> bool:
-        """Check if pool is stopped, paused, run superseded, or instance terminated.
+        """Check if pool is stopped, run superseded, or instance terminated.
         
         Centralized stop condition check used throughout execution_engine.py to avoid
         duplicated 4-condition checks across 8+ locations. Returns True immediately
         on any stop signal for fast-path efficiency.
         
-        IMPORTANT: Includes pause in the check — use this for Phase 4 tool execution
-        where pause should block tools. For streaming (Phase 3), use _is_stop_interrupted()
-        which excludes pause, since pause should not interrupt ongoing LLM calls.
+        Note: Does NOT include pause — pause is handled separately via cooperative
+        wait loops (e.g. `while self.pool.is_paused(): time.sleep(0.1)`).
+        Pause should not interrupt execution; it should just wait and resume.
         
         Args:
             inst_name: Instance name to check halt/termination status
@@ -1059,7 +1062,6 @@ class ExecutionEngine:
         """
         return (self.pool.stopped or 
                 self._my_generation != self.pool._run_generation or
-                self.pool.is_paused() or
                 inst_name in self.pool._halted_instances or
                 self.pool.is_instance_terminated(inst_name))
 
@@ -1998,6 +2000,10 @@ class ExecutionEngine:
             if not use_tool:
                 continue
 
+            # Cooperatively wait if paused — don't skip tool execution, just wait
+            while self.pool.is_paused():
+                time.sleep(0.1)
+            
             # Stop/halt check BEFORE tool execution (check before setting used_any_tool)
             if self._is_stopped(inst_name):
                 break
@@ -2153,10 +2159,6 @@ class ExecutionEngine:
                 conv = self.pool.get_conversation(inst_name)
                 if conv and not validate_message_pool(conv, inst_name):
                     logger.error(f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
-
-            # Post-tool-execution stop check — catches stop during long-running synchronous tools (shell_cmd, etc.)
-            if self._is_stopped(inst_name):
-                break
 
             # Build function result message — include function_id and tool_success per OpenAI spec
             # function_id was extracted BEFORE _execute_tool call above
