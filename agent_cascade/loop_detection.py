@@ -175,8 +175,7 @@ def detect_loop(
                 pop_count = len(window) - second_rep_window_idx
 
                 reason = (
-                    f"Detected repeated sequence loop "
-                    f"({', '.join(roles)} repeating {K} times)"
+                    f"sequence ({', '.join(roles)}) repeated {K} times"
                 )
                 return reason, pop_count
 

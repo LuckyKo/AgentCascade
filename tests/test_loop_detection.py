@@ -471,7 +471,7 @@ class TestRecoveryHandler:
         # Verify hint was injected via append_message
         assert inst.append_message.called, "Hint should be appended to instance"
         hint_msg = inst.append_message.call_args[0][0]
-        assert "[SYSTEM]: A repetitive loop was detected" in (hint_msg.content or "")
+        assert "[SYSTEM]: You appear to be stuck in a loop" in (hint_msg.content or "")
         assert hint_msg.role == USER
 
     @patch('agent_cascade.api_integration.run_agent_in_pool')

@@ -1318,8 +1318,8 @@ class ExecutionEngine:
         hint_msg = Message(
             role=USER,
             content=(
-                f"[SYSTEM]: A repetitive loop was detected ({reason}). "
-                f"Please try a different approach."
+                f"[SYSTEM]: You appear to be stuck in a loop — {reason}. "
+                f"Try a different approach to break the pattern."
             ),
         )
         self._append_and_log(instance, hint_msg)
