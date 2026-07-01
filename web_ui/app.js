@@ -1282,9 +1282,9 @@ function handleServerMessage(data) {
       const instanceData = state.subAgents[activeInstance];
       if (instanceData && instanceData.messages && instanceData.messages.length > 0) {
         const lastMsg = instanceData.messages[instanceData.messages.length - 1];
-        ActivityBar.push(activeInstance, getActivityPreview(lastMsg));
+        ActivityBar.pushImmediate(activeInstance, getActivityPreview(lastMsg), instanceData.is_waiting ?? false, instanceData.total_tokens ?? 0);
       } else {
-        ActivityBar.push(activeInstance, '');
+        ActivityBar.pushImmediate(activeInstance, '', instanceData?.is_waiting ?? false, instanceData?.total_tokens ?? 0);
       }
 
       // Normalize active_stack: backend sends tuples [name, depth], extract just name
