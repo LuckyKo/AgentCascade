@@ -9,7 +9,7 @@ import time as _time
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
-from agent_cascade.utils.utils import extract_text_from_message, _format_tool_calls_for_text, _reasoning_to_text
+from agent_cascade.utils.utils import extract_text_from_message, _format_tool_calls_for_text, _reasoning_to_text, _msg_field_or_extra
 
 # Import shared broadcast helper (replaces duplicated inline broadcast loops)
 from agent_cascade.api_integration import broadcast_stream_update
@@ -77,10 +77,7 @@ def _format_messages_for_summary(target_messages):
 
         # Check for reasoning_content even if content is populated (handles str and list types)
         # Only process reasoning for assistant messages — matches extract_text_from_message behavior
-        if isinstance(msg, dict):
-            rc = msg.get('reasoning_content', '') or ''
-        else:
-            rc = getattr(msg, 'reasoning_content', '') or ''
+        rc = _msg_field_or_extra(msg, 'reasoning_content') or ''
 
         rc_text = _reasoning_to_text(rc)
         if rc_text and role == ASSISTANT.upper():

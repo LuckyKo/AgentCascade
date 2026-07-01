@@ -356,3 +356,13 @@ class TestExtractTextFunctionCall:
         result = _format_messages_for_summary(msgs)
         assert "Secret user thought" not in result
         assert "Assistant thought" in result
+
+    def test_format_messages_reasoning_from_extra_dict(self):
+        """Test that reasoning_content in extra dict is picked up by _format_messages_for_summary."""
+        from agent_cascade.compression.agent_invoker import _format_messages_for_summary
+        
+        msgs = [
+            {"role": "assistant", "content": "", "extra": {"reasoning_content": "Hidden thought from extra"}},
+        ]
+        result = _format_messages_for_summary(msgs)
+        assert "[THOUGHT: Hidden thought from extra]" in result
