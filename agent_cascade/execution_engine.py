@@ -2875,7 +2875,7 @@ class ExecutionEngine:
 
         # Item 12: Initialize sub-agent WebUI state before execution begins (Fix #3: lighter snapshot)
         # Issue Y2: Use shared helper method instead of duplicated logic
-        self._update_webui_state(instance_name, agent_class, inst, conv, final_resp=[], is_initial=True)
+        self._update_webui_state(instance_name, inst.agent_class, inst, conv, final_resp=[], is_initial=True)
 
         # Phase 4.4: Delegate to StreamPublisher for WebSocket push
         self.stream_publisher.push_initial_state(inst, caller)
@@ -2916,7 +2916,7 @@ class ExecutionEngine:
                 if _update_counter % 5 == 0:
                     # Issue Y2: Use shared helper method instead of duplicated logic
                     current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
-                    self._update_webui_state(instance_name, agent_class, inst, current_conv, final_resp)
+                    self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
 
                 # ── Push stream_update to frontend during sub-agent execution ──
                 # This is the key fix: without this, the main agent's streaming loop
@@ -2938,7 +2938,7 @@ class ExecutionEngine:
             # Ensures even short-lived agents (<5 turns) appear in the WebUI
             # Issue Y2: Use shared helper method instead of duplicated logic
             current_conv = list(inst.conversation) if hasattr(inst, 'conversation') else conv
-            self._update_webui_state(instance_name, agent_class, inst, current_conv, final_resp)
+            self._update_webui_state(instance_name, inst.agent_class, inst, current_conv, final_resp)
 
             # ── Push final stream_update after sub-agent completes ──
             self.stream_publisher.push_final_state(inst, caller)
@@ -3022,7 +3022,7 @@ class ExecutionEngine:
         
         # Initialize WebUI state for immediate tab visibility
         # Issue Y2: Use shared helper method instead of duplicated logic
-        self._update_webui_state(instance_name, agent_class, inst, conv, final_resp=[], is_initial=True)
+        self._update_webui_state(instance_name, inst.agent_class, inst, conv, final_resp=[], is_initial=True)
         
         # Phase 4.4: Delegate to StreamPublisher for WebSocket push
         self.stream_publisher.push_initial_state(inst, caller)
