@@ -53,8 +53,9 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck - it should clear up ALL the API slots. after 1000 fixed this still happens!
 - [x] loop detector is appending to agent pool the first user message on rollback; no debug logging on event (FIXED 2026-07-01: surgical_rollback now clears _cached_messages/_cached_llm_messages, added debug logging in execution_engine.py and api_integration.py)
 - [ ] images don't get properly pasted in chat
+- [ ] Pause interferes with streaming and halts, it should only affect tool response startup.
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent once it reached conclusion
-- [ ] session load must also load the type of agent and instance name from the json file and use that
+- [x] session load must also load the type of agent and instance name from the json file and use that (Fixed 2026-07-01: changed 6 call sites in execution_engine.py to use inst.agent_class instead of caller's agent_class after find_or_create_instance, ensuring build_system_message/initialize_conversation/propagate_settings all use the loaded session's agent class)
 - [ ] max_tokens does not get updated when the API endpoint changes
 - [x] auto-ask security sometimes returns this even if the response was fine: REJECTED BY USER: Security check error: There is no current event loop in thread 'Thread-43 (_run_check_worker)'. (Fixed 2026-06-30: replaced asyncio.get_event_loop() with _get_ws_loop helper that uses agent_pool._ws_loop)
 - [x] approval window does not show justification for edit file operation (Fixed 2026-06-30: wired justification through tool classes → operation manager methods → tool_args → PendingApproval. Also fixed WriteFile non-JSON fallback path that silently dropped justification.)

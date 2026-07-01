@@ -2855,18 +2855,19 @@ class ExecutionEngine:
         )
 
         # Phase 4.1: Delegate to lifecycle manager for system message building
-        sys_msg = self.lifecycle.build_system_message(agent_class, instance_name)
+        # Use inst.agent_class (may differ from caller's agent_class if session was loaded from log file)
+        sys_msg = self.lifecycle.build_system_message(inst.agent_class, instance_name)
 
         # Phase 4.1: Delegate to lifecycle manager for task message building
         task_msg = self.lifecycle.build_task_message(args, caller)
 
         # Phase 4.1: Delegate to lifecycle manager for conversation initialization
         conv = self.lifecycle.initialize_conversation(
-            inst, sys_msg, task_msg, is_reuse, instance_name, agent_class
+            inst, sys_msg, task_msg, is_reuse, instance_name, inst.agent_class
         )
 
         # Phase 4.1: Delegate to lifecycle manager for settings propagation
-        self.lifecycle.propagate_settings(inst, caller, agent_class)
+        self.lifecycle.propagate_settings(inst, caller, inst.agent_class)
 
         # Track in active stack with depth info (thread-safe via RLock)
         with self.pool._execution._state_lock:
@@ -3002,19 +3003,19 @@ class ExecutionEngine:
             agent_class, instance_name, caller, nest_depth=0, force_fresh=True
         )
         
-        # Build system message using lifecycle manager
-        sys_msg = self.lifecycle.build_system_message(agent_class, instance_name)
+        # Build system message using lifecycle manager (use inst.agent_class for consistency)
+        sys_msg = self.lifecycle.build_system_message(inst.agent_class, instance_name)
         
         # Build task message using lifecycle manager
         task_msg = self.lifecycle.build_task_message(args, caller)
         
         # Initialize conversation using lifecycle manager (pass actual is_reuse value)
         conv = self.lifecycle.initialize_conversation(
-            inst, sys_msg, task_msg, is_reuse=is_reuse, instance_name=instance_name, agent_class=agent_class
+            inst, sys_msg, task_msg, is_reuse=is_reuse, instance_name=instance_name, agent_class=inst.agent_class
         )
         
         # Phase 4.1: Propagate settings from caller to system agent
-        self.lifecycle.propagate_settings(inst, caller, agent_class)
+        self.lifecycle.propagate_settings(inst, caller, inst.agent_class)
         
         # Track in active stack (thread-safe)
         self.pool.active_stack_append(instance_name, 0)
