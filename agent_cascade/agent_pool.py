@@ -1760,6 +1760,10 @@ class AgentPool:
         """Check if the pool is currently paused."""
         return self._paused.is_set()
 
+    def wait_if_paused(self, timeout: float = 1.0) -> None:
+        """Block until resumed or timeout expires. Used by execution loop to wait efficiently on pause."""
+        self._paused.wait(timeout=timeout)
+
     # ── Instance halt check (checks both global pause + per-instance halt) ───
 
     def is_instance_halted(self, instance_name: str) -> bool:

@@ -765,12 +765,10 @@ class ExecutionEngine:
                 # Check generation change (old run superseded by newer one) alongside stop/pause
                 if self._is_stopped(instance.instance_name):
                     logger.debug("halted/stopped/superseded - %s", instance.instance_name)
-                    # Wait efficiently on pause event instead of busy-sleep polling.
-                    # A 1s timeout ensures we still re-check other stop conditions periodically.
                     if self.pool.is_paused():
-                        self.pool._paused.wait(timeout=1.0)
+                        self.pool.wait_if_paused(timeout=1.0)
                     else:
-                        time.sleep(0.1)  # fallback for non-pause stops (superseded, halted, terminated)
+                        time.sleep(0.1)
                     yield response
                     continue
 
