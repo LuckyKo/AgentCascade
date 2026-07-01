@@ -549,6 +549,7 @@ def create_app(agents, agent_pool, config=None):
                 'summary': '',
                 'has_queued_messages': has_queued,
                 'stopped': stopped,
+                'paused': agent_pool.is_paused() if agent_pool else False,
                 'agents': agents_list,
                 'current_model': current_model,
                 'telemetry': None,
@@ -618,6 +619,7 @@ def create_app(agents, agent_pool, config=None):
                 'current_model': current_model,
                 'telemetry': None,
                 'stopped': stopped,
+                'paused': agent_pool.is_paused() if agent_pool else False,
             }
         
         return result

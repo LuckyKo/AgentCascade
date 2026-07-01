@@ -765,8 +765,12 @@ class ExecutionEngine:
                 # Check generation change (old run superseded by newer one) alongside stop/pause
                 if self._is_stopped(instance.instance_name):
                     logger.debug("halted/stopped/superseded - %s", instance.instance_name)
-                    # Sleep 100ms to prevent tight loop when paused/stopped
-                    time.sleep(0.1)
+                    # Wait efficiently on pause event instead of busy-sleep polling.
+                    # A 1s timeout ensures we still re-check other stop conditions periodically.
+                    if self.pool.is_paused():
+                        self.pool._paused.wait(timeout=1.0)
+                    else:
+                        time.sleep(0.1)  # fallback for non-pause stops (superseded, halted, terminated)
                     yield response
                     continue
 
@@ -1047,6 +1051,10 @@ class ExecutionEngine:
         duplicated 4-condition checks across 8+ locations. Returns True immediately
         on any stop signal for fast-path efficiency.
         
+        IMPORTANT: Includes pause in the check — use this for Phase 4 tool execution
+        where pause should block tools. For streaming (Phase 3), use _is_stop_interrupted()
+        which excludes pause, since pause should not interrupt ongoing LLM calls.
+        
         Args:
             inst_name: Instance name to check halt/termination status
             
@@ -1056,6 +1064,24 @@ class ExecutionEngine:
         return (self.pool.stopped or 
                 self._my_generation != self.pool._run_generation or
                 self.pool.is_paused() or
+                inst_name in self.pool._halted_instances or
+                self.pool.is_instance_terminated(inst_name))
+
+    def _is_stop_interrupted(self, inst_name: str) -> bool:
+        """Check if pool is stopped, run superseded, or instance terminated (excludes pause).
+        
+        Used during streaming (Phase 3) where only actual stop/termination should interrupt.
+        Pause does NOT trigger interruption — it should only block tool execution (Phase 4).
+        This enforces the semantic distinction: pause = "hold tools", not "abort streaming".
+        
+        Args:
+            inst_name: Instance name to check halt/termination status
+            
+        Returns:
+            True if any stop condition met (excluding pause), False otherwise.
+        """
+        return (self.pool.stopped or 
+                self._my_generation != self.pool._run_generation or
                 inst_name in self.pool._halted_instances or
                 self.pool.is_instance_terminated(inst_name))
 
@@ -1472,7 +1498,9 @@ class ExecutionEngine:
                     # Also checks generation change (old run superseded by newer one on resume).
                     # This is defense-in-depth: _check_stop_conditions() runs before the LLM call, but stop
                     # can also be triggered DURING the streaming call itself (while chunks are arriving).
-                    if self._is_stopped(inst_name):
+                    # CRITICAL: Use _is_stop_interrupted() which excludes pause — pause should NOT abort
+                    # ongoing streaming; it only blocks tool execution after streaming completes.
+                    if self._is_stop_interrupted(inst_name):
                         with instance._compression_lock:
                             instance._streaming_responses = []
                         try:
@@ -1490,7 +1518,8 @@ class ExecutionEngine:
                             last_streaming_update_time = current_time
                     
                     # Re-check stop/halt after UI update (defense in depth — catches stop during slow streaming)
-                    if self._is_stopped(inst_name):
+                    # CRITICAL: Use _is_stop_interrupted() which excludes pause — same as above.
+                    if self._is_stop_interrupted(inst_name):
                         with instance._compression_lock:
                             instance._streaming_responses = []
                         try:

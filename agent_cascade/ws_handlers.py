@@ -121,8 +121,17 @@ class WsMessageHandler:
 
     # ── Broadcast helper ──────────────────────────────────────────────────
     async def _broadcast(self, ws_type: str = 'state', generating: Optional[bool] = None) -> None:
-        """Broadcast state update to all WebSocket clients."""
+        """Broadcast state update to all WebSocket clients.
+
+        Sends a full state snapshot via the broadcast function. The build_state_fn
+        is called with optional generating override; it reads from pool.instances
+        and includes all fields needed by the frontend (messages, instances, telemetry).
+        """
         await self.broadcast_fn({'type': ws_type, **self.build_state_fn(generating=generating)})
+
+    def _is_paused(self) -> bool:
+        """Check if agent pool is currently paused."""
+        return self.agent_pool.is_paused() if self.agent_pool else False
 
     # ── Helper: get active agent runner ───────────────────────────────────
     def _get_agent(self):
@@ -353,36 +362,25 @@ class WsMessageHandler:
         await self._broadcast('done')
 
     async def handle_pause(self, data: dict) -> None:
-        """Handle 'pause' — pause ALL running instances by setting global flag."""
+        """Handle 'pause' — pause ALL running instances by setting global flag.
+
+        IMPORTANT: This does NOT call _stop_generation() or broadcast generating=False.
+        Pause should only affect tool response startup (Phase 4), not disrupt ongoing
+        streaming (Phase 3). The generating flag and WebSocket state remain unchanged
+        so the frontend keeps its streaming UI active while tools are held back.
+        """
         if self.agent_pool:
             inst_names = list(self.agent_pool.instances.keys())
-            self.agent_pool.pause()
+            self.agent_pool.pause()  # Sets _paused Event — backend blocks Phase 4 tool execution
             from agent_cascade.log import logger
             logger.info(f"Paused all instances: {inst_names}")
-            self._stop_generation()
-
-        try:
-            await self._broadcast(generating=False)
-        except Exception as e:
-            from agent_cascade.log import logger
-            logger.warning(f"Failed to broadcast pause state: {e}")
 
     async def handle_resume_all(self, data: dict) -> None:
         """Handle 'resume_all' — resume ALL paused instances."""
         if self.agent_pool:
-            self.agent_pool.resume()
+            self.agent_pool.resume()  # Clears _paused Event — backend unblocks Phase 4 tool execution
             from agent_cascade.log import logger
             logger.info("Cleared global pause flag — all agents will resume naturally")
-
-        # Mark session as generating again
-        with self._session_lock:
-            self.session['generating'] = True
-
-        try:
-            await self._broadcast(generating=True)
-        except Exception as e:
-            from agent_cascade.log import logger
-            logger.warning(f"Failed to broadcast resume_all state: {e}")
 
     async def handle_resume(self, data: dict) -> None:
         """Handle 'resume' — restore agent pools from logs and restart generation."""

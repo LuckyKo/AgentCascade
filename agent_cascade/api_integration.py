@@ -780,7 +780,7 @@ def build_state_from_pool(
 
     # Get pending approvals (only include if non-empty to prevent UI flickering)
     pending_approvals = _get_approvals(pool)
-    
+
     return {
         # Kept for backward compat — frontend fallback reads data.messages if root not in agent_instances
         'messages': [serialize_message(m, i) for i, m in enumerate(msgs)],
@@ -797,6 +797,7 @@ def build_state_from_pool(
         'summary': current_summary,
         'has_queued_messages': pool.has_messages(instance_name),
         'stopped': pool.stopped,
+        'paused': pool.is_paused(),  # Pause state for frontend "Paused" indicator
         # Extra fields for frontend display
         'agents': agents_list,
         'current_model': current_model,
@@ -900,6 +901,7 @@ def build_stream_update_from_pool(
         'current_model': current_model,
         'telemetry': telemetry_data,
         'stopped': pool.stopped,
+        'paused': pool.is_paused(),  # Pause state for frontend "Paused" indicator
     }
 
 
