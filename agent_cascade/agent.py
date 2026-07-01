@@ -28,7 +28,6 @@ from agent_cascade.tools.base import ToolServiceError
 from agent_cascade.tools.simple_doc_parser import DocParserError
 from agent_cascade.utils.utils import has_chinese_messages, merge_generate_cfgs
 from agent_cascade.utils.thinking_block import strip_thinking_blocks
-from agent_cascade.loop_detection import LoopDetectedError  # For proper isinstance check in tool execution
 
 
 class Agent(ABC):
@@ -241,11 +240,6 @@ class Agent(ABC):
             logger.warning(f'Tool `{tool_name}` reported a service error:\n{error_message}')
             return error_message
         except Exception as ex:
-            # Special Case: Allow LoopDetectedError to propagate to the orchestrator/API server
-            # for surgical rollback and retry logic to trigger.
-            if isinstance(ex, LoopDetectedError):
-                raise ex
-                
             exception_type = type(ex).__name__
             exception_message = str(ex)
             traceback_info = ''.join(traceback.format_tb(ex.__traceback__))

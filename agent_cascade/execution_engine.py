@@ -47,7 +47,7 @@ from .lifecycle_manager import AgentLifecycleManager
 from .compression.handler import CompressionHandler
 from .tool_dispatcher import ToolDispatcher
 from .stream_publisher import StreamPublisher
-from .loop_detection import detect_loop as _canonical_detect_loop, LoopDetectedError
+from .loop_detection import detect_loop as _canonical_detect_loop
 from .operation_manager import set_current_instance_name, clear_current_instance_name
 
 
@@ -2086,12 +2086,7 @@ class ExecutionEngine:
                     tool_result = f"Error: {e}"
                     _tool_success = False
                     _tool_error = str(e)
-                    # Re-raise loop detection errors so the turn loop stops as intended
-                    if isinstance(e, LoopDetectedError):
-                        # tool_result already set above, so finally-block telemetry will fire before propagate
-                        raise
-
-                # Truncate if needed — track whether truncation actually occurred.
+                    # Truncate if needed — track whether truncation actually occurred.
                 # Non-string tool results bypass truncation and always report truncated=False.
                 _was_truncated = False
                 if isinstance(tool_result, str):

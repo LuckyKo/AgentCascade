@@ -71,7 +71,8 @@ def run_child_core(
             happens inline inside engine.run() up to 3 times).
 
     Raises:
-        Exception: Only truly unexpected errors propagate. LoopDetectedError is handled internally.
+        Exception: Only truly unexpected errors propagate. Loop detection is
+        handled inline inside engine.run().
     """
     if not force_fresh:
         force_fresh = _determine_force_fresh(agent_class)

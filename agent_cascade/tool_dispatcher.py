@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from agent_cascade.agent_instance import AgentInstance
 
 from agent_cascade.log import logger
-from agent_cascade.loop_detection import LoopDetectedError
 from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS
 from agent_cascade.tool_utils import (
     MAX_SPILL_SIZE,
@@ -385,9 +384,8 @@ class ToolDispatcher:
             return result
 
         except Exception as e:
-            # Catch non-LoopDetectedError exceptions and return formatted error string.
-            # run_child_core handles LoopDetectedError internally, so this catches only
-            # unexpected errors (matching the old sync path format for parent parsing).
+            # Catch all exceptions and return formatted error string.
+            # Loop detection is handled inline inside engine.run().
             logger.error(f"Sync child '{instance_name}' failed: {e}")
             return f"[Agent '{instance_name}' Failed]:\n{str(e)}"
 

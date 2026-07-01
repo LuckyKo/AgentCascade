@@ -26,7 +26,7 @@ from agent_cascade.llm.schema import (
 from agent_cascade.log import logger
 
 from .agent_pool import AgentPool
-from .loop_detection import LoopDetectedError
+
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -207,11 +207,6 @@ def run_agent_thread_unified(
 
     except (KeyboardInterrupt, SystemExit):
         # Never swallow user interrupts or explicit exits
-        raise
-    except LoopDetectedError:
-        # Re-raise — let run_agent_in_pool_with_recovery handle loop recovery.
-        # This MUST come before the generic Exception handler to avoid treating
-        # a loop as a terminal error (which would skip the surgical rollback + retry).
         raise
     except Exception as e:
         # Catch unhandled exceptions — log and yield error state

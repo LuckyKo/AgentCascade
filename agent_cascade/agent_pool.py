@@ -24,7 +24,7 @@ from agent_cascade.settings import DEFAULT_WORKSPACE
 
 from .agent_instance import AgentInstance, PoolSettings, AgentState
 from .async_tools import AsyncResultBuffer, AsyncToolRegistry
-from .loop_detection import LoopDetectedError
+
 
 # Active states for agent lifecycle management (not IDLE — it means "not executing")
 ACTIVE_STATES = (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING)
@@ -1731,9 +1731,6 @@ class AgentPool:
                     prefix="Parallel Agent",
                 )
                 return result
-            except LoopDetectedError:
-                # Preserve loop detection signal if it escapes run_child_core
-                raise
             except Exception as e:
                 # Catch generic exceptions to preserve the structured agent-specific prefix
                 return f"[Parallel Agent '{child_instance_name}' Failed]:\n{str(e)}"
