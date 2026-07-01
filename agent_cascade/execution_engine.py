@@ -791,9 +791,6 @@ class ExecutionEngine:
                 self._append_and_log(instance, msg)
                 response.append(msg)  # Stream turn limit to UI
 
-        except LoopDetectedError:
-            # Propagate to consumer-level recovery wrapper (DESIGN_REWRITE §7.2)
-            raise
         except Exception as e:
             # C4 fix: Catch unhandled exceptions — log and yield error state
             logger.error("EXCEPTION - %s: %s: %s", instance.instance_name, type(e).__name__, e)
@@ -1189,7 +1186,7 @@ class ExecutionEngine:
 
         Returns True if processing should continue to next iteration (yield + continue).
         Handles: stop/halt guard, async message drain, forced compression with rebuild,
-        and loop detection (raises LoopDetectedError if found).
+        and loop detection (inline rollback + hint if found).
         """
         inst_name = instance.instance_name
         
@@ -1228,13 +1225,32 @@ class ExecutionEngine:
                     f"[LOOP_DETECTED] {inst_name}: pattern={reason}, "
                     f"pop_count={pop_count}, messages={len(messages)}"
                 )
-                logger.warning(f"Loop detected for {inst_name}: {reason}")
-                # Bug #1 fix: Add agent_name to LoopDetectedError for correct rollback target
-                raise LoopDetectedError(reason=reason, agent_name=inst_name, pop_count=pop_count)
+
+                # ── Inline rollback + hint (no exception, no retry loop) ──────
+                # Track rollback count to prevent infinite recovery loops
+                rollbacks = getattr(instance, '_loop_rollback_count', 0) + 1
+                instance._loop_rollback_count = rollbacks
+
+                self._inline_rollback_and_hint(
+                    instance, inst_name, pop_count, reason,
+                    messages, llm_messages, response,
+                )
+
+                if rollbacks >= 3:
+                    logger.warning(
+                        f"Loop recovery for {inst_name}: rolled back "
+                        f"{rollbacks} times without success. Continuing."
+                    )
+
+                return True  # Continue loop with fresh state
         else:
             # Clear the cooldown flag now that we've skipped loop detection this turn.
             # Next turn will run normal loop detection (no more suppression).
             instance._suppress_loop_detection_next_turn = False
+
+            # Also reset rollback counter after compression (conversation state changed)
+            if hasattr(instance, '_loop_rollback_count'):
+                instance._loop_rollback_count = 0
 
         return False  # Continue to LLM call normally
 
@@ -1271,6 +1287,46 @@ class ExecutionEngine:
             f"Consider using compress_context to free space.]"
         )
         self._append_system_notification(llm_messages, "[SYSTEM WARNING: Context", warning)
+
+    def _inline_rollback_and_hint(
+        self, instance: AgentInstance, inst_name: str,
+        pop_count: int, reason: str,
+        messages: List[Message], llm_messages: List[Message],
+        response: List[Message],
+    ) -> None:
+        """Rollback conversation and inject a hint message inline (no exception).
+
+        Steps:
+          1. Pop N messages from instance.conversation via pool._rollback_instance
+             (this also clears working set caches and syncs the logger).
+          2. Append ONE USER hint message to guide the agent toward a new approach.
+          3. Rebuild local working sets (messages, llm_messages) so the next turn
+             uses the rolled-back state instead of stale copies.
+
+        Args:
+            instance: The AgentInstance being executed.
+            inst_name: Instance name string.
+            pop_count: Number of messages to remove from end.
+            reason: Human-readable loop detection reason.
+            messages, llm_messages, response: Working lists mutated in-place.
+        """
+        # Step 1: Rollback — pops N msgs, clears caches, syncs logger
+        self.pool._rollback_instance(inst_name, pop_count=pop_count)
+
+        # Step 2: Append hint message (goes to conversation + logger atomically)
+        hint_msg = Message(
+            role=USER,
+            content=(
+                f"[SYSTEM]: A repetitive loop was detected ({reason}). "
+                f"Please try a different approach."
+            ),
+        )
+        self._append_and_log(instance, hint_msg)
+
+        # Step 3: Rebuild local working sets so the next turn sees fresh state.
+        # The response list is also cleared since we're starting a new turn.
+        self._rebuild_working_set(messages, llm_messages, inst_name)
+        response.clear()
 
     def _rebuild_working_set(
         self, messages: List[Message], llm_messages: List[Message], inst_name: str

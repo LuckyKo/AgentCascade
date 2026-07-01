@@ -544,37 +544,36 @@ class WsMessageHandler:
 
         instance_name = data.get('target_agent') or self.session['session_name']
 
-        # Remove trailing assistant/function messages from the pool instance's conversation
+        # Initialize variables before the instance check to avoid undefined references
+        last_user_msg = None
+        count_to_trim = 0
+
+        # Remove trailing assistant/function messages + the user message using unified rollback helper.
+        # The helper handles cache clearing and logger sync internally, so we skip manual sync steps.
         if self.agent_pool:
             inst = self.agent_pool.get_instance(instance_name)
             if inst is not None:
-                from agent_cascade.llm.schema import ASSISTANT, FUNCTION
+                from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER
                 from agent_cascade.utils.utils import msg_field
 
-                count_to_trim = 0
                 while inst.conversation and count_to_trim < len(inst.conversation) \
                         and msg_field(inst.conversation[-1 - count_to_trim], 'role') in (ASSISTANT, FUNCTION):
                     count_to_trim += 1
+
+                # Check the message BEFORE the trailing assistant/function messages for USER role
+                if inst.conversation and count_to_trim < len(inst.conversation):
+                    candidate_idx = len(inst.conversation) - 1 - count_to_trim
+                    if msg_field(inst.conversation[candidate_idx], 'role') == USER:
+                        last_user_msg = inst.conversation[candidate_idx]
+                        count_to_trim += 1
+
                 if count_to_trim > 0:
-                    inst.trim_tail(count_to_trim)
-
-        # Roll back one more (the user message) to allow a clean re-trigger
-        last_user_msg = None
-        from agent_cascade.llm.schema import USER
-        inst = self.agent_pool.get_instance(instance_name) if self.agent_pool else None
-        if inst is not None and inst.conversation:
-            if msg_field(inst.conversation[-1], 'role') == USER:
-                removed = inst.trim_tail(1)
-                last_user_msg = removed[0] if removed else None
-
-        # Sync JSONL log with trimmed conversation state
-        if self.agent_pool and inst is not None:
-            try:
-                log_inst = self.agent_pool.get_logger(instance_name, inst.agent_class)
-                log_inst.rewrite_log_with_history(list(inst.conversation))
-            except Exception as e:
-                from agent_cascade.log import logger
-                logger.debug(f"Logger sync after retry trim failed for {instance_name} (non-critical): {e}")
+                    self.agent_pool._rollback_instance(
+                        instance_name,
+                        pop_count=count_to_trim,
+                        sync_logger=True,
+                        reason="User retry: trim trailing messages",
+                    )
 
         # Check if instance exists and has messages
         inst = self.agent_pool.get_instance(instance_name) if self.agent_pool else None

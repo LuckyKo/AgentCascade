@@ -25,7 +25,6 @@ from agent_cascade.log import logger
 from .agent_instance import AgentInstance, AgentState
 from .agent_pool import AgentPool
 from .execution_engine import ExecutionEngine
-from .loop_detection import LoopDetectedError
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -377,7 +376,6 @@ def run_agent_in_pool(
 
     Raises:
         KeyError: If instance_name is not found in the pool.
-        LoopDetectedError: Propagated from ExecutionEngine for recovery at caller level.
 
     Example:
         engine = ExecutionEngine(pool)
@@ -408,93 +406,20 @@ def run_agent_in_pool_with_recovery(
 ) -> Iterator[List[Message]]:
     """Run an agent with automatic loop detection recovery.
 
-    Wrapper around run_agent_in_pool that catches LoopDetectedError and retries
-    after surgical rollback. This replaces the retry loop in run_agent_thread().
+    Loop recovery is now handled inline inside engine.run().
+    This wrapper is kept for backward compatibility.
 
     Args:
         pool: The AgentPool managing all instances.
         instance_name: Name of the instance to execute.
-        max_auto_retries: Maximum number of auto-rollback retries (-1 for unlimited).
-        auto_rollback_enabled: Whether to attempt recovery on loop detection.
+        max_auto_retries: Kept for backward compatibility (no longer used).
+        auto_rollback_enabled: Kept for backward compatibility (no longer used).
 
     Yields:
         List[Message]: Current conversation state after each execution phase.
     """
-    from agent_cascade.child_runner import _recover_from_loop
-
-    if max_auto_retries == -1:
-        max_auto_retries = 999_999
-
-    retry_count = 0
-    instance = pool.get_instance(instance_name)
-    if instance is None:
-        raise KeyError(f"Instance '{instance_name}' not found in pool")
-
-    # Hint injection callback for root path: direct lock-based append (avoids
-    # creating ExecutionEngine instances in the tight retry loop).
-    def _inject_root_hint(inst, msg: Message) -> None:
-        log_inst = pool.get_logger(instance_name, inst.agent_class)
-        with inst._compression_lock:
-            inst.append_message(msg)
-            log_inst.log_message(msg)
-
-    while retry_count <= max_auto_retries:
-        try:
-            # Execute through unified engine
-            yield from run_agent_in_pool(pool, instance_name)
-            return  # Success — no loop detected
-
-        except LoopDetectedError as e:
-            looped_agent = e.agent_name if e.agent_name else instance_name
-
-            logger.debug(
-                f"[LOOP_RECOVERY] {looped_agent}: reason={e.reason}, "
-                f"pop_count={e.pop_count}, retry={retry_count}/{max_auto_retries}"
-            )
-
-            if not auto_rollback_enabled or retry_count >= max_auto_retries:
-                logger.warning(
-                    f"Loop detected for {looped_agent}: {e.reason}. "
-                    f"Exceeded retries ({retry_count}/{max_auto_retries}). Stopping."
-                )
-                error_msg = Message(
-                    role=ASSISTANT,
-                    content=f"[SYSTEM: Loop detected for {looped_agent} — {e.reason}]",
-                )
-                yield [error_msg]
-                return
-
-            # Shared recovery: rollback → get instance → inject hint
-            retry_count, succeeded = _recover_from_loop(
-                pool=pool,
-                exception=e,
-                instance_name=instance_name,
-                retry_count=retry_count,
-                max_auto_retries=max_auto_retries,
-                inject_hint=_inject_root_hint,
-            )
-
-            if not succeeded:
-                error_msg = Message(
-                    role=ASSISTANT,
-                    content=f"[SYSTEM: Rollback performed but loop recovery failed — could not find agent '{looped_agent}' for hint injection]",
-                )
-                yield [error_msg]
-                break
-
-        except (KeyboardInterrupt, SystemExit):
-            # Never swallow user interrupts or explicit exits
-            raise
-
-        except Exception as e:
-            # Catch non-loop errors (LLM failure, tool crash, etc.) — yield error state
-            logger.error(f"Execution failed for {instance_name}: {e}")
-            error_msg = Message(
-                role=ASSISTANT,
-                content=f"[SYSTEM ERROR: {e}]",
-            )
-            yield [error_msg]
-            return
+    # Execute through unified engine (loop recovery is now inline inside engine.run())
+    yield from run_agent_in_pool(pool, instance_name)
 
 
 # ═══════════════════════════════════════════════════════════════════════

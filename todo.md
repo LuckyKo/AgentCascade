@@ -25,6 +25,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] add `delete_and_insert` match_mode to edit_file tool: the `old_content` argument takes a python range `start:end` (but start with 1) that will be deleted before the new content is inserted at position `start`. leaving `new_content` empty will just delete that line range, providing just `start` in range will be pure insert of `new_content`. range can go negative, a start of -1 will insert at tail-1, 0 will append at the end, 1 will insert at start.
 [x] add `shift` mode to re_indet tool, a mode where we just add or remove indent units from the start of the line. (the old `shit` mode will be renamed to `min`)
 [ ] vision capabilities switch from global to API endpoint property (add vision toggle to each API entry). each !image insert in the messages should have an accompanying text description that the non vision model can read, a dedicated caption agent will be called to fill it if an image insert is presented and the model does not support vision.
+[ ] refactor tool assignment to work in real time, enabled tools acquired for each turn from the list assigned to the specific class of agent from the UI tool assignment list.
  
 # Message stack update rules:
 
@@ -52,7 +53,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] randomly duplicated compression markers in agent log
 - [x] first compression doesn't include the first user message; compressions with existing markers include the last marker twice: once in existing summary, second time in history (FIXED 2026-06-30)
 - [ ] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck - it should clear up ALL the API slots. after 1000 fixed this still happens!
-- [ ] loop rollback system is appending to agent pool the first user message after rollback
+- [x] loop rollback system was appending to agent pool the first user message after rollback (FIXED 2026-07-01: simplified rollback — detect → inline rollback via shared _rollback_instance → append ONE hint message → continue same turn loop. Eliminated exception-throwing, retry loops, agent re-creation, and re-initialization that caused cache mismatch and message duplication.)
 - [ ] images don't get properly pasted in chat
 - [ ] Pause function interferes with streaming and halts the system in an odd state, it should only affect tool response startup.
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent once it reached conclusion
