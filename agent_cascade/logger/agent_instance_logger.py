@@ -419,116 +419,163 @@ class AgentInstanceLogger:
                     self._append_line(msg)
 
         if needs_rewrite:
-            self.reset_history(old_history, rewrite=True)
+            self.rewrite_log_with_history(old_history)
 
     # ── History reset / rewrite ───────────────────────────────────────────
+
+    def rewrite_log_with_history(self, new_history: List[Any]) -> bool:
+        """Rewrite the log file from scratch with a complete history.
+
+        SRP: Session load rewriting — writes the full message list as-is.
+        No marker detection, deduplication, or mirrored position logic.
+        Used when the caller already has the definitive history (session load,
+        edit, delete, retry-trim operations).
+
+        Args:
+            new_history: Complete list of messages to write to the log file.
+
+        Returns:
+            True on success, False on error.
+        """
+        # Close cached handle before overwriting (Fix #1)
+        if self._file_handle and not self._file_handle.closed:
+            self._file_handle.flush()
+            self._file_handle.close()
+            self._file_handle = None
+
+        try:
+            formatted_msgs = [self._format_message(m) for m in new_history]
+
+            # Write metadata header + all messages
+            lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
+            for msg in formatted_msgs:
+                lines.append(json.dumps(msg, ensure_ascii=False) + '\n')
+
+            with open(self.log_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+
+            self._file_handle = None  # Invalidate so _ensure_file reopens clean after overwrite
+            logger.info(f"Rewrote agent log {self.log_path} with {len(formatted_msgs)} messages.")
+        except Exception as e:
+            logger.error(f"Failed to rewrite agent log {self.log_path}: {e}")
+            return False
+
+        # Update internal tracking — pool state (active set) for in-memory history
+        self.data["history"] = [self._format_message(msg) for msg in new_history]
+        self._file_history_synced = True  # Prevent unnecessary file reload on next update_history()
+
+        return True
+
+    def sync_compression_marker(self, new_pool_state: List[Any]) -> bool:
+        """Insert a new compression marker into the log at a mirrored tail position.
+
+        SRP: Post-compression log maintenance — reads existing log messages from disk,
+        finds the newest compression marker in the pool state, deduplicates against
+        the file, and inserts it at a position mirroring its tail distance.
+        All original messages in the JSONL are preserved (not replaced).
+
+        Args:
+            new_pool_state: Current pool working set containing the new compression marker.
+
+        Returns:
+            True on success, False on error.
+        """
+        # Close cached handle before overwriting (Fix #1)
+        if self._file_handle and not self._file_handle.closed:
+            self._file_handle.flush()
+            self._file_handle.close()
+            self._file_handle = None
+
+        try:
+            # ── Read existing log messages from disk ──
+            # Always read from file to get full history. Pool working set is smaller after compression.
+            existing_msgs = []
+            if self.log_path and os.path.exists(self.log_path):
+                with open(self.log_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            item = json.loads(line)
+                            if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+                                existing_msgs.append(item)
+                        except json.JSONDecodeError:
+                            logger.warning(f"Skipping malformed JSON line in {self.log_path}")
+                            continue
+
+            # ── Find the LAST (newest) compression marker in pool state ──
+            from agent_cascade.llm.schema import USER as USER_ROLE
+            last_marker_idx = -1
+            marker_content = None
+            for i in range(len(new_pool_state) - 1, -1, -1):
+                msg = new_pool_state[i]
+                role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                if role == USER_ROLE and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                    last_marker_idx = i
+                    marker_content = content
+                    break
+
+            # ── Dedup guard: check if this specific marker already exists in the log file ──
+            marker_already_in_file = any(
+                isinstance(m.get('content', ''), str) and m['content'] == marker_content
+                for m in existing_msgs
+            ) if last_marker_idx >= 0 else False
+
+            # ── Build result: existing log + marker inserted at mirrored tail offset ──
+            if last_marker_idx >= 0:
+                actual_tail_count = len(new_pool_state) - last_marker_idx - 1
+                formatted_marker = self._format_message(new_pool_state[last_marker_idx])
+
+                insert_pos = len(existing_msgs) - actual_tail_count
+                insert_pos = max(0, min(insert_pos, len(existing_msgs)))
+
+                if marker_already_in_file:
+                    logger.debug(f"Skipping duplicate marker insert — content already in {self.log_path}")
+                    result_msgs = existing_msgs
+                else:
+                    result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
+            else:
+                # No markers found — prefer pool state, fall back to file contents
+                if new_pool_state:
+                    result_msgs = [self._format_message(m) for m in new_pool_state]
+                elif existing_msgs:
+                    result_msgs = [self._format_message(m) for m in existing_msgs]  # File has content, pool is empty → use file as source of truth
+                else:
+                    result_msgs = []
+
+            # ── Write to file (overwrite) ──
+            lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
+            for msg in result_msgs:
+                lines.append(json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) + '\n')
+
+            with open(self.log_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+
+            self._file_handle = None
+            logger.info(f"Synced compression marker in {self.log_path} ({len(result_msgs)} messages).")
+        except Exception as e:
+            logger.error(f"Failed to sync compression marker for {self.log_path}: {e}")
+            return False
+
+        # Update internal tracking — pool state (active set) for in-memory history
+        self.data["history"] = [self._format_message(msg) for msg in new_pool_state]
+        self._file_history_synced = True
+
+        return True
 
     def reset_history(self, new_history: List[Any], rewrite: bool = False):
         """Update internal tracking after a compression event or manual edit.
 
-        If rewrite=True, the log file is rewritten with only the NEWEST marker inserted
-        at a position mirroring its tail distance from pool memory. All original messages
-        in the JSONL are preserved (not replaced by markers).
-        Otherwise, we append a compression baseline to the end of the log.
+        If rewrite=True, delegates to sync_compression_marker() which reads the existing
+        log from disk and inserts any new compression marker at a mirrored tail position,
+        preserving all original messages in the JSONL file.
+        Otherwise, appends a compression baseline to the end of the log.
         """
         if rewrite:
-            # Close cached handle before overwriting (Fix #1)
-            if self._file_handle and not self._file_handle.closed:
-                self._file_handle.flush()
-                self._file_handle.close()
-                self._file_handle = None
-
-            try:
-                # COMPRESSION_MARKER imported at module level (line 18)
-
-                # ── Read existing log messages ──
-                # Always read from file on rewrite=True to get full history.
-                # self.data["history"] may be stale (pool working set is smaller after compression).
-                existing_msgs = []
-                if self.log_path and os.path.exists(self.log_path):
-                    with open(self.log_path, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                item = json.loads(line)
-                                if isinstance(item, dict) and "metadata" not in item and "event" not in item:
-                                    # Preserve ALL messages including compression markers (no event entries)
-                                    existing_msgs.append(item)
-                            except json.JSONDecodeError:
-                                logger.warning(f"Skipping malformed JSON line in {self.log_path}")
-                                continue
-
-                # ── Find the LAST (newest) marker in pool — only this one is new ──
-                # Role check matches load_session_from_log: markers must be USER role
-                from agent_cascade.llm.schema import USER as USER_ROLE
-                last_marker_idx = -1
-                marker_content = None
-                for i in range(len(new_history) - 1, -1, -1):
-                    msg = new_history[i]
-                    role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-                    content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                    if role == USER_ROLE and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                        last_marker_idx = i
-                        marker_content = content
-                        break
-
-                # ── Dedup guard: check if THIS specific marker content already exists in the log file ──
-                # Exact match (not prefix) ensures cumulative compressions with different summaries insert new markers,
-                # but identical re-calls (e.g., recovery re-sync) are safely deduplicated.
-                marker_already_in_file = any(
-                    isinstance(m.get('content', ''), str) and m['content'] == marker_content
-                    for m in existing_msgs
-                ) if last_marker_idx >= 0 else False
-
-                # ── Build result: existing log + marker inserted at mirrored tail offset ──
-                if last_marker_idx >= 0:
-                    actual_tail_count = len(new_history) - last_marker_idx - 1  # Messages AFTER marker (not including marker itself)
-                    formatted_marker = self._format_message(new_history[last_marker_idx])
-
-                    insert_pos = len(existing_msgs) - actual_tail_count  # Mirror tail distance in JSONL
-                    insert_pos = max(0, min(insert_pos, len(existing_msgs)))
-
-                    if marker_already_in_file:
-                        logger.debug(f"Skipping duplicate marker insert — content already in {self.log_path}")
-                        result_msgs = existing_msgs
-                    else:
-                        result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
-                else:
-                    # No markers — prefer new_history (pool state), but fall back to existing_msgs from file
-                    if new_history:
-                        result_msgs = [self._format_message(m) for m in new_history]
-                    elif existing_msgs:
-                        result_msgs = [self._format_message(m) for m in existing_msgs]  # File has content, pool is empty → use file as source of truth
-                    else:
-                        result_msgs = []  # Both empty — nothing to write
-
-                # ── Write to file (overwrite) ──
-                lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
-                for msg in result_msgs:
-                    lines.append(json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) + '\n')
-
-                with open(self.log_path, 'w', encoding='utf-8') as f:
-                    f.writelines(lines)
-
-                # Excise COMPRESSION event marker — only messages and markers belong in JSONL logs
-                self._file_handle = None  # Invalidate so _ensure_file reopens clean after overwrite
-
-                logger.info(f"Rewrote agent log {self.log_path} with {len(result_msgs)} messages.")
-            except Exception as e:
-                logger.error(f"Failed to rewrite agent log {self.log_path}: {e}")
-                return False
-
-            # Update internal tracking — pool state (active set) for in-memory history
-            self.data["history"] = [self._format_message(msg) for msg in new_history]
-            
-            # After rewrite=True: JSONL has all originals + marker at mirrored position.
-            # data["history"] has pool state (smaller working set). Both yield identical
-            # working sets. Set flag to prevent unnecessary file reload on next update_history().
-            self._file_history_synced = True
-            
-            return True
+            self.rewrite_log_with_history(new_history)
+            return self.sync_compression_marker(new_history)
 
         # Find the summary message in new_history
         summary_msg = None

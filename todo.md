@@ -55,7 +55,18 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] images don't get properly pasted in chat
 - [ ] Pause interferes with streaming and halts, it should only affect tool response startup.
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent once it reached conclusion
-- [x] session load must also load the type of agent and instance name from the json file and use that (Fixed 2026-07-01: changed 6 call sites in execution_engine.py to use inst.agent_class instead of caller's agent_class after find_or_create_instance, ensuring build_system_message/initialize_conversation/propagate_settings all use the loaded session's agent class)
+- [x] session load must also load the type of agent and instance name from the json file and use that (Fixed 2026-07-01: changed 10 call sites in execution_engine.py to use inst.agent_class instead of caller's agent_class after find_or_create_instance)
+  **Session load code quality review findings (2026-07-01):**
+  - [ ] [CRITICAL] Missing _instances_version += 1 after new instance creation in load_session_from_log() (agent_pool.py ~1211) — compression module gets stale data
+  - [ ] [CRITICAL] Partial state corruption: rebuild_conversation() runs before logger setup, if logger setup fails the conversation is already replaced and _session_restored is not set — next call destroys the restored conversation
+  - [ ] [MAJOR] Triple-duplicated JSON parsing in load_session_from_log() (agent_pool.py ~1007-1091) — extract to helper
+  - [ ] [MAJOR] Inconsistent error handling across 4 entry points (load_session_from_log returns strings, api_server returns bools, lifecycle swallows errors silently)
+  - [ ] [MAJOR] _session_restored flag is a fragile two-phase protocol — replace with explicit parameter in initialize_conversation() (Fixed 2026-07-01: replaced with from_external_load param)
+  - [ ] [MAJOR] reset_history(rewrite=True) does too much (SRP violation) — split into rewrite_log_with_history() and insert_compression_marker()
+  - [ ] [MINOR] Redundant isinstance(msg, dict) check in agent_pool.py ~1100 after initial parsing already filtered to dicts
+  - [ ] [MINOR] Inconsistent sub-agent clearing: ws_handlers clears, api_server and lifecycle don't
+  - [ ] [MINOR] Debug-level error logs for session load failures should be WARNING level
+  - [ ] [NIT] Duplicate _is_compression_marker logic between agent_pool.py and reset_history()
 - [ ] max_tokens does not get updated when the API endpoint changes
 - [x] auto-ask security sometimes returns this even if the response was fine: REJECTED BY USER: Security check error: There is no current event loop in thread 'Thread-43 (_run_check_worker)'. (Fixed 2026-06-30: replaced asyncio.get_event_loop() with _get_ws_loop helper that uses agent_pool._ws_loop)
 - [x] approval window does not show justification for edit file operation (Fixed 2026-06-30: wired justification through tool classes → operation manager methods → tool_args → PendingApproval. Also fixed WriteFile non-JSON fallback path that silently dropped justification.)

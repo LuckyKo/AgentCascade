@@ -400,7 +400,7 @@ class TestExecuteAgentSyncExceptionHandling:
         
         # Mock lifecycle manager and stream publisher
         engine.lifecycle = MagicMock()
-        engine.lifecycle.find_or_create_instance = MagicMock(return_value=(MagicMock(), False))
+        engine.lifecycle.find_or_create_instance = MagicMock(return_value=(MagicMock(), False, False))
         engine.lifecycle.build_system_message = MagicMock(return_value=MagicMock())
         engine.lifecycle.build_task_message = MagicMock(return_value=MagicMock())
         engine.lifecycle.initialize_conversation = MagicMock(return_value=[])
@@ -449,7 +449,7 @@ class TestExecuteAgentSyncExceptionHandling:
         engine.lifecycle = MagicMock()
         mock_inst = MagicMock()
         mock_inst._nest_depth = 0
-        engine.lifecycle.find_or_create_instance = MagicMock(return_value=(mock_inst, False))
+        engine.lifecycle.find_or_create_instance = MagicMock(return_value=(mock_inst, False, False))
         engine.lifecycle.build_system_message = MagicMock(return_value=MagicMock())
         engine.lifecycle.build_task_message = MagicMock(return_value=MagicMock())
         engine.lifecycle.initialize_conversation = MagicMock(return_value=[])

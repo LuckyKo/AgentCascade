@@ -573,7 +573,7 @@ class WsMessageHandler:
         if self.agent_pool and inst is not None:
             try:
                 log_inst = self.agent_pool.get_logger(instance_name, inst.agent_class)
-                log_inst.reset_history(list(inst.conversation), rewrite=True)
+                log_inst.rewrite_log_with_history(list(inst.conversation))
             except Exception as e:
                 from agent_cascade.log import logger
                 logger.debug(f"Logger sync after retry trim failed for {instance_name} (non-critical): {e}")
@@ -822,10 +822,9 @@ class WsMessageHandler:
                         target_name,
                         'Orchestrator' if target_name == self.session['session_name'] else 'SubAgent'
                     )
-                    logger_inst.reset_history(history, rewrite=True)
+                    logger_inst.rewrite_log_with_history(history)
 
                 # Sync instance_state so build_state() sees the edit
-                if target_name != self.session['session_name'] and target_name in self.agent_pool.instance_state:
                     self.agent_pool.instance_state[target_name]['messages'] = list(history)
 
         _clear_caches_safely()
@@ -856,7 +855,7 @@ class WsMessageHandler:
                     target_name,
                     'Orchestrator' if target_name == self.session['session_name'] else 'SubAgent'
                 )
-                logger_inst.reset_history(history, rewrite=True)
+                logger_inst.rewrite_log_with_history(history)
 
                 if target_name != self.session['session_name'] and target_name in self.agent_pool.instance_state:
                     self.agent_pool.instance_state[target_name]['messages'] = list(history)

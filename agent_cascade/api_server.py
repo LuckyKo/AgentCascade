@@ -380,6 +380,18 @@ def create_app(agents, agent_pool, config=None):
     # Initial load — pool is the single source of truth for conversation state (Phase 6)
     if agent_pool:
         loaded = _load_session_history(default_session_name)
+        # Validate partial success: instance exists but has no conversation data beyond system message
+        if loaded:
+            inst = agent_pool.get_instance(default_session_name)
+            if inst and hasattr(inst, 'conversation'):
+                conv_len = len(inst.conversation)
+                if conv_len <= 1:
+                    logger.warning(
+                        f"Session load reported success for '{default_session_name}' "
+                        f"but conversation has only {conv_len} message(s) — treating as fresh session"
+                    )
+                    loaded = False  # Fall through to fallback creation below
+
         # If log loading failed, create an empty instance so build_state_from_pool() doesn't return None.
         # This mirrors how the original branch always had session['history'] = [] even on load failure.
         if not loaded and agent_pool.get_instance(default_session_name) is None:

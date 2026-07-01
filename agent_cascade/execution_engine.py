@@ -2850,7 +2850,7 @@ class ExecutionEngine:
         log_file = args.get('log_file')
 
         # Phase 4.1: Delegate to lifecycle manager for instance creation/reuse
-        inst, is_reuse = self.lifecycle.find_or_create_instance(
+        inst, is_reuse, session_was_loaded = self.lifecycle.find_or_create_instance(
             agent_class, instance_name, caller, nest_depth, force_fresh, log_file=log_file
         )
 
@@ -2863,7 +2863,7 @@ class ExecutionEngine:
 
         # Phase 4.1: Delegate to lifecycle manager for conversation initialization
         conv = self.lifecycle.initialize_conversation(
-            inst, sys_msg, task_msg, is_reuse, instance_name, inst.agent_class
+            inst, sys_msg, task_msg, is_reuse, instance_name, inst.agent_class, from_external_load=session_was_loaded
         )
 
         # Phase 4.1: Delegate to lifecycle manager for settings propagation
@@ -2999,7 +2999,7 @@ class ExecutionEngine:
         args = {'task': task, 'context': context}
         
         # Use lifecycle manager with force_fresh=True for system agents
-        inst, is_reuse = self.lifecycle.find_or_create_instance(
+        inst, is_reuse, session_was_loaded = self.lifecycle.find_or_create_instance(
             agent_class, instance_name, caller, nest_depth=0, force_fresh=True
         )
         
@@ -3011,7 +3011,7 @@ class ExecutionEngine:
         
         # Initialize conversation using lifecycle manager (pass actual is_reuse value)
         conv = self.lifecycle.initialize_conversation(
-            inst, sys_msg, task_msg, is_reuse=is_reuse, instance_name=instance_name, agent_class=inst.agent_class
+            inst, sys_msg, task_msg, is_reuse=is_reuse, instance_name=instance_name, agent_class=inst.agent_class, from_external_load=session_was_loaded
         )
         
         # Phase 4.1: Propagate settings from caller to system agent

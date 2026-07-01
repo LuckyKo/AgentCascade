@@ -960,6 +960,115 @@ class AgentPool:
                 except Exception as e:
                     logger.debug(f"Logger truncation failed for {name} (non-critical): {e}")
 
+    def _parse_json_input(self, log_input: str) -> Tuple[List[dict], dict]:
+        """Parse log input as file path, multi-line JSONL, or single JSON block.
+
+        Tries each strategy in order and returns the first successful parse.
+        Filters to only dict items (BOOL_LEAK guard). Extracts metadata entries.
+
+        Returns:
+            Tuple of (messages_list, metadata_dict)
+        """
+        import json
+
+        messages = []
+        metadata = {}
+
+        # Resolve potential file path
+        potential_path = Path(log_input)
+        if not potential_path.is_absolute():
+            ws = self._logger.workspace_dir if self._logger.workspace_dir else Path(DEFAULT_WORKSPACE)
+            potential_path = ws / potential_path
+
+        # --- Strategy 1: File path ---
+        if potential_path.exists() and potential_path.is_file():
+            try:
+                with open(potential_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        item = self._parse_json_line(line.strip())
+                        messages.extend(item["messages"])
+                        metadata.update(item["metadata"])
+                return messages, metadata
+            except Exception as e:
+                logger.debug(f"Error reading log file '{potential_path.name}': {e}")
+
+        # --- Strategy 2: Multi-line JSONL (one JSON object per line) ---
+        lines = [l.strip() for l in log_input.split('\n') if l.strip()]
+        parse_messages, parse_metadata = [], {}
+        single_line = len(lines) == 1
+        for line in lines:
+            item = self._parse_json_line(line)
+            parse_messages.extend(item["messages"])
+            parse_metadata.update(item["metadata"])
+        if parse_messages or parse_metadata:
+            return parse_messages, parse_metadata
+
+        # --- Strategy 3: Single JSON block (array or object) ---
+        if not single_line:
+            return [], {}  # Already tried line-by-line above; don't double-try
+        try:
+            item = json.loads(log_input)
+            if isinstance(item, list):
+                filtered = [msg for msg in item if isinstance(msg, dict)]
+                if len(filtered) != len(item):
+                    logger.debug(f"_parse_json_input: filtered {len(item)-len(filtered)} non-dict items from JSON block")
+                return filtered, {}
+            elif isinstance(item, dict):
+                if "history" in item:
+                    history = item["history"]
+                    if isinstance(history, list):
+                        filtered = [msg for msg in history if isinstance(msg, dict)]
+                        meta = {}
+                        if "metadata" in item:
+                            meta.update(item["metadata"])
+                        return filtered, meta
+                    elif isinstance(history, dict):
+                        return [history], {}
+                else:
+                    meta = {}
+                    if "metadata" in item:
+                        meta.update(item["metadata"])
+                    return [item], meta
+        except json.JSONDecodeError:
+            pass
+
+        return [], {}
+
+    @staticmethod
+    def _parse_json_line(line: str) -> dict:
+        """Parse a single JSON line and return {'messages': [...], 'metadata': {...}}.
+
+        Handles plain dicts, metadata wrappers, and inline lists.
+        Filters to only dict items (BOOL_LEAK guard).
+        """
+        import json
+        result = {"messages": [], "metadata": {}}
+        if not line:
+            return result
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            return result
+
+        if isinstance(item, dict):
+            if "metadata" in item:
+                # Metadata wrapper: extract the metadata payload and any messages
+                if isinstance(item["metadata"], dict):
+                    result["metadata"].update(item["metadata"])
+                elif not item.get("event"):  # Skip event markers
+                    result["messages"].append(item)
+            elif "event" in item:
+                pass  # Skip COMPRESSION/ROLLBACK event markers
+            else:
+                result["messages"].append(item)
+        elif isinstance(item, list):
+            filtered = [msg for msg in item if isinstance(msg, dict)]
+            if len(filtered) != len(item):
+                logger.debug(f"_parse_json_line: filtered {len(item)-len(filtered)} non-dict items from inline list")
+            result["messages"].extend(filtered)
+
+        return result
+
     def load_session_from_log(
         self, 
         log_input: str, 
@@ -983,7 +1092,6 @@ class AgentPool:
             >>> # Load session and automatically clear stale sub-agents
             >>> status = pool.load_session_from_log(path, target_instance='Maine', clear_sub_agents_before_load=True)
         """
-        import json
         from agent_cascade.llm.schema import ASSISTANT, CONTENT, FUNCTION, ROLE, SYSTEM, USER
 
         # Issue 1 fix: Clear sub-agents at the very start if requested
@@ -994,101 +1102,10 @@ class AgentPool:
         if not log_input:
             return "Error: Empty log input."
 
-        messages = []
-        metadata = {}
-
-        # Try as file path first (resolve relative paths against workspace_dir)
-        potential_path = Path(log_input)
-        if not potential_path.is_absolute():
-            ws = self._logger.workspace_dir if self._logger.workspace_dir else Path(DEFAULT_WORKSPACE)
-            potential_path = ws / potential_path
-
-        if potential_path.exists() and potential_path.is_file():
-            try:
-                with open(potential_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            item = json.loads(line)
-                            # FIX BOOL_LEAK: Only accept dict as message objects from JSONL
-                            # json.loads can return bool (True/False), list, str, etc.
-                            if isinstance(item, dict):
-                                if "metadata" in item:
-                                    metadata.update(item["metadata"])
-                                elif "event" not in item:  # Skip event entries (COMPRESSION/ROLLBACK markers)
-                                    messages.append(item)
-                            else:
-                                logger.debug(f"load_session_from_log: skipping non-dict JSONL entry of type {type(item).__name__}")
-                        except json.JSONDecodeError as e:
-                            logger.debug(f"Skipping malformed JSONL line in log file: {e}")
-                            continue
-                log_source = f"file '{potential_path.name}'"
-            except Exception as e:
-                return f"Error reading log file: {e}"
-        else:
-            # Try as JSON (single line or block)
-            try:
-                lines = log_input.split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        item = json.loads(line)
-                        # FIX BOOL_LEAK: Validate types before appending
-                        if isinstance(item, dict):
-                            if "metadata" in item:
-                                metadata.update(item)
-                            else:
-                                messages.append(item)
-                        elif isinstance(item, list):  # Full history block
-                            # Filter the list to only include dicts
-                            filtered = [msg for msg in item if isinstance(msg, dict)]
-                            if len(filtered) != len(item):
-                                skipped = len(item) - len(filtered)
-                                logger.debug(f"load_session_from_log: filtered {skipped} non-dict items from history block")
-                            messages.extend(filtered)
-                        else:
-                            logger.debug(f"load_session_from_log: skipping non-dict/non-list JSON entry of type {type(item).__name__}")
-                    except json.JSONDecodeError as e:
-                        if len(lines) == 1:
-                            raise  # Re-raise to try full-block parse
-                        logger.debug(f"Skipping malformed JSONL line in inline input: {e}")
-                        continue
-                log_source = "JSON input"
-            except json.JSONDecodeError:
-                try:
-                    item = json.loads(log_input)
-                    if isinstance(item, list):
-                        # FIX BOOL_LEAK: Filter list to only include dict messages
-                        filtered = [msg for msg in item if isinstance(msg, dict)]
-                        if len(filtered) != len(item):
-                            skipped = len(item) - len(filtered)
-                            logger.debug(f"load_session_from_log: filtered {skipped} non-dict items from JSON block")
-                        messages = filtered
-                    elif isinstance(item, dict) and "history" in item:
-                        history = item["history"]
-                        if isinstance(history, list):
-                            # Filter history list to only include dicts
-                            filtered = [msg for msg in history if isinstance(msg, dict)]
-                            if len(filtered) != len(history):
-                                skipped = len(history) - len(filtered)
-                                logger.debug(f"load_session_from_log: filtered {skipped} non-dict items from history key")
-                            messages = filtered
-                        else:
-                            messages = [history] if isinstance(history, dict) else []
-                        if "metadata" in item:
-                            metadata.update(item["metadata"])
-                    elif isinstance(item, dict):
-                        messages = [item]
-                    else:
-                        logger.debug(f"load_session_from_log: skipping non-dict/non-list JSON block of type {type(item).__name__}")
-                        messages = []
-                    log_source = "JSON block"
-                except json.JSONDecodeError:
-                    return "Error: Input is neither a valid file path nor a valid JSON."
+        # Delegate all parsing to the centralized helper (eliminates triple-duplication)
+        messages, metadata = self._parse_json_input(log_input)
+        if not messages and not metadata:
+            return "Error: Input is neither a valid file path nor a valid JSON."
 
         if not messages:
             return "Error: No valid messages found in log input."
@@ -1209,6 +1226,7 @@ class AgentPool:
                 latest_marker_index=-1,
             )
             self.instances[instance_name] = new_inst
+            self._instances_version += 1
 
         # Set up logger for the restored session
         # CRITICAL: Must replace the logger entirely to avoid writing to the wrong file.
@@ -1228,7 +1246,7 @@ class AgentPool:
                     try:
                         self._logger._loggers[key].close()
                     except Exception as e:
-                        logger.debug(f"Logger close during session load failed for {instance_name} (non-critical): {e}")
+                        logger.warning(f"Logger close during session load failed for {instance_name} (non-critical): {e}")
                 # Remove from cache so we can add the new one below (safe pop avoids KeyError)
                 self._logger._loggers.pop(key, None)
 
@@ -1261,21 +1279,14 @@ class AgentPool:
             # BUG FIX: Pass cleaned_messages (full history from JSONL) instead of restored_messages (partial working set).
             # This ensures reset_history has complete marker context for accurate insert_pos calculation,
             # preventing permanent loss of pre-marker history when copy fails or file is inaccessible.
-            log_inst.reset_history(cleaned_messages, rewrite=True)
+            log_inst.rewrite_log_with_history(cleaned_messages)
             
             # Cache the new logger instance
             with self._logger._lock:
                 self._logger._loggers[key] = log_inst
         except Exception as e:
-            logger.debug(f"Logger setup after log load failed for {instance_name} (non-critical): {e}")
+            logger.warning(f"Logger setup after log load failed for {instance_name} (non-critical): {e}")
             logger_setup_ok = False
-
-        # FIX 5: Set _session_restored flag AFTER all operations succeed, under lock.
-        # This ensures the flag is only True if conversation + logger were both set up correctly.
-        inst = self.instances.get(instance_name)
-        if inst is not None and logger_setup_ok:
-            with inst._compression_lock:
-                inst._session_restored = True
 
         return f"Successfully loaded {len(restored_messages)} messages for instance '{instance_name}' ({agent_class}) from {log_source}."
 

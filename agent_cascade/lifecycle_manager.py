@@ -62,7 +62,7 @@ class AgentLifecycleManager:
     
     Usage:
         manager = AgentLifecycleManager(pool)
-        inst, is_reuse = manager.find_or_create_instance(...)
+        inst, is_reuse, session_was_loaded = manager.find_or_create_instance(...)
         sys_msg = manager.build_system_message(...)
         manager.propagate_settings(inst, caller_name, agent_class)
     """
@@ -101,7 +101,7 @@ class AgentLifecycleManager:
         nest_depth: int,
         force_fresh: bool = False,
         log_file: Optional[str] = None
-    ) -> Tuple[AgentInstance, bool]:
+    ) -> Tuple[AgentInstance, bool, bool]:
         """Find existing inactive instance or create new one.
         
         Checks for an existing inactive (IDLE/TERMINATED) instance that can be reused.
@@ -116,7 +116,9 @@ class AgentLifecycleManager:
             log_file: Optional path to a JSONL log file to load session history from
             
         Returns:
-            Tuple of (instance, is_reuse) where is_reuse indicates if existing was reused
+            Tuple of (instance, is_reuse, session_was_loaded) where is_reuse indicates
+            if existing was reused and session_was_loaded indicates that conversation
+            history was loaded from a log file
         """
         now = time.monotonic()
         existing = self.pool.instances.get(instance_name)
@@ -177,20 +179,16 @@ class AgentLifecycleManager:
             )
 
         # BUG FIX (Bug 2): Load session from log_file if provided
+        session_was_loaded = False
         if log_file:
-            # Skip redundant reload if instance was already restored in this startup cycle
-            existing = self.pool.instances.get(instance_name)
-            if existing and getattr(existing, '_session_restored', False):
-                logger.debug(f"[LOG_FILE_LOAD] Session already restored for '{instance_name}', skipping reload")
+            status = self.pool.load_session_from_log(log_file, target_instance=instance_name)
+            if status.startswith("Error"):
+                logger.warning(f"[LOG_FILE_LOAD] Failed to load session for '{instance_name}': {status}")
             else:
-                status = self.pool.load_session_from_log(log_file, target_instance=instance_name)
-                if status.startswith("Error"):
-                    logger.warning(f"[LOG_FILE_LOAD] Failed to load session for '{instance_name}': {status}")
-                    inst._session_restored = False  # Reset flag since load failed
-                else:
-                    logger.info(f"[LOG_FILE_LOAD] Loaded session for '{instance_name}': {status}")
+                logger.info(f"[LOG_FILE_LOAD] Loaded session for '{instance_name}': {status}")
+                session_was_loaded = True
 
-        return inst, is_reuse
+        return inst, is_reuse, session_was_loaded
     
     def build_system_message(
         self,
@@ -328,7 +326,8 @@ class AgentLifecycleManager:
         task_msg: Message,
         is_reuse: bool,
         instance_name: str,
-        agent_class: str
+        agent_class: str,
+        from_external_load: bool = False
     ) -> list:
         """Initialize or extend instance conversation.
         
@@ -345,6 +344,7 @@ class AgentLifecycleManager:
             is_reuse: Whether reusing existing instance
             instance_name: Instance name for logger access
             agent_class: Agent class for logger access
+            from_external_load: If True, conversation was loaded from a log file and should be preserved
             
         Returns:
             Conversation list (either preserved or newly created)
@@ -359,30 +359,23 @@ class AgentLifecycleManager:
 
         if is_reuse:
             # Thread-safe update of instance state for reuse
-            # Note: All mutations use centralized API methods (edit_message_in_place, insert_message_at_head)
-            # which handle cache invalidation automatically. No explicit token_cache_invalidated wrapper needed.
             with instance._compression_lock:
                 # FIX #3: Reset stale state fields to prepare for new task
                 instance.compression_summary = None
                 instance.latest_marker_index = -1
                 instance._generate_cfg_override = None
                 instance.max_turns = None
-                # Reset session restoration flag (already handled by reuse path, but clear for safety)
-                instance._session_restored = False
                 
                 # FIX #4: Clear is_terminated flag
                 instance.is_terminated = False
                 
                 # SLOT_TIMEOUT FIX: Clear _slot_release to prevent stale callback issues
-                # The reused instance will acquire a fresh slot in engine.run() at line 349
-                # This ensures no leftover release callback from previous execution interferes
                 instance._slot_release = None
                 
                 # FIX: Preserve & extend conversation
                 # Update system message in-place (first message is always system)
                 if instance.conversation and len(instance.conversation) > 0:
                     # Preserve old system message's timestamp so update_history() can match it as an update
-                    # rather than appending a duplicate. The logger uses timestamps as identity markers.
                     old_sys_msg = instance.conversation[0]
                     if hasattr(old_sys_msg, 'timestamp') and old_sys_msg.timestamp:
                         try:
@@ -423,13 +416,10 @@ class AgentLifecycleManager:
                 except Exception as e:
                     logger.debug(f"Logger sync via update_history for {instance_name} failed (non-critical): {e}")
         else:
-            # FIX 4: Check _session_restored INSIDE the lock to avoid TOCTOU race condition.
-            # The entire branch is under one lock block using RLock (reentrant).
+            # For new instances: check if session was loaded from a log file (explicit parameter, not flag)
             with instance._compression_lock:
-                if instance._session_restored:
+                if from_external_load:
                     # Session loaded from log file — only append task message, preserve restored conversation
-                    # Reset the flag after consuming it (one-shot use)
-                    instance._session_restored = False
                     instance.append_message(task_msg)  # Centralized mutation API handles cache sync
                     
                     conv = instance.conversation

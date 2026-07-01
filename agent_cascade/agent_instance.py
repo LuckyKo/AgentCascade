@@ -134,9 +134,7 @@ class AgentInstance:
     _last_config_version: int = field(default=-1)                      # Pool config version at last rebuild
     
     # ── Session Restoration Tracking (Fix session load-on-restart bug) ────────
-    # Set to True when load_session_from_log() populates the instance's conversation.
-    # initialize_conversation() checks this flag to avoid overwriting restored history.
-    _session_restored: bool = field(default=False)
+    # Replaced by explicit from_external_load parameter in initialize_conversation().
 
     # ── Loop Detection Cooldown (Fix /compress Bug) ───────────────────────────
     # After compression/rollback, the conversation state has concentrated patterns that can trigger
