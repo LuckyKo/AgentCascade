@@ -271,6 +271,7 @@ class AgentPool:
 
         # ── Simple state (owned directly by pool, no separate manager) ───────
         self._paused = threading.Event()                   # global pause flag (thread-safe Event)
+        self._paused.set()                                  # start in resumed state (clear = paused, set = resumed)
         self._halted_instances: set = set()                # per-instance halt state (legacy, kept for compat)
         self._compression_halted: set = set()              # instances halted by forced compression (not manual)
         self.terminated_instances: set = set()             # instances marked for immediate termination
@@ -703,7 +704,7 @@ class AgentPool:
         self._instances_version += 1
 
         # ── Step 5: Clear per-instance state ────────────────────────────────
-        self._paused.clear()
+        self._paused.set()  # reset to resumed state
         self._halted_instances.clear()
         self._compression_halted.clear()
         self.terminated_instances.clear()
@@ -1740,21 +1741,21 @@ class AgentPool:
     # ── Pause/Resume state management ───────────────────────────────────────
 
     def pause(self):
-        """Pause ALL instances by setting the global pause flag.
+        """Pause ALL instances by clearing the global pause flag.
         
-        Sets _paused Event so all agents spin in a 100ms sleep loop until resumed.
+        Clears _paused Event so all agents block in wait_if_paused() until resumed.
         Unlike stop(), this does NOT trigger idle.stop() or async_registry.shutdown() —
         those are side effects of pool.stopped=True (the stop path), not pause.
         """
-        self._paused.set()
+        self._paused.clear()
 
     def resume(self):
-        """Resume all paused instances by clearing the global pause flag."""
-        self._paused.clear()
+        """Resume all paused instances by setting the global pause flag."""
+        self._paused.set()
 
     def is_paused(self) -> bool:
         """Check if the pool is currently paused."""
-        return self._paused.is_set()
+        return not self._paused.is_set()
 
     def wait_if_paused(self, timeout: float = 1.0) -> None:
         """Block until resumed or timeout expires. Used by execution loop to wait efficiently on pause."""
@@ -1766,7 +1767,7 @@ class AgentPool:
         """Check if an instance is halted. Returns True if globally paused or per-instance halted.
         
         Note: resume_instance() only clears per-instance halt; call resume() first to clear _paused."""
-        return self._paused.is_set() or instance_name in self._halted_instances
+        return self.is_paused() or instance_name in self._halted_instances
     
     # (internal helpers used by compression handler and REST endpoints)
 

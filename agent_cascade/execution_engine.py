@@ -765,8 +765,7 @@ class ExecutionEngine:
 
                 # Cooperatively wait if paused — don't break execution flow, just wait
                 if self.pool.is_paused():
-                    while self.pool.is_paused():
-                        time.sleep(0.1)
+                    self.pool.wait_if_paused(timeout=1.0)
                     # Fall through to stop check and Phase 4 after unpause
                 
                 # Check generation change (old run superseded by newer one) alongside stop
@@ -2001,8 +2000,8 @@ class ExecutionEngine:
                 continue
 
             # Cooperatively wait if paused — don't skip tool execution, just wait
-            while self.pool.is_paused():
-                time.sleep(0.1)
+            if self.pool.is_paused():
+                self.pool.wait_if_paused(timeout=1.0)
             
             # Stop/halt check BEFORE tool execution (check before setting used_any_tool)
             if self._is_stopped(inst_name):
