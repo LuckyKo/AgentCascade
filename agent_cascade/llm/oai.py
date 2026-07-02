@@ -16,6 +16,8 @@ import copy
 import logging
 import os
 import requests
+import threading
+from collections import OrderedDict
 from pprint import pformat
 from typing import Dict, Iterator, List, Optional
 
@@ -32,6 +34,68 @@ from agent_cascade.llm.base import ModelServiceError, register_llm
 from agent_cascade.llm.function_calling import BaseFnCallModel
 from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
 from agent_cascade.log import logger
+
+
+# --- Module-level OpenAI client cache (fixes ~2.4s tool response delay) ---
+# Each new OpenAI() call initializes httpx connection pools, TLS config, DNS resolution, etc.
+# We cache clients per (base_url, api_key) to reuse the underlying HTTP connection pool.
+# LRU-ordered with maxsize=10 to prevent unbounded growth; oldest entries evicted automatically.
+_oai_client_maxsize = 10
+
+_oai_client_cache: OrderedDict[tuple, openai.OpenAI] = OrderedDict()
+# Lock for protecting the cache dict (read + write)
+_oai_cache_lock = threading.Lock()
+
+# Lock for protecting self.api_base / self.api_key reads and writes during mid-session config changes.
+# Lock acquisition order (when both are needed): always _config_lock first, then _oai_cache_lock.
+_config_lock = threading.Lock()
+
+
+def _get_openai_client(base_url: str, api_key: str) -> openai.OpenAI:
+    """Return a cached OpenAI client for the given (base_url, api_key), creating one if needed.
+
+    Uses LRU eviction: when cache exceeds maxsize, the least-recently-used entry is removed.
+    """
+    cache_key = (base_url or '', api_key or '')
+    with _oai_cache_lock:
+        # Move to end on hit (LRU: most recently used stays at tail)
+        if cache_key in _oai_client_cache:
+            _oai_client_cache.move_to_end(cache_key)
+            client = _oai_client_cache[cache_key]
+            logger.debug(f"Reusing cached OpenAI client for base_url={base_url!r}")
+            return client
+
+        # Evict oldest entries if at capacity (FIFO from left side)
+        while len(_oai_client_cache) >= _oai_client_maxsize:
+            evicted_key, _ = _oai_client_cache.popitem(last=False)
+            logger.debug(f"LRU-evicted OpenAI client for base_url={evicted_key[0]!r}")
+
+        kwargs = {}
+        if base_url:
+            kwargs['base_url'] = base_url
+        if api_key:
+            kwargs['api_key'] = api_key
+        client = openai.OpenAI(**kwargs)
+        _oai_client_cache[cache_key] = client
+        logger.debug(f"Created new OpenAI client for base_url={base_url!r}")
+    return client
+
+
+def _clear_openai_client(base_url: str, api_key: str) -> None:
+    """Remove a specific client from the cache when credentials change."""
+    cache_key = (base_url or '', api_key or '')
+    with _oai_cache_lock:
+        if cache_key in _oai_client_cache:
+            del _oai_client_cache[cache_key]
+            logger.debug(f"Evicted OpenAI client from cache for base_url={base_url!r}")
+
+
+def _clear_all_openai_clients() -> None:
+    """Remove all cached clients (e.g., during shutdown or config reset)."""
+    with _oai_cache_lock:
+        _oai_client_cache.clear()
+
+# --- End client cache ---
 
 
 # Standard OpenAI-compatible inference parameters
@@ -72,12 +136,6 @@ class TextChatAtOAI(BaseFnCallModel):
             self._complete_create = openai.Completion.create
             self._chat_complete_create = openai.ChatCompletion.create
         else:
-            api_kwargs = {}
-            if api_base:
-                api_kwargs['base_url'] = api_base
-            if api_key:
-                api_kwargs['api_key'] = api_key
-
             def _chat_complete_create(*args, **kwargs):
                 # OpenAI API v1 does not allow the following args, must pass by extra_body
                 extra_params = ['top_k', 'repetition_penalty', 'repeat_penalty', 'repeatPenalty', 'min_p']
@@ -89,13 +147,16 @@ class TextChatAtOAI(BaseFnCallModel):
                 if 'request_timeout' in kwargs:
                     kwargs['timeout'] = kwargs.pop('request_timeout')
 
-                local_api_kwargs = dict(api_kwargs)
-                if 'api_base' in kwargs:
-                    local_api_kwargs['base_url'] = kwargs.pop('api_base')
-                if 'api_key' in kwargs:
-                    local_api_kwargs['api_key'] = kwargs.pop('api_key')
+                # Per-call overrides take precedence; fall back to instance config.
+                # Read self.api_base / self.api_key under _config_lock to avoid data race
+                # (they are written under _config_lock during mid-session config changes).
+                per_call_base = kwargs.pop('api_base', None)
+                per_call_key = kwargs.pop('api_key', None)
+                with _config_lock:
+                    base_url = per_call_base or self.api_base or ''
+                    key = per_call_key or self.api_key or ''
 
-                client = openai.OpenAI(**local_api_kwargs)
+                client = _get_openai_client(base_url, key)
                 return client.chat.completions.create(*args, **kwargs)
 
             def _complete_create(*args, **kwargs):
@@ -109,13 +170,15 @@ class TextChatAtOAI(BaseFnCallModel):
                 if 'request_timeout' in kwargs:
                     kwargs['timeout'] = kwargs.pop('request_timeout')
 
-                local_api_kwargs = dict(api_kwargs)
-                if 'api_base' in kwargs:
-                    local_api_kwargs['base_url'] = kwargs.pop('api_base')
-                if 'api_key' in kwargs:
-                    local_api_kwargs['api_key'] = kwargs.pop('api_key')
+                # Per-call overrides take precedence; fall back to instance config.
+                # Read self.api_base / self.api_key under _config_lock to avoid data race.
+                per_call_base = kwargs.pop('api_base', None)
+                per_call_key = kwargs.pop('api_key', None)
+                with _config_lock:
+                    base_url = per_call_base or self.api_base or ''
+                    key = per_call_key or self.api_key or ''
 
-                client = openai.OpenAI(**local_api_kwargs)
+                client = _get_openai_client(base_url, key)
                 return client.completions.create(*args, **kwargs)
 
             self._complete_create = _complete_create
@@ -233,9 +296,15 @@ class TextChatAtOAI(BaseFnCallModel):
         # Update local infrastructure state if changed in UI
         new_base = generate_cfg.get('api_base')
         new_key = generate_cfg.get('api_key')
-        if (new_base and new_base != self.api_base) or (new_key and new_key != self.api_key):
-            self.api_base = new_base or self.api_base
-            self.api_key = new_key or self.api_key
+        config_changed = False
+        with _config_lock:
+            if (new_base and new_base != self.api_base) or (new_key and new_key != self.api_key):
+                # Don't evict the old client — it may still be in use by in-flight requests.
+                # The new config will create a new cache entry; LRU eviction handles cleanup.
+                self.api_base = new_base or self.api_base
+                self.api_key = new_key or self.api_key
+                config_changed = True
+        if config_changed:
             logger.info(f"LLM infrastructure changed. Re-detecting context for: {self.api_base}")
             self._detect_context_window(self.api_base, self.api_key)
         
@@ -257,7 +326,9 @@ class TextChatAtOAI(BaseFnCallModel):
                 logger.error(f"Failed to dump API POST: {e}")
         
         try:
+            logger.debug(f"[TOOL_RECOVERY] _chat_stream _chat_complete_create START model={request_model}")
             response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
+            logger.debug(f"[TOOL_RECOVERY] _chat_stream _chat_complete_create END (got response iterator)")
             
             if delta_stream:
                 for chunk in response:
@@ -277,7 +348,11 @@ class TextChatAtOAI(BaseFnCallModel):
                 full_response = ''
                 full_reasoning_content = ''
                 full_tool_calls = []
+                _first_chunk = True
                 for chunk in response:
+                    if _first_chunk:
+                        logger.debug(f"[TOOL_RECOVERY] _chat_stream FIRST CHUNK RECEIVED model={request_model}")
+                        _first_chunk = False
                     # Update local model info if returned by the server
                     if hasattr(chunk, 'model') and chunk.model:
                         if chunk.model != self.model:
@@ -385,9 +460,15 @@ class TextChatAtOAI(BaseFnCallModel):
         # Update local infrastructure state if changed in UI
         new_base = generate_cfg.get('api_base')
         new_key = generate_cfg.get('api_key')
-        if (new_base and new_base != self.api_base) or (new_key and new_key != self.api_key):
-            self.api_base = new_base or self.api_base
-            self.api_key = new_key or self.api_key
+        config_changed = False
+        with _config_lock:
+            if (new_base and new_base != self.api_base) or (new_key and new_key != self.api_key):
+                # Don't evict the old client — it may still be in use by in-flight requests.
+                # The new config will create a new cache entry; LRU eviction handles cleanup.
+                self.api_base = new_base or self.api_base
+                self.api_key = new_key or self.api_key
+                config_changed = True
+        if config_changed:
             logger.info(f"LLM infrastructure changed. Re-detecting context for: {self.api_base}")
             self._detect_context_window(self.api_base, self.api_key)
 
@@ -467,6 +548,18 @@ class TextChatAtOAI(BaseFnCallModel):
             return result
         except OpenAIError as ex:
             raise ModelServiceError(exception=ex)
+
+    def close(self) -> None:
+        """Clean up this instance's cached OpenAI client(s).
+
+        Removes the client for the current (api_base, api_key) from the shared cache.
+        Call this when shutting down to free HTTP connection pool resources.
+        Safe to call multiple times or with no active config.
+        """
+        with _config_lock:
+            base = self.api_base
+            key = self.api_key
+        _clear_openai_client(base, key)
 
     def convert_messages_to_dicts(self, messages: List[Message]) -> List[dict]:
         # TODO: Change when the VLLM deployed model needs to pass reasoning_complete.
