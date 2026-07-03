@@ -1318,8 +1318,16 @@ if __name__ == "__main__":
             # PR3 migration: Use centralized API for system message append at server startup
             maine_inst.append_messages([Message(role=SYSTEM, content=sys_msg_content)])
 
+    # Build full agents list from pool templates (matching _build_agents_list order)
+    # This ensures the dropdown index correctly maps to the actual agent template
+    all_agents = [agent_pool.get_agent(name) for name in agent_pool.list_agents()]
+    # Ensure orchestrator is at index 0 so it's always the default fallback
+    if 'orchestrator' in agent_pool.agents:
+        orch = agent_pool.agents['orchestrator']
+        all_agents = [orch] + [a for a in all_agents if a != orch]
+
     try:
-        app = create_app(agents=[orch_agent], agent_pool=agent_pool)
+        app = create_app(agents=all_agents, agent_pool=agent_pool)
         logger.debug("FastAPI app created successfully")
     except Exception as e:
         logger.error("[FATAL] Failed to create API server app: %s", e)
