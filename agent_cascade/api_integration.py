@@ -1396,9 +1396,28 @@ def _build_agents_list(pool: AgentPool) -> list:
     Returns a list of agent metadata dictionaries that the frontend uses to
     show available agents and their capabilities. Built from pool.templates,
     the canonical source of agent definitions.
+
+    Orchestrator is always placed at index 0 to match the handler's agent
+    lookup order (api_server.py and ws_handlers.py).
     """
+    # Collect all templates, ensuring orchestrator is first
+    template_items = list(pool.templates.items())
+    if template_items:
+        # Find orchestrator and move it to front
+        orch_item = None
+        non_orch_items = []
+        for agent_class, template in template_items:
+            if template is None:
+                continue
+            if agent_class.lower() == 'orchestrator':
+                orch_item = (agent_class, template)
+            else:
+                non_orch_items.append((agent_class, template))
+        if orch_item:
+            template_items = [orch_item] + non_orch_items
+
     agents_list = []
-    for idx, (agent_class, template) in enumerate(pool.templates.items()):
+    for idx, (agent_class, template) in enumerate(template_items):
         if template is None:
             continue
         try:

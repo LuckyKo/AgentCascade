@@ -1321,6 +1321,8 @@ if __name__ == "__main__":
     # Build full agents list from pool templates (matching _build_agents_list order)
     # This ensures the dropdown index correctly maps to the actual agent template
     all_agents = [agent_pool.get_agent(name) for name in agent_pool.list_agents()]
+    # Filter out None entries in case get_agent fails for some template
+    all_agents = [a for a in all_agents if a is not None]
     # Ensure orchestrator is at index 0 so it's always the default fallback
     if 'orchestrator' in agent_pool.agents:
         orch = agent_pool.agents['orchestrator']
