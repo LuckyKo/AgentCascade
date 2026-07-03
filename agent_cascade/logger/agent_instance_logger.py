@@ -565,16 +565,140 @@ class AgentInstanceLogger:
 
         return True
 
+    def _sync_marker_single_write(self, new_pool_state: List[Any]) -> bool:
+        """Single-write marker insertion for reset_history(rewrite=True).
+
+        Design doc §5.2: JSONL retains FULL history (discarded messages preserved).
+        Pool is trimmed smaller after compression. This method reads the existing
+        JSONL from disk, finds the new marker in pool state, and inserts it at a
+        position mirroring its tail offset. ONE file write. No overwrite-then-readback.
+
+        Args:
+            new_pool_state: Trimmed pool working set containing the new compression marker.
+
+        Returns:
+            True on success, False on error.
+        """
+        # Close cached handle before writing (Fix #1)
+        if self._file_handle and not self._file_handle.closed:
+            self._file_handle.flush()
+            self._file_handle.close()
+            self._file_handle = None
+
+        from agent_cascade.llm.schema import USER as USER_ROLE
+
+        try:
+            # ── Read existing log messages from disk (full history) ──
+            if not self.log_path or not os.path.exists(self.log_path):
+                logger.debug(
+                    f"Log file missing for {self.instance_name} ({self.log_path}) — "
+                    f"writing pool state directly."
+                )
+                existing_msgs = []
+            else:
+                # Read existing log messages from disk (full history)
+                existing_msgs = []
+                with open(self.log_path, 'r', encoding='utf-8') as f:
+                    for line_num, line in enumerate(f, 1):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            item = json.loads(line)
+                            if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+                                existing_msgs.append(item)
+                        except json.JSONDecodeError:
+                            logger.debug(
+                                f"Skipping corrupted JSONL line {line_num} in {self.log_path}: "
+                                f"'{line[:60]}...'"
+                            )
+
+            # ── Find the LAST (newest) compression marker in pool state ──
+            last_marker_idx = -1
+            for i in range(len(new_pool_state) - 1, -1, -1):
+                msg = new_pool_state[i]
+                role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                if role == USER_ROLE and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+                    last_marker_idx = i
+                    break
+
+            # ── Build result: existing log + marker inserted at mirrored tail offset ──
+            if last_marker_idx >= 0:
+                actual_tail_count = len(new_pool_state) - last_marker_idx - 1
+                formatted_marker = self._format_message(new_pool_state[last_marker_idx])
+
+                # Dedup guard: skip if this exact marker content already exists
+                marker_already_in_file = any(
+                    isinstance(m.get('content', ''), str) and m['content'] == formatted_marker['content']
+                    for m in existing_msgs
+                )
+
+                insert_pos = max(0, min(len(existing_msgs) - actual_tail_count, len(existing_msgs)))
+                if marker_already_in_file and existing_msgs:
+                    # Marker already there — but also include tail messages from pool that aren't in file
+                    result_msgs = list(existing_msgs)
+                    # Append any tail messages from pool not already in existing_msgs
+                    tail_from_pool = new_pool_state[last_marker_idx + 1:]
+                    if tail_from_pool and len(existing_msgs) <= actual_tail_count:
+                        for tmsg in tail_from_pool:
+                            result_msgs.append(self._format_message(tmsg))
+                elif not existing_msgs:
+                    # No existing messages — write full pool state (marker + tail)
+                    result_msgs = [self._format_message(m) for m in new_pool_state]
+                else:
+                    # Insert marker at mirrored position, then append pool tail messages after it.
+                    # Tail count = len(pool) - marker_idx - 1. The remaining (existing_msgs - actual_tail_count)
+                    # go before the marker, and only pool tail appears after it (design doc §5.2 mirror rule).
+                    # Keep ALL existing msgs to avoid data loss — insert at mirrored position.
+                    tail_from_pool = [self._format_message(m) for m in new_pool_state[last_marker_idx + 1:]]
+                    result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + tail_from_pool + existing_msgs[insert_pos:]
+            elif new_pool_state:
+                # No markers in pool — use pool state as-is (session load path)
+                result_msgs = [self._format_message(m) for m in new_pool_state]
+            elif existing_msgs:
+                # Empty pool but file has content — preserve file with timestamps
+                result_msgs = [self._format_message(m) if not isinstance(m, dict) or 'timestamp' not in m else m for m in existing_msgs]
+            else:
+                result_msgs = []
+
+            # ── Single write to disk ──
+            lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
+            for msg in result_msgs:
+                lines.append(json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) + '\n')
+
+            with open(self.log_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+
+            self._file_handle = None
+            logger.info(f"Synced compression marker in {self.log_path} ({len(result_msgs)} messages).")
+
+            # Update internal tracking — pool state (active set) for in-memory history
+            self.data["history"] = [self._format_message(msg) for msg in new_pool_state]
+            self._file_history_synced = True
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to sync compression marker for {self.log_path}: {e}")
+            return False
+
     def reset_history(self, new_history: List[Any], rewrite: bool = False):
         """Update internal tracking after a compression event or manual edit.
 
-        If rewrite=True, delegates to rewrite_log_with_history() which replaces the
-        log file on disk with the provided history (including all markers).
+        Design doc §5.2 rule (READ IT BEFORE CHANGING THIS!):
+          JSONL retains FULL history including discarded messages.
+          Pool working set is trimmed smaller. They are NOT in sync.
+          Only the tail past the last marker must match exactly.
+
+        If rewrite=True, single operation: read existing JSONL from disk,
+        find the new compression marker in pool state, insert it at a position
+        mirroring its tail offset — preserving ALL original messages on disk.
+        One file write. No overwriting first then reading back.
+
         Otherwise, appends a compression baseline to the end of the log.
         """
         if rewrite:
-            self.rewrite_log_with_history(new_history)
-            return True
+            return self._sync_marker_single_write(new_history)
 
         # Find the summary message in new_history
         summary_msg = None
