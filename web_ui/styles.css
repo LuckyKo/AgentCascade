@@ -141,13 +141,23 @@ body {
 
 .sidebar {
   width: 260px;
-  min-width: 260px;
+  min-width: 180px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--bg-elevated);
   display: flex;
   flex-direction: column;
   overflow: hidden;
   transition: width 350ms cubic-bezier(0.4, 0, 0.2, 1), min-width 350ms cubic-bezier(0.4, 0, 0.2, 1), opacity 200ms ease;
+}
+
+/* Hide sidebar resizer when sidebar is collapsed */
+.sidebar.collapsed + .resizer-v {
+  display: none;
+}
+
+/* Disable transition during resize for smooth dragging (matches right panel pattern) */
+.app.resizing .sidebar {
+  transition: none !important;
 }
 
 .sidebar.collapsed {
