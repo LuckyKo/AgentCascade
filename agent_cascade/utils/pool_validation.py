@@ -56,20 +56,49 @@ def validate_message_pool(messages: list[Any], agent_name: str) -> bool:
         # Increase content window from 200 to 500 chars for better precision (Issue 8 fix)
         content_key = str(content)[:500] if content else ''
 
-        # Skip tool-call messages — parallel tool calls produce consecutive assistant messages
-        # with empty/identical content, which is expected behavior not corruption.
-        has_function_call = (msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None))
-        if has_function_call:
-            prev_role = role
-            prev_content = content_key
-            continue
+        # Check: assistant messages should not be empty (tool calls have content in function_call)
+        if role == 'assistant' and not content_key:
+            has_fc = msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None)
+            has_tc = msg.get('tool_calls') if isinstance(msg, dict) else getattr(msg, 'tool_calls', None)
+            if not has_fc and not has_tc:
+                dup_count += 1
+                compression_logger.warning(f"[MSG POOL VALIDATION] Empty assistant message at index {i} for '{agent_name}' (no function_call/tool_calls)")
 
+        # Check for duplicate consecutive messages
         if role == prev_role and content_key == prev_content:
             dup_count += 1
             compression_logger.warning(f"[MSG POOL VALIDATION] Duplicate consecutive msg at index {i} for '{agent_name}'")
 
         prev_role = role
         prev_content = content_key
+
+    # Check: parallel tool calls must have matching function results
+    # Count tool_calls in assistant messages and verify equal number of function responses follow
+    for i, msg in enumerate(messages):
+        if isinstance(msg, dict):
+            tool_calls = msg.get('tool_calls')
+            function_call = msg.get('function_call')
+        else:
+            tool_calls = getattr(msg, 'tool_calls', None)
+            function_call = getattr(msg, 'function_call', None)
+
+        if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 1:
+            # Multiple parallel tool calls — count expected function results
+            expected_results = len(tool_calls)
+            actual_results = 0
+            j = i + 1
+            while j < len(messages):
+                next_role = messages[j].get('role') if isinstance(messages[j], dict) else getattr(messages[j], 'role', '')
+                if next_role not in ('function', 'tool'):
+                    break
+                actual_results += 1
+                j += 1
+            if actual_results < expected_results:
+                dup_count += 1
+                compression_logger.warning(
+                    f"[MSG POOL VALIDATION] Parallel tool call mismatch at index {i} for '{agent_name}': "
+                    f"{expected_results} tool calls but only {actual_results} function results"
+                )
 
     # FIX 4: Use adaptive threshold instead of fixed value
     # Shorter conversations shouldn't trigger false positives with a fixed count threshold

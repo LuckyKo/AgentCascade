@@ -305,8 +305,9 @@ class CompressionHandler:
                     # Re-fetch conv since _append_and_log may have appended notifications to it
                     conv = self.pool.get_conversation(instance_name)
             
-            # ── Tail sync check after compression (design doc §5.2 — D1 fix) ──
-            # Verify pool tail matches JSONL tail after the sync write.
+            # ── Tail sync check after ALL operations complete (design doc §5.2 — D1 fix) ──
+            # Runs after pool and JSONL are in final state (notifications flushed).
+            # (JSONL keeps full history, pool keeps trimmed working set — counts differ by design.)
             if getattr(self.pool.settings, 'tail_sync_check_enabled', True):
                 from agent_cascade.logger.tail_sync_check import check_and_log as _check_tail
                 _check_tail(instance_name, conv, log_inst.log_path, context=f"compression/{operation_name}")
