@@ -71,6 +71,7 @@ const state = {
     // Throttle timestamps for streaming performance
     lastGenStatsUpdate: 0,       // For updateGenStats throttling (~2Hz)
         lastSubAgentRender: 0,      // For renderSubAgents throttling (~150ms during streaming)
+        lastSubAgentRenderDuration: 0, // Track render duration for adaptive throttling
     lastContextBarUpdate: 0,    // For updateContextBar throttling (~1Hz during streaming)
     lastUiUpdate: 0,            // For activity bar throttling (~1Hz)
     lastControlsUpdate: 0,      // For updateControls throttling (~1Hz)
@@ -204,15 +205,14 @@ const ActivityBar = {
        }
   
     // Deduplication: skip if content hasn't changed since last pushImmediate
-    // This prevents excessive DOM updates during rapid LLM streaming (~10-20 updates/sec)
     // Use JSON.stringify to avoid collision with '|' character in preview text (Major Issue #3)
     const key = JSON.stringify([instanceName, preview, isWaiting, tokenCount]);
     if (key === this._lastImmediateKey) return;
   
-    // Throttle DOM writes to ~50ms intervals during rapid streaming (~20 ticks/sec)
-    // This reduces JSON.stringify + regex overhead while keeping updates responsive
+    // Throttle DOM writes to ~30ms intervals during rapid streaming (~33 ticks/sec)
+    // Lowered from 50ms: the dedup above handles most duplicates, so we can be more responsive
     const now = performance.now();
-    if (now - this._lastPushTime < 50) return;
+    if (now - this._lastPushTime < 30) return;
     this._lastPushTime = now;
   
     this._lastImmediateKey = key;
@@ -1173,6 +1173,9 @@ function handleServerMessage(data) {
 
       // Render all agents through the same path — no root/sub distinction
       renderSubAgents();
+      // Reset throttle timer after full state render so subsequent stream_updates aren't throttled
+      state.genStats.lastSubAgentRender = performance.now();
+      state.genStats.lastSubAgentRenderDuration = 0;
       
       // Ensure the session primary agent's tab is active on initial load or if no tab is selected.
       if (!state.activeSubTab) {
@@ -1350,6 +1353,9 @@ function handleServerMessage(data) {
           p.dataset.contentKey = '';
           p.dataset.lastRenderedCount = '999999999';
         });
+        // Reset throttle timers so first render happens immediately, not delayed by 250ms+
+        state.genStats.lastSubAgentRender = 0;
+        state.genStats.lastSubAgentRenderDuration = 0;
       }
       state.generating = true;
       const newStackStr = (state.activeStack || []).join(',');
@@ -1394,9 +1400,11 @@ function handleServerMessage(data) {
       // (O(1) raw text append was fast, but we now always re-render markdown for quality)
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
       const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
-      // Reverted from 100ms to 150ms: the lower throttle caused ~6-7 full panel re-renders/sec
-      // with markdown parsing, which was a major contributor to UI jank during streaming.
-      const subThrottleContent = isSubAgentActive ? 150 : 750;
+      // Sub-agent streaming: 150ms. Root agent: 250ms (was 750, caused 2-6s gaps).
+      // Adaptive: if last render took long, increase throttle to avoid stacking renders.
+      const lastRenderDur = Math.max(0, state.genStats.lastSubAgentRenderDuration || 0);
+      const rootThrottleContent = Math.min(500, 250 + Math.round(lastRenderDur * 0.5));
+      const subThrottleContent = isSubAgentActive ? 150 : rootThrottleContent;
       
       // Force render on: completion detected, stack change, new visible message, 
       // or if the visible agent's content changed (bypass throttle for visible active agent).
@@ -1408,8 +1416,8 @@ function handleServerMessage(data) {
                            isVisibleActiveAgentContentChanged ||
                            (now - state.genStats.lastSubAgentRender > subThrottleContent);
       if (shouldRender) {
-              // Reset timer BEFORE render logic to reduce latency (moved from after renderSubAgents)
-              state.genStats.lastSubAgentRender = now;
+              // Measure render duration for adaptive throttling; reset timer AFTER to avoid stacking
+              const renderStart = now;
       
         // Check if Auto Agent Tab Focus is enabled (default: true if setting not found or checked)
         const autoTabFocusEnabled = !settingAutoTabFocus || settingAutoTabFocus.checked;
@@ -1425,6 +1433,13 @@ function handleServerMessage(data) {
         
         if (!willSwitchTab) {
           renderSubAgents();
+          // Reset timer AFTER render so elapsed time is accurate (prevents stacking renders)
+          state.genStats.lastSubAgentRender = now;
+          state.genStats.lastSubAgentRenderDuration = performance.now() - renderStart;
+        } else {
+          // switchMainTab will call renderSubAgents internally, but we still need to reset the throttle timer
+          state.genStats.lastSubAgentRender = now;
+          state.genStats.lastSubAgentRenderDuration = 0;
         }
         
         // Auto-switch tabs only when enabled and stack changed
@@ -2548,6 +2563,8 @@ window.rejectRequest = function (requestId) {
 // ── Sub-agents ───────────────────────────────────────────────────────────────
 
 function renderSubAgents() {
+  const t0 = performance.now();
+  
   // Preserve chat input focus and cursor position during DOM manipulation.
   // renderSubAgents rebuilds message panels which can steal focus from #chatInput,
   // causing the caret to jump while typing or during streaming.
@@ -2703,6 +2720,12 @@ function renderSubAgents() {
       chatInput.focus();
     }
   }
+  
+  // Diagnostic: log render duration when it exceeds threshold (helps identify bottlenecks)
+  const renderMs = performance.now() - t0;
+  if (renderMs > 100) {
+    console.warn(`[renderSubAgents] took ${renderMs.toFixed(1)}ms for ${namesArr.length} agents`);
+  }
 }
 
 function renderSubAgentPanel(panel, agentData, name) {
@@ -2769,17 +2792,16 @@ function renderSubAgentPanel(panel, agentData, name) {
   if (statusTokens) statusTokens.textContent = `${tokCount} tokens`;
 
   // 4. Check Content Key EARLY to skip all layout reads and DOM work when nothing changed
-  const lastMsgTextLen = (() => {
-    if (!lastMsg) return 0;
-    if (Array.isArray(lastMsg.content)) {
-      return lastMsg.content.reduce((sum, item) => sum + (item.text ? String(item.text).length : 0), 0);
-    }
-    return String(lastMsg.content || '').length;
-  })();
-  const funcCallLen = (lastMsg && lastMsg.function_call && lastMsg.function_call.arguments) ? String(lastMsg.function_call.arguments).length : 0;
+  // Optimized: use .length directly on strings (no String() wrapper needed for known-string values)
+  // and short-circuit early checks before expensive operations
+  const lastMsgTextLen = lastMsg ? (Array.isArray(lastMsg.content)
+    ? lastMsg.content.reduce((s, item) => s + (item.text?.length || 0), 0)
+    : (lastMsg.content || '').length) : 0;
+  const reasoningLen = lastMsg ? (lastMsg.reasoning_content || '').length : 0;
+  const funcCallLen = lastMsg?.function_call?.arguments ? (lastMsg.function_call.arguments + '').length : 0;
   // Agent-specific active flag only — no global fallback (prevents cross-agent pulsing)
   const activeFlag = agentData?.active ?? false;
-  const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + (lastMsg ? String(lastMsg.reasoning_content || '').length : 0) + ':' + funcCallLen + ':' + activeFlag;
+  const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + reasoningLen + ':' + funcCallLen + ':' + activeFlag;
   
   if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === displayMsgs.length) {
     // Nothing changed — skip scrollHeight read and all DOM updates
@@ -3296,6 +3318,7 @@ function resetGenStats() {
     // Reset throttle timestamps at generation start for fresh timing windows
     lastGenStatsUpdate: 0,
     lastSubAgentRender: 0,
+    lastSubAgentRenderDuration: 0,
     lastContextBarUpdate: 0,
     lastUiUpdate: 0,
     lastControlsUpdate: 0,
