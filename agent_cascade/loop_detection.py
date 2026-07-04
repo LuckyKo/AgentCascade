@@ -30,7 +30,12 @@ _FEATURE_TEXT_LIMIT = 3000
 _HASH_DIGITS = 8
 
 class LoopDetectedError(Exception):
-    """Raised when a repetitive loop is detected in agent turns."""
+    """Raised when a repetitive loop is detected in agent turns.
+
+    Kept for backward compatibility with existing tests. No longer raised
+    by the main codebase — loop detection is now handled inline inside
+    engine.run().
+    """
     def __init__(self, reason, agent_name=None, pop_count=None, turn_pop_count=0, resp_snapshot=None):
         self.reason = reason
         self.agent_name = agent_name
