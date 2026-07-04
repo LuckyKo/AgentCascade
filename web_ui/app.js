@@ -1799,6 +1799,11 @@ function updateBubbleContent(bubble, msg, config) {
     const curReasoning = msg.reasoning_content || '';
     const isGenerating = (config.isGenerating !== undefined) ? config.isGenerating : state.generating;
 
+    // Reset incremental append counter when streaming is done or for fresh messages
+    if (!isGenerating) {
+        bubble.dataset.incrementCount = '0';
+    }
+
     if (prevContent === curContent && prevReasoning === curReasoning && bubble.dataset.wasGenerating === String(isGenerating)) {
         return; // Nothing changed
     }
@@ -1813,13 +1818,13 @@ function updateBubbleContent(bubble, msg, config) {
     if (isGenerating && prevContent !== undefined && !msg.function_call && msg.role !== 'function' && !msg.reasoning_content) {
         const newText = curContent.slice(prevContent.length);
         if (newText) {
-            // FIX 4: Periodically force a full re-render every 15 incremental appends to prevent formatting drift.
+            // FIX 4: Periodically force a full re-render every 8 incremental appends to prevent formatting drift.
             // Raw text append can diverge from markdown-structured state over many ticks.
             const incrementCount = parseInt(bubble.dataset.incrementCount || '0');
             try {
                 appendStreamingDelta(contentDiv, newText);
                 bubble.dataset.incrementCount = String(incrementCount + 1);
-                if (incrementCount + 1 >= 15) {
+                if (incrementCount + 1 >= 8) {
                     bubble.dataset.incrementCount = '0'; // Reset counter after drift correction
                 } else {
                     return;  // Success - skip full re-render
@@ -2751,9 +2756,6 @@ function renderSubAgentPanel(panel, agentData, name) {
   const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + reasoningLen + ':' + funcCallLen + ':' + activeFlag + ':' + (state.generating ? '1' : '0');
   
   if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === displayMsgs.length) {
-    // During active streaming, consecutive ticks can have the same content length but still need
-    // bubble state updates (waiting animation, token count). Don't skip if actively generating.
-    if (isActive) return;
     // Nothing changed — skip scrollHeight read and all DOM updates
     return;
   }
