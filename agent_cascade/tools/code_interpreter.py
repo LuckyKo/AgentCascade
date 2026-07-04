@@ -388,42 +388,58 @@ class CodeInterpreter(BaseToolWithFileAccess):
             if e.args and isinstance(e.args[0], dict):
                 partial_result = e.args[0].get('partial_output', '')
             
-            # Tier 1: Jupyter-level interrupt + poll for idle status, collecting any remaining output
+            # Helper to drain ALL available IOPub messages in a non-blocking loop.
+            # Multiple messages can arrive simultaneously during interrupt; reading only
+            # one per call (as before) loses the rest, causing partial output loss.
+            def _drain_iopub(timeout: float = 1.0) -> None:
+                """Read all available IOPub messages until queue is empty or timeout."""
+                nonlocal interrupted, partial_result
+                while True:
+                    try:
+                        msg = kc.get_iopub_msg(timeout=timeout)
+                    except queue.Empty:
+                        break
+                    except Exception as e:
+                        logger.debug(f"IOPub drain error for kernel {kernel_id}: {e}")
+                        break
+                    
+                    # Check if watchdog killed the kernel during polling
+                    with _KERNEL_LOCK:
+                        if kernel_id in _WATCHDOG_KILLED:
+                            return
+                    
+                    mtype = msg['msg_type']
+                    content = msg['content']
+                    
+                    if mtype == 'status':
+                        if content.get('execution_state') == 'idle':
+                            interrupted = True
+                    elif mtype in ('execute_result', 'display_data'):
+                        text = content['data'].get('text/plain', '')
+                        if text:
+                            partial_result += f'\n\nstdout:\n```\n{text}\n```'  # type: ignore[operator]
+                    elif mtype == 'stream':
+                        name = content['name']
+                        text = content['text']
+                        if text:
+                            partial_result += f'\n\n{name}:\n```\n{text}\n```'  # type: ignore[operator]
+                    elif mtype == 'error':
+                        text = _escape_ansi('\n'.join(content['traceback']))
+                        if text:
+                            partial_result += f'\n\nstderr:\n```\n{text}\n```'  # type: ignore[operator]
+
+            # Tier 1: Jupyter-level interrupt + poll for idle status, collecting all remaining output
             try:
                 kc.interrupt()
                 for _ in range(3):
                     time.sleep(0.5)
                     
-                    # Check if watchdog killed the kernel during polling
                     with _KERNEL_LOCK:
-                        was_killed = kernel_id in _WATCHDOG_KILLED
-                    if was_killed:
-                        break
+                        if kernel_id in _WATCHDOG_KILLED:
+                            break
                     
-                    try:
-                        msg = kc.get_iopub_msg(timeout=1)
-                        # Collect partial output from messages received during interrupt
-                        if msg['msg_type'] == 'status':
-                            if msg['content'].get('execution_state') == 'idle':
-                                interrupted = True
-                            continue
-                        elif msg['msg_type'] in ('execute_result', 'display_data'):
-                            text = msg['content']['data'].get('text/plain', '')
-                            if text:
-                                partial_result += f'\n\nstdout:\n```\n{text}\n```'
-                        elif msg['msg_type'] == 'stream':
-                            name = msg['content']['name']
-                            text = msg['content']['text']
-                            if text:
-                                partial_result += f'\n\n{name}:\n```\n{text}\n```'
-                        elif msg['msg_type'] == 'error':
-                            text = _escape_ansi('\n'.join(msg['content']['traceback']))
-                            if text:
-                                partial_result += f'\n\nstderr:\n```\n{text}\n```'
-                    except queue.Empty:
-                        continue
-                    except Exception:
-                        break
+                    # Drain ALL messages that arrived during the sleep window, not just one
+                    _drain_iopub(timeout=1)
             except Exception as interrupt_err:
                 logger.warning(f"Tier 1 interrupt failed: {interrupt_err}")
             
@@ -440,23 +456,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
                         )
                         time.sleep(2)
                         
-                        # Collect remaining output and check if interrupt succeeded
-                        try:
-                            msg = kc.get_iopub_msg(timeout=2)
-                            if msg['msg_type'] == 'status':
-                                if msg['content'].get('execution_state') == 'idle':
-                                    interrupted = True
-                            elif msg['msg_type'] in ('execute_result', 'display_data'):
-                                text = msg['content']['data'].get('text/plain', '')
-                                if text:
-                                    partial_result += f'\n\nstdout:\n```\n{text}\n```'
-                            elif msg['msg_type'] == 'stream':
-                                name = msg['content']['name']
-                                text = msg['content']['text']
-                                if text:
-                                    partial_result += f'\n\n{name}:\n```\n{text}\n```'
-                        except Exception:
-                            pass
+                        # Drain ALL remaining messages after SIGINT, not just one
+                        _drain_iopub(timeout=2)
                     except Exception as sigint_err:
                         logger.warning(f"Tier 2 docker SIGINT failed: {sigint_err}")
             

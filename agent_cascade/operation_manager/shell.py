@@ -4,8 +4,9 @@ import os
 import re
 import signal
 import subprocess
+import threading
 import time
-from typing import Optional
+from typing import List, Optional, Tuple
 
 
 # ─── Mixin: Shell methods for OperationManager ─────────────────────────────
@@ -151,8 +152,28 @@ class ShellMixin:
                 start_new_session=True,
             )
 
+            # Use threaded pipe reading to prevent output loss on timeout/hang.
+            # communicate() blocks until BOTH pipes close; when a process hangs,
+            # data in pipe buffers is not returned and can be lost after killing.
+            stdout_chunks: List[str] = []
+            stderr_chunks: List[str] = []
+
+            def _drain_pipe(pipe, chunks: List[str]) -> None:
+                """Continuously drain a pipe into a list until EOF or error."""
+                try:
+                    for chunk in iter(lambda: pipe.read(4096), ''):
+                        chunks.append(chunk)
+                except Exception as e:
+                    logger.debug(f"Pipe read error on PID {proc.pid}: {e}")
+
+            t_out = threading.Thread(target=_drain_pipe, args=(proc.stdout, stdout_chunks), daemon=True, name='shell_stdout_reader')
+            t_err = threading.Thread(target=_drain_pipe, args=(proc.stderr, stderr_chunks), daemon=True, name='shell_stderr_reader')
+            t_out.start()
+            t_err.start()
+
+            # Wait for process to finish within the timeout window
             try:
-                stdout, stderr = proc.communicate(timeout=effective_timeout)
+                proc.wait(timeout=effective_timeout)
                 result_ok = True
             except subprocess.TimeoutExpired:
                 result_ok = False
@@ -232,10 +253,14 @@ class ShellMixin:
                         except Exception as e:
                             logger.debug(f"Process kill fallback failed (non-critical): {e}")
 
-                try:
-                    stdout, stderr = proc.communicate(timeout=5)
-                except Exception:
-                    stdout, stderr = '', ''
+            # Wait for reader threads to drain remaining pipe buffers before they close.
+            # This ensures all output flushed by the process (or its children) is captured,
+            # even if the process was killed mid-write.
+            t_out.join(timeout=3)
+            t_err.join(timeout=3)
+
+            stdout: str = ''.join(stdout_chunks)
+            stderr: str = ''.join(stderr_chunks)
 
             if result_ok:
                 output = ""
