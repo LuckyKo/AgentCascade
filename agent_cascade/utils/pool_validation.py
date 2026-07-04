@@ -48,29 +48,35 @@ def validate_message_pool(messages: list[Any], agent_name: str) -> bool:
 
     # Check for duplicate consecutive messages (compression can cause this via extend+clear issues)
     prev_content = None
+    prev_reasoning_key = None  # Renamed from prev_reasoning for consistency with prev_content (both are keys, not raw content)
     prev_role = None
     dup_count = 0
     for i, msg in enumerate(messages):
         role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+        # Normalize explicit None values to empty string using or '' pattern
+        content = (msg.get('content') or '') if isinstance(msg, dict) else (getattr(msg, 'content', '') or '')
+        reasoning_content = (msg.get('reasoning_content') or '') if isinstance(msg, dict) else (getattr(msg, 'reasoning_content', '') or '')
         # Increase content window from 200 to 500 chars for better precision (Issue 8 fix)
-        content_key = str(content)[:500] if content else ''
+        # content and reasoning_content are already normalized to '' above, so direct slice is safe
+        content_key = content[:500]
+        reasoning_key = reasoning_content[:500]
 
-        # Check: assistant messages should not be empty (tool calls have content in function_call)
-        if role == 'assistant' and not content_key:
+        # Check: assistant messages should not be empty (tool calls have content in function_call or reasoning_content)
+        if role == 'assistant' and not content_key and not reasoning_key:
             has_fc = msg.get('function_call') if isinstance(msg, dict) else getattr(msg, 'function_call', None)
             has_tc = msg.get('tool_calls') if isinstance(msg, dict) else getattr(msg, 'tool_calls', None)
             if not has_fc and not has_tc:
                 dup_count += 1
                 compression_logger.warning(f"[MSG POOL VALIDATION] Empty assistant message at index {i} for '{agent_name}' (no function_call/tool_calls)")
 
-        # Check for duplicate consecutive messages
-        if role == prev_role and content_key == prev_content:
+        # Check for duplicate consecutive messages (compare both content and reasoning_content)
+        if role == prev_role and content_key == prev_content and reasoning_key == prev_reasoning_key:
             dup_count += 1
             compression_logger.warning(f"[MSG POOL VALIDATION] Duplicate consecutive msg at index {i} for '{agent_name}'")
 
         prev_role = role
         prev_content = content_key
+        prev_reasoning_key = reasoning_key
 
     # Check: parallel tool calls must have matching function results
     # Count tool_calls in assistant messages and verify equal number of function responses follow
