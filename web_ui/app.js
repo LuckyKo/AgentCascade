@@ -395,19 +395,15 @@ const ranges = [
 
 // ── Initialization ───────────────────────────────────────────────────────────
 
-// Resizer for Right Panel
-const sidePanelResizer = $('#side-panel-resizer');
-
 // Side panel toggle
 if (btnToggleSettings && sidePanel) {
   btnToggleSettings.addEventListener('click', () => {
-    const isCollapsed = sidePanel.classList.toggle('collapsed');
-    // Sync resizer visibility with panel state
-    if (sidePanelResizer) {
-      sidePanelResizer.classList.toggle('hidden', isCollapsed);
-    }
+    sidePanel.classList.toggle('collapsed');
   });
 }
+
+// Resizer for Right Panel
+const sidePanelResizer = $('#side-panel-resizer');
 if (sidePanelResizer && sidePanel) {
   let isResizing = false;
   const appContainer = $('.app');
