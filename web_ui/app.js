@@ -395,6 +395,9 @@ const ranges = [
 
 // ── Initialization ───────────────────────────────────────────────────────────
 
+// Resizer for Right Panel
+const sidePanelResizer = $('#side-panel-resizer');
+
 // Side panel toggle
 if (btnToggleSettings && sidePanel) {
   btnToggleSettings.addEventListener('click', () => {
@@ -405,9 +408,6 @@ if (btnToggleSettings && sidePanel) {
     }
   });
 }
-
-// Resizer for Right Panel
-const sidePanelResizer = $('#side-panel-resizer');
 if (sidePanelResizer && sidePanel) {
   let isResizing = false;
   const appContainer = $('.app');
