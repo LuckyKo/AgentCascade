@@ -398,7 +398,11 @@ const ranges = [
 // Side panel toggle
 if (btnToggleSettings && sidePanel) {
   btnToggleSettings.addEventListener('click', () => {
-    sidePanel.classList.toggle('collapsed');
+    const isCollapsed = sidePanel.classList.toggle('collapsed');
+    // Sync resizer visibility with panel state
+    if (sidePanelResizer) {
+      sidePanelResizer.classList.toggle('hidden', isCollapsed);
+    }
   });
 }
 
