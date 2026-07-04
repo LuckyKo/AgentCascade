@@ -387,46 +387,84 @@ class CodeInterpreter(BaseToolWithFileAccess):
             partial_result = ''
             if e.args and isinstance(e.args[0], dict):
                 partial_result = e.args[0].get('partial_output', '')
-            
+
+            # Drain constants: prevent resource exhaustion from runaway IOPub message streams
+            DRAIN_TOTAL_TIMEOUT = 5.0       # Max seconds spent draining IOPub messages per call
+            DRAIN_MAX_MESSAGES = 100        # Max IOPub messages to read per drain cycle
+            DRAIN_MAX_OUTPUT_BYTES = 10 * 1024 * 1024  # 10 MB cap on accumulated output
+
             # Helper to drain ALL available IOPub messages in a non-blocking loop.
             # Multiple messages can arrive simultaneously during interrupt; reading only
             # one per call (as before) loses the rest, causing partial output loss.
-            def _drain_iopub(timeout: float = 1.0) -> None:
-                """Read all available IOPub messages until queue is empty or timeout."""
+            def _drain_iopub(msg_timeout: float = 1.0) -> None:
+                """Read all available IOPub messages until queue is empty or timeout.
+
+                Guards against resource exhaustion:
+                - Total drain time capped at DRAIN_TOTAL_TIMEOUT seconds
+                - Message count capped at DRAIN_MAX_MESSAGES per call
+                - Accumulated output size capped at DRAIN_MAX_OUTPUT_BYTES (10 MB)
+                """
                 nonlocal interrupted, partial_result
+                start = time.time()
+                msg_count = 0
+                parts: list[str] = []  # O(n) accumulation via list + join
+
                 while True:
-                    try:
-                        msg = kc.get_iopub_msg(timeout=timeout)
-                    except queue.Empty:
+                    # Check total elapsed time to avoid draining forever
+                    if time.time() - start >= DRAIN_TOTAL_TIMEOUT:
                         break
-                    except Exception as e:
-                        logger.debug(f"IOPub drain error for kernel {kernel_id}: {e}")
+                    # Check message count limit to prevent resource exhaustion
+                    if msg_count >= DRAIN_MAX_MESSAGES:
                         break
-                    
-                    # Check if watchdog killed the kernel during polling
+                    # Check watchdog BEFORE the blocking get_iopub_msg call (reduces latency)
                     with _KERNEL_LOCK:
                         if kernel_id in _WATCHDOG_KILLED:
-                            return
-                    
+                            break
+
+                    try:
+                        msg = kc.get_iopub_msg(timeout=msg_timeout)
+                    except queue.Empty:
+                        break
+                    except Exception as err:
+                        logger.debug(f"IOPub drain error for kernel {kernel_id}: {err}")
+                        break
+
+                    msg_count += 1
                     mtype = msg['msg_type']
                     content = msg['content']
-                    
+
                     if mtype == 'status':
                         if content.get('execution_state') == 'idle':
                             interrupted = True
                     elif mtype in ('execute_result', 'display_data'):
                         text = content['data'].get('text/plain', '')
                         if text:
-                            partial_result += f'\n\nstdout:\n```\n{text}\n```'  # type: ignore[operator]
+                            parts.append(f'\n\nstdout:\n```\n{text}\n```')
                     elif mtype == 'stream':
                         name = content['name']
                         text = content['text']
                         if text:
-                            partial_result += f'\n\n{name}:\n```\n{text}\n```'  # type: ignore[operator]
+                            parts.append(f'\n\n{name}:\n```\n{text}\n```')
                     elif mtype == 'error':
                         text = _escape_ansi('\n'.join(content['traceback']))
                         if text:
-                            partial_result += f'\n\nstderr:\n```\n{text}\n```'  # type: ignore[operator]
+                            parts.append(f'\n\nstderr:\n```\n{text}\n```')
+                    else:
+                        # Log warnings for unrecognized IOPub message types (debug, not spammy)
+                        logger.debug(
+                            f"IOPub drain: ignoring unknown msg type '{mtype}' "
+                            f"for kernel {kernel_id}"
+                        )
+
+                # Merge accumulated parts into partial_result once per drain call
+                if parts:
+                    partial_result = partial_result + ''.join(parts)
+
+                # Enforce size limit on total accumulated output (truncate with marker)
+                combined = partial_result
+                if len(combined) > DRAIN_MAX_OUTPUT_BYTES:
+                    kept = combined[:DRAIN_MAX_OUTPUT_BYTES - 50]
+                    partial_result = f'{kept}\n\n[OUTPUT TRUNCATED — exceeded {DRAIN_MAX_OUTPUT_BYTES // (1024*1024)}MB limit]'
 
             # Tier 1: Jupyter-level interrupt + poll for idle status, collecting all remaining output
             try:

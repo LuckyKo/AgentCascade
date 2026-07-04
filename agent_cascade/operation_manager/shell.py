@@ -9,6 +9,10 @@ import time
 from typing import List, Optional, Tuple
 
 
+# Named constants for shell pipe draining (avoid magic numbers)
+PIPE_READ_SIZE = 4096           # Bytes per read call on stdout/stderr pipes
+DRAIN_THREAD_JOIN_TIMEOUT = 3   # Seconds to wait for drain threads after process ends
+
 # ─── Mixin: Shell methods for OperationManager ─────────────────────────────
 
 class ShellMixin:
@@ -157,17 +161,27 @@ class ShellMixin:
             # data in pipe buffers is not returned and can be lost after killing.
             stdout_chunks: List[str] = []
             stderr_chunks: List[str] = []
+            drain_errors: List[Exception] = []  # Collect exceptions from drain threads
 
-            def _drain_pipe(pipe, chunks: List[str]) -> None:
-                """Continuously drain a pipe into a list until EOF or error."""
+            def _drain_pipe(pipe, chunks: List[str], errors: List[Exception]) -> None:
+                """Continuously drain a pipe into a list until EOF or error.
+
+                Reads PIPE_READ_SIZE bytes at a time in a loop. After the process is
+                killed (and pipes close), this returns via EOF. Any exception is
+                captured into the shared errors list for post-join inspection.
+                """
                 try:
-                    for chunk in iter(lambda: pipe.read(4096), ''):
+                    # Read PIPE_READ_SIZE bytes at a time until EOF (pipe closed).
+                    while True:
+                        chunk = pipe.read(PIPE_READ_SIZE)
+                        if not chunk:
+                            break  # EOF
                         chunks.append(chunk)
                 except Exception as e:
-                    logger.debug(f"Pipe read error on PID {proc.pid}: {e}")
+                    errors.append(e)
 
-            t_out = threading.Thread(target=_drain_pipe, args=(proc.stdout, stdout_chunks), daemon=True, name='shell_stdout_reader')
-            t_err = threading.Thread(target=_drain_pipe, args=(proc.stderr, stderr_chunks), daemon=True, name='shell_stderr_reader')
+            t_out = threading.Thread(target=_drain_pipe, args=(proc.stdout, stdout_chunks, drain_errors), daemon=True, name='shell_stdout_reader')
+            t_err = threading.Thread(target=_drain_pipe, args=(proc.stderr, stderr_chunks, drain_errors), daemon=True, name='shell_stderr_reader')
             t_out.start()
             t_err.start()
 
@@ -256,8 +270,20 @@ class ShellMixin:
             # Wait for reader threads to drain remaining pipe buffers before they close.
             # This ensures all output flushed by the process (or its children) is captured,
             # even if the process was killed mid-write.
-            t_out.join(timeout=3)
-            t_err.join(timeout=3)
+            t_out.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
+            t_err.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
+
+            # Ensure threads have fully terminated before accessing shared lists.
+            # A small grace period handles edge cases where pipes close slowly after kill.
+            if t_out.is_alive() or t_err.is_alive():
+                time.sleep(0.1)  # Brief grace period for thread cleanup
+
+            # Check for exceptions from drain threads and log them
+            if drain_errors:
+                logger.warning(
+                    f"Pipe drain errors on PID {proc.pid}: "
+                    + "; ".join(str(e) for e in drain_errors)
+                )
 
             stdout: str = ''.join(stdout_chunks)
             stderr: str = ''.join(stderr_chunks)
