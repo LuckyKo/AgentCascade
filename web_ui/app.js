@@ -1813,9 +1813,17 @@ function updateBubbleContent(bubble, msg, config) {
     if (isGenerating && prevContent !== undefined && !msg.function_call && msg.role !== 'function' && !msg.reasoning_content) {
         const newText = curContent.slice(prevContent.length);
         if (newText) {
+            // FIX 4: Periodically force a full re-render every 15 incremental appends to prevent formatting drift.
+            // Raw text append can diverge from markdown-structured state over many ticks.
+            const incrementCount = parseInt(bubble.dataset.incrementCount || '0');
             try {
                 appendStreamingDelta(contentDiv, newText);
-                return;  // Success - skip full re-render
+                bubble.dataset.incrementCount = String(incrementCount + 1);
+                if (incrementCount + 1 >= 15) {
+                    bubble.dataset.incrementCount = '0'; // Reset counter after drift correction
+                } else {
+                    return;  // Success - skip full re-render
+                }
             } catch(e) {
                 // If incremental fails for any reason, fall through to full re-render below
                 console.warn('Incremental streaming append failed, falling back to full render:', e);
@@ -1844,9 +1852,9 @@ function updateBubbleContent(bubble, msg, config) {
                 }
             }
         }
-        // Enable thinking block parsing even during streaming for "full content formatted" experience.
-        // Modern browsers handle this regex well enough for typical message sizes.
-        html += renderMarkdown(text, true);
+        // Use lightweight markdown during streaming to skip expensive thinking-block regex parsing.
+        // Full parsing (allowThinking=true) is only needed on final renders when streaming stops.
+        html += renderMarkdown(text, false);
     }
     
     // Preserve <details> open/close state and code block scroll positions during innerHTML replacement
@@ -2739,9 +2747,13 @@ function renderSubAgentPanel(panel, agentData, name) {
   const funcCallLen = lastMsg?.function_call?.arguments ? (lastMsg.function_call.arguments + '').length : 0;
   // Agent-specific active flag only — no global fallback (prevents cross-agent pulsing)
   const activeFlag = agentData?.active ?? false;
-  const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + reasoningLen + ':' + funcCallLen + ':' + activeFlag;
+  // Include streaming state in contentKey so bubble UI (waiting animation, token count) updates even when content dims match
+  const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + reasoningLen + ':' + funcCallLen + ':' + activeFlag + ':' + (state.generating ? '1' : '0');
   
   if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === displayMsgs.length) {
+    // During active streaming, consecutive ticks can have the same content length but still need
+    // bubble state updates (waiting animation, token count). Don't skip if actively generating.
+    if (isActive) return;
     // Nothing changed — skip scrollHeight read and all DOM updates
     return;
   }

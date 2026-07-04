@@ -203,85 +203,149 @@ def _check_css(content: str, _path: str) -> str:
 
 
 def _check_c_family(content: str, _path: str) -> str:
-    """Check C-family languages for balanced braces, parens, and brackets."""
+    """Check C-family languages for balanced braces, parens, and brackets.
+
+    Handles strings (double/single/backtick), comments (// and /* */),
+    regex literals (/pattern/flags with character classes), and multiline
+    strings/template literals by persisting state across lines.
+
+    Note: Braces inside template ${...} expressions are not tracked;
+    division vs. regex ambiguity is resolved via a preceding-char heuristic.
+    """
     errors = []
     stack = []
     match_map = {')': '(', ']': '[', '}': '{'}
     open_chars = set('({[')
-    close_chars = set(')}]')
 
+    # State persists across lines (multiline strings/template literals)
     in_string = False
     string_char = ''
-    in_line_comment = False
     in_block_comment = False
-    prev_ch = ''
 
     lines = content.splitlines()
     for line_no, line in enumerate(lines, 1):
-        in_line_comment = False
-        for col, ch in enumerate(line):
-            # Handle block comment state
+        prev_ch = ''
+        i = 0
+        while i < len(line):
+            ch = line[i]
+
+            # Handle block comment state (/* ... */)
             if in_block_comment:
                 if prev_ch == '*' and ch == '/':
                     in_block_comment = False
-                    prev_ch = ''
-                    continue
                 prev_ch = ch
+                i += 1
                 continue
 
-            # Handle string state
-            if in_string:
-                if ch == string_char:
-                    # Count preceding backslashes to determine if escaped
+            # Check for comment start (only outside strings)
+            if ch == '/' and not in_string and i + 1 < len(line):
+                next_ch = line[i + 1]
+                if next_ch == '/':
+                    break  # rest of line is a line comment
+                elif next_ch == '*':
+                    in_block_comment = True
+                    prev_ch = ch
+                    i += 1
+                    continue
+
+            # Check for string start/close (handles ", ', `)
+            if ch in ('"', "'", '`'):
+                if not in_string:
+                    in_string = True
+                    string_char = ch
+                    prev_ch = ch
+                    i += 1
+                    continue
+                else:
+                    # Count preceding backslashes to check for escape
                     backslash_count = 0
-                    for i in range(col - 1, -1, -1):
-                        if line[i] == '\\':
+                    for j in range(i - 1, -1, -1):
+                        if line[j] == '\\':
                             backslash_count += 1
                         else:
                             break
                     if backslash_count % 2 == 0:
                         in_string = False
-                prev_ch = ch
-                continue
-
-            # Check for comment start
-            if ch == '/' and col + 1 < len(line):
-                next_ch = line[col + 1]
-                if next_ch == '/':
-                    in_line_comment = True
-                    break
-                elif next_ch == '*':
-                    in_block_comment = True
                     prev_ch = ch
+                    i += 1
                     continue
 
-            # Check for string start
-            if ch in ('"', "'", '`'):
-                in_string = True
-                string_char = ch
-                prev_ch = ch
-                continue
+            # Detect regex literal /pattern/flags
+            # Regex starts with / when preceded by an operator, delimiter, or at line start.
+            # Includes ) and ] since after closing parens/brackets a common next token is a regex.
+            if ch == '/' and not in_string:
+                before = ''
+                j = i - 1
+                while j >= 0 and line[j] in ' \t':
+                    j -= 1
+                if j >= 0:
+                    before = line[j]
 
-            if ch in open_chars:
-                stack.append((ch, line_no))
-            elif ch in close_chars:
-                expected = match_map[ch]
-                if not stack:
-                    errors.append(f"Line {line_no}: Unexpected '{ch}' with no matching '{expected}'")
-                elif stack[-1][0] != expected:
-                    opener, open_line = stack[-1]
-                    errors.append(
-                        f"Line {line_no}: '{ch}' does not match '{opener}' opened at line {open_line}"
-                    )
-                    stack.pop()
-                else:
-                    stack.pop()
+                # Preceding chars that indicate a regex (not division).
+                # j < 0 means start-of-line after whitespace, also valid for regex.
+                if (before in ('(', ')', '[', ']', '=', '!', '&', '|', '^',
+                               ',', ';', ':', '?', '~') or i == 0 or j < 0):
+                    # Scan forward to find the closing /
+                    j = i + 1
+                    while j < len(line):
+                        if line[j] == '\\':
+                            j += 2  # skip escaped character inside regex
+                            continue
+                        elif line[j] == '[':
+                            # Skip character class (handles [a-z], [\w\d], etc.)
+                            k = j + 1
+                            while k < len(line):
+                                if line[k] == '\\':
+                                    k += 2
+                                    continue
+                                elif line[k] == ']':
+                                    break
+                                k += 1
+                            j = k + 1
+                            continue
+                        elif line[j] == '/':
+                            # Found closing slash, skip any flags (giu, etc.)
+                            j += 1
+                            while (j < len(line) and
+                                   (line[j].isalpha() or line[j] in '_')):
+                                j += 1
+                            i = j - 1  # will be incremented at end of loop
+                            break
+                        # (spaces are naturally skipped by the loop increment below)
+                        j += 1
+                    prev_ch = ch
+                    i += 1
+                    continue
+
+            # Track bracket/brace/paren balance (skip characters inside strings)
+            if not in_string:
+                if ch in match_map:
+                    expected = match_map[ch]
+                    if not stack:
+                        errors.append(
+                            f"Line {line_no}: Unexpected '{ch}' "
+                            f"with no matching '{expected}'")
+                    elif stack[-1][0] != expected:
+                        opener, open_line = stack[-1]
+                        errors.append(
+                            f"Line {line_no}: '{ch}' does not match "
+                            f"'{opener}' opened at line {open_line}"
+                        )
+                        stack.pop()
+                    else:
+                        stack.pop()
+                elif ch in open_chars:
+                    stack.append((ch, line_no))
 
             prev_ch = ch
+            i += 1
 
+    # Report any unclosed brackets/braces/parens
     for opener, line_no in stack:
-        close = {'{': '}', '(': ')', '[': ']'}[opener]
-        errors.append(f"Line {line_no}: Unclosed '{opener}' (expected '{close}')")
+        close_char = {'{': '}', '(': ')', '[': ']'}[opener]
+        errors.append(
+            f"Line {line_no}: Unclosed '{opener}' (expected '{close_char}')"
+        )
 
     if errors:
         return "Syntax Issues:\n" + "\n".join(errors[:20])
