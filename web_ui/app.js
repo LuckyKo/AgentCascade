@@ -40,6 +40,19 @@ const DEFAULT_SESSION_NAME = 'Maine'; // Default session/agent name
 // Tab ID prefix — all agents (including session primary) use 'sub-' prefix for their tabs.
 const TAB_PREFIX = 'sub-';  // e.g., 'sub-Maine'
 
+// ── Throttle configuration (all streaming/render timing constants in one place) ──
+const THROTTLE = Object.freeze({
+  PUSH_IMMEDIATE_MS: 30,       // ActivityBar push throttle
+  RENDER_SUBAGENT_MS: 150,     // sub-agent streaming render throttle
+  RENDER_ROOT_BASE_MS: 250,    // root agent base render throttle
+  RENDER_ROOT_MAX_MS: 500,     // root agent max render throttle cap (adaptive)
+  ACTIVITY_BAR_RENDER_MS: 200, // ActivityBar full render throttle
+  GEN_STATS_MS: 500,           // gen stats update throttle (~2Hz)
+  CONTROLS_MS: 1000,           // controls update throttle (~1Hz)
+  TELEMETRY_MS: 2000,          // telemetry panel update throttle (~2s)
+  RENDER_DIAG_THRESHOLD_MS: 100, // render duration diagnostic warning threshold
+});
+
 // Pre-compiled regexes for thinking blocks (consistent with backend)
 const _TAG_THINK = 'think';
 const _TAG_THOUGHT = 'thought';
@@ -75,8 +88,7 @@ const state = {
     lastContextBarUpdate: 0,    // For updateContextBar throttling (~1Hz during streaming)
     lastUiUpdate: 0,            // For activity bar throttling (~1Hz)
     lastControlsUpdate: 0,      // For updateControls throttling (~1Hz)
-    lastTelemetryUpdate: 0,     // For updateTelemetryPanel throttling (~2s)
-        // Note: subContextBarThrottle removed - context bar updates are now unconditional (cheaper)
+  lastTelemetryUpdate: 0,     // updateTelemetryPanel throttling (~2s)
   },
   totalTokens: 0,
   totalWords: 0,
@@ -94,7 +106,7 @@ let ws = null;
 let reconnectTimer = null;
 // Root agent rendering state is now managed per-panel via panel.dataset.lastRenderedCount (same as sub-agents)
 
-// Note: documentHidden variable removed - modern browsers optimize painting for hidden tabs automatically.
+// Modern browsers optimize painting for hidden tabs automatically — no explicit check needed.
 // The early-return check in stream_update was also removed to avoid render delays when switching back.
 
 // Per-panel scroll lock state for ALL panels including root (managed via subAgentScrollLocks)
@@ -171,11 +183,14 @@ const ActivityBar = {
   el: null,          // DOM ref to #globalActivityBar
   fifoEl: null,      // DOM ref to .activity-fifo
   queuedEl: null,    // DOM ref to .activity-queued
-  lastRenderTime: 0, // Throttle: render() uses 200ms; pushImmediate() uses dedup + throttle
-  _lastImmediateKey: '', // Dedup key for pushImmediate() — skip if content hasn't changed
-  _immediateLocked: false, // Atomic lock to prevent race between pushImmediate() and render()
-  _currentInstance: null, // Track current agent instance for reset on filter change (Major Issue #5)
-  _lastPushTime: 0,      // Throttle timer for pushImmediate() DOM writes (~50ms interval)
+  lastRenderTime: 0, // Throttle timer for render()
+  _lastPushTime: 0,      // Throttle timer for pushImmediate()
+  
+  // Cached values for pushImmediate dedup (avoids JSON.stringify overhead)
+  _dedupInstance: null,
+  _dedupPreview: '',
+  _dedupWaiting: false,
+  _dedupTokens: 0,
   
   init() {
     this.el = document.getElementById('globalActivityBar');
@@ -192,71 +207,48 @@ const ActivityBar = {
   },
   
   pushImmediate(instanceName, preview, isWaiting, tokenCount) {
-    // Lightweight update for activity banner — bypasses full render throttling
-    // Only updates the text content for near-real-time feedback during streaming
-  
     if (instanceName !== this.getFilterInstance()) return;
     if (!this.el || !this.fifoEl) return;
   
-       // Reset dedup key when agent filter changes to avoid skipping first update (Major Issue #5)
-       if (this._currentInstance !== instanceName) {
-         this._lastImmediateKey = '';
-         this._currentInstance = instanceName;
-       }
+    // Fast dedup: skip if content hasn't changed since last call
+    if (this._dedupInstance === instanceName &&
+    this._dedupPreview === preview &&
+    this._dedupWaiting === isWaiting &&
+    this._dedupTokens === tokenCount) return;
   
-    // Deduplication: skip if content hasn't changed since last pushImmediate
-    // Use JSON.stringify to avoid collision with '|' character in preview text (Major Issue #3)
-    const key = JSON.stringify([instanceName, preview, isWaiting, tokenCount]);
-    if (key === this._lastImmediateKey) return;
+    if (performance.now() - this._lastPushTime < THROTTLE.PUSH_IMMEDIATE_MS) return;
+    this._lastPushTime = performance.now();
   
-    // Throttle DOM writes to ~30ms intervals during rapid streaming (~33 ticks/sec)
-    // Lowered from 50ms: the dedup above handles most duplicates, so we can be more responsive
-    const now = performance.now();
-    if (now - this._lastPushTime < 30) return;
-    this._lastPushTime = now;
+    this._dedupInstance = instanceName;
+    this._dedupPreview = preview;
+    this._dedupWaiting = isWaiting;
+    this._dedupTokens = tokenCount;
   
-    this._lastImmediateKey = key;
-    
-    const activeInstance = this.getFilterInstance();
-    // Null safety: use optional chaining for state.subAgents access
-    const agentData = state?.subAgents?.[activeInstance];
+    const agentData = state.subAgents[instanceName];
     const isActive = agentData?.active ?? false;
-    
-    // Update active state indicators
+  
     this.el.classList.toggle('active', isActive);
-    
+
     if (isActive) {
       let status = '';
-      
-      // Show waiting status if applicable (exclude session primary agent - its waiting is global)
-      if (!isSessionPrimaryAgent(activeInstance) && isWaiting) {
+
+      if (!isSessionPrimaryAgent(instanceName) && isWaiting) {
         status = 'Waiting for API slot...';
-      } else if (preview !== undefined && preview !== null) {
-              // Use the preview from stream_update (activity_update path removed for consistent timing)
-        status = (preview === '' || !preview.trim()) 
-          ? 'Streaming...' 
-          : preview;
+      } else if (preview !== undefined && preview != null) {
+        status = (preview === '' || !preview.trim()) ? 'Streaming...' : preview;
       }
-      
-      // Append token count if provided (aligned with render() fallback logic)
-      // Use > 0 instead of !== undefined to hide "(0 words, 0 tokens)" during initial streaming
+
       const tokCount = tokenCount > 0 ? tokenCount : (agentData?.total_tokens ?? state.totalTokens);
-      if (tokCount !== undefined && tokCount > 0) {
+      if (tokCount > 0) {
         const wordCount = agentData?.total_words ?? state.totalWords;
         status += ` (${wordCount} words, ${tokCount} tokens)`;
       }
-      
-             // Atomic write: set lock before writing to prevent render() from overwriting (Critical Issue #1)
-             this._immediateLocked = true;
-      this.fifoEl.textContent = status;
-             this._immediateLocked = false;
+
+      this.fifoEl.textContent = status || 'Agent Idle';
     } else {
-             this._immediateLocked = true;
       this.fifoEl.textContent = 'Agent Idle';
-             this._immediateLocked = false;
     }
-    
-    // Update queued messages indicator
+
     if (this.queuedEl) {
       this.queuedEl.style.display = agentData?.has_queued_messages ? 'block' : 'none';
     }
@@ -270,61 +262,41 @@ const ActivityBar = {
     this.render();
   },
   
-  render(streamingText) {
-    // Throttle: skip re-render if less than 200ms since last render (reduced from 500ms for snappier updates)
+render(streamingText) {
     const now = performance.now();
-    if (now - this.lastRenderTime < 200) return;
+    if (now - this.lastRenderTime < THROTTLE.ACTIVITY_BAR_RENDER_MS) return;
     this.lastRenderTime = now;
-    
+
     if (!this.el || !this.fifoEl) return;
-    
-    const activeInstance = this.getFilterInstance();
-    // Null safety: use optional chaining for state.subAgents access
-    const agentData = state?.subAgents?.[activeInstance];
-    // Agent-specific active state only — no global fallback (prevents cross-agent pulsing)
+
+    const agentData = state.subAgents[this.getFilterInstance()];
     const isActive = agentData?.active ?? false;
-    
+
     this.el.classList.toggle('active', isActive);
-    
+
     if (isActive) {
       let status = '';
-      // Show waiting status for sub-agents only (session primary agent waiting is global)
-      if (!isSessionPrimaryAgent(activeInstance) && agentData?.is_waiting) {
+
+      if (!isSessionPrimaryAgent(this.getFilterInstance()) && agentData.is_waiting) {
         status = 'Waiting for API slot...';
       } else if (streamingText !== undefined) {
-        // When streamingText is empty but the agent IS generating, show "Streaming..." instead of blank.
-        // Guard with isActive to avoid showing "Streaming..." for idle agents with no messages.
-        status = (isActive && (streamingText === '' || !streamingText.trim())) 
-            ? 'Streaming...' 
-            : (streamingText !== undefined ? streamingText : '');
+        status = (streamingText === '' || !streamingText.trim()) ? 'Streaming...' : streamingText;
       } else {
-        // Fallback or tab switch: get from last message of agent
         const msgs = agentData?.messages || [];
-        const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
-        status = getActivityPreview(lastMsg) || 'Agent Idle';
+        status = getActivityPreview(msgs[msgs.length - 1]) || 'Agent Idle';
       }
-      
-      // Use agent-level stats if available, fall back to global stats
-      const tokCount = agentData?.total_tokens ?? state.totalTokens;
-      const wordCount = agentData?.total_words ?? state.totalWords;
-      if (tokCount !== undefined) {
-        status += ` (${wordCount} words, ${tokCount} tokens)`;
+
+      if (agentData.total_tokens !== undefined) {
+        status += ` (${agentData.total_words ?? state.totalWords} words, ${agentData.total_tokens ?? state.totalTokens} tokens)`;
       }
-      
-             // Check atomic lock from pushImmediate() before writing (Critical Issue #1)
-             // If locked, skip the write — pushImmediate() already wrote the correct content
-             if (!this._immediateLocked) {
+
       this.fifoEl.textContent = status;
-             }
-           } else {
-             // Check atomic lock from pushImmediate() before writing (Critical Issue #1)
-             if (!this._immediateLocked) {
+    } else {
       this.fifoEl.textContent = 'Agent Idle';
     }
-           }
-    
+      
     if (this.queuedEl) {
-      this.queuedEl.style.display = agentData?.has_queued_messages ? 'block' : 'none';
+    this.queuedEl.style.display = agentData?.has_queued_messages ? 'block' : 'none';
     }
   }
 };
@@ -1051,7 +1023,6 @@ function handleServerMessage(data) {
       if (state.generating && data.instance_halted) {
         for (const [name, agentData] of Object.entries(state.subAgents)) {
           if (agentData?.is_halted && agentData?.messages?.length > 0) {
-            // Use optional chaining to handle hole entries at array boundaries
             partialContents[name] = String(agentData.messages[agentData.messages.length - 1]?.content || '');
           }
         }
@@ -1213,25 +1184,6 @@ function handleServerMessage(data) {
       break;
 
     case 'stream_update': {
-      // DEBUG: trace stream update frequency
-      if (!state._debugStreamCount) state._debugStreamCount = 0;
-      state._debugStreamCount++;
-      if (state._debugStreamCount % 10 === 1) {
-        console.log(`[STREAM] Received ${state._debugStreamCount} stream_updates, generating=${state.generating}, activeStack=[${(state.activeStack||[]).join(',')}]`);
-      }
-      // DEBUG: trace render throttling every tick (will see if shouldRender fires enough)
-      if (!state._debugLastThrottleLog || state._debugStreamCount - state._debugLastThrottleLog < 5) {
-        const nowDebug = performance.now();
-        const isSubActive = state.activeStack && state.activeStack.length > 0;
-              const throttleMs = isSubActive ? 150 : 750;  // Matches render throttle: 150ms during streaming
-        const elapsed = (state.genStats.lastSubAgentRender ? nowDebug - state.genStats.lastSubAgentRender : 999);
-        if (elapsed > throttleMs) {
-          console.log(`[STREAM #${state._debugStreamCount}] shouldRender=${true}, elapsed=${Math.round(elapsed)}ms, throttle=${throttleMs}ms, activeStack=[${(state.activeStack||[]).join(',')}]`);
-        } else if (state._debugStreamCount % 5 === 1) {
-          console.log(`[STREAM #${state._debugStreamCount}] shouldRender=${false}, elapsed=${Math.round(elapsed)}ms, throttle=${throttleMs}ms`);
-        }
-      }
-      
       // Only block stream updates when the ACTIVE agent itself is halted
       const activeName = getActiveAgentName();
       if (state.subAgents[activeName]?.is_halted) break;
@@ -1276,12 +1228,9 @@ function handleServerMessage(data) {
                  }
                 existing._lastHistoryCount = hCount;
               } else {
-                // Normal merge path with proper array replacement to avoid holes
                 const startIdx = hCount - sa.messages.length;
                 if (startIdx >= 0) {
-                  // Fix #3a: If server's partial is beyond our array length, replace entirely to avoid holes.
-                  // Hole-patching (existing.messages.length = startIdx) creates undefined entries that break
-                  // contentKey computation and DOM sync logic.
+                // Avoid holes: replace entirely if server is ahead, otherwise splice in
                   if (startIdx > existing.messages.length) {
                     existing.messages = [...sa.messages];
                   } else {
@@ -1289,7 +1238,7 @@ function handleServerMessage(data) {
                     existing.messages.push(...sa.messages);
                   }
                 } else {
-                  // Fix #3b: Server has fewer messages than client (rollback/compression). Replace entirely.
+                // Server rolled back (fewer messages than client). Replace entirely.
                   existing.messages = [...sa.messages];
                 }
                 // Sync other metadata fields — but NOT messages (we just merged those above).
@@ -1369,17 +1318,12 @@ function handleServerMessage(data) {
       if (data.telemetry) {
         state.pendingTelemetry = data.telemetry;
         const telemNow = performance.now();
-        if (telemNow - state.genStats.lastTelemetryUpdate > 2000) {
+        if (telemNow - state.genStats.lastTelemetryUpdate > THROTTLE.TELEMETRY_MS) {
           updateTelemetryPanel(data.telemetry);
           state.genStats.lastTelemetryUpdate = telemNow;
         }
       }
 
-      // Note: Removed documentHidden early return check to avoid render delays when switching tabs.
-           // Modern browsers already optimize painting for hidden tabs, and the old check could cause
-           // up to 750ms delay when switching back due to throttle timers still being active.
-      
-             // Capture current timestamp for throttle checks below
              const now = performance.now();
       
       // Approvals require immediate rendering (user must see these promptly)
@@ -1391,20 +1335,18 @@ function handleServerMessage(data) {
 
       // Throttle control updates to ~1Hz during streaming; always update when generating state changes.
       // Uses wasGenerating captured at function scope (line 770), before state.generating was updated above.
-      if (wasGenerating !== state.generating || now - state.genStats.lastControlsUpdate > 1000) {
+      if (wasGenerating !== state.generating || now - state.genStats.lastControlsUpdate > THROTTLE.CONTROLS_MS) {
         updateControls();
         state.genStats.lastControlsUpdate = now;
       }
 
       // Throttle sub-agent rendering during streaming to reduce markdown re-parsing load.
-      // (O(1) raw text append was fast, but we now always re-render markdown for quality)
       if (!state.genStats.lastSubAgentRender) state.genStats.lastSubAgentRender = 0;
       const isSubAgentActive = state.activeStack && state.activeStack.length > 0;
-      // Sub-agent streaming: 150ms. Root agent: 250ms (was 750, caused 2-6s gaps).
       // Adaptive: if last render took long, increase throttle to avoid stacking renders.
       const lastRenderDur = Math.max(0, state.genStats.lastSubAgentRenderDuration || 0);
-      const rootThrottleContent = Math.min(500, 250 + Math.round(lastRenderDur * 0.5));
-      const subThrottleContent = isSubAgentActive ? 150 : rootThrottleContent;
+      const rootThrottleContent = Math.min(THROTTLE.RENDER_ROOT_MAX_MS, THROTTLE.RENDER_ROOT_BASE_MS + Math.round(lastRenderDur * 0.5));
+      const subThrottleContent = isSubAgentActive ? THROTTLE.RENDER_SUBAGENT_MS : rootThrottleContent;
       
       // Force render on: completion detected, stack change, new visible message, 
       // or if the visible agent's content changed (bypass throttle for visible active agent).
@@ -1464,7 +1406,7 @@ function handleServerMessage(data) {
       // approximate anyway, so updating twice per second is visually indistinguishable
       // from the original frequency.
       if (!state.genStats.lastGenStatsUpdate) state.genStats.lastGenStatsUpdate = 0;
-      if (now - state.genStats.lastGenStatsUpdate > 500) {
+      if (now - state.genStats.lastGenStatsUpdate > THROTTLE.GEN_STATS_MS) {
         const activeMsgs = state.subAgents[getActiveAgentName()]?.messages || [];
         updateGenStats(activeMsgs);
         state.genStats.lastGenStatsUpdate = now;
@@ -1637,8 +1579,7 @@ function renderAgentConversation(instanceName, messages, depth, indexMap, render
 
     for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
-        // Fix #5: Defensive null/undefined check to handle hole entries from sync gaps.
-        // Renders a placeholder element instead of crashing on undefined message properties.
+        // Handle hole entries from sync gaps with a placeholder
         if (!msg) {
             const placeholderEl = document.createElement('div');
             placeholderEl.className = 'sub-msg sub-msg-unknown missed-msg';
@@ -1844,10 +1785,8 @@ function appendStreamingDelta(container, newText) {
 function updateBubbleContent(bubble, msg, config) {
     if (!config) config = getAgentConfig(state.sessionName);
 
-    // FIX: Defensive null/undefined check to prevent crashes on hole entries.
-    // Complements Fix #5 in renderAgentConversation() for complete null message handling.
     if (!msg) return;
-
+    
     const contentDiv = bubble.querySelector('.' + contentClass());
     if (!contentDiv) return;
 
@@ -2591,7 +2530,6 @@ function renderSubAgents() {
       if (panel) panel.remove();
       // Clean up per-panel state when agent is removed
       delete subAgentScrollLocks[agentName];
-            // Note: subContextBarThrottle cleanup removed - property no longer exists
     }
   });
 
@@ -2721,9 +2659,9 @@ function renderSubAgents() {
     }
   }
   
-  // Diagnostic: log render duration when it exceeds threshold (helps identify bottlenecks)
+  // Diagnostic: warn on slow renders
   const renderMs = performance.now() - t0;
-  if (renderMs > 100) {
+  if (renderMs > THROTTLE.RENDER_DIAG_THRESHOLD_MS) {
     console.warn(`[renderSubAgents] took ${renderMs.toFixed(1)}ms for ${namesArr.length} agents`);
   }
 }
@@ -2954,11 +2892,9 @@ function switchMainTab(tabId) {
   state.activeSubTab = tabId;
   ActivityBar.setActiveTab(tabId);
   
-  // Fix #4: Reset sub-agent render throttle timer so the tab renders immediately when switched to.
-  // Without this, the throttle can delay rendering for up to 750ms after tab switch.
+  // Reset throttle timer so the new tab renders immediately
   state.genStats.lastSubAgentRender = 0;
   
-  // Trigger immediate render of the newly visible content — all agents use same path now
   renderSubAgents();
   
   // Ensure active class is set on tab and panel after renderSubAgents()
@@ -3323,7 +3259,6 @@ function resetGenStats() {
     lastUiUpdate: 0,
     lastControlsUpdate: 0,
     lastTelemetryUpdate: 0,
-        // Note: subContextBarThrottle removed - context bar updates are now unconditional (cheaper)
   };
   if (statusTokensSec) statusTokensSec.textContent = '— t/s';
   if (statusGenInfo) statusGenInfo.textContent = 'Starting...';
