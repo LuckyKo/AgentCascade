@@ -1204,9 +1204,7 @@ def serialize_message(
                 parts.append(f"![image]({item.image})")
         content = '\n'.join(parts)
 
-    # M2: Only truncate when rendering for the UI — preserve full content for agent reasoning
-    if for_ui and isinstance(content, str) and len(content) > 100000:
-        content = content[:100000] + "\n\n... [TRUNCATED IN UI FOR PERFORMANCE. Full content is available in the session logs.]"
+    # Keep content intact — frontend handles truncation via renderToolResult()
 
     d['content'] = content or ''
 
