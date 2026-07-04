@@ -51,8 +51,9 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] retry is broken, it deleted the user message too
 - [ ] max tokens does not change when a new API endpoint is acquired 
 - [ ] running into early timeout on code_intepreter
-- [ ] get cmd_shell to output console result even on timeout
+- [x] get cmd_shell and code_intepreter to return console output even on timeout (FIXED 2026-07-04: code_interpreter now passes partial_output through dict-based TimeoutError, collects remaining IOPub messages during interrupt tiers, and returns them with the timeout message. shell_cmd already handled this correctly via proc.communicate after killing processes.)
 - [ ] we have about 10-15% discrepancy (less) between the nr of tokens we measure and the actual count that LMStudio processes 
+- [ ] fix read_logs tool to properly handle regular files (non agent JSON), truncating middle of each line
 - [x] randomly duplicated compression markers in agent log
 - [x] first compression doesn't include the first user message; compressions with existing markers include the last marker twice: once in existing summary, second time in history (FIXED 2026-06-30)
 - [ ] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck - it should clear up ALL the API slots. after 1000 fixed this still happens!
@@ -66,31 +67,6 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
       ERROR: 'charmap' codec can't encode character '\u2717' in position 0: character maps to <undefined>
 
 # Errors to investigate:
-- drift?
-2026-07-01 08:13:54,798 - base.py - 949 - INFO - Agent [Coder] - ALL tokens: 18098, Available tokens: 89184
-2026-07-01 08:14:13,936 - base.py - 949 - INFO - Agent [Coder] - ALL tokens: 18620, Available tokens: 89184
-2026-07-01 08:14:25,988 - execution_engine.py - 853 - DEBUG - EXIT - PauseFixCoder RUNNING→IDLE
-2026-07-01 08:14:25,990 - execution_engine.py - 2955 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=PauseFixCoder, reason=completed, inst_type=AgentInstance, conv_len=229, final_resp_len=195
-2026-07-01 08:14:25,996 - tool_dispatcher.py - 382 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'PauseFixCoder' completed in 1326.09s
-2026-07-01 08:14:25,997 - tool_dispatcher.py - 396 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'Maine' after sync child
-2026-07-01 08:14:25,998 - agent_pool.py - 1675 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://localhost:1234/v1, concurrency_limit=0
-2026-07-01 08:14:25,998 - tool_dispatcher.py - 405 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 1326.09s
-2026-07-01 08:14:25,999 - tool_dispatcher.py - 106 - DEBUG - handle_call_agent returned type=str
-2026-07-01 08:14:26,025 - base.py - 949 - INFO - Agent [Orchestrator] - ALL tokens: 5674, Available tokens: 88327
-2026-07-01 08:15:02,145 - tool_dispatcher.py - 545 - DEBUG - call_agent nesting - Maine depth=1/10
-2026-07-01 08:15:02,145 - tool_dispatcher.py - 362 - DEBUG - [SLOT_SYNC_RELEASE] Releasing slot for 'Maine' before running sync child 'PauseFixReviewer'
-2026-07-01 08:15:02,148 - tool_dispatcher.py - 366 - DEBUG - [SLOT_SYNC_RELEASE] Slot released for 'Maine', active agents can now acquire
-2026-07-01 08:15:02,148 - execution_engine.py - 2843 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target=PauseFixReviewer, class=reviewer, caller=Maine, nest_depth=1, force_fresh=False
-2026-07-01 08:15:02,149 - lifecycle_manager.py - 176 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for PauseFixReviewer
-2026-07-01 08:15:02,170 - tail_sync_check.py - 200 - WARNING - [TAIL SYNC DRIFT] 'PauseFixReviewer' after session_init: pool_tail=2 (conv_len=2, marker=no_marker) vs jsonl_tail=68 (total_msgs=68, marker=no_marker)
-2026-07-01 08:15:02,173 - execution_engine.py - 2888 - DEBUG - starting engine.run() for PauseFixReviewer
-2026-07-01 08:15:02,173 - execution_engine.py - 619 - DEBUG - engine.run() ENTRY - instance=PauseFixReviewer
-2026-07-01 08:15:02,173 - agent_pool.py - 1675 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=reviewer, instance_name=PauseFixReviewer, api_base=http://localhost:1234/v1, concurrency_limit=0
-2026-07-01 08:15:02,174 - execution_engine.py - 461 - DEBUG - [SLOT_ACQUIRE] initial - instance=PauseFixReviewer, class=reviewer
-2026-07-01 08:15:02,174 - execution_engine.py - 924 - INFO - [CACHE_REBUILD] Rebuilding working set for PauseFixReviewer
-2026-07-01 08:15:02,175 - execution_engine.py - 1002 - DEBUG - [CACHE_REBUILD] System prompt content CHANGED for PauseFixReviewer
-2026-07-01 08:15:02,179 - base.py - 949 - INFO - Agent [Reviewer] - ALL tokens: 442, Available tokens: 124204
-
 
 # TOOL TIMING TRACE UNIFIED BRANCH
 2026-07-03 07:58:47,481 - config_handlers.py - 140 - WARNING - [THREAD_POOL] resize_executor skipped — executor is None (pool just initialized?)
@@ -227,5 +203,67 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 2026-07-03 07:56:52,733 - oai.py - 282 - INFO - [TIMING] _chat_stream GOT ITERATOR (headers received) model=qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved
 2026-07-03 07:57:03,300 - api_server.py - 1403 - INFO - Syncing history from agent state - pool corruption detected. Pool has SYSTEM: False, tfm has SYSTEM: True. Pool length: 19, tfm length: 20.
 
+
+# streaming issues
+STREAM] Received 10271 stream_updates, generating=true, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10271] shouldRender=true, elapsed=202ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10272] shouldRender=true, elapsed=159ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10273] shouldRender=true, elapsed=189ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10274] shouldRender=true, elapsed=198ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10275] shouldRender=true, elapsed=174ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10276] shouldRender=true, elapsed=155ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10277] shouldRender=true, elapsed=187ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10278] shouldRender=true, elapsed=181ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10279] shouldRender=true, elapsed=201ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10280] shouldRender=true, elapsed=162ms, throttle=150ms, activeStack=[SidebarResizer] <--- these come in fine but UI doesn't refresh as they come
+app.js:1172 [STREAM] Received 10281 stream_updates, generating=true, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10281] shouldRender=true, elapsed=184ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10282] shouldRender=true, elapsed=171ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10283] shouldRender=true, elapsed=199ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10284] shouldRender=true, elapsed=188ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10286] shouldRender=true, elapsed=187ms, throttle=150ms, activeStack=[SidebarResizer]
+app.js:1181 [STREAM #10287] shouldRender=true, elapsed=999ms, throttle=750ms, activeStack=[] <--- switched back to root agent
+app.js:1172 [STREAM] Received 10291 stream_updates, generating=true, activeStack=[]
+app.js:1183 [STREAM #10291] shouldRender=false, elapsed=220ms, throttle=750ms
+app.js:1183 [STREAM #10296] shouldRender=false, elapsed=407ms, throttle=750ms
+app.js:1172 [STREAM] Received 10301 stream_updates, generating=true, activeStack=[]
+app.js:1183 [STREAM #10301] shouldRender=false, elapsed=613ms, throttle=750ms
+app.js:1181 [STREAM #10303] shouldRender=true, elapsed=852ms, throttle=750ms, activeStack=[]
+app.js:1181 [STREAM #10304] shouldRender=true, elapsed=2140ms, throttle=750ms, activeStack=[]
+app.js:1181 [STREAM #10306] shouldRender=true, elapsed=2180ms, throttle=750ms, activeStack=[]
+app.js:1181 [STREAM #10308] shouldRender=true, elapsed=1976ms, throttle=750ms, activeStack=[]
+app.js:1172 [STREAM] Received 10311 stream_updates, generating=true, activeStack=[]
+app.js:1183 [STREAM #10311] shouldRender=false, elapsed=198ms, throttle=750ms
+app.js:1181 [STREAM #10315] shouldRender=true, elapsed=5989ms, throttle=750ms, activeStack=[]
+app.js:1183 [STREAM #10316] shouldRender=false, elapsed=94ms, throttle=750ms
+app.js:1172 [STREAM] Received 10321 stream_updates, generating=true, activeStack=[]
+app.js:1183 [STREAM #10321] shouldRender=false, elapsed=368ms, throttle=750ms
+app.js:1181 [STREAM #10326] shouldRender=true, elapsed=808ms, throttle=750ms, activeStack=[]
+app.js:1181 [STREAM #10327] shouldRender=true, elapsed=1260ms, throttle=750ms, activeStack=[]
+app.js:1181 [STREAM #10329] shouldRender=true, elapsed=1164ms, throttle=750ms, activeStack=[]
+app.js:1172 [STREAM] Received 10331 stream_updates, generating=true, activeStack=[]
+app.js:1183 [STREAM #10331] shouldRender=false, elapsed=96ms, throttle=750ms
+app.js:1181 [STREAM #10335] shouldRender=true, elapsed=5445ms, throttle=750ms, activeStack=[]
+app.js:1183 [STREAM #10336] shouldRender=false, elapsed=111ms, throttle=750ms
+app.js:1172 [STREAM] Received 10341 stream_updates, generating=true, activeStack=[]
+app.js:1183 [STREAM #10341] shouldRender=false, elapsed=372ms, throttle=750ms
+app.js:1183 [STREAM #10346] shouldRender=false, elapsed=561ms, throttle=750ms
+app.js:1181 [STREAM #10350] shouldRender=true, elapsed=781ms, throttle=750ms, activeStack=[]
+app.js:1172 [STREAM] Received 10351 stream_updates, generating=true, activeStack=[]
+app.js:1183 [STREAM #10351] shouldRender=false, elapsed=273ms, throttle=750ms
+app.js:1181 [STREAM #10352] shouldRender=true, elapsed=2115ms, throttle=750ms, activeStack=[]
+app.js:1183 [STREAM #10356] shouldRender=false, elapsed=221ms, throttle=750ms
+app.js:1181 [STREAM #10357] shouldRender=true, elapsed=4138ms, throttle=750ms, activeStack=[]
+app.js:1181 [STREAM #10358] shouldRender=true, elapsed=2033ms, throttle=750ms, activeStack=[]
+app.js:1172 [STREAM] Received 10361 stream_updates, generating=true, activeStack=[]
+app.js:1183 [STREAM #10361] shouldRender=false, elapsed=156ms, throttle=750ms
+app.js:1181 [STREAM #10362] shouldRender=true, elapsed=4596ms, throttle=750ms, activeStack=[]
+app.js:1183 [STREAM #10366] shouldRender=false, elapsed=265ms, throttle=750ms
+app.js:1172 [STREAM] Received 10371 stream_updates, generating=true, activeStack=[]
+app.js:1183 [STREAM #10371] shouldRender=false, elapsed=608ms, throttle=750ms
+app.js:1181 [STREAM #10374] shouldRender=true, elapsed=794ms, throttle=750ms, activeStack=[]
+app.js:1183 [STREAM #10376] shouldRender=false, elapsed=135ms, throttle=750ms
+app.js:1181 [STREAM #10380] shouldRender=true, elapsed=2537ms, throttle=750ms, activeStack=[]
+app.js:1172 [STREAM] Received 10381 stream_updates, generating=true, activeStack=[]
 
 # EOF

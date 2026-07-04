@@ -382,16 +382,44 @@ class CodeInterpreter(BaseToolWithFileAccess):
             
             interrupted = False
             
-            # Tier 1: Jupyter-level interrupt + poll for idle status
+            # Collect any partial output accumulated before the timeout
+            # The TimeoutError carries partial_output in its args if available
+            partial_result = ''
+            if e.args and isinstance(e.args[0], dict):
+                partial_result = e.args[0].get('partial_output', '')
+            
+            # Tier 1: Jupyter-level interrupt + poll for idle status, collecting any remaining output
             try:
                 kc.interrupt()
                 for _ in range(3):
                     time.sleep(0.5)
+                    
+                    # Check if watchdog killed the kernel during polling
+                    with _KERNEL_LOCK:
+                        was_killed = kernel_id in _WATCHDOG_KILLED
+                    if was_killed:
+                        break
+                    
                     try:
                         msg = kc.get_iopub_msg(timeout=1)
-                        if msg['msg_type'] == 'status' and msg['content'].get('execution_state') == 'idle':
-                            interrupted = True
-                            break
+                        # Collect partial output from messages received during interrupt
+                        if msg['msg_type'] == 'status':
+                            if msg['content'].get('execution_state') == 'idle':
+                                interrupted = True
+                            continue
+                        elif msg['msg_type'] in ('execute_result', 'display_data'):
+                            text = msg['content']['data'].get('text/plain', '')
+                            if text:
+                                partial_result += f'\n\nstdout:\n```\n{text}\n```'
+                        elif msg['msg_type'] == 'stream':
+                            name = msg['content']['name']
+                            text = msg['content']['text']
+                            if text:
+                                partial_result += f'\n\n{name}:\n```\n{text}\n```'
+                        elif msg['msg_type'] == 'error':
+                            text = _escape_ansi('\n'.join(msg['content']['traceback']))
+                            if text:
+                                partial_result += f'\n\nstderr:\n```\n{text}\n```'
                     except queue.Empty:
                         continue
                     except Exception:
@@ -412,11 +440,21 @@ class CodeInterpreter(BaseToolWithFileAccess):
                         )
                         time.sleep(2)
                         
-                        # Check again if interrupt succeeded after SIGINT
+                        # Collect remaining output and check if interrupt succeeded
                         try:
                             msg = kc.get_iopub_msg(timeout=2)
-                            if msg['msg_type'] == 'status' and msg['content'].get('execution_state') == 'idle':
-                                interrupted = True
+                            if msg['msg_type'] == 'status':
+                                if msg['content'].get('execution_state') == 'idle':
+                                    interrupted = True
+                            elif msg['msg_type'] in ('execute_result', 'display_data'):
+                                text = msg['content']['data'].get('text/plain', '')
+                                if text:
+                                    partial_result += f'\n\nstdout:\n```\n{text}\n```'
+                            elif msg['msg_type'] == 'stream':
+                                name = msg['content']['name']
+                                text = msg['content']['text']
+                                if text:
+                                    partial_result += f'\n\n{name}:\n```\n{text}\n```'
                         except Exception:
                             pass
                     except Exception as sigint_err:
@@ -463,9 +501,12 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 else:
                     _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
             
-            # Return timeout message to caller (same behavior as before, just actually enforced)
+            # Return timeout message along with any partial output collected
             if exec_timeout and isinstance(e, TimeoutError):
-                return f'Timeout: Code execution exceeded the {exec_timeout}-second time limit. Please optimize your code or break it into smaller steps.'
+                timeout_msg = f'Timeout: Code execution exceeded the {exec_timeout}-second time limit.'
+                if partial_result.strip():
+                    return f'{timeout_msg}\n\nPartial output:\n{partial_result}'
+                return f'{timeout_msg}. Please optimize your code or break it into smaller steps.'
             raise
         except Exception as e:
             # Check if the kernel was killed by the watchdog while we were executing (thread-safe)
@@ -487,7 +528,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
             raise
 
         if exec_timeout:
-            self._execute_code(kc, '_M6CountdownTimer.cancel()', timeout=10, kernel_id=kernel_id)
+            try:
+                self._execute_code(kc, '_M6CountdownTimer.cancel()', timeout=10, kernel_id=kernel_id)
+            except Exception as e:
+                logger.debug(f"Cancel timer failed (non-critical): {e}")
 
         # Mark activity after successful execution so watchdog knows this kernel is still healthy (Fix D3)
         with _KERNEL_LOCK:
@@ -961,7 +1005,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
             # Check overall wall-clock budget at the top of each iteration
             # Raise TimeoutError so caller's except block can interrupt the kernel (Fix A1a)
             if time.time() - start_time > timeout:
-                raise TimeoutError(f'Code execution exceeded the {timeout}-second time limit.')
+                raise TimeoutError({'partial_output': result, 'message': f'Code execution exceeded the {timeout}-second time limit.'})
             
             text = ''
             image = ''
@@ -1013,7 +1057,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
                         text = f'Timeout: Code execution exceeded the {timeout}-second time limit.'
             except queue.Empty:
                 # This is raised by get_iopub_msg() when timeout expires (Fix A1b)
-                raise TimeoutError(f'Code execution exceeded the {timeout}-second time limit.')
+                raise TimeoutError({'partial_output': result, 'message': f'Code execution exceeded the {timeout}-second time limit.'})
             except Exception:
                 text = 'The code interpreter encountered an unexpected error.'
                 print_traceback()
