@@ -46,23 +46,17 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 # BUGS:
 
 - [ ] Activity banner still doesn't change when tools are written
-- [ ] compression is fucking up the logs again, syncing them with agent pool instead of keeping the compressed messages
-- [x] edit_file (and other file operations) feedback message needs to be more useful to the LLM receiving it - plan a more informative and tighter message format
+- [ ] add optional justification argument to forget_last tool that will append to the truncated messages like "... [TRUNCATED] Forgotten because {reason}". also the the tool response could be compacted a bit to save some tokens.
 - [ ] retry is broken, it deleted the user message too
 - [ ] max tokens does not change when a new API endpoint is acquired 
 - [ ] running into early timeout on code_intepreter
 - [x] get cmd_shell and code_intepreter to return console output even on timeout (FIXED 2026-07-04: code_interpreter now passes partial_output through dict-based TimeoutError, collects remaining IOPub messages during interrupt tiers, and returns them with the timeout message. shell_cmd already handled this correctly via proc.communicate after killing processes.)
 - [ ] we have about 10-15% discrepancy (less) between the nr of tokens we measure and the actual count that LMStudio processes 
 - [ ] fix read_logs tool to properly handle regular files (non agent JSON), truncating middle of each line
-- [x] randomly duplicated compression markers in agent log
-- [x] first compression doesn't include the first user message; compressions with existing markers include the last marker twice: once in existing summary, second time in history (FIXED 2026-06-30)
 - [ ] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck - it should clear up ALL the API slots. after 1000 fixed this still happens!
-- [x] loop rollback system was appending to agent pool the first user message after rollback (FIXED 2026-07-01: simplified rollback — detect → inline rollback via shared _rollback_instance → append ONE hint message → continue same turn loop. Eliminated exception-throwing, retry loops, agent re-creation, and re-initialization that caused cache mismatch and message duplication.)
 - [ ] images don't get properly pasted in chat
 - [ ] Pause function interferes with streaming and halts the system in an odd state, it should only affect tool response startup.
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent once it reached conclusion
-- [x] auto-ask security sometimes returns this even if the response was fine: REJECTED BY USER: Security check error: There is no current event loop in thread 'Thread-43 (_run_check_worker)'. (Fixed 2026-06-30: replaced asyncio.get_event_loop() with _get_ws_loop helper that uses agent_pool._ws_loop)
-- [x] approval window does not show justification for edit file operation (Fixed 2026-06-30: wired justification through tool classes → operation manager methods → tool_args → PendingApproval. Also fixed WriteFile non-JSON fallback path that silently dropped justification.)
 - [ ] investigate if we can make shell cmd accept special character and multi-line `python -c` commands
       ERROR: 'charmap' codec can't encode character '\u2717' in position 0: character maps to <undefined>
 

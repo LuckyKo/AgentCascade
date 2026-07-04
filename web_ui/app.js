@@ -1257,13 +1257,15 @@ function handleServerMessage(data) {
               state.subAgents[name] = sa;
             }
           } else {
+          // Non-partial: replace entire agent state. Read from the updated state,
+          // NOT from `existing` which still points to the OLD object after replacement.
             state.subAgents[name] = { ...sa, _lastHistoryCount: sa.history_count || 0 };
           }
           
           // Detect changes to decide render urgency:
           //   - New messages (message count grew or brand new agent) → force immediate render if visible
           //   - Any state change (including streaming content growth with same message count) → use flat ~200ms throttle
-          const newMsgCount = existing ? existing.messages.length : (sa.messages ? sa.messages.length : 0);
+          const newMsgCount = state.subAgents[name]?.messages?.length ?? (sa.messages ? sa.messages.length : 0);
           const hasNewMessage = newMsgCount > prevMsgCount || !prevMsgCount;
           
           if (hasNewMessage) {
@@ -1375,12 +1377,17 @@ function handleServerMessage(data) {
         
         if (!willSwitchTab) {
           renderSubAgents();
-          // Reset timer AFTER render so elapsed time is accurate (prevents stacking renders)
-          state.genStats.lastSubAgentRender = now;
-          state.genStats.lastSubAgentRenderDuration = performance.now() - renderStart;
+          // Reset timer to ACTUAL post-render time so elapsed calculation includes render duration.
+          // Using `now` (pre-render capture at line 1327) made the effective throttle window shorter than intended,
+          // causing renders to stack during heavy markdown parsing and skip during tool pauses.
+          const tEnd = performance.now();
+          state.genStats.lastSubAgentRender = tEnd;
+          state.genStats.lastSubAgentRenderDuration = tEnd - renderStart;
         } else {
-          // switchMainTab will call renderSubAgents internally, but we still need to reset the throttle timer
-          state.genStats.lastSubAgentRender = now;
+          // switchMainTab will call renderSubAgents internally, but we still need to reset the throttle timer.
+          // Set a sentinel so that after switchMainTab's internal renderSubAgents() completes,
+          // the next stream_update tick won't immediately re-render (the tab just switched).
+          state.genStats.lastSubAgentRender = performance.now();
           state.genStats.lastSubAgentRenderDuration = 0;
         }
         
@@ -2752,12 +2759,25 @@ function renderSubAgentPanel(panel, agentData, name) {
   const funcCallLen = lastMsg?.function_call?.arguments ? (lastMsg.function_call.arguments + '').length : 0;
   // Agent-specific active flag only — no global fallback (prevents cross-agent pulsing)
   const activeFlag = agentData?.active ?? false;
+  
+  // Include token count in contentKey so status bar updates even when text length is unchanged.
+  // During tool execution pauses, text doesn't grow but tokens do — without this the render skips.
+  const tokPart = (typeof tokCount === 'number' && !isNaN(tokCount)) ? tokCount : '0';
+  
   // Include streaming state in contentKey so bubble UI (waiting animation, token count) updates even when content dims match
-  const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + reasoningLen + ':' + funcCallLen + ':' + activeFlag + ':' + (state.generating ? '1' : '0');
+  const contentKey = displayMsgs.length + ':' + lastMsgTextLen + ':' + reasoningLen + ':' + funcCallLen + ':' + activeFlag + ':' + (state.generating ? '1' : '0') + ':' + tokPart;
   
   if (panel.dataset.contentKey === contentKey && state.editingIndex === null && parseInt(panel.dataset.lastRenderedCount || '0') === displayMsgs.length) {
-    // Nothing changed — skip scrollHeight read and all DOM updates
-    return;
+    // Nothing changed — skip scrollHeight read and all DOM updates.
+    // BUT during active streaming, force at least one render per throttle cycle to catch
+    // incremental append drift (raw text appended via updateBubbleContent may diverge from
+    // markdown-structured state). The incrementCount resets every 8 ticks, so we use that
+    // as a freshness signal — if generating and no new messages, still validate once.
+    if (!state.generating) {
+      return;
+    }
+    // During streaming: always update the bubble content to ensure incremental appends are flushed.
+    // This is lightweight (updateBubbleContent has its own prev-content check).
   }
 
   panel.dataset.contentKey = contentKey;

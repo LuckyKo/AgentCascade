@@ -538,6 +538,20 @@ def _build_active_stack(pool: AgentPool) -> list:
     return list(pool._execution.active_stack) if hasattr(pool, '_execution') else []
 
 
+def _get_msg_content(m):
+    """Get content from a Message object or dict."""
+    if isinstance(m, dict):
+        return m.get(CONTENT, '') or ''
+    return getattr(m, CONTENT, '') or ''
+
+
+def _get_msg_reasoning(m):
+    """Get reasoning_content from a Message object or dict."""
+    if isinstance(m, dict):
+        return m.get(REASONING_CONTENT, '') or ''
+    return getattr(m, REASONING_CONTENT, '') or ''
+
+
 def _calc_stream_token_stats(
     pool: AgentPool, instance_name: str,
     conv_snapshot: List[Message], stream_resp_snapshot: Optional[List[Message]],
@@ -596,11 +610,19 @@ def _serialize_instances_incremental(
                 list(inst._streaming_responses) if len(inst._streaming_responses) > 0 else None
             )
         
-        # Calculate content length for this instance's streaming responses (used for version tracking)
+        # Calculate content length for this instance's streaming responses (used for version tracking).
+        # Include total character count so that growing streaming content invalidates the cache
+        # even when message count stays at 1 (single partial response being accumulated).
+        stream_content_len = sum(
+            len(_get_msg_content(m)) + len(_get_msg_reasoning(m))
+            for m in inst_streaming_responses
+        ) if inst_streaming_responses else 0
+        
         current_version = (
             len(current_msgs),
             id(current_msgs[-1]) if current_msgs else None,
             len(inst_streaming_responses) if inst_streaming_responses else 0,
+            stream_content_len,
         )
 
         # C4: Atomic read-compare-write under lock to prevent TOCTOU race.
@@ -770,12 +792,19 @@ def build_stream_update_from_pool(
         stream_resp_snapshot = list(instance._streaming_responses) if instance._streaming_responses else None
     
     # BUG31 Fix #4: Skip expensive stats computation when conversation hasn't changed.
-    # Version uses msg count, last msg id, and streaming response count — excluding
-    # stream_content_len which grows every tick and prevents cache reuse during active streaming.
+    # Version uses msg count, last msg id, streaming response count, and content length —
+    # including content_len so that growing streaming content invalidates the cache
+    # and fresh token stats are computed (total_tokens grows during active streaming).
+    stream_content_len = sum(
+        len(_get_msg_content(m)) + len(_get_msg_reasoning(m))
+        for m in stream_resp_snapshot
+    ) if stream_resp_snapshot else 0
+    
     current_version = (
         len(conv_snapshot),
         id(conv_snapshot[-1]) if conv_snapshot else None,
         len(stream_resp_snapshot) if stream_resp_snapshot else 0,
+        stream_content_len,
     )
     
     # Thread-safe read of cached token stats and last version via CacheManager
@@ -1295,7 +1324,11 @@ def _serialize_instance(
     # and removing the tail cut avoids any risk of losing early context during streaming.
     start_idx = 0
     serialized_msgs = [serialize_message(m, i) for i, m in enumerate(msgs)]
-    result['is_partial'] = False
+    
+    # Set is_partial=True when there are active streaming responses so the frontend uses
+    # the partial merge path (smart splice with history_count), which properly handles
+    # growing content with same message count and avoids stale reference bugs.
+    result['is_partial'] = len(stream_responses or []) > 0
 
     # ── Streaming UI Content Update Fix: Append partial LLM content ────────
     num_streaming = 0
@@ -1333,11 +1366,15 @@ def _serialize_instance(
     # the conversation doesn't change — only partial streamed content changes.
     # So stats are only recalculated when a new message is appended.
     
-    # Streaming UI Content Update Fix: Include streaming_responses length in cache key
-    # so that growing streaming content causes cache miss and fresh stats computation.
-    # Excluding stream_content_len (grows every tick) to allow cache reuse during active streaming.
+    # Streaming UI Content Update Fix: Include streaming_responses length AND content
+    # length in cache key so that growing streaming content causes cache miss and
+    # fresh token stats computation (total_tokens grows during active streaming).
     stream_resp_len = len(stream_responses) if stream_responses else 0
-    cache_key = (original_history_count, id(msgs[-1]) if msgs else None, stream_resp_len)
+    per_agent_stream_content_len = sum(
+        len(_get_msg_content(m)) + len(_get_msg_reasoning(m))
+        for m in (stream_responses or [])
+    )
+    cache_key = (original_history_count, id(msgs[-1]) if msgs else None, stream_resp_len, per_agent_stream_content_len)
     
     # Streaming UI Content Update Fix: Compute token stats from combined messages (conversation + streaming_responses)
     # Use full_msgs_snapshot (persisted history) to ensure stats reflect total usage, not just the tail.

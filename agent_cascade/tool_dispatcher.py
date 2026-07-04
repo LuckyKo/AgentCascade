@@ -654,14 +654,10 @@ class ToolDispatcher:
                 return (
                     f"{truncated}\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. "
                     f"Full output ({len(tool_result)} chars) saved to: {spill_rel}"
-                    f"\nYou can read it with read_file if needed. "
-                    f"Consider compressing context before continuing.]"
                 )
             else:
                 return (
                     f"{truncated}\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. "
-                    f"Spillover file could not be saved (disk error). "
-                    f"Consider compressing context before continuing.]"
                 )
 
         except Exception as e:
@@ -675,8 +671,6 @@ class ToolDispatcher:
                     return (
                         f"{tool_result[:8000]}\n\n[TOOL RESPONSE TRUNCATED — fallback path. "
                         f"Full output ({len(tool_result)} chars) saved to: {spill_rel}"
-                        f"\nYou can read it with read_file if needed. "
-                        f"Consider compressing context before continuing.]"
                     )
                 return f"{tool_result[:8000]}\n\n[TOOL RESPONSE TRUNCATED — fallback path. Spillover file could not be saved (disk error).]"
             return tool_result
