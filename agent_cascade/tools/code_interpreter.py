@@ -559,9 +559,12 @@ class CodeInterpreter(BaseToolWithFileAccess):
             DRAIN_MAX_MESSAGES = 100        # Max IOPub messages to read per drain cycle
             DRAIN_MAX_OUTPUT_BYTES = 10 * 1024 * 1024  # 10 MB cap on accumulated output
 
-            # Tier 1: Jupyter-level interrupt + poll for idle status, collecting all remaining output
+            # Tier 1: Jupyter-level interrupt via control channel + poll for idle status,
+            # collecting all remaining output. BlockingKernelClient has no .interrupt() method
+            # (that lives on KernelManager), so we send an interrupt_request message directly.
             try:
-                kc.interrupt()
+                msg = kc.session.msg("interrupt_request", content={})
+                kc.session.send(kc.control_channel.socket, msg)
                 for _ in range(3):
                     time.sleep(0.5)
 
