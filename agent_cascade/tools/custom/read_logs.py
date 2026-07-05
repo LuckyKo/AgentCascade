@@ -151,7 +151,7 @@ class ReadLogs(BaseTool):
             """Keep the first and last halves of *s*, replacing the middle. Always stays within *limit* chars."""
             s = str(s) if not isinstance(s, str) else s
             if len(s) > limit:
-                msg = f"\n\n... [TRUNCATED: {len(s) - limit} chars removed] ...\n\n"
+                msg = f" ... [TRUNCATED: {len(s) - limit} chars removed] ..."
                 # Reserve space for the truncation message itself
                 remaining = limit - len(msg)
                 if remaining < 2:
