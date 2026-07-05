@@ -373,8 +373,32 @@ class AgentPool:
                 self._async_registry.shutdown(wait=False)  # Quick stop — don't block waiting for tasks
             except Exception as e:
                 logger.debug(f"Async registry shutdown failed (non-critical): {e}")
+            logger.debug("Background services shut down (idle_checker + async_registry)")
         else:
             self._stopped_event.clear()
+            # Restart background services on resume (they were shut down during stop)
+            try:
+                self._idle.start()
+                logger.debug("Idle checker restarted")
+            except Exception as e:
+                logger.debug(f"Idle manager restart (non-critical): {e}")
+            # Restart async registry executor
+            try:
+                # Check if executor was shut down and recreate if needed
+                if self._async_registry._executor is not None:
+                    # ThreadPoolExecutor doesn't have a direct 'closed' check,
+                    # but shutdown() makes submit() return PendingResult
+                    # We recreate to be safe
+                    self._async_registry._executor.shutdown(wait=False)
+                    from concurrent.futures import ThreadPoolExecutor
+                    self._async_registry._executor = ThreadPoolExecutor(
+                        max_workers=4,
+                        thread_name_prefix="async_tool",
+                    )
+                    logger.debug("Async registry executor recreated")
+            except Exception as e:
+                logger.debug(f"Async registry restart (non-critical): {e}")
+            logger.debug("Stopped flag cleared — ready for new execution")
 
     # ── Instance lifecycle ───────────────────────────────────────────────────
 
@@ -847,6 +871,8 @@ class AgentPool:
         # haven't noticed the stop signal yet. Prevents "stuck slot" issues where
         # agents transitioned to IDLE still hold their semaphores.
         # Uses instance._state_lock for thread safety against concurrent slot acquisition/release.
+        released_count = 0
+        held_count = 0
         if release_slots:
             try:
                 for inst_name, instance in list(self.instances.items()):
@@ -855,14 +881,60 @@ class AgentPool:
                             try:
                                 instance._slot_release()
                                 instance._slot_release = None
-                                logger.debug(f"[STOP_SLOT] Released slot for '{inst_name}' during stop_session")
+                                released_count += 1
                             except Exception as e:
                                 logger.warning(f"[STOP_SLOT] Failed to release slot for '{inst_name}': {e}")
+                        else:
+                            # Check if instance is in active state but has no slot held
+                            if instance.state.name not in ('IDLE', 'TERMINATED'):
+                                held_count += 1
             except Exception as e:
                 logger.warning(f"slot_release failed during stop_session (non-critical): {e}")
 
-        # ── Step 3: Clear pending approvals ────────────────────────────────────────
+        # ── Step 2.5: Reset API router semaphores ──────────────────────────────
+        # The call_with_fallback per-API-call semaphores may be held if generator
+        # wrappers were closed before full consumption (stop interrupt during streaming).
+        # Reset them to prevent hangs on resume when new calls try to acquire the semaphore.
+        if hasattr(self, 'api_router') and self.api_router:
+            try:
+                self.api_router.reset_semaphores()
+            except Exception as e:
+                logger.debug(f"Semaphore reset during stop_session (non-critical): {e}")
+
+        # ── Step 3: Clear cached message sets, message queues, and async results ──
+        # After stop, the cached working sets may be stale (from interrupted turns).
+        # Clear them so the next turn rebuilds from current conversation state.
+        # Also drain message queues and async results buffers to prevent stale data.
+        cache_cleared = 0
+        queue_cleared = 0
+        async_cleared = 0
+        try:
+            for inst_name, instance in list(self.instances.items()):
+                if instance._cached_messages or instance._cached_llm_messages:
+                    instance._cached_messages = []
+                    instance._cached_llm_messages = []
+                    instance._last_config_version = 0  # Force rebuild
+                    cache_cleared += 1
+                # Clear message queue for this instance
+                if inst_name in self.message_queues:
+                    try:
+                        self.message_queues[inst_name].clear()
+                        queue_cleared += 1
+                    except Exception:
+                        pass
+                # Drain async results buffer
+                if hasattr(self, '_async_results'):
+                    try:
+                        self._async_results.drain(inst_name)
+                        async_cleared += 1
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"Cache clear during stop_session (non-critical): {e}")
+
+        # ── Step 4: Clear pending approvals ────────────────────────────────────────
         # Prevent dangling threads waiting for user approval.
+        approval_count = 0
         if self.operation_manager:
             try:
                 with self.operation_manager._lock:
@@ -871,9 +943,33 @@ class AgentPool:
                             approval.approved = False
                             approval.outcome_reason = "Session stopped"
                             approval.event.set()
+                            approval_count += 1
                     self.operation_manager.pending.clear()
             except Exception as e:
                 logger.warning(f"clear_pending failed during stop_session (threads may hang): {e}")
+
+        # ── Instrumentation: Report stop state ──────────────────────────────────────
+        with self._execution._state_lock:
+            stack_len = len(self._execution.active_stack)
+        slot_info = ""
+        if hasattr(self, 'api_router') and self.api_router:
+            sched = self.api_router.scheduler
+            with sched._lock:
+                totals = {k: v['active_count'] for k, v in sched._schedules.items() if v['active_count'] > 0}
+            if totals:
+                slot_info = f" active_slots={totals}"
+        
+        logger.info(
+            f"Stop session done: released={released_count} slots, "
+            f"cache_cleared={cache_cleared}, "
+            f"queue_cleared={queue_cleared}, "
+            f"async_cleared={async_cleared}, "
+            f"active_instances={len(self.instances)}, "
+            f"active_stack={stack_len}{slot_info}, "
+            f"approvals_cleared={approval_count}"
+        )
+        if held_count > 0:
+            logger.warning(f"[STOP_SESSION] {held_count} instance(s) were active but held no slot — possible slot leak")
 
     @property
     def _state_lock(self):

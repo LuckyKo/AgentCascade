@@ -674,7 +674,9 @@ class ExecutionEngine:
         
         try:
             # ── Phase 1: Setup ─────────────────────────────────────────────
+            logger.debug(f"[TURN_START] Calling _setup_turn for {instance.instance_name}")
             messages, llm_messages, response = self._setup_turn(instance)
+            logger.debug(f"[TURN_DONE] Got messages={len(messages)}, llm_messages={len(llm_messages)}")
             if not messages:
                 # Safety: drain any queued user messages before exiting, so they aren't lost.
                 # Note: Using pool.add_message() here is safe because the engine returns immediately
@@ -726,13 +728,16 @@ class ExecutionEngine:
 
                 # ── Phase 2: Pre-LLM Checks ────────────────────────────────
                 # Stop/halt checks, async message injection, compression check/force, loop detection
+                logger.debug(f"[PRE_LLM_CHECK] Checking stop/halt/async/compression for {inst_name}")
                 if self._pre_llm_checks(instance, messages, llm_messages, response, turns_available):
+                    logger.debug(f"[PRE_LLM_CHECK] Condition met, continuing loop")
                     yield response
                     continue
 
                 turns_available -= 1
 
                 # ── Phase 3: LLM Call with Injection Points ────────────────
+                logger.debug(f"[LLM_CALL_START] Calling LLM for {inst_name} with {len(llm_messages)} messages")
                 turn_output = []
                 for msg in self._call_llm_with_injection(instance, llm_messages):
                     if msg is None:
@@ -766,6 +771,7 @@ class ExecutionEngine:
                 # Cooperatively wait if paused — don't break execution flow, just wait
                 if self.pool.is_paused():
                     self.pool.wait_if_paused(timeout=1.0)
+                    logger.debug(f"[UNPAUSE] {inst_name} resumed after pause")
                     # Fall through to stop check and Phase 4 after unpause
                 
                 # Check generation change (old run superseded by newer one) alongside stop
@@ -775,6 +781,7 @@ class ExecutionEngine:
                     yield response
                     continue
 
+                logger.debug(f"[LLM_DONE] {inst_name} got {len(turn_output)} messages from LLM")
                 # ── Phase 4: Response Processing and Tool Execution ─────────
                 if self._process_response(instance, turn_output, messages, llm_messages, response):
                     # logger.debug("tool used - %s looping", instance.instance_name)
@@ -920,10 +927,11 @@ class ExecutionEngine:
                         can_use_cache = False
                 
                 if can_use_cache:
+                    logger.debug(f"[CACHE_HIT] Reusing cached messages={len(instance._cached_messages)}, llm_messages={len(instance._cached_llm_messages)}")
                     return instance._cached_messages, instance._cached_llm_messages, []
 
         # Cache miss or config change - rebuild from pool (Fix 3: promoted to INFO for visibility)
-        logger.info(f"[CACHE_REBUILD] Rebuilding working set for {inst_name}")
+        logger.info(f"[CACHE_REBUILD] Rebuilding working set for {inst_name} (conv_len={len(conv)})")
 
         # Load template to get system message if needed
         template = self.pool.get_template(instance.agent_class)
@@ -1026,6 +1034,7 @@ class ExecutionEngine:
         instance._last_config_version = self.pool._config_version
         
         response: List[Message] = []
+        logger.info(f"[SETUP_TURN] messages={len(conv)}, llm_messages={len(llm_messages)}, roles={[m.get('role') if isinstance(m, dict) else getattr(m, 'role', '?') for m in llm_messages]}")
         return conv, llm_messages, response
 
     def _check_stop_conditions(self, instance: AgentInstance) -> bool:
@@ -1194,6 +1203,7 @@ class ExecutionEngine:
         
         # 1. Stop/halt checks
         if self._check_stop_conditions(instance):
+            logger.debug(f"[PRE_LLM] Stop/halt condition met for {inst_name}")
             return True  # Skip LLM call, yield and continue loop
         
         # 2. Async message injection
@@ -1203,15 +1213,18 @@ class ExecutionEngine:
         # 3. Rollback command check (delegated to compression_handler)
         # Pass response so notification messages get yielded (fixes compress feedback bug)
         if self.compression_handler.handle_rollback_command(instance, messages, llm_messages, response):
+            logger.debug(f"[PRE_LLM] Rollback command handled for {inst_name}")
             return True  # Command handled — yield and continue
         
         # 4. Compress command check (Phase 4.2: delegated to compression_handler)
         # Pass response so notification messages get yielded (fixes compress feedback bug)
         if self.compression_handler.handle_compress_command(instance, messages, llm_messages, response):
+            logger.debug(f"[PRE_LLM] Compress command handled for {inst_name}")
             return True  # Command handled — yield and continue
         
         # 5. Compression trigger (pass response for notification feedback)
         if self._check_and_trigger_compression(instance, messages, llm_messages, response):
+            logger.debug(f"[PRE_LLM] Compression triggered for {inst_name}")
             return True  # Compression triggered — yield and continue
         
         # 6. Loop detection (with post-compression cooldown) ───────────────────

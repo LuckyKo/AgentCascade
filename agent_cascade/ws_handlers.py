@@ -227,6 +227,13 @@ class WsMessageHandler:
         if self.agent_pool:
             self.agent_pool.stopped = False
 
+            # Diagnostic: Check pool state before starting
+            from agent_cascade.log import logger
+            with self.agent_pool._execution._state_lock:
+                stack = len(self.agent_pool._execution.active_stack)
+            states = {n: i.state.name for n, i in self.agent_pool.instances.items()}
+            logger.debug(f"Starting generation gen_id={gen_id}, instances={states}, active_stack={stack}")
+
         agent_runner = self._get_agent()
         loop = asyncio.get_event_loop()
 
@@ -299,6 +306,8 @@ class WsMessageHandler:
 
     async def handle_stop(self, data: dict) -> None:
         """Handle 'stop' — stop all streaming and set ALL active agents to IDLE."""
+        from agent_cascade.log import logger
+
         with self._session_lock:
             self.session['stop_requested'] = True
             self.session['generating'] = False
@@ -308,8 +317,8 @@ class WsMessageHandler:
             # Transition ALL active agents to IDLE state (not just reset)
             from agent_cascade.agent_pool import ACTIVE_STATES
             from agent_cascade.agent_instance import AgentState, InvalidStateTransition
-            from agent_cascade.log import logger
 
+            transitioned = 0
             for inst_name, instance in list(self.agent_pool.instances.items()):
                 try:
                     self.agent_pool._mark_activity(inst_name)
@@ -318,6 +327,7 @@ class WsMessageHandler:
                         current_state = instance.state
                         if current_state in ACTIVE_STATES:
                             instance._transition(AgentState.IDLE)
+                            transitioned += 1
                             logger.info(f"Stop: Transitioned {inst_name} from {current_state.name} to IDLE")
 
                     # Clear any pending continue merge state on stop
@@ -326,15 +336,31 @@ class WsMessageHandler:
                             logger.debug(f"[CONTINUE_FIX] Stop handler cleared _continue_saved_msg for {inst_name}")
                             instance._continue_saved_msg = None
                 except InvalidStateTransition as e:
-                    logger.warning(f"Invalid state transition for {inst_name}: {e}")
+                    logger.warning(f"[STOP_ERROR] Invalid state transition for {inst_name}: {e}")
                 except Exception as e:
-                    logger.warning(f"Failed to transition {inst_name} to IDLE: {e}")
+                    logger.warning(f"[STOP_ERROR] Failed to transition {inst_name} to IDLE: {e}")
 
             # Halt threads, release slots, and unblock pending approvals
             self.agent_pool.stop_session()
 
             # Increment run generation AFTER slot release
             self.agent_pool._run_generation += 1
+
+            # Diagnostic: Check for stuck slots after stop
+            if hasattr(self.agent_pool, 'api_router') and self.agent_pool.api_router:
+                sched = self.agent_pool.api_router.scheduler
+                with sched._lock:
+                    stuck = {k: v for k, v in sched._schedules.items() if v['active_count'] > 0}
+                    stuck_holders = {k: v for k, v in sched._slot_holders.items() if v}
+                if stuck:
+                    logger.warning(
+                        f"Stuck slots detected after stop: "
+                        f"active={stuck}, holders={stuck_holders}"
+                    )
+                else:
+                    logger.debug("All slots released cleanly")
+
+            logger.debug(f"Transitioned {transitioned} agent(s) to IDLE, generation now={self.agent_pool._run_generation}")
 
         # Clean up active stack and halted state after stop_session()
         if self.agent_pool:

@@ -1014,6 +1014,25 @@ class APIRouter:
             + "\n".join(all_errors)
         )
 
+    # ── Semaphore Reset (for stop+resume) ────────────────────────────────
+
+    def reset_semaphores(self):
+        """Reset all per-API-call semaphores to their initial state.
+        
+        Called during stop flow to prevent semaphore leaks that cause hangs on resume.
+        Each endpoint shares the same semaphore based on api_base, so we need to
+        release any held semaphores before new calls are made.
+        
+        This is a safety net - normally semaphores are released by generator wrappers
+        in their finally blocks, but during stop interrupts these may not fire properly.
+        """
+        with self._sem_lock:
+            for base, (sem, size) in list(self._semaphores.items()):
+                # Create fresh semaphore with correct initial value
+                self._semaphores[base] = (threading.Semaphore(size), size)
+                
+        logger.debug(f"[APIRouter] Reset {len(self._semaphores)} semaphores for stop+resume safety")
+
     # ── Persistence ──────────────────────────────────────────────────────
 
     def _save(self):
