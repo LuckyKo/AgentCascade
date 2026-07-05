@@ -1019,9 +1019,9 @@ class APIRouter:
     def reset_semaphores(self):
         """Reset all per-API-call semaphores to their initial state.
         
-        Releases any held permits by adding missing ones back, then releases all
-        to restore the semaphore to its initial state. This avoids replacing the
-        semaphore object (which could cause lost releases from generator finally blocks).
+        Releases all held permits to restore each semaphore to its initial state.
+        This avoids replacing the semaphore object (which could cause lost releases
+        from generator finally blocks).
         """
         with self._sem_lock:
             for base, (sem, size) in list(self._semaphores.items()):

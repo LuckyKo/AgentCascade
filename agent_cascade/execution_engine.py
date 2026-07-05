@@ -661,6 +661,9 @@ class ExecutionEngine:
         skip_slot_acquire = getattr(instance, '_skip_slot_acquire', False)
 
         if not skip_slot_acquire:
+            # Check stopped flag before acquiring slot to prevent starting new work
+            if self._is_stopped(instance.instance_name):
+                return  # Exit early if stopped
             instance._slot_release = None  # Initialize for proper cleanup in finally block
             self._acquire_slot_with_logging(instance, "initial")
 

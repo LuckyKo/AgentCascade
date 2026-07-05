@@ -877,17 +877,17 @@ class AgentPool:
             try:
                 for inst_name, instance in list(self.instances.items()):
                     with instance._state_lock:
-                        if hasattr(instance, '_slot_release') and instance._slot_release is not None:
+                        # Atomic check-and-clear to prevent double-release with execution threads
+                        if instance._slot_release is not None:
+                            release_cb = instance._slot_release
+                            instance._slot_release = None
                             try:
-                                instance._slot_release()
-                                instance._slot_release = None
+                                release_cb()
                                 released_count += 1
                             except Exception as e:
                                 logger.warning(f"[STOP_SLOT] Failed to release slot for '{inst_name}': {e}")
-                        else:
-                            # Check if instance is in active state but has no slot held
-                            if instance.state.name not in ('IDLE', 'TERMINATED'):
-                                held_count += 1
+                        elif instance.state.name not in ('IDLE', 'TERMINATED'):
+                            held_count += 1
             except Exception as e:
                 logger.warning(f"slot_release failed during stop_session (non-critical): {e}")
 
