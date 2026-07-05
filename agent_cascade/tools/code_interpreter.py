@@ -248,26 +248,33 @@ def _kernel_watchdog():
             except OSError as e:
                 logger.warning(f"Failed to remove path mapping file {mapping_file}: {e}")
 
-        # Fix 3: Clean up stale containers older than STALE_CONTAINER_TTL (prevents accumulation)
-        expired_stale = []
-        with _KERNEL_LOCK:
-            for kernel_id, info in list(_STALE_CONTAINERS.items()):
-                if isinstance(info, dict):
-                    age = now - info.get('timestamp', 0)
-                    if age > STALE_CONTAINER_TTL:
-                        expired_stale.append((kernel_id, info['container_id']))
+        _cleanup_stale_containers(now)
 
-        for kernel_id, cid in expired_stale:
-            try:
-                subprocess.run(
-                    ['docker', 'rm', '-f', cid], timeout=10,
-                    capture_output=True, encoding='utf-8', errors='replace'
-                )
-                with _KERNEL_LOCK:
-                    del _STALE_CONTAINERS[kernel_id]
-                logger.debug(f"Watchdog removed expired stale container {cid} (age={age:.0f}s)")
-            except Exception as e:
-                logger.warning(f"Failed to remove expired stale container {cid}: {e}")
+
+def _cleanup_stale_containers(now: float):
+    """Remove stale containers older than STALE_CONTAINER_TTL.
+
+    Keeps the stale container registry from accumulating entries indefinitely.
+    Called from the watchdog loop on each tick.
+    """
+    expired_stale = []
+    with _KERNEL_LOCK:
+        for kernel_id, info in list(_STALE_CONTAINERS.items()):
+            age = now - info.get('timestamp', 0)
+            if age > STALE_CONTAINER_TTL:
+                expired_stale.append((kernel_id, info['container_id']))
+
+    for kernel_id, cid in expired_stale:
+        try:
+            subprocess.run(
+                ['docker', 'rm', '-f', cid], timeout=10,
+                capture_output=True, encoding='utf-8', errors='replace'
+            )
+            with _KERNEL_LOCK:
+                del _STALE_CONTAINERS[kernel_id]
+        except Exception as e:
+            logger.debug(f"Failed to remove expired stale container {cid}: {e}")
+
 
 _WATCHDOG_THREAD = threading.Thread(target=_kernel_watchdog, daemon=True, name='code-interpreter-watchdog')
 _WATCHDOG_THREAD.start()
@@ -374,21 +381,21 @@ class CodeInterpreter(BaseToolWithFileAccess):
             if kernel_id in _KERNEL_CLIENTS:
                 kc = _KERNEL_CLIENTS[kernel_id]
             else:
-                # Try warm restart: check if a container with the same name is already running
+                # Try warm restart: check if a container with the same name is already running.
                 # This happens after Tier 3 kills but keeps the container, or after watchdog cleanup.
                 # Reusing avoids ~7s docker rm + docker run + kernel startup overhead.
                 warm_restart_ok = False
+                found_cid = None
                 container_name = f'code_interpreter_{kernel_id}'
 
                 # Check stale containers first (most likely candidate)
                 stale_info = _STALE_CONTAINERS.get(kernel_id)
-                if isinstance(stale_info, dict):
+                if stale_info:
                     stale_cid = stale_info['container_id']
-                else:
-                    stale_cid = None  # backward compat with old plain-string format
-                if stale_cid and _check_container_healthy(stale_cid):
-                    logger.info(f"Warm restart: Reusing healthy container {stale_cid} for kernel {kernel_id}")
-                    warm_restart_ok = True
+                    if _check_container_healthy(stale_cid):
+                        logger.info(f"Warm restart: Reusing healthy container {stale_cid} for kernel {kernel_id}")
+                        found_cid = stale_cid
+                        warm_restart_ok = True
 
                 # Also check for any running container with the same name (e.g., from a crash)
                 if not warm_restart_ok:
@@ -401,13 +408,12 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     # Reuse the existing container — reconnect the kernel client via warm restart.
                     # This is much faster than _start_kernel (~2s vs ~7s) because it skips
                     # docker rm + docker run and just launches a new kernel inside the existing container.
-                    needs_init = True  # New kernel process requires initialization code (Fix: was False, skipping init)
+                    needs_init = True  # New kernel process requires initialization code
                     try:
-                        kc, container_id = self._warm_restart_kernel(kernel_id)
+                        kc, container_id = self._warm_restart_kernel(kernel_id, found_cid)
                     except RuntimeError:
                         logger.warning(f"Warm restart failed for {kernel_id}, falling back to full start")
                         kc, container_id = self._start_kernel(kernel_id)
-                        needs_init = True  # Full start means we need init code too
 
                     _KERNEL_CLIENTS[kernel_id] = kc
                     _DOCKER_CONTAINERS[kernel_id] = container_id
@@ -481,7 +487,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         try:
             result = self._execute_code(kc, fixed_code, timeout=exec_timeout, kernel_id=kernel_id)
         except TimeoutError as e:
-            # On timeout, escalate through 3 tiers to recover the kernel (Fix A3)
+            # On timeout, escalate through 3 tiers to recover the kernel
             logger.warning(f"Code interpreter execution timed out ({exec_timeout}s), escalating...")
             
             interrupted = False
@@ -497,99 +503,34 @@ class CodeInterpreter(BaseToolWithFileAccess):
             DRAIN_MAX_MESSAGES = 100        # Max IOPub messages to read per drain cycle
             DRAIN_MAX_OUTPUT_BYTES = 10 * 1024 * 1024  # 10 MB cap on accumulated output
 
-            # Helper to drain ALL available IOPub messages in a non-blocking loop.
-            # Multiple messages can arrive simultaneously during interrupt; reading only
-            # one per call (as before) loses the rest, causing partial output loss.
-            def _drain_iopub(msg_timeout: float = 1.0) -> None:
-                """Read all available IOPub messages until queue is empty or timeout.
-
-                Guards against resource exhaustion:
-                - Total drain time capped at DRAIN_TOTAL_TIMEOUT seconds
-                - Message count capped at DRAIN_MAX_MESSAGES per call
-                - Accumulated output size capped at DRAIN_MAX_OUTPUT_BYTES (10 MB)
-                """
-                nonlocal interrupted, partial_result
-                start = time.time()
-                msg_count = 0
-                parts: list[str] = []  # O(n) accumulation via list + join
-
-                while True:
-                    # Check total elapsed time to avoid draining forever
-                    if time.time() - start >= DRAIN_TOTAL_TIMEOUT:
-                        break
-                    # Check message count limit to prevent resource exhaustion
-                    if msg_count >= DRAIN_MAX_MESSAGES:
-                        break
-                    # Check watchdog BEFORE the blocking get_iopub_msg call (reduces latency)
-                    with _KERNEL_LOCK:
-                        if kernel_id in _WATCHDOG_KILLED:
-                            break
-
-                    try:
-                        msg = kc.get_iopub_msg(timeout=msg_timeout)
-                    except queue.Empty:
-                        break
-                    except Exception as err:
-                        logger.debug(f"IOPub drain error for kernel {kernel_id}: {err}")
-                        break
-
-                    msg_count += 1
-                    mtype = msg['msg_type']
-                    content = msg['content']
-
-                    if mtype == 'status':
-                        if content.get('execution_state') == 'idle':
-                            interrupted = True
-                    elif mtype in ('execute_result', 'display_data'):
-                        text = content['data'].get('text/plain', '')
-                        if text:
-                            parts.append(f'\n\nstdout:\n```\n{text}\n```')
-                    elif mtype == 'stream':
-                        name = content['name']
-                        text = content['text']
-                        if text:
-                            parts.append(f'\n\n{name}:\n```\n{text}\n```')
-                    elif mtype == 'error':
-                        text = _escape_ansi('\n'.join(content['traceback']))
-                        if text:
-                            parts.append(f'\n\nstderr:\n```\n{text}\n```')
-                    else:
-                        # Log warnings for unrecognized IOPub message types (debug, not spammy)
-                        logger.debug(
-                            f"IOPub drain: ignoring unknown msg type '{mtype}' "
-                            f"for kernel {kernel_id}"
-                        )
-
-                # Merge accumulated parts into partial_result once per drain call
-                if parts:
-                    partial_result = partial_result + ''.join(parts)
-
-                # Enforce size limit on total accumulated output (truncate with marker)
-                combined = partial_result
-                if len(combined) > DRAIN_MAX_OUTPUT_BYTES:
-                    kept = combined[:DRAIN_MAX_OUTPUT_BYTES - 50]
-                    partial_result = f'{kept}\n\n[OUTPUT TRUNCATED — exceeded {DRAIN_MAX_OUTPUT_BYTES // (1024*1024)}MB limit]'
-
             # Tier 1: Jupyter-level interrupt + poll for idle status, collecting all remaining output
             try:
                 kc.interrupt()
                 for _ in range(3):
                     time.sleep(0.5)
-                    
+
                     with _KERNEL_LOCK:
                         if kernel_id in _WATCHDOG_KILLED:
                             break
-                    
+
                     # Drain ALL messages that arrived during the sleep window, not just one
-                    _drain_iopub(timeout=1)
+                    interrupted_flag, output = self._drain_iopub(
+                        kc, kernel_id, msg_timeout=1.0,
+                        drain_total_timeout=DRAIN_TOTAL_TIMEOUT,
+                        drain_max_messages=DRAIN_MAX_MESSAGES,
+                        drain_max_output_bytes=DRAIN_MAX_OUTPUT_BYTES,
+                    )
+                    if interrupted_flag:
+                        interrupted = True
+                    partial_result += output
             except Exception as interrupt_err:
                 logger.warning(f"Tier 1 interrupt failed: {interrupt_err}")
-            
+
             # Tier 2: Docker-level SIGINT if still not interrupted
             if not interrupted:
                 with _KERNEL_LOCK:
                     container_id = _DOCKER_CONTAINERS.get(kernel_id)
-                
+
                 if container_id:
                     try:
                         subprocess.run(
@@ -597,9 +538,17 @@ class CodeInterpreter(BaseToolWithFileAccess):
                             timeout=5, capture_output=True, encoding='utf-8', errors='replace'
                         )
                         time.sleep(2)
-                        
+
                         # Drain ALL remaining messages after SIGINT, not just one
-                        _drain_iopub(timeout=2)
+                        interrupted_flag, output = self._drain_iopub(
+                            kc, kernel_id, msg_timeout=2.0,
+                            drain_total_timeout=DRAIN_TOTAL_TIMEOUT,
+                            drain_max_messages=DRAIN_MAX_MESSAGES,
+                            drain_max_output_bytes=DRAIN_MAX_OUTPUT_BYTES,
+                        )
+                        if interrupted_flag:
+                            interrupted = True
+                        partial_result += output
                     except Exception as sigint_err:
                         logger.warning(f"Tier 2 docker SIGINT failed: {sigint_err}")
             
@@ -674,7 +623,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
             except Exception as e:
                 logger.debug(f"Cancel timer failed (non-critical): {e}")
 
-        # Mark activity after successful execution so watchdog knows this kernel is still healthy (Fix D3)
+        # Update activity timestamp so watchdog knows this kernel is still healthy
         with _KERNEL_LOCK:
             if kernel_id in _KERNEL_ACTIVITY and isinstance(_KERNEL_ACTIVITY[kernel_id], dict):
                 _KERNEL_ACTIVITY[kernel_id]['last_active'] = time.time()
@@ -734,6 +683,91 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         return result
 
+    @staticmethod
+    def _drain_iopub(
+        kc, kernel_id: str, msg_timeout: float = 1.0,
+        drain_total_timeout: float = 5.0,
+        drain_max_messages: int = 100,
+        drain_max_output_bytes: int = 10 * 1024 * 1024,
+    ) -> tuple[bool, str]:
+        """Read all available IOPub messages until queue is empty or timeout.
+
+        Guards against resource exhaustion:
+        - Total drain time capped at drain_total_timeout seconds
+        - Message count capped at drain_max_messages per call
+        - Accumulated output size capped at drain_max_output_bytes (10 MB)
+
+        Args:
+            kc: The kernel client.
+            kernel_id: Kernel identifier for watchdog checks and logging.
+            msg_timeout: Timeout for each individual message read.
+            drain_total_timeout: Max total seconds spent draining.
+            drain_max_messages: Max IOPub messages to read per drain cycle.
+            drain_max_output_bytes: Cap on accumulated output size.
+
+        Returns:
+            Tuple of (interrupted, partial_output) where interrupted is True if
+            an idle status was received, and partial_output contains collected text.
+        """
+        interrupted = False
+        parts: list[str] = []
+        start = time.time()
+        msg_count = 0
+
+        while True:
+            if time.time() - start >= drain_total_timeout:
+                break
+            if msg_count >= drain_max_messages:
+                break
+            # Check watchdog before the blocking get_iopub_msg call (reduces latency)
+            with _KERNEL_LOCK:
+                if kernel_id in _WATCHDOG_KILLED:
+                    break
+
+            try:
+                msg = kc.get_iopub_msg(timeout=msg_timeout)
+            except queue.Empty:
+                break
+            except Exception as err:
+                logger.debug(f"IOPub drain error for kernel {kernel_id}: {err}")
+                break
+
+            msg_count += 1
+            mtype = msg['msg_type']
+            content = msg['content']
+
+            if mtype == 'status':
+                if content.get('execution_state') == 'idle':
+                    interrupted = True
+            elif mtype in ('execute_result', 'display_data'):
+                text = content['data'].get('text/plain', '')
+                if text:
+                    parts.append(f'\n\nstdout:\n```\n{text}\n```')
+            elif mtype == 'stream':
+                name = content['name']
+                text = content['text']
+                if text:
+                    parts.append(f'\n\n{name}:\n```\n{text}\n```')
+            elif mtype == 'error':
+                text = _escape_ansi('\n'.join(content['traceback']))
+                if text:
+                    parts.append(f'\n\nstderr:\n```\n{text}\n```')
+            else:
+                logger.debug(
+                    f"IOPub drain: ignoring unknown msg type '{mtype}' "
+                    f"for kernel {kernel_id}"
+                )
+
+        partial_output = ''.join(parts) if parts else ''
+        if len(partial_output) > drain_max_output_bytes:
+            kept = partial_output[:drain_max_output_bytes - 50]
+            partial_output = (
+                f'{kept}\n\n[OUTPUT TRUNCATED — exceeded '
+                f'{drain_max_output_bytes // (1024*1024)}MB limit]'
+            )
+
+        return interrupted, partial_output
+
     def __del__(self):
         # Recycle the jupyter subprocess and Docker container:
         k: str = f'{self.instance_id}_{os.getpid()}'
@@ -746,7 +780,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 del _KERNEL_CLIENTS[k]
             if k in _DOCKER_CONTAINERS:
                 container_id = _DOCKER_CONTAINERS[k]
-                # Use docker rm -f instead of stop + rm (Fix 5: simpler, handles both running and stopped containers)
+                # Force-remove container (handles both running and stopped states)
                 try:
                     subprocess.run(['docker', 'rm', '-f', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
                 except Exception:
@@ -756,8 +790,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
             # Also clean up stale container record if it exists
             if k in _STALE_CONTAINERS:
-                stale_info = _STALE_CONTAINERS[k]
-                stale_cid = stale_info['container_id'] if isinstance(stale_info, dict) else stale_info
+                stale_cid = _STALE_CONTAINERS[k]['container_id']
                 try:
                     subprocess.run(['docker', 'rm', '-f', stale_cid], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
                 except Exception:
@@ -886,6 +919,48 @@ class CodeInterpreter(BaseToolWithFileAccess):
             s.close()
         return ports
 
+    @staticmethod
+    def _create_kernel_client(host_connection_file: str, container_id: str) -> 'BlockingKernelClient':
+        """Create a Jupyter kernel client, start channels, and wait for readiness.
+
+        Shared helper used by both _start_kernel and _warm_restart_kernel to avoid
+        duplicating connection setup and readiness-wait logic (~60% overlap).
+
+        Args:
+            host_connection_file: Path to the host-side connection JSON file.
+            container_id: Container ID (used for log retrieval on failure).
+
+        Returns:
+            A ready BlockingKernelClient instance.
+        """
+        from jupyter_client import BlockingKernelClient
+
+        kc = BlockingKernelClient(connection_file=host_connection_file)
+        asyncio.set_event_loop_policy(AnyThreadEventLoopPolicy())
+        kc.load_connection_file()
+        kc.start_channels()
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                kc.wait_for_ready(timeout=10)
+                logger.info("Kernel is ready")
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Kernel not ready (attempt {attempt + 1}/{max_retries}), retrying...")
+                    time.sleep(2)
+                else:
+                    logs = subprocess.run(
+                        ['docker', 'logs', container_id],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace'
+                    )
+                    raise RuntimeError(
+                        f'Kernel failed to start: {e}\nContainer logs:\n{logs.stdout}\n{logs.stderr}'
+                    )
+
+        return kc
+
     def _start_kernel(self, kernel_id: str):
         self._build_docker_image()
 
@@ -921,10 +996,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
         with open(host_connection_file, 'w') as f:
             json.dump(host_conn_data, f)
 
-        # prepare container connection file (Fix B4 reverted: use 0.0.0.0 inside container)
-        # Rationale: allow_remote_access=False + 127.0.0.1 caused kernel to reject its own
-        # connections on Windows Docker port forwarding. Kernel binds to all interfaces
-        # inside the container, but host-side port binding is restricted to 127.0.0.1 (Fix C2)
+        # Prepare container connection file: use 0.0.0.0 inside container for Windows Docker port forwarding
+        # Kernel binds to all interfaces, while host-side ports are restricted to 127.0.0.1
         container_conn_data = host_conn_data.copy()
         container_conn_data["ip"] = "0.0.0.0"
         with open(container_connection_file, 'w') as f:
@@ -973,7 +1046,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         path_mapping = self._build_path_mapping(kernel_id, mounted_rw, mounted_ro)
         path_mapping_file = os.path.join(self.work_dir, f'path_mapping_{kernel_id}.json')
 
-        # Fix D2: Remove any leftover container with the same name from a previous crash
+        # Remove any leftover container with the same name from a previous crash
         container_name = f'code_interpreter_{kernel_id}'
         subprocess.run(
             ['docker', 'rm', '-f', container_name],
@@ -984,10 +1057,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
         docker_run_cmd = [
             'docker', 'run', '-d',
             '--name', container_name,
-            # Fix B1: Drop all Linux capabilities and prevent privilege escalation
+            # Drop all Linux capabilities and prevent privilege escalation
             '--cap-drop=ALL',
             '--security-opt=no-new-privileges',
-            # Fix B2: Resource constraints (memory, CPU, PID limit) to prevent resource exhaustion
+            # Enforce resource limits (memory, CPU, PID count) to prevent container exhaustion
             '--memory=' + CONTAINER_MEMORY_LIMIT,
             '--cpus=' + str(CONTAINER_CPU_LIMIT),
             '--pids-limit=' + str(CONTAINER_PID_LIMIT),
@@ -1018,7 +1091,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
             '-w', self.container_work_dir,
         ])
 
-        # Fix C2: Bind forwarded ports to 127.0.0.1 only (not all interfaces)
+        # Bind forwarded ports to 127.0.0.1 only (not all interfaces, for security)
         for p in ports:
             docker_run_cmd.extend(['-p', f'127.0.0.1:{p}:{p}'])
 
@@ -1047,44 +1120,24 @@ class CodeInterpreter(BaseToolWithFileAccess):
         container_id = result.stdout.strip()
         logger.info(f"INFO: Docker container ID = {container_id}")
 
-        # start local jupyter client
-        from jupyter_client import BlockingKernelClient
-
-        kc = BlockingKernelClient(connection_file=host_connection_file)
-        asyncio.set_event_loop_policy(AnyThreadEventLoopPolicy())
-        kc.load_connection_file()
-        kc.start_channels()
-        
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                kc.wait_for_ready(timeout=10)
-                logger.info("Kernel is ready")
-                break
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Kernel not ready (attempt {attempt + 1}/{max_retries}), retrying...")
-                    time.sleep(2)
-                else:
-                    logs = subprocess.run(
-                        ['docker', 'logs', container_id],
-                        capture_output=True,
-                        text=True,
-                        encoding='utf-8',
-                        errors='replace'
-                    )
-                    raise RuntimeError(f'Kernel failed to start: {e}\nContainer logs:\n{logs.stdout}\n{logs.stderr}')
+        # Create client and wait for kernel readiness (shared helper)
+        kc = self._create_kernel_client(host_connection_file, container_id)
 
         # Initialize activity tracking for watchdog (include work_dir for cleanup)
-        _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
+        with _KERNEL_LOCK:
+            _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
 
         return kc, container_id
 
-    def _warm_restart_kernel(self, kernel_id: str):
+    def _warm_restart_kernel(self, kernel_id: str, container_id: str):
         """Reconnect to an existing Docker container and launch a new kernel inside it.
 
-        This is faster than _start_kernel because the container already exists — we just
-        need to start a fresh kernel process within it. Saves ~7s by avoiding docker rm + run.
+        The container_id is passed from the caller (call()) which already located it,
+        avoiding redundant docker ps calls. This saves ~7s by skipping docker rm + run.
+
+        Args:
+            kernel_id: Kernel identifier.
+            container_id: Container ID discovered by the caller.
 
         Returns:
             Tuple of (kernel_client, container_id)
@@ -1093,8 +1146,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         container_connection_file = os.path.join(self.work_dir, f'kernel_connection_file_{kernel_id}_container.json')
 
         # Read original ports from existing connection file BEFORE deleting it.
-        # The container has fixed port bindings (e.g., -p 127.0.0.1:5000:5000) that we must reuse.
-        # If we generate new random ports, the kernel will bind to them but Docker won't forward traffic.
+        # The container has fixed port bindings that we must reuse for traffic forwarding.
         original_ports = None
         if os.path.exists(host_connection_file):
             try:
@@ -1114,7 +1166,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
             if os.path.exists(f):
                 os.remove(f)
 
-        # prepare host connection file with original ports (or new ones if not available)
+        # Prepare host connection file with original ports (or new ones if not available)
         host_conn_data = {
             "ip": "127.0.0.1",
             "key": str(uuid.uuid4()),
@@ -1135,61 +1187,13 @@ class CodeInterpreter(BaseToolWithFileAccess):
         with open(host_connection_file, 'w') as f:
             json.dump(host_conn_data, f)
 
-        # prepare container connection file
+        # Prepare container connection file (use 0.0.0.0 inside container for Windows Docker port forwarding)
         container_conn_data = host_conn_data.copy()
         container_conn_data["ip"] = "0.0.0.0"
         with open(container_connection_file, 'w') as f:
             json.dump(container_conn_data, f)
 
-        # Find the existing container (check stale record first, then by name)
-        container_name = f'code_interpreter_{kernel_id}'
-        stale_info = _STALE_CONTAINERS.get(kernel_id)
-        if isinstance(stale_info, dict):
-            stale_cid = stale_info['container_id']
-        else:
-            stale_cid = None  # backward compat with old plain-string format
-        if stale_cid and _check_container_healthy(stale_cid):
-            container_id = stale_cid
-            logger.info(f"Warm restart: Using healthy stale container {container_id}")
-        else:
-            # Check for stopped container by name — start it if found
-            result = subprocess.run(
-                ['docker', 'ps', '-aq', '--filter', f'name={container_name}', '--filter', 'status=exited'],
-                timeout=5, capture_output=True, text=True, encoding='utf-8', errors='replace'
-            )
-            stopped_cid = result.stdout.strip()
-            if stopped_cid:
-                # Start the stopped container
-                subprocess.run(
-                    ['docker', 'start', stopped_cid],
-                    timeout=10, capture_output=True, text=True, encoding='utf-8', errors='replace'
-                )
-                container_id = stopped_cid
-                logger.info(f"Warm restart: Started previously-stopped container {container_id}")
-            else:
-                # Also check for a running container by name
-                result = subprocess.run(
-                    ['docker', 'ps', '-aq', '--filter', f'name={container_name}', '--filter', 'status=running'],
-                    timeout=5, capture_output=True, text=True, encoding='utf-8', errors='replace'
-                )
-                running_cid = result.stdout.strip()
-                if running_cid:
-                    container_id = running_cid
-                    logger.info(f"Warm restart: Using already-running container {container_id}")
-                else:
-                    raise RuntimeError(
-                        f'Warm restart failed: no existing container found for kernel {kernel_id}. '
-                        f'Falling back to full start.'
-                    )
-
-        # Clean up stale record on successful warm restart
-        if kernel_id in _STALE_CONTAINERS:
-            del _STALE_CONTAINERS[kernel_id]
-
         # Launch a new kernel process inside the existing container using docker exec.
-        # We need to forward ports so the host can connect to the new kernel.
-        # Since the container already has port bindings, we reuse them by writing
-        # connection files and executing the kernel with docker exec.
         launch_script = os.path.join(self.work_dir, f'launch_kernel_{kernel_id}.py')
         if not os.path.exists(launch_script):
             os.makedirs(self.work_dir, exist_ok=True)
@@ -1206,53 +1210,17 @@ class CodeInterpreter(BaseToolWithFileAccess):
             '--quiet',
         ]
 
-        # Start kernel process in background inside container
+        # Start kernel process in background inside container (single docker call)
         subprocess.Popen(exec_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         time.sleep(2)
 
-        # Wait for container to be running
-        max_wait = 30
-        wait_interval = 0.5
-        elapsed = 0
-        while elapsed < max_wait:
-            check_result = subprocess.run(
-                ['docker', 'ps', '-q', '-f', f'id={container_id}'],
-                capture_output=True, text=True, encoding='utf-8', errors='replace'
-            )
-            if check_result.stdout.strip():
-                logger.info("Container is running")
-                break
-            time.sleep(wait_interval)
-            elapsed += wait_interval
-
-        # start local jupyter client
-        from jupyter_client import BlockingKernelClient
-
-        kc = BlockingKernelClient(connection_file=host_connection_file)
-        asyncio.set_event_loop_policy(AnyThreadEventLoopPolicy())
-        kc.load_connection_file()
-        kc.start_channels()
-
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                kc.wait_for_ready(timeout=10)
-                logger.info("Kernel is ready (warm restart)")
-                break
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Kernel not ready on warm restart (attempt {attempt + 1}/{max_retries}), retrying...")
-                    time.sleep(2)
-                else:
-                    logs = subprocess.run(
-                        ['docker', 'logs', container_id],
-                        capture_output=True, text=True, encoding='utf-8', errors='replace'
-                    )
-                    raise RuntimeError(f'Kernel failed to warm restart: {e}\nContainer logs:\n{logs.stdout}\n{logs.stderr}')
+        # Create client and wait for kernel readiness
+        kc = self._create_kernel_client(host_connection_file, container_id)
 
         # Initialize activity tracking for watchdog
-        _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
+        with _KERNEL_LOCK:
+            _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
 
         return kc, container_id
 
@@ -1279,11 +1247,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
         if timeout is None:
             timeout = CODE_EXECUTION_TIMEOUT
 
-        # Fix A2: Add timeout to wait_for_ready() to prevent permanent hang on stuck kernel
+        # Wait for kernel readiness with timeout to prevent permanent hang on stuck kernels
         kc.wait_for_ready(timeout=30)
         kc.execute(code)
-        
-        # Mark execution start as "active" so watchdog doesn't kill during CPU-bound computation (Fix D3)
+
+        # Mark execution start as "active" so watchdog doesn't kill during CPU-bound computation
         with _KERNEL_LOCK:
             if kernel_id in _KERNEL_ACTIVITY and isinstance(_KERNEL_ACTIVITY[kernel_id], dict):
                 _KERNEL_ACTIVITY[kernel_id]['last_active'] = time.time()
@@ -1312,7 +1280,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 break
             
             # Check overall wall-clock budget at the top of each iteration
-            # Raise TimeoutError so caller's except block can interrupt the kernel (Fix A1a)
+            # Raise TimeoutError so the caller's except block can interrupt the kernel
             if time.time() - start_time > timeout:
                 raise TimeoutError({'partial_output': result, 'message': f'Code execution exceeded the {timeout}-second time limit.'})
             
@@ -1365,9 +1333,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     if 'M6_CODE_INTERPRETER_TIMEOUT' in text:
                         text = f'Timeout: Code execution exceeded the {timeout}-second time limit.'
             except queue.Empty:
-                # This is raised by get_iopub_msg() when timeout expires (Fix A1b)
+                # Raised by get_iopub_msg() when the per-message timeout expires
                 raise TimeoutError({'partial_output': result, 'message': f'Code execution exceeded the {timeout}-second time limit.'})
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Unexpected IOPub error during execution for kernel {kernel_id}: {e}")
                 text = 'The code interpreter encountered an unexpected error.'
                 print_traceback()
                 finished = True
