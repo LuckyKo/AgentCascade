@@ -1186,6 +1186,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
         container_id = result.stdout.strip()
         logger.info(f"INFO: Docker container ID = {container_id}")
 
+        # Brief delay to let the container initialize before connecting
+        # (matches warm_restart_kernel behavior; prevents cold-start race condition)
+        time.sleep(2)
+
         # Create client and wait for kernel readiness (shared helper)
         kc = self._create_kernel_client(host_connection_file, container_id)
 
@@ -1313,13 +1317,6 @@ class CodeInterpreter(BaseToolWithFileAccess):
         if timeout is None:
             timeout = CODE_EXECUTION_TIMEOUT
 
-        # Wait for kernel readiness with timeout to prevent permanent hang on stuck kernels
-        try:
-            kc.wait_for_ready(timeout=30)
-        except Exception as e:
-            logger.warning(f"Kernel wait_for_ready failed: {e}")
-            raise
-        
         # Drain any leftover messages from the probe execute before sending real code
         try:
             while True:
