@@ -256,6 +256,9 @@ def _cleanup_stale_containers(now: float):
 
     Keeps the stale container registry from accumulating entries indefinitely.
     Called from the watchdog loop on each tick.
+
+    Lock strategy: scan under lock, docker rm outside lock, then batch-delete
+    from the dict under a single lock acquisition to minimize hold time.
     """
     expired_stale = []
     with _KERNEL_LOCK:
@@ -264,16 +267,23 @@ def _cleanup_stale_containers(now: float):
             if age > STALE_CONTAINER_TTL:
                 expired_stale.append((kernel_id, info['container_id']))
 
+    # Remove containers outside the lock (docker ops can be slow)
+    removed_ids = set()
     for kernel_id, cid in expired_stale:
         try:
             subprocess.run(
                 ['docker', 'rm', '-f', cid], timeout=10,
                 capture_output=True, encoding='utf-8', errors='replace'
             )
-            with _KERNEL_LOCK:
-                del _STALE_CONTAINERS[kernel_id]
+            removed_ids.add(kernel_id)
         except Exception as e:
             logger.debug(f"Failed to remove expired stale container {cid}: {e}")
+
+    # Batch-delete from dict under a single lock acquisition
+    if removed_ids:
+        with _KERNEL_LOCK:
+            for kernel_id in removed_ids:
+                _STALE_CONTAINERS.pop(kernel_id, None)
 
 
 _WATCHDOG_THREAD = threading.Thread(target=_kernel_watchdog, daemon=True, name='code-interpreter-watchdog')
@@ -370,6 +380,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         kernel_id: str = f'{self.instance_id}_{os.getpid()}'
         
+        # Phase 1: Acquire lock, check state, and determine kernel strategy
         with _KERNEL_LOCK:
             # Check if the kernel was killed by the watchdog — clean up and start fresh (thread-safe)
             if kernel_id in _WATCHDOG_KILLED:
@@ -380,53 +391,52 @@ class CodeInterpreter(BaseToolWithFileAccess):
             needs_init = False
             if kernel_id in _KERNEL_CLIENTS:
                 kc = _KERNEL_CLIENTS[kernel_id]
+                container_id = _DOCKER_CONTAINERS.get(kernel_id)
             else:
-                # Try warm restart: check if a container with the same name is already running.
-                # This happens after Tier 3 kills but keeps the container, or after watchdog cleanup.
-                # Reusing avoids ~7s docker rm + docker run + kernel startup overhead.
-                warm_restart_ok = False
-                found_cid = None
-                container_name = f'code_interpreter_{kernel_id}'
+                kc = None
+                container_id = None
 
+        # Phase 2: Start kernel if needed (outside lock to avoid deadlock with internal lock acquisition)
+        if kc is None:
+            # Try warm restart: check if a container with the same name is already running.
+            warm_restart_ok = False
+            found_cid = None
+            container_name = f'code_interpreter_{kernel_id}'
+
+            with _KERNEL_LOCK:
                 # Check stale containers first (most likely candidate)
                 stale_info = _STALE_CONTAINERS.get(kernel_id)
-                if stale_info:
-                    stale_cid = stale_info['container_id']
-                    if _check_container_healthy(stale_cid):
-                        logger.info(f"Warm restart: Reusing healthy container {stale_cid} for kernel {kernel_id}")
-                        found_cid = stale_cid
-                        warm_restart_ok = True
 
-                # Also check for any running container with the same name (e.g., from a crash)
-                if not warm_restart_ok:
-                    found_cid = _find_running_container(container_name)
-                    if found_cid:
-                        logger.info(f"Warm restart: Found running container {found_cid} for kernel {kernel_id}")
-                        warm_restart_ok = True
+            if stale_info:
+                stale_cid = stale_info['container_id']
+                if _check_container_healthy(stale_cid):
+                    logger.info(f"Warm restart: Reusing healthy container {stale_cid} for kernel {kernel_id}")
+                    found_cid = stale_cid
+                    warm_restart_ok = True
 
-                if warm_restart_ok:
-                    # Reuse the existing container — reconnect the kernel client via warm restart.
-                    # This is much faster than _start_kernel (~2s vs ~7s) because it skips
-                    # docker rm + docker run and just launches a new kernel inside the existing container.
-                    needs_init = True  # New kernel process requires initialization code
-                    try:
-                        kc, container_id = self._warm_restart_kernel(kernel_id, found_cid)
-                    except RuntimeError:
-                        logger.warning(f"Warm restart failed for {kernel_id}, falling back to full start")
-                        kc, container_id = self._start_kernel(kernel_id)
+            # Also check for any running container with the same name (e.g., from a crash)
+            if not warm_restart_ok:
+                found_cid = _find_running_container(container_name)
+                if found_cid:
+                    logger.info(f"Warm restart: Found running container {found_cid} for kernel {kernel_id}")
+                    warm_restart_ok = True
 
-                    _KERNEL_CLIENTS[kernel_id] = kc
-                    _DOCKER_CONTAINERS[kernel_id] = container_id
-
-                    # Clean up stale record on successful warm restart
-                    if kernel_id in _STALE_CONTAINERS:
-                        del _STALE_CONTAINERS[kernel_id]
-                else:
-                    # New kernel — mark for initialization
-                    needs_init = True
+            needs_init = True
+            if warm_restart_ok:
+                try:
+                    kc, container_id = self._warm_restart_kernel(kernel_id, found_cid)
+                except RuntimeError:
+                    logger.warning(f"Warm restart failed for {kernel_id}, falling back to full start")
                     kc, container_id = self._start_kernel(kernel_id)
-                    _KERNEL_CLIENTS[kernel_id] = kc
-                    _DOCKER_CONTAINERS[kernel_id] = container_id
+            else:
+                kc, container_id = self._start_kernel(kernel_id)
+
+            # Register kernel state (lock held inside _start_kernel/_warm_restart for _KERNEL_ACTIVITY)
+            with _KERNEL_LOCK:
+                _KERNEL_CLIENTS[kernel_id] = kc
+                _DOCKER_CONTAINERS[kernel_id] = container_id
+                if kernel_id in _STALE_CONTAINERS:
+                    del _STALE_CONTAINERS[kernel_id]
 
         if needs_init:
             # First time — run initialization code (defines _M6CountdownTimer etc.)
@@ -436,7 +446,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     container_font_path = f'{self.container_work_dir}/{os.path.basename(ALIB_FONT_FILE)}'
                     start_code = start_code.replace('{{M6_FONT_PATH}}', repr(container_font_path)[1:-1])
                     start_code += '\n%xmode Minimal'
-                logger.info(self._execute_code(kc, start_code, timeout=exec_timeout, kernel_id=kernel_id))
+                self._execute_code(kc, start_code, timeout=exec_timeout, kernel_id=kernel_id)
             except Exception:
                 # Init failed — clean up the broken kernel so next call recreates fresh
                 with _KERNEL_LOCK:
@@ -944,7 +954,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         for attempt in range(max_retries):
             try:
                 kc.wait_for_ready(timeout=10)
-                logger.info("Kernel is ready")
+                logger.info(f"Kernel is ready (attempt {attempt+1}/{max_retries})")
                 break
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -1248,7 +1258,19 @@ class CodeInterpreter(BaseToolWithFileAccess):
             timeout = CODE_EXECUTION_TIMEOUT
 
         # Wait for kernel readiness with timeout to prevent permanent hang on stuck kernels
-        kc.wait_for_ready(timeout=30)
+        try:
+            kc.wait_for_ready(timeout=30)
+        except Exception as e:
+            logger.warning(f"Kernel wait_for_ready failed: {e}")
+            raise
+        
+        # Drain any leftover messages from the probe execute before sending real code
+        try:
+            while True:
+                m = kc.get_iopub_msg(timeout=0.5)
+        except:
+            pass
+        
         kc.execute(code)
 
         # Mark execution start as "active" so watchdog doesn't kill during CPU-bound computation
