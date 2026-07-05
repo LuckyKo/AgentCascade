@@ -910,11 +910,13 @@ class AgentPool:
         async_cleared = 0
         try:
             for inst_name, instance in list(self.instances.items()):
-                if instance._cached_messages or instance._cached_llm_messages:
-                    instance._cached_messages = []
-                    instance._cached_llm_messages = []
-                    instance._last_config_version = 0  # Force rebuild
-                    cache_cleared += 1
+                # Use compression lock for thread-safe cache clearing
+                with instance._compression_lock:
+                    if instance._cached_messages or instance._cached_llm_messages:
+                        instance._cached_messages = []
+                        instance._cached_llm_messages = []
+                        instance._last_config_version = 0  # Force rebuild
+                        cache_cleared += 1
                 # Clear message queue for this instance
                 if inst_name in self.message_queues:
                     try:
