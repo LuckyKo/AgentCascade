@@ -1006,15 +1006,22 @@ class CodeInterpreter(BaseToolWithFileAccess):
         kc.load_connection_file()
         kc.start_channels()
 
-        max_retries = 3
+        # Adaptive backoff: shorter initial timeout, progressively longer if needed.
+        # This reduces wasted time on slow hosts (WSL2 overhead) where the kernel
+        # may take 4-6s to initialize but responds quickly once ready.
+        timeouts = [3, 5, 10]  # Progressive backoff: fast first, longer if needed
+        max_retries = len(timeouts)
         for attempt in range(max_retries):
             try:
-                kc.wait_for_ready(timeout=10)
+                kc.wait_for_ready(timeout=timeouts[attempt])
                 logger.info(f"Kernel is ready (attempt {attempt+1}/{max_retries})")
                 break
             except Exception as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Kernel not ready (attempt {attempt + 1}/{max_retries}), retrying...")
+                    logger.warning(
+                        f"Kernel not ready (attempt {attempt + 1}/{max_retries}, "
+                        f"timeout={timeouts[attempt]}s), retrying with timeout={timeouts[attempt+1]}s..."
+                    )
                     time.sleep(2)
                 else:
                     logs = subprocess.run(
@@ -1186,9 +1193,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
         container_id = result.stdout.strip()
         logger.info(f"INFO: Docker container ID = {container_id}")
 
-        # Brief delay to let the container initialize before connecting
-        # (matches warm_restart_kernel behavior; prevents cold-start race condition)
-        time.sleep(2)
+        # Brief delay to let the container initialize before connecting.
+        # Cold start uses a longer delay than warm restart (4s vs 2s) to account for
+        # Windows WSL2 overhead where kernel initialization can take 4-6 seconds.
+        time.sleep(4)
 
         # Create client and wait for kernel readiness (shared helper)
         kc = self._create_kernel_client(host_connection_file, container_id)
