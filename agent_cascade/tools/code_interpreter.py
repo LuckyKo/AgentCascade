@@ -85,6 +85,46 @@ _KERNEL_LOCK = threading.Lock()
 # Track kernels killed by the watchdog so that in-flight calls can detect it and return a proper error
 _WATCHDOG_KILLED: set = set()
 
+# Track "stale" containers after Tier 3 kill for warm restart.
+# Value format: {'container_id': str, 'timestamp': float} — timestamp enables TTL cleanup.
+_STALE_CONTAINERS: Dict[str, dict] = {}
+
+# TTL for stale containers in seconds (10 minutes)
+STALE_CONTAINER_TTL = int(os.getenv('M6_CODE_INTERPRETER_STALE_TTL', '600'))
+
+
+def _check_container_healthy(container_id: str) -> bool:
+    """Check if a Docker container exists and is running via docker inspect.
+
+    Returns True if the container is in 'running' state, False otherwise.
+    """
+    try:
+        result = subprocess.run(
+            ['docker', 'inspect', '--format', '{{.State.Status}}', container_id],
+            timeout=5, capture_output=True, text=True, encoding='utf-8', errors='replace'
+        )
+        return result.stdout.strip() == 'running'
+    except Exception as e:
+        logger.debug(f"Container health check failed for {container_id}: {e}")
+        return False
+
+
+def _find_running_container(container_name: str) -> Optional[str]:
+    """Find a running container by name and return its ID.
+
+    Returns the container ID string if found and running, None otherwise.
+    """
+    try:
+        result = subprocess.run(
+            ['docker', 'ps', '-q', '--filter', f'name={container_name}', '--filter', 'status=running'],
+            timeout=5, capture_output=True, text=True, encoding='utf-8', errors='replace'
+        )
+        cid = result.stdout.strip()
+        return cid if cid else None
+    except Exception as e:
+        logger.debug(f"Failed to find running container '{container_name}': {e}")
+        return None
+
 
 def _kill_kernels_and_containers(_sig_num=None, _frame=None):
     # Stop the watchdog thread first
@@ -109,6 +149,7 @@ def _kill_kernels_and_containers(_sig_num=None, _frame=None):
 
         _KERNEL_ACTIVITY.clear()
         _WATCHDOG_KILLED.clear()
+        _STALE_CONTAINERS.clear()
 
 
 # Make sure all containers are terminated even if killed abnormally:
@@ -206,6 +247,27 @@ def _kernel_watchdog():
                     os.remove(mapping_file)
             except OSError as e:
                 logger.warning(f"Failed to remove path mapping file {mapping_file}: {e}")
+
+        # Fix 3: Clean up stale containers older than STALE_CONTAINER_TTL (prevents accumulation)
+        expired_stale = []
+        with _KERNEL_LOCK:
+            for kernel_id, info in list(_STALE_CONTAINERS.items()):
+                if isinstance(info, dict):
+                    age = now - info.get('timestamp', 0)
+                    if age > STALE_CONTAINER_TTL:
+                        expired_stale.append((kernel_id, info['container_id']))
+
+        for kernel_id, cid in expired_stale:
+            try:
+                subprocess.run(
+                    ['docker', 'rm', '-f', cid], timeout=10,
+                    capture_output=True, encoding='utf-8', errors='replace'
+                )
+                with _KERNEL_LOCK:
+                    del _STALE_CONTAINERS[kernel_id]
+                logger.debug(f"Watchdog removed expired stale container {cid} (age={age:.0f}s)")
+            except Exception as e:
+                logger.warning(f"Failed to remove expired stale container {cid}: {e}")
 
 _WATCHDOG_THREAD = threading.Thread(target=_kernel_watchdog, daemon=True, name='code-interpreter-watchdog')
 _WATCHDOG_THREAD.start()
@@ -312,11 +374,53 @@ class CodeInterpreter(BaseToolWithFileAccess):
             if kernel_id in _KERNEL_CLIENTS:
                 kc = _KERNEL_CLIENTS[kernel_id]
             else:
-                # New kernel — mark for initialization
-                needs_init = True
-                kc, container_id = self._start_kernel(kernel_id)
-                _KERNEL_CLIENTS[kernel_id] = kc
-                _DOCKER_CONTAINERS[kernel_id] = container_id
+                # Try warm restart: check if a container with the same name is already running
+                # This happens after Tier 3 kills but keeps the container, or after watchdog cleanup.
+                # Reusing avoids ~7s docker rm + docker run + kernel startup overhead.
+                warm_restart_ok = False
+                container_name = f'code_interpreter_{kernel_id}'
+
+                # Check stale containers first (most likely candidate)
+                stale_info = _STALE_CONTAINERS.get(kernel_id)
+                if isinstance(stale_info, dict):
+                    stale_cid = stale_info['container_id']
+                else:
+                    stale_cid = None  # backward compat with old plain-string format
+                if stale_cid and _check_container_healthy(stale_cid):
+                    logger.info(f"Warm restart: Reusing healthy container {stale_cid} for kernel {kernel_id}")
+                    warm_restart_ok = True
+
+                # Also check for any running container with the same name (e.g., from a crash)
+                if not warm_restart_ok:
+                    found_cid = _find_running_container(container_name)
+                    if found_cid:
+                        logger.info(f"Warm restart: Found running container {found_cid} for kernel {kernel_id}")
+                        warm_restart_ok = True
+
+                if warm_restart_ok:
+                    # Reuse the existing container — reconnect the kernel client via warm restart.
+                    # This is much faster than _start_kernel (~2s vs ~7s) because it skips
+                    # docker rm + docker run and just launches a new kernel inside the existing container.
+                    needs_init = True  # New kernel process requires initialization code (Fix: was False, skipping init)
+                    try:
+                        kc, container_id = self._warm_restart_kernel(kernel_id)
+                    except RuntimeError:
+                        logger.warning(f"Warm restart failed for {kernel_id}, falling back to full start")
+                        kc, container_id = self._start_kernel(kernel_id)
+                        needs_init = True  # Full start means we need init code too
+
+                    _KERNEL_CLIENTS[kernel_id] = kc
+                    _DOCKER_CONTAINERS[kernel_id] = container_id
+
+                    # Clean up stale record on successful warm restart
+                    if kernel_id in _STALE_CONTAINERS:
+                        del _STALE_CONTAINERS[kernel_id]
+                else:
+                    # New kernel — mark for initialization
+                    needs_init = True
+                    kc, container_id = self._start_kernel(kernel_id)
+                    _KERNEL_CLIENTS[kernel_id] = kc
+                    _DOCKER_CONTAINERS[kernel_id] = container_id
 
         if needs_init:
             # First time — run initialization code (defines _M6CountdownTimer etc.)
@@ -499,31 +603,29 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     except Exception as sigint_err:
                         logger.warning(f"Tier 2 docker SIGINT failed: {sigint_err}")
             
-            # Tier 3: Kill the container entirely if still unresponsive
+            # Tier 3: Kill the container entirely if still unresponsive.
+            # Instead of fully removing it, keep a stale record for warm restart (reduces ~7s overhead).
             if not interrupted:
                 with _KERNEL_LOCK:
                     container_id = _DOCKER_CONTAINERS.get(kernel_id)
-                
+
                 if container_id:
                     try:
                         subprocess.run(
                             ['docker', 'kill', '-s', 'KILL', container_id],
                             timeout=10, capture_output=True, encoding='utf-8', errors='replace'
                         )
-                        # Remove the dead container from Docker (prevents accumulation of stopped containers)
-                        subprocess.run(
-                            ['docker', 'rm', container_id],
-                            timeout=10, capture_output=True, encoding='utf-8', errors='replace'
-                        )
-                        # Clean up container record so next call starts fresh
+                        # Don't remove the container — keep it for warm restart on next call.
+                        # Record as stale with timestamp for TTL-based cleanup (prevents accumulation).
                         with _KERNEL_LOCK:
+                            _STALE_CONTAINERS[kernel_id] = {'container_id': container_id, 'timestamp': time.time()}
                             if kernel_id in _DOCKER_CONTAINERS:
                                 del _DOCKER_CONTAINERS[kernel_id]
-                        
-                        logger.warning(f"Tier 3: Container {container_id} killed due to unresponsive kernel")
+
+                        logger.info(f"Tier 3: Container {container_id} killed (kept for warm restart)")
                     except Exception as kill_err:
                         logger.warning(f"Tier 3 container kill failed: {kill_err}")
-                
+
                 # Also clean up the dead kernel client so next call starts fresh
                 with _KERNEL_LOCK:
                     if kernel_id in _KERNEL_CLIENTS:
@@ -532,7 +634,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
                         except Exception:
                             pass
                         del _KERNEL_CLIENTS[kernel_id]
-            
+
             # Update activity timestamp so watchdog doesn't double-kill
             with _KERNEL_LOCK:
                 if kernel_id in _KERNEL_ACTIVITY and isinstance(_KERNEL_ACTIVITY[kernel_id], dict):
@@ -644,14 +746,25 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 del _KERNEL_CLIENTS[k]
             if k in _DOCKER_CONTAINERS:
                 container_id = _DOCKER_CONTAINERS[k]
+                # Use docker rm -f instead of stop + rm (Fix 5: simpler, handles both running and stopped containers)
                 try:
-                    subprocess.run(['docker', 'stop', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
-                    subprocess.run(['docker', 'rm', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
+                    subprocess.run(['docker', 'rm', '-f', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
                 except Exception:
                     pass
                 finally:
                     del _DOCKER_CONTAINERS[k]
-        
+
+            # Also clean up stale container record if it exists
+            if k in _STALE_CONTAINERS:
+                stale_info = _STALE_CONTAINERS[k]
+                stale_cid = stale_info['container_id'] if isinstance(stale_info, dict) else stale_info
+                try:
+                    subprocess.run(['docker', 'rm', '-f', stale_cid], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
+                except Exception:
+                    pass
+                finally:
+                    del _STALE_CONTAINERS[k]
+
         # Clean up path mapping file for this kernel
         mapping_file = os.path.join(self.work_dir, f'path_mapping_{k}.json')
         try:
@@ -793,7 +906,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
         if not os.path.exists(work_dir_font):
             shutil.copy(ALIB_FONT_FILE, work_dir_font)
 
-        # prepare host connection file 
+        # prepare host connection file
         host_conn_data = {
             "ip": "127.0.0.1",
             "key": str(uuid.uuid4()),
@@ -809,18 +922,68 @@ class CodeInterpreter(BaseToolWithFileAccess):
             json.dump(host_conn_data, f)
 
         # prepare container connection file (Fix B4 reverted: use 0.0.0.0 inside container)
-        # Rationale: allow_remote_access=False + 127.0.0.1 caused kernel to reject its own 
-        # connections on Windows Docker port forwarding. Kernel binds to all interfaces 
+        # Rationale: allow_remote_access=False + 127.0.0.1 caused kernel to reject its own
+        # connections on Windows Docker port forwarding. Kernel binds to all interfaces
         # inside the container, but host-side port binding is restricted to 127.0.0.1 (Fix C2)
         container_conn_data = host_conn_data.copy()
         container_conn_data["ip"] = "0.0.0.0"
         with open(container_connection_file, 'w') as f:
             json.dump(container_conn_data, f)
 
+        # Resolve extra folders dynamically (picks up runtime config changes if operation_manager is set)
+        extra_rw, extra_ro = self._resolve_extra_folders()
+
+        # Track which extra folders were actually mounted (for path mapping)
+        mounted_rw = []
+        mounted_ro = []
+
+        # Allowed prefixes for path security validation — prevent mounting arbitrary host paths
+        # Use work_dir as the allowed root; also add extra folder paths themselves since they
+        # come from trusted config and may be siblings of work_dir (not children)
+        allowed_prefixes = {os.path.realpath(self.work_dir)} if self.work_dir else set()
+        for fp in [*extra_rw, *extra_ro]:
+            rp = os.path.realpath(fp)
+            allowed_prefixes.add(rp)
+
+        # Mount extra RW work folders as /extra_rw_0, /extra_rw_1, etc.
+        for folder_path in extra_rw:
+            abs_path = os.path.realpath(folder_path)  # resolves symlinks for security check
+            if not os.path.isdir(abs_path):
+                logger.warning("Extra RW mount path does not exist, skipping: %s", abs_path)
+                continue
+            if not self._is_path_allowed(abs_path, allowed_prefixes):
+                logger.warning("Extra RW mount path %s is outside allowed directories, skipping", abs_path)
+                continue
+            mount_point = f'/extra_rw_{len(mounted_rw)}'
+            mounted_rw.append({'host': abs_path, 'container': mount_point})
+
+        # Mount extra RO work folders as /extra_ro_0, /extra_ro_1, etc. (read-only)
+        for folder_path in extra_ro:
+            abs_path = os.path.realpath(folder_path)  # resolves symlinks for security check
+            if not os.path.isdir(abs_path):
+                logger.warning("Extra RO mount path does not exist, skipping: %s", abs_path)
+                continue
+            if not self._is_path_allowed(abs_path, allowed_prefixes):
+                logger.warning("Extra RO mount path %s is outside allowed directories, skipping", abs_path)
+                continue
+            mount_point = f'/extra_ro_{len(mounted_ro)}'
+            mounted_ro.append({'host': abs_path, 'container': mount_point})
+
+        # Create path mapping data (file is written AFTER container starts to avoid orphaned files)
+        path_mapping = self._build_path_mapping(kernel_id, mounted_rw, mounted_ro)
+        path_mapping_file = os.path.join(self.work_dir, f'path_mapping_{kernel_id}.json')
+
+        # Fix D2: Remove any leftover container with the same name from a previous crash
+        container_name = f'code_interpreter_{kernel_id}'
+        subprocess.run(
+            ['docker', 'rm', '-f', container_name],
+            capture_output=True, text=True, timeout=10, encoding='utf-8', errors='replace'
+        )
+
         # prepare Docker launch cmd
         docker_run_cmd = [
             'docker', 'run', '-d',
-            '--name', f'code_interpreter_{kernel_id}',
+            '--name', container_name,
             # Fix B1: Drop all Linux capabilities and prevent privilege escalation
             '--cap-drop=ALL',
             '--security-opt=no-new-privileges',
@@ -830,64 +993,30 @@ class CodeInterpreter(BaseToolWithFileAccess):
             '--pids-limit=' + str(CONTAINER_PID_LIMIT),
         ]
 
-        # Resolve extra folders dynamically (picks up runtime config changes if operation_manager is set)
-        extra_rw, extra_ro = self._resolve_extra_folders()
-        
-        # Track which extra folders were actually mounted (for path mapping)
-        mounted_rw = []
-        mounted_ro = []
-        
-        # Allowed prefixes for path security validation — prevent mounting arbitrary host paths
-        # Use work_dir as the allowed root; also add extra folder paths themselves since they
-        # come from trusted config and may be siblings of work_dir (not children)
-        allowed_prefixes = {os.path.realpath(self.work_dir)} if self.work_dir else set()
-        for fp in [*extra_rw, *extra_ro]:
-            rp = os.path.realpath(fp)
-            allowed_prefixes.add(rp)
-        
         # Mount extra RW work folders as /extra_rw_0, /extra_rw_1, etc.
         # NOTE: These mounts are added BEFORE the main work_dir mount so Docker processes
         # the more specific paths first, avoiding overlay filesystem stacking issues where
         # writes to subdirectories don't persist back to the host disk (Fix MountStacking).
         for folder_path in extra_rw:
-            abs_path = os.path.realpath(folder_path)  # resolves symlinks for security check
+            abs_path = os.path.realpath(folder_path)
             if not os.path.isdir(abs_path):
-                logger.warning("Extra RW mount path does not exist, skipping: %s", abs_path)
-                continue
-            # Security: verify path is within allowed directories (uses commonpath, not startswith)
-            if not self._is_path_allowed(abs_path, allowed_prefixes):
-                logger.warning("Extra RW mount path %s is outside allowed directories, skipping", abs_path)
                 continue
             mount_point = f'/extra_rw_{len(mounted_rw)}'
             docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}'])
-            mounted_rw.append({'host': abs_path, 'container': mount_point})
 
         # Mount extra RO work folders as /extra_ro_0, /extra_ro_1, etc. (read-only)
         for folder_path in extra_ro:
-            abs_path = os.path.realpath(folder_path)  # resolves symlinks for security check
+            abs_path = os.path.realpath(folder_path)
             if not os.path.isdir(abs_path):
-                logger.warning("Extra RO mount path does not exist, skipping: %s", abs_path)
-                continue
-            # Security: verify path is within allowed directories (uses commonpath, not startswith)
-            if not self._is_path_allowed(abs_path, allowed_prefixes):
-                logger.warning("Extra RO mount path %s is outside allowed directories, skipping", abs_path)
                 continue
             mount_point = f'/extra_ro_{len(mounted_ro)}'
             docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}:ro'])
-            mounted_ro.append({'host': abs_path, 'container': mount_point})
 
         # Mount main work directory AFTER extra mounts so specific subdirectory mounts take precedence.
-        # Docker processes volume mounts in order; mounting /workspace first then its children
-        # creates an overlay that can prevent writes from propagating to the host (Fix MountStacking).
         docker_run_cmd.extend([
             '-v', f'{os.path.abspath(self.work_dir)}:{self.container_work_dir}',
             '-w', self.container_work_dir,
         ])
-
-        # Create path mapping data (file is written AFTER container starts to avoid orphaned files)
-        path_mapping = self._build_path_mapping(kernel_id, mounted_rw, mounted_ro)
-        # Store file path for writing after container confirmation
-        path_mapping_file = os.path.join(self.work_dir, f'path_mapping_{kernel_id}.json')
 
         # Fix C2: Bind forwarded ports to 127.0.0.1 only (not all interfaces)
         for p in ports:
@@ -902,56 +1031,21 @@ class CodeInterpreter(BaseToolWithFileAccess):
             '--matplotlib=inline',
             '--quiet',
         ])
-        
-        # Fix D2: Remove any leftover container with the same name from a previous crash
-        container_name = f'code_interpreter_{kernel_id}'
-        subprocess.run(
-            ['docker', 'rm', '-f', container_name],
-            capture_output=True, text=True, timeout=10, encoding='utf-8', errors='replace'
-        )
-        
+
         # start Docker container
         result = subprocess.run(docker_run_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
         if result.returncode != 0:
             raise RuntimeError(f'Failed to start Docker container: {result.stderr}')
-        
+
         # Container started successfully — now write the path mapping file (avoids orphaned files on failure)
         with open(path_mapping_file, 'w') as f:
             json.dump(path_mapping, f, indent=2)
 
         # Update code_path_resolver with actual mounts so path resolution matches reality
         set_active_mappings(path_mapping['host_to_container'])
-        
+
         container_id = result.stdout.strip()
         logger.info(f"INFO: Docker container ID = {container_id}")
-
-        max_wait = 30
-        wait_interval = 0.5
-        elapsed = 0
-        while elapsed < max_wait:
-            check_result = subprocess.run(
-                ['docker', 'ps', '-q', '-f', f'id={container_id}'],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace'
-            )
-            if check_result.stdout.strip():
-                logger.info("Container is running")
-                break
-            time.sleep(wait_interval)
-            elapsed += wait_interval
-        else:
-            logs = subprocess.run(
-                ['docker', 'logs', container_id],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace'
-            )
-            raise RuntimeError(f'Container failed to start properly. Logs:\n{logs.stdout}\n{logs.stderr}')
-
-        time.sleep(2)
 
         # start local jupyter client
         from jupyter_client import BlockingKernelClient
@@ -983,7 +1077,183 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         # Initialize activity tracking for watchdog (include work_dir for cleanup)
         _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
-        
+
+        return kc, container_id
+
+    def _warm_restart_kernel(self, kernel_id: str):
+        """Reconnect to an existing Docker container and launch a new kernel inside it.
+
+        This is faster than _start_kernel because the container already exists — we just
+        need to start a fresh kernel process within it. Saves ~7s by avoiding docker rm + run.
+
+        Returns:
+            Tuple of (kernel_client, container_id)
+        """
+        host_connection_file = os.path.join(self.work_dir, f'kernel_connection_file_{kernel_id}_host.json')
+        container_connection_file = os.path.join(self.work_dir, f'kernel_connection_file_{kernel_id}_container.json')
+
+        # Read original ports from existing connection file BEFORE deleting it.
+        # The container has fixed port bindings (e.g., -p 127.0.0.1:5000:5000) that we must reuse.
+        # If we generate new random ports, the kernel will bind to them but Docker won't forward traffic.
+        original_ports = None
+        if os.path.exists(host_connection_file):
+            try:
+                with open(host_connection_file, 'r') as f:
+                    old_conn_data = json.load(f)
+                port_names = ['shell_port', 'iopub_port', 'stdin_port', 'hb_port', 'control_port']
+                original_ports = [old_conn_data.get(p) for p in port_names]
+                if None in original_ports:
+                    logger.warning(f"Warm restart: incomplete port data in connection file, falling back to full start")
+                    raise RuntimeError("Invalid connection file, cannot reuse ports")
+            except Exception as e:
+                logger.warning(f"Warm restart: failed to read old connection file ({e}), falling back to full start")
+                raise RuntimeError("Failed to read connection file, cannot reuse ports")
+
+        # Delete old connection files so we start fresh
+        for f in [host_connection_file, container_connection_file]:
+            if os.path.exists(f):
+                os.remove(f)
+
+        # prepare host connection file with original ports (or new ones if not available)
+        host_conn_data = {
+            "ip": "127.0.0.1",
+            "key": str(uuid.uuid4()),
+            "transport": "tcp",
+            "signature_scheme": "hmac-sha256",
+            "kernel_name": ""
+        }
+        port_names = ['shell_port', 'iopub_port', 'stdin_port', 'hb_port', 'control_port']
+        if original_ports:
+            ports = original_ports
+            logger.info(f"Warm restart: reusing original ports {ports}")
+        else:
+            ports = self._get_free_ports(5)
+            logger.info(f"Warm restart: no original ports found, using new ports {ports}")
+
+        port_config = dict(zip(port_names, ports))
+        host_conn_data.update(port_config)
+        with open(host_connection_file, 'w') as f:
+            json.dump(host_conn_data, f)
+
+        # prepare container connection file
+        container_conn_data = host_conn_data.copy()
+        container_conn_data["ip"] = "0.0.0.0"
+        with open(container_connection_file, 'w') as f:
+            json.dump(container_conn_data, f)
+
+        # Find the existing container (check stale record first, then by name)
+        container_name = f'code_interpreter_{kernel_id}'
+        stale_info = _STALE_CONTAINERS.get(kernel_id)
+        if isinstance(stale_info, dict):
+            stale_cid = stale_info['container_id']
+        else:
+            stale_cid = None  # backward compat with old plain-string format
+        if stale_cid and _check_container_healthy(stale_cid):
+            container_id = stale_cid
+            logger.info(f"Warm restart: Using healthy stale container {container_id}")
+        else:
+            # Check for stopped container by name — start it if found
+            result = subprocess.run(
+                ['docker', 'ps', '-aq', '--filter', f'name={container_name}', '--filter', 'status=exited'],
+                timeout=5, capture_output=True, text=True, encoding='utf-8', errors='replace'
+            )
+            stopped_cid = result.stdout.strip()
+            if stopped_cid:
+                # Start the stopped container
+                subprocess.run(
+                    ['docker', 'start', stopped_cid],
+                    timeout=10, capture_output=True, text=True, encoding='utf-8', errors='replace'
+                )
+                container_id = stopped_cid
+                logger.info(f"Warm restart: Started previously-stopped container {container_id}")
+            else:
+                # Also check for a running container by name
+                result = subprocess.run(
+                    ['docker', 'ps', '-aq', '--filter', f'name={container_name}', '--filter', 'status=running'],
+                    timeout=5, capture_output=True, text=True, encoding='utf-8', errors='replace'
+                )
+                running_cid = result.stdout.strip()
+                if running_cid:
+                    container_id = running_cid
+                    logger.info(f"Warm restart: Using already-running container {container_id}")
+                else:
+                    raise RuntimeError(
+                        f'Warm restart failed: no existing container found for kernel {kernel_id}. '
+                        f'Falling back to full start.'
+                    )
+
+        # Clean up stale record on successful warm restart
+        if kernel_id in _STALE_CONTAINERS:
+            del _STALE_CONTAINERS[kernel_id]
+
+        # Launch a new kernel process inside the existing container using docker exec.
+        # We need to forward ports so the host can connect to the new kernel.
+        # Since the container already has port bindings, we reuse them by writing
+        # connection files and executing the kernel with docker exec.
+        launch_script = os.path.join(self.work_dir, f'launch_kernel_{kernel_id}.py')
+        if not os.path.exists(launch_script):
+            os.makedirs(self.work_dir, exist_ok=True)
+            with open(launch_script, 'w') as fout:
+                fout.write(LAUNCH_KERNEL_PY)
+
+        exec_cmd = [
+            'docker', 'exec', '-i', container_id,
+            'python', f'{self.container_work_dir}/{os.path.basename(launch_script)}',
+            '--IPKernelApp.connection_file',
+            f'{self.container_work_dir}/{os.path.basename(container_connection_file)}',
+            '--KernelApp.allow_remote_access=False',
+            '--matplotlib=inline',
+            '--quiet',
+        ]
+
+        # Start kernel process in background inside container
+        subprocess.Popen(exec_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        time.sleep(2)
+
+        # Wait for container to be running
+        max_wait = 30
+        wait_interval = 0.5
+        elapsed = 0
+        while elapsed < max_wait:
+            check_result = subprocess.run(
+                ['docker', 'ps', '-q', '-f', f'id={container_id}'],
+                capture_output=True, text=True, encoding='utf-8', errors='replace'
+            )
+            if check_result.stdout.strip():
+                logger.info("Container is running")
+                break
+            time.sleep(wait_interval)
+            elapsed += wait_interval
+
+        # start local jupyter client
+        from jupyter_client import BlockingKernelClient
+
+        kc = BlockingKernelClient(connection_file=host_connection_file)
+        asyncio.set_event_loop_policy(AnyThreadEventLoopPolicy())
+        kc.load_connection_file()
+        kc.start_channels()
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                kc.wait_for_ready(timeout=10)
+                logger.info("Kernel is ready (warm restart)")
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Kernel not ready on warm restart (attempt {attempt + 1}/{max_retries}), retrying...")
+                    time.sleep(2)
+                else:
+                    logs = subprocess.run(
+                        ['docker', 'logs', container_id],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace'
+                    )
+                    raise RuntimeError(f'Kernel failed to warm restart: {e}\nContainer logs:\n{logs.stdout}\n{logs.stderr}')
+
+        # Initialize activity tracking for watchdog
+        _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
+
         return kc, container_id
 
     def _execute_code(self, kc, code: str, timeout: Optional[int] = None, kernel_id: Optional[str] = None) -> str:
