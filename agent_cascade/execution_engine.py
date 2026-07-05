@@ -2596,8 +2596,8 @@ class ExecutionEngine:
         FIX Mi3: Extracted helper to eliminate code duplication across three locations.
         Encapsulates the capture-nullify-release-log pattern for slot release.
         
-        Note: This is intentionally static and accesses logger from module scope.
-        Defensive check ensures robustness even if called without hasattr guards.
+        Thread-safe: acquires instance._state_lock before checking/clearing _slot_release
+        to prevent double-release with concurrent stop_session calls.
         
         Args:
             slot_holder: Object with _slot_release attribute (AgentInstance or similar)
@@ -2609,16 +2609,19 @@ class ExecutionEngine:
             return
         
         context_suffix = f" during {context}" if context else ""
-        if slot_holder._slot_release is not None:
-            release_callback = slot_holder._slot_release
-            slot_holder._slot_release = None  # Capture ref first, then nullify to prevent double-release
-            try:
-                release_callback()
-            except Exception as e:
-                logger.error(
-                    f"[SLOT_RELEASE_ERROR] Failed to release slot for {holder_name}{context_suffix}: {e}",
-                    exc_info=True
-                )
+        # Acquire state lock for atomic check-nullify-release
+        if hasattr(slot_holder, '_state_lock'):
+            with slot_holder._state_lock:
+                if slot_holder._slot_release is not None:
+                    release_callback = slot_holder._slot_release
+                    slot_holder._slot_release = None
+                    try:
+                        release_callback()
+                    except Exception as e:
+                        logger.error(
+                            f"[SLOT_RELEASE_ERROR] Failed to release slot for {holder_name}{context_suffix}: {e}",
+                            exc_info=True
+                        )
 
     def _transition_to_sleeping(self, instance: 'AgentInstance') -> None:
         """Transition an agent instance to SLEEPING state.
