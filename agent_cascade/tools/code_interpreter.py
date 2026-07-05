@@ -79,8 +79,10 @@ _DOCKER_CONTAINERS: Dict[str, str] = {}
 # Track last activity per kernel for watchdog (value is {'last_active': float, 'work_dir': str})
 _KERNEL_ACTIVITY: Dict[str, dict] = {}
 
-# Thread-safe lock for mutating shared kernel state (_KERNEL_CLIENTS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY)
+# Thread-safe lock + condition for mutating shared kernel state (_KERNEL_CLIENTS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY)
 _KERNEL_LOCK = threading.Lock()
+# Condition variable built on the same lock — allows waiting threads to block until a sentinel is replaced with a real client
+_KERNEL_READY = threading.Condition(_KERNEL_LOCK)
 
 # Track kernels killed by the watchdog so that in-flight calls can detect it and return a proper error
 _WATCHDOG_KILLED: set = set()
@@ -132,24 +134,36 @@ def _kill_kernels_and_containers(_sig_num=None, _frame=None):
         _WATCHDOG_TERMINATE.set()
         _WATCHDOG_THREAD.join(timeout=5)
 
+    # Collect all kernels and containers under lock (minimize hold time)
+    kernels_to_kill = []
+    container_pairs = []
     with _KERNEL_LOCK:
-        for v in _KERNEL_CLIENTS.values():
-            v.shutdown()
+        for kernel_id, kc in list(_KERNEL_CLIENTS.items()):
+            if kc is not None:
+                kernels_to_kill.append((kernel_id, kc))
         for k in list(_KERNEL_CLIENTS.keys()):
             del _KERNEL_CLIENTS[k]
 
-        for container_id in _DOCKER_CONTAINERS.values():
-            try:
-                subprocess.run(['docker', 'stop', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
-                subprocess.run(['docker', 'rm', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
-            except Exception:
-                print(f"WARNING: Failed to stop and remove the Docker container: {container_id}")
-        for k in list(_DOCKER_CONTAINERS.keys()):
-            del _DOCKER_CONTAINERS[k]
-
+        for k, container_id in list(_DOCKER_CONTAINERS.items()):
+            container_pairs.append((k, container_id))
         _KERNEL_ACTIVITY.clear()
         _WATCHDOG_KILLED.clear()
         _STALE_CONTAINERS.clear()
+
+    # Kill kernel clients outside lock (shutdown can block)
+    for kernel_id, kc in kernels_to_kill:
+        try:
+            kc.shutdown()
+        except Exception:
+            pass
+
+    # Kill containers outside lock (docker ops can be slow)
+    for k, container_id in container_pairs:
+        try:
+            subprocess.run(['docker', 'stop', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
+            subprocess.run(['docker', 'rm', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
+        except Exception:
+            print(f"WARNING: Failed to stop and remove the Docker container: {container_id}")
 
 
 # Make sure all containers are terminated even if killed abnormally:
@@ -280,10 +294,12 @@ def _cleanup_stale_containers(now: float):
             logger.debug(f"Failed to remove expired stale container {cid}: {e}")
 
     # Batch-delete from dict under a single lock acquisition
+    # (re-check: if another thread reused this container, it's no longer stale)
     if removed_ids:
         with _KERNEL_LOCK:
             for kernel_id in removed_ids:
-                _STALE_CONTAINERS.pop(kernel_id, None)
+                if kernel_id in _STALE_CONTAINERS:
+                    del _STALE_CONTAINERS[kernel_id]
 
 
 _WATCHDOG_THREAD = threading.Thread(target=_kernel_watchdog, daemon=True, name='code-interpreter-watchdog')
@@ -379,24 +395,39 @@ class CodeInterpreter(BaseToolWithFileAccess):
             exec_timeout = self.cfg.get('execution_timeout', CODE_EXECUTION_TIMEOUT)
 
         kernel_id: str = f'{self.instance_id}_{os.getpid()}'
-        
-        # Phase 1: Acquire lock, check state, and determine kernel strategy
-        with _KERNEL_LOCK:
+
+        # Phase 1: Acquire lock, check state, and reserve kernel slot atomically.
+        # Use a condition variable so concurrent callers wait for the starter to finish
+        # instead of all racing to start duplicate kernels (TOCTOU fix).
+        with _KERNEL_READY:
             # Check if the kernel was killed by the watchdog — clean up and start fresh (thread-safe)
-            if kernel_id in _WATCHDOG_KILLED:
-                logger.warning(f"Kernel {kernel_id} was killed by watchdog; starting fresh.")
-                _WATCHDOG_KILLED.discard(kernel_id)
-            
-            # Determine whether this is a new kernel or an existing one
-            needs_init = False
-            if kernel_id in _KERNEL_CLIENTS:
-                kc = _KERNEL_CLIENTS[kernel_id]
-                container_id = _DOCKER_CONTAINERS.get(kernel_id)
-            else:
+            while True:
+                if kernel_id in _WATCHDOG_KILLED:
+                    logger.warning(f"Kernel {kernel_id} was killed by watchdog; starting fresh.")
+                    _WATCHDOG_KILLED.discard(kernel_id)
+
+                # Check for existing ready kernel
+                if kernel_id in _KERNEL_CLIENTS and _KERNEL_CLIENTS[kernel_id] is not None:
+                    kc = _KERNEL_CLIENTS[kernel_id]
+                    container_id = _DOCKER_CONTAINERS.get(kernel_id)
+                    break
+
+                # If sentinel (None) exists, another thread is starting it — wait for completion
+                if kernel_id in _KERNEL_CLIENTS and _KERNEL_CLIENTS[kernel_id] is None:
+                    try:
+                        _KERNEL_READY.wait(timeout=30)  # Wait up to 30s for starter to finish
+                    except RuntimeError:
+                        pass
+                    continue
+
+                # No entry at all — reserve the slot and become the starter
+                _KERNEL_CLIENTS[kernel_id] = None  # sentinel: kernel is being started
                 kc = None
                 container_id = None
+                break
 
-        # Phase 2: Start kernel if needed (outside lock to avoid deadlock with internal lock acquisition)
+        # Phase 2: Start kernel if needed (outside lock to avoid holding during docker ops)
+        needs_init = False
         if kc is None:
             # Try warm restart: check if a container with the same name is already running.
             warm_restart_ok = False
@@ -422,21 +453,36 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     warm_restart_ok = True
 
             needs_init = True
-            if warm_restart_ok:
-                try:
+            try:
+                if warm_restart_ok:
                     kc, container_id = self._warm_restart_kernel(kernel_id, found_cid)
-                except RuntimeError:
-                    logger.warning(f"Warm restart failed for {kernel_id}, falling back to full start")
+                else:
                     kc, container_id = self._start_kernel(kernel_id)
-            else:
-                kc, container_id = self._start_kernel(kernel_id)
+            except Exception as e:
+                # Clean up reservation on failure so next call starts fresh; notify waiters
+                with _KERNEL_READY:
+                    _KERNEL_CLIENTS.pop(kernel_id, None)
+                    _KERNEL_READY.notify_all()
+                
+                # Cleanup any container that might have been created during startup
+                try:
+                    if 'container_id' in locals() and container_id:
+                        subprocess.run(['docker', 'stop', container_id], timeout=10,
+                                        capture_output=True, encoding='utf-8', errors='replace')
+                        subprocess.run(['docker', 'rm', '-f', container_id], timeout=10,
+                                        capture_output=True, encoding='utf-8', errors='replace')
+                except Exception:
+                    pass  # Don't mask original exception
+                
+                raise
 
-            # Register kernel state (lock held inside _start_kernel/_warm_restart for _KERNEL_ACTIVITY)
-            with _KERNEL_LOCK:
+            # Register kernel state and notify any waiting threads
+            with _KERNEL_READY:
                 _KERNEL_CLIENTS[kernel_id] = kc
                 _DOCKER_CONTAINERS[kernel_id] = container_id
                 if kernel_id in _STALE_CONTAINERS:
                     del _STALE_CONTAINERS[kernel_id]
+                _KERNEL_READY.notify_all()
 
         if needs_init:
             # First time — run initialization code (defines _M6CountdownTimer etc.)
@@ -781,32 +827,42 @@ class CodeInterpreter(BaseToolWithFileAccess):
     def __del__(self):
         # Recycle the jupyter subprocess and Docker container:
         k: str = f'{self.instance_id}_{os.getpid()}'
+
+        # Collect state under lock (minimize hold time)
+        kc_list = []
+        container_ids = []
+        stale_cids = []
         with _KERNEL_LOCK:
             if k in _KERNEL_CLIENTS:
-                try:
-                    _KERNEL_CLIENTS[k].shutdown()
-                except Exception:
-                    pass
+                kc_list.append(_KERNEL_CLIENTS[k])
                 del _KERNEL_CLIENTS[k]
             if k in _DOCKER_CONTAINERS:
-                container_id = _DOCKER_CONTAINERS[k]
-                # Force-remove container (handles both running and stopped states)
-                try:
-                    subprocess.run(['docker', 'rm', '-f', container_id], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
-                except Exception:
-                    pass
-                finally:
-                    del _DOCKER_CONTAINERS[k]
-
-            # Also clean up stale container record if it exists
+                container_ids.append(_DOCKER_CONTAINERS[k])
+                del _DOCKER_CONTAINERS[k]
             if k in _STALE_CONTAINERS:
-                stale_cid = _STALE_CONTAINERS[k]['container_id']
-                try:
-                    subprocess.run(['docker', 'rm', '-f', stale_cid], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
-                except Exception:
-                    pass
-                finally:
-                    del _STALE_CONTAINERS[k]
+                stale_cids.append(_STALE_CONTAINERS[k]['container_id'])
+                del _STALE_CONTAINERS[k]
+
+        # Clean up kernel clients outside lock (shutdown can block)
+        for kc in kc_list:
+            try:
+                kc.shutdown()
+            except Exception:
+                pass
+
+        # Force-remove containers outside lock (docker ops can be slow)
+        for cid in container_ids:
+            try:
+                subprocess.run(['docker', 'rm', '-f', cid], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
+            except Exception:
+                pass
+
+        # Force-remove stale containers outside lock
+        for cid in stale_cids:
+            try:
+                subprocess.run(['docker', 'rm', '-f', cid], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
+            except Exception:
+                pass
 
         # Clean up path mapping file for this kernel
         mapping_file = os.path.join(self.work_dir, f'path_mapping_{k}.json')
