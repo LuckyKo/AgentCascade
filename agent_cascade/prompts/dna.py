@@ -41,7 +41,7 @@ AVAILABLE_TOOLS: List[str] = [
 
     # Information & utilities
     'system_info',      # System info, workspace paths, session stats
-    'read_logs',        # Read agent JSONL log files
+    'read_logs',        # Read JSON/JSONL log files (arrays, objects, or mixed/malformed content)
     'code_map',         # Quick file structure overview
     'calculate',        # Evaluate mathematical expressions
     'syntax_check',     # Check file syntax without execution
@@ -309,12 +309,14 @@ TOOL_METADATA = {
     },
     'read_logs': {
         'description': (
-            'Read an agent JSONL log file. Large message contents are truncated in the middle '
-            'to prevent context overflow while retaining the beginning and end of the message.'
+            'Read a JSON/JSONL log file (agent logs, JSON arrays, single objects, or files with mixed/malformed lines). '
+            'Large message contents are truncated in the middle to prevent context overflow while '
+            'retaining the beginning and end of each message. Handles reasoning_content, function_call arguments, '
+            'and nested extra fields.'
         ),
         'parameters': {
-            'log_file': 'The path to the log file, absolute or relative to workspace root (e.g., "logs/orchestrator_main.jsonl").',
-            'max_chars_per_message': 'Maximum characters to keep for each message content. Defaults to 1000.',
+            'log_file': 'The path to the log file, absolute or relative to workspace root (e.g., "logs/orchestrator_main.jsonl"). Works with JSON arrays, single objects, and JSONL files.',
+            'max_chars_per_message': 'Maximum characters to keep for each string value in messages. Defaults to 1000.',
             'last_n_messages': 'Only read the last N messages. Can be used instead of start_index/nr_of_entries.',
             'start_index': 'The starting index of the log entries to read (0-indexed).',
             'nr_of_entries': 'The number of entries to read starting from start_index. Defaults to 20.'
