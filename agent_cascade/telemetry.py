@@ -8,15 +8,28 @@ Each event is tagged with a config fingerprint so different framework configurat
 (prompts, sampling params, model selection) can be compared.
 """
 
-import copy
+import logging
 import hashlib
 import json
-import os
 import time
 import datetime
 from pathlib import Path
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Union
+from typing import Dict, List, Optional
+
+_logger = logging.getLogger('agent_cascade.telemetry')
+
+# Token estimation: ~4 chars per token (rule of thumb for LLM tokenization)
+TOKEN_ESTIMATE_CHAR_DIVISOR = 4
+
+# Max characters for system prompt before hashing in config fingerprint
+SYSTEM_PROMPT_HASH_MAX_CHARS = 2000
+
+# Default number of recent events to return in get_recent_events()
+DEFAULT_RECENT_EVENT_COUNT = 50
+
+# Max events to keep in memory before trimming
+MAX_EVENTS_IN_MEMORY = 5000
 
 
 class TelemetryCollector:
@@ -32,6 +45,7 @@ class TelemetryCollector:
 
         # In-memory event buffer for real-time aggregation
         self.events: List[Dict] = []
+        self.max_events = MAX_EVENTS_IN_MEMORY
 
         # Active turn tracking (keyed by instance_name)
         self._active_turns: Dict[str, Dict] = {}
@@ -98,7 +112,7 @@ class TelemetryCollector:
         fingerprint_data = {
             "model": model,
             "params": params,
-            "system_prompt_hash": hashlib.md5(system_prompt[:2000].encode()).hexdigest()[:8],
+            "system_prompt_hash": hashlib.md5(system_prompt[:SYSTEM_PROMPT_HASH_MAX_CHARS].encode()).hexdigest()[:8],
             "tools": sorted(tools or []),
         }
 
@@ -181,7 +195,6 @@ class TelemetryCollector:
             "timestamp": _now_iso(),
         }
         self._write_event(event)
-        self.events.append(event)
 
         # Update session stats
         self._session_stats["total_turns"] += 1
@@ -254,7 +267,6 @@ class TelemetryCollector:
             "timestamp": _now_iso(),
         }
         self._write_event(event)
-        self.events.append(event)
 
         # Update session stats
         self._session_stats["total_llm_calls"] += 1
@@ -310,7 +322,6 @@ class TelemetryCollector:
             event["error"] = error[:200]
 
         self._write_event(event)
-        self.events.append(event)
 
         # Update session stats
         self._session_stats["total_tool_calls"] += 1
@@ -348,7 +359,6 @@ class TelemetryCollector:
             "timestamp": _now_iso(),
         }
         self._write_event(event)
-        self.events.append(event)
         self._session_stats["agent_instance_calls"] += 1
 
     def record_loop_detected(self, instance_name: str, reason: str, auto_rolled_back: bool = False, pop_count: int = 0):
@@ -362,7 +372,6 @@ class TelemetryCollector:
             "timestamp": _now_iso(),
         }
         self._write_event(event)
-        self.events.append(event)
         self._session_stats["total_loops_detected"] += 1
 
         turn = self._active_turns.get(instance_name)
@@ -389,7 +398,6 @@ class TelemetryCollector:
             "timestamp": _now_iso(),
         }
         self._write_event(event)
-        self.events.append(event)
         self._session_stats["total_compressions"] += 1
 
     # ── Aggregation & Reporting ───────────────────────────────────────────
@@ -473,7 +481,7 @@ class TelemetryCollector:
 
         return result
 
-    def get_recent_events(self, count: int = 50) -> List[Dict]:
+    def get_recent_events(self, count: int = DEFAULT_RECENT_EVENT_COUNT) -> List[Dict]:
         """Get the most recent N events."""
         return self.events[-count:]
 
@@ -484,12 +492,17 @@ class TelemetryCollector:
     # ── Persistence ───────────────────────────────────────────────────────
 
     def _write_event(self, event: Dict):
-        """Append an event to the JSONL log file."""
+        """Append an event to the JSONL log file and in-memory buffer."""
+        self.events.append(event)
+        # Trim old events if over cap to prevent memory bloat
+        if len(self.events) > self.max_events:
+            self.events = self.events[-self.max_events:]
+
         try:
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
         except Exception as e:
-            print(f"[TELEMETRY] Failed to write event: {e}")
+            _logger.debug(f"Failed to write telemetry event: {e}")
 
 
 def _now_iso() -> str:

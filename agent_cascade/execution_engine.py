@@ -22,6 +22,9 @@ import time
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 from enum import Enum, auto
 
+# Token estimation: ~4 chars per token (rule of thumb for LLM tokenization)
+TOKEN_ESTIMATE_CHAR_DIVISOR = 4
+
 from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
 )
@@ -442,6 +445,12 @@ class ExecutionEngine:
         self.tool_dispatcher.set_engine(self)
         # stream_publisher doesn't need engine reference (per refactor plan line 2190)
 
+    # ── Telemetry guard helper (fixes 12x duplication) ────────────────────
+
+    def _telemetry(self):
+        """Return the telemetry collector if available, else None."""
+        return getattr(self.pool, 'telemetry', None)
+
     # ── Slot acquisition helper (fixes 3x duplication) ─────────────────────
 
     def _acquire_slot_with_logging(self, instance: AgentInstance, context: str = "initial") -> None:
@@ -678,6 +687,36 @@ class ExecutionEngine:
         try:
             # ── Phase 1: Setup ─────────────────────────────────────────────
             logger.debug(f"[TURN_START] Calling _setup_turn for {instance.instance_name}")
+
+            # Telemetry: record turn start (non-blocking)
+            if (tel := self._telemetry()) is not None:
+                try:
+                    template = self.pool.get_template(instance.agent_class)
+                    model = getattr(getattr(template, 'llm', None), 'model', '') or ''
+                    cfg = getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {}
+                    sys_prompt = ""
+                    if template:
+                        try:
+                            m0_msgs = instance.conversation[:1]
+                            for m in m0_msgs:
+                                c = msg_field(m, 'content', '')
+                                if isinstance(c, str):
+                                    sys_prompt = c
+                                    break
+                        except Exception:
+                            pass
+                    tools_list = None
+                    if template and hasattr(template, 'function_map'):
+                        tools_list = sorted(template.function_map.keys())
+                    fp = tel.fingerprint_config(
+                        model=model, generate_cfg=cfg, system_prompt=sys_prompt, tools=tools_list,
+                    )
+                    desc = tel.describe_config(model=model, generate_cfg=cfg, tools=tools_list)
+                    tel.record_turn_start(instance.instance_name,
+                                         config_fingerprint=fp, config_description=desc)
+                except Exception:
+                    pass
+
             messages, llm_messages, response = self._setup_turn(instance)
             logger.debug(f"[TURN_DONE] Got messages={len(messages)}, llm_messages={len(llm_messages)}")
             if not messages:
@@ -803,6 +842,14 @@ class ExecutionEngine:
                 )
                 self._append_and_log(instance, msg)
                 response.append(msg)  # Stream turn limit to UI
+
+            # Telemetry: record turn end (non-blocking)
+            inst_name_turn = instance.instance_name
+            if (tel := self._telemetry()) is not None:
+                try:
+                    tel.record_turn_end(inst_name_turn)
+                except Exception:
+                    pass
 
         except Exception as e:
             # C4 fix: Catch unhandled exceptions — log and yield error state
@@ -1261,9 +1308,9 @@ class ExecutionEngine:
                     )
 
                 # Telemetry: record loop detection (non-blocking)
-                if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                if (tel := self._telemetry()) is not None:
                     try:
-                        self.pool.telemetry.record_loop_detected(
+                        tel.record_loop_detected(
                             inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count,
                         )
                     except Exception:
@@ -1567,15 +1614,15 @@ class ExecutionEngine:
         error_already_yielded = False
         
         # Estimate input tokens for telemetry (rough char-based estimate)
-        _input_tokens_est = sum(len(m.content or '') for m in llm_messages) // 4
+        _input_tokens_est = sum(len(m.content or '') for m in llm_messages) // TOKEN_ESTIMATE_CHAR_DIVISOR
         
         while retry_count <= MAX_RETRIES:
             try:
                 # Telemetry: record LLM call start (non-blocking)
-                if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                if (tel := self._telemetry()) is not None:
                     try:
                         model = getattr(template.llm, 'model', '') or ''
-                        self.pool.telemetry.record_llm_call_start(
+                        tel.record_llm_call_start(
                             inst_name, input_tokens_est=_input_tokens_est, model=model,
                         )
                     except Exception:
@@ -1590,9 +1637,9 @@ class ExecutionEngine:
                     last_output = output
                     
                     # Telemetry: record Time To First Token (TTFT) on the first streaming chunk
-                    if not _first_token_received and hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                    if not _first_token_received and (tel := self._telemetry()) is not None:
                         try:
-                            self.pool.telemetry.record_llm_first_token(inst_name)
+                            tel.record_llm_first_token(inst_name)
                         except Exception:
                             pass
                         _first_token_received = True
@@ -1673,14 +1720,14 @@ class ExecutionEngine:
                 yield None
         
         # Telemetry: record LLM call end with output token estimate (non-blocking)
-        if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+        if (tel := self._telemetry()) is not None:
             try:
                 _output_tokens_est = 0
                 if last_output:
                     for m in last_output:
                         c = getattr(m, 'content', '') or ''
-                        _output_tokens_est += len(c) // 4
-                self.pool.telemetry.record_llm_call_end(inst_name, output_tokens_est=_output_tokens_est)
+                        _output_tokens_est += len(c) // TOKEN_ESTIMATE_CHAR_DIVISOR
+                tel.record_llm_call_end(inst_name, output_tokens_est=_output_tokens_est)
             except Exception:
                 pass
 
@@ -2087,10 +2134,10 @@ class ExecutionEngine:
                 function_id = extra_data.get('function_id')
                 
                 # Telemetry: record tool call start and end for auto-denied tools
-                if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                if (tel := self._telemetry()) is not None:
                     try:
-                        self.pool.telemetry.record_tool_call_start(inst_name, tool_name)
-                        self.pool.telemetry.record_tool_call_end(
+                        tel.record_tool_call_start(inst_name, tool_name)
+                        tel.record_tool_call_end(
                             inst_name, tool_name,
                             success=False,
                             result_chars=len(tool_result),
@@ -2126,9 +2173,9 @@ class ExecutionEngine:
             _tool_error = ""
 
             # Telemetry: record tool call start (non-blocking)
-            if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+            if (tel := self._telemetry()) is not None:
                 try:
-                    self.pool.telemetry.record_tool_call_start(inst_name, tool_name)
+                    tel.record_tool_call_start(inst_name, tool_name)
                 except Exception:
                     pass
 
@@ -2184,9 +2231,9 @@ class ExecutionEngine:
 
             finally:
                 # Telemetry: record tool call end (non-blocking, always called)
-                if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                if (tel := self._telemetry()) is not None:
                     try:
-                        self.pool.telemetry.record_tool_call_end(
+                        tel.record_tool_call_end(
                             inst_name, tool_name,
                             success=_tool_success,
                             result_chars=len(tool_result) if isinstance(tool_result, str) else 0,
@@ -2208,7 +2255,7 @@ class ExecutionEngine:
                 # Clear thread-local instance name after draining to prevent stale references across concurrent calls
                 clear_current_instance_name()
 
-            # Track compress_context execution
+            # Track compress_context execution and record telemetry
             if tool_name == 'compress_context':
                 inst = self.pool.get_instance(inst_name)
                 if inst:
@@ -2217,6 +2264,13 @@ class ExecutionEngine:
                 conv = self.pool.get_conversation(inst_name)
                 if conv and not validate_message_pool(conv, inst_name):
                     logger.error(f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
+
+                # Telemetry: record compression event (non-blocking)
+                if (tel := self._telemetry()) is not None:
+                    try:
+                        tel.record_compression(inst_name, fraction=0.5)
+                    except Exception:
+                        pass
 
             # Build function result message — include function_id and tool_success per OpenAI spec
             # function_id was extracted BEFORE _execute_tool call above
@@ -2308,10 +2362,10 @@ class ExecutionEngine:
                         fn_content = f"Tool execution skipped: instance {inst_name} was halted/stopped"
                     
                     # Telemetry: record tool call start and end (matching primary loop pattern)
-                    if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                    if (tel := self._telemetry()) is not None:
                         try:
-                            self.pool.telemetry.record_tool_call_start(inst_name, tool_name)
-                            self.pool.telemetry.record_tool_call_end(
+                            tel.record_tool_call_start(inst_name, tool_name)
+                            tel.record_tool_call_end(
                                 inst_name, tool_name,
                                 success=False,
                                 result_chars=len(fn_content),
@@ -3090,9 +3144,9 @@ class ExecutionEngine:
 
             # Telemetry: record successful agent instance call (non-blocking)
             _call_latency_ms = (time.perf_counter() - _call_start) * 1000
-            if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+            if (tel := self._telemetry()) is not None:
                 try:
-                    self.pool.telemetry.record_agent_instance_call(
+                    tel.record_agent_instance_call(
                         instance_name, agent_class, caller, latency_ms=_call_latency_ms,
                     )
                 except Exception:
@@ -3289,7 +3343,7 @@ class ExecutionEngine:
                 len(str(m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')))
                 for m in messages if not isinstance(m, list)
             )
-            return max(total_chars // 4, 100)
+            return max(total_chars // TOKEN_ESTIMATE_CHAR_DIVISOR, 100)
 
     # ── _detect_loop removed — now uses canonical detect_loop from loop_detection.py ──
 

@@ -57,7 +57,7 @@ def _get_cached_client(base_url: str, api_key: str) -> openai.OpenAI:
             # Move to end for LRU ordering (most recently used last)
             client = _CLIENT_CACHE.pop(key)
             _CLIENT_CACHE[key] = client
-            logger.debug(f"[CACHE] HIT key={key}")
+            # logger.debug(f"[CACHE] HIT key={key}")
             return client
 
         # Evict oldest entries if cache is full
@@ -370,7 +370,7 @@ class TextChatAtOAI(BaseFnCallModel):
                         continue
                     chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
                     if _first_chunk:
-                        logger.debug(f"[TOOL_RECOVERY] _chat_stream FIRST CHUNK RECEIVED model={request_model}")
+                        # logger.debug(f"[TOOL_RECOVERY] _chat_stream FIRST CHUNK RECEIVED model={request_model}")
                         _first_chunk = False
                     # Update local model info if returned by the server
                     if hasattr(chunk, 'model') and chunk.model:

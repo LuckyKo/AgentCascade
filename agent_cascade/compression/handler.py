@@ -451,6 +451,13 @@ class CompressionHandler:
             if result.success:
                 # Rebuild working set from compressed pool state (includes token cache invalidation)
                 self.engine._rebuild_working_set(messages, llm_messages, inst_name)
+
+                # Telemetry: record forced compression event (non-blocking)
+                if (tel := self.engine._telemetry()) is not None:
+                    try:
+                        tel.record_compression(inst_name, fraction=0.5)
+                    except Exception:
+                        pass
                 
                 # Use summary_text directly from CompressResult (P2 fix — no fragile tag parsing)
                 instance.compression_summary = result.summary_text
@@ -547,6 +554,13 @@ class CompressionHandler:
 
         if result.success:
             _invalidate_token_cache(instance)  # Invalidate cache before rebuilding working set (Fix Finding #3)
+
+            # Telemetry: record compression event from tool handler path (non-blocking)
+            if (tel := self.engine._telemetry()) is not None:
+                try:
+                    tel.record_compression(target_agent_name, fraction=fraction)
+                except Exception:
+                    pass
 
             # Get current messages for rebuild and validation
             conv = self.pool.get_conversation(target_agent_name)
@@ -808,6 +822,13 @@ class CompressionHandler:
             conv = self.pool.get_conversation(inst_name)
 
             self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress command", instance)
+
+            # Telemetry: record /compress command compression event (non-blocking)
+            if (tel := self.engine._telemetry()) is not None:
+                try:
+                    tel.record_compression(inst_name, fraction=fraction)
+                except Exception:
+                    pass
 
             working_set_rebuilt = False
             if conv and not validate_message_pool(conv, inst_name):
