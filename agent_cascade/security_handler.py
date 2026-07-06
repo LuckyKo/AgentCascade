@@ -315,6 +315,9 @@ class SecurityAdvisorHandler:
             # Acquire concurrency semaphore (prevents unlimited parallelism)
             self.app_state.security_check_semaphore.acquire()
             try:
+                # Telemetry: track Security agent call latency (non-blocking)
+                _call_start = time.perf_counter()
+
                 # ── Engine execution loop with streaming ───────────────────
                 _last_sec_send = 0.0
                 _sec_tick_num = 0
@@ -365,6 +368,16 @@ class SecurityAdvisorHandler:
                 logger.error(f"Security agent execution error: {e}")
                 raise
             finally:
+                # Telemetry: record Security agent instance call (non-blocking, always fires even on timeout/error)
+                _call_latency_ms = (time.perf_counter() - _call_start) * 1000
+                if (tel := engine._telemetry()) is not None:
+                    try:
+                        tel.record_agent_instance_call(
+                            sec_state_key, "Security", caller_name_sec, latency_ms=_call_latency_ms,
+                        )
+                    except Exception:
+                        pass
+
                 # Release concurrency semaphore for Security checks
                 self.app_state.security_check_semaphore.release()
                 sec_warning_timer.cancel()

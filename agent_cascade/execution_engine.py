@@ -1084,7 +1084,7 @@ class ExecutionEngine:
         instance._last_config_version = self.pool._config_version
         
         response: List[Message] = []
-        logger.info(f"[SETUP_TURN] messages={len(conv)}, llm_messages={len(llm_messages)}, roles={[m.get('role') if isinstance(m, dict) else getattr(m, 'role', '?') for m in llm_messages]}")
+        # logger.info(f"[SETUP_TURN] messages={len(conv)}, llm_messages={len(llm_messages)}, roles={[m.get('role') if isinstance(m, dict) else getattr(m, 'role', '?') for m in llm_messages]}")
         return conv, llm_messages, response
 
     def _check_stop_conditions(self, instance: AgentInstance) -> bool:
@@ -3142,7 +3142,8 @@ class ExecutionEngine:
             # ── Push final stream_update after sub-agent completes ──
             self.stream_publisher.push_final_state(inst, caller)
 
-            # Telemetry: record successful agent instance call (non-blocking)
+        finally:
+            # Telemetry: record agent instance call (non-blocking, fires in finally so failed delegations are counted too)
             _call_latency_ms = (time.perf_counter() - _call_start) * 1000
             if (tel := self._telemetry()) is not None:
                 try:
@@ -3152,7 +3153,6 @@ class ExecutionEngine:
                 except Exception:
                     pass
 
-        finally:
             # Always clean up active stack — even on halt or error
             with self.pool._execution._state_lock:
                 for i, (name, _depth) in enumerate(self.pool._execution.active_stack):

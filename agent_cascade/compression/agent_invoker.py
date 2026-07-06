@@ -255,6 +255,9 @@ def invoke_compression_agent(
         max_poll_time = 300  # 5-minute timeout for large compression tasks
         
         try:
+            # Telemetry: track Compressor agent call latency (non-blocking)
+            _call_start = _time.perf_counter()
+
             # ── SLOT BYPASS FOR COMPRESSION ──
             # When forced compression triggers during an agent's turn, the Compressor runs 
             # on the SAME thread as the caller. The caller holds the shared sequential slot.
@@ -320,6 +323,16 @@ def invoke_compression_agent(
         except Exception as e:
             logger.error(f"Compression agent execution error: {e}")
             raise
+        finally:
+            # Telemetry: record Compressor agent instance call (non-blocking, always fires even on timeout/error)
+            _call_latency_ms = (_time.perf_counter() - _call_start) * 1000
+            if (tel := engine._telemetry()) is not None:
+                try:
+                    tel.record_agent_instance_call(
+                        comp_state_key, "Compressor", caller_name, latency_ms=_call_latency_ms,
+                    )
+                except Exception:
+                    pass
 
         # 2. Extract the summary from the last assistant message
         if final_msgs:
