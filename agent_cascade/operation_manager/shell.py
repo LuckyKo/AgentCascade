@@ -140,8 +140,17 @@ class ShellMixin:
 
             if os.name == 'nt':
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore
+                # Prepend chcp 65001 to force CMD into UTF-8 code page mode.
+                # Redirect both stdout and stderr from chcp to keep output clean.
+                command = f'chcp 65001 > nul 2>&1 & {command}'
             else:
                 creationflags = 0
+
+            # Set PYTHONIOENCODING to ensure Python child processes output UTF-8
+            # instead of defaulting to the system code page (e.g., CP1252 on English Windows).
+            env = os.environ.copy() if os.name == 'nt' else None
+            if env is not None:
+                env['PYTHONIOENCODING'] = 'utf-8'
 
             proc = subprocess.Popen(
                 command,
@@ -154,6 +163,7 @@ class ShellMixin:
                 errors='replace',
                 creationflags=creationflags,
                 start_new_session=True,
+                env=env,
             )
 
             # Use threaded pipe reading to prevent output loss on timeout/hang.
@@ -196,7 +206,7 @@ class ShellMixin:
                         subprocess.run(
                             ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
                             capture_output=True, timeout=10,
-                            encoding='utf-8',
+                            encoding='utf-8', errors='replace',
                         )
                     except Exception as e:
                         logger.warning(f"taskkill failed for PID {proc.pid}: {e}, falling back to proc.kill()")
@@ -210,7 +220,7 @@ class ShellMixin:
                         subprocess.run(
                             ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
                             capture_output=True, timeout=10,
-                            encoding='utf-8',
+                            encoding='utf-8', errors='replace',
                         )
                     except Exception as e:
                         logger.debug(f"Second-pass taskkill failed (non-critical): {e}")
@@ -251,7 +261,7 @@ class ShellMixin:
                                 subprocess.run(
                                     ['taskkill', '/F', '/PID', str(dpid)],
                                     capture_output=True, timeout=5,
-                                    encoding='utf-8',
+                                    encoding='utf-8', errors='replace',
                                 )
                             except Exception as e:
                                 logger.debug(f"WMIC child kill failed (non-critical): {e}")
