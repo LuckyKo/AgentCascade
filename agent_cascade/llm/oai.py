@@ -138,9 +138,6 @@ class TextChatAtOAI(BaseFnCallModel):
                 api_kwargs['api_key'] = api_key
 
             def _chat_complete_create(*args, **kwargs):
-                import time as _time
-                t_start = _time.perf_counter()
-
                 # OpenAI API v1 does not allow the following args, must pass by extra_body
                 extra_params = ['top_k', 'repetition_penalty', 'repeat_penalty', 'repeatPenalty', 'min_p']
                 if any((k in kwargs) for k in extra_params):
@@ -163,16 +160,7 @@ class TextChatAtOAI(BaseFnCallModel):
                     api_key=local_api_kwargs.get('api_key'),
                 )
 
-                # Lightweight pool probe
-                pool = client._client._transport._pool
-                idle_conns = sum(1 for c in pool._connections if getattr(c, 'is_idle', lambda: True)())
-                logger.debug(f"[POOL] conns={len(pool._connections)}, idle={idle_conns}")
-
-                response = client.chat.completions.create(*args, **kwargs)
-                t_end = _time.perf_counter()
-                logger.debug(f"[POST] {(t_end - t_start)*1000:.0f}ms")
-
-                return response
+                return client.chat.completions.create(*args, **kwargs)
 
             def _complete_create(*args, **kwargs):
                 # OpenAI API v1 does not allow the following args, must pass by extra_body
@@ -345,9 +333,9 @@ class TextChatAtOAI(BaseFnCallModel):
         
         response = None
         try:
-            logger.debug(f"[TOOL_RECOVERY] _chat_stream _chat_complete_create START model={request_model}")
+            #logger.debug(f"[TOOL_RECOVERY] _chat_stream _chat_complete_create START model={request_model}")
             response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
-            logger.debug(f"[TOOL_RECOVERY] _chat_stream _chat_complete_create END (got response iterator)")
+            #logger.debug(f"[TOOL_RECOVERY] _chat_stream _chat_complete_create END (got response iterator)")
 
             if delta_stream:
                 # Use _iter_events() to fully drain SSE stream so connection is returned to pool
@@ -472,14 +460,6 @@ class TextChatAtOAI(BaseFnCallModel):
             # Close response to return connection to the httpx pool for reuse
             if response is not None:
                 response.close()
-                # Check pool state after close
-                try:
-                    client_check = _get_cached_client(self.api_base, self.api_key)
-                    pool = client_check._client._transport._pool
-                    idle_conns = sum(1 for c in pool._connections if getattr(c, 'is_idle', lambda: True)())
-                    logger.debug(f"[POOL_AFTER] conns={len(pool._connections)}, idle={idle_conns}")
-                except Exception:
-                    pass
 
     def _chat_no_stream(
         self,
