@@ -3939,7 +3939,7 @@ function updateTelemetryPanel(telemetry) {
   set('telem-turns', formatNumber(telemetry.total_turns));
   set('telem-llm-calls', formatNumber(telemetry.total_llm_calls));
   set('telem-tool-calls', formatNumber(telemetry.total_tool_calls));
-  set('telem-sa-calls', formatNumber(telemetry.sub_agent_calls));
+  set('telem-sa-calls', formatNumber(telemetry.agent_instance_calls));
   set('telem-input-tokens', formatNumber(telemetry.total_input_tokens_est));
   set('telem-output-tokens', formatNumber(telemetry.total_output_tokens_est));
   set('telem-total-tokens', formatNumber(telemetry.total_tokens));
