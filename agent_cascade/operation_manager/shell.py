@@ -127,6 +127,22 @@ class ShellMixin:
         return True
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _detect_multiline_python(command: str) -> bool:
+        """Check if the command uses python -c with newlines inside quotes.
+
+        Returns True if a `python -c "..."` or `python3 -c "..."` pattern is found
+        containing literal newline characters within its quoted argument.
+        """
+        # Match python/python3 -c followed by double-quoted string containing newlines
+        m = re.search(r'(?:python3?\s+-c\s*)("([^"]*\n[^"]*)")', command, re.IGNORECASE)
+        return bool(m)
+
+    @staticmethod
+    def _multiline_python_hint() -> str:
+        """Return a system hint for multi-line python -c usage on Windows."""
+        return "[SYSTEM: Multi-line python -c detected. On Windows, use semicolons (;) instead of newlines inside quoted strings, e.g., python -c \"import sys; print(sys.version)\"]"
+
     def _configure_windows_utf8(self, command: str) -> Tuple[str, int]:
         """Prepend chcp 65001 to force CMD into UTF-8 mode on Windows.
 
@@ -261,6 +277,7 @@ class ShellMixin:
             from agent_cascade.tool_utils import MAX_SPILL_SIZE, generate_spillover_filename
 
             # ── Platform-specific setup ──────────────────────────────
+            original_command = command  # keep for multi-line detection hint
             if ON_WINDOWS:
                 command, creationflags = self._configure_windows_utf8(command)
                 env = _WIN_ENV  # pre-cached dict with PYTHONIOENCODING set
@@ -350,7 +367,11 @@ class ShellMixin:
                     status = f"Command exited with return code {proc.returncode}."
 
                 if not output.strip():
-                    output = "No output produced."
+                    # Detect multi-line python -c and append a hint on Windows
+                    if ON_WINDOWS and self._detect_multiline_python(original_command):
+                        output = f"No output produced.\n\n{self._multiline_python_hint()}"
+                    else:
+                        output = "No output produced."
 
                 final_output = output
                 if char_limit != -1 and len(output) > char_limit:
@@ -399,6 +420,11 @@ class ShellMixin:
                 f"If the process is expected to take a long time, consider using a background command "
                 f"(e.g. using '&' on linux or 'Start-Job' on windows) or optimizing the task."
             )
+
+            # Append multi-line python hint if applicable
+            if ON_WINDOWS and self._detect_multiline_python(original_command):
+                timeout_msg += f"\n\n{self._multiline_python_hint()}"
+
             if output.strip():
                 return f"{timeout_msg}\n\n{output}"
             return timeout_msg
