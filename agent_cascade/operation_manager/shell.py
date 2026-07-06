@@ -28,7 +28,7 @@ else:
 
 # ─── Module-level helper (used inside ShellMixin) ──────────────────────
 
-def _run_taskkill(pid: int, timeout: int = 10):
+def _run_taskkill(pid: int, timeout: int = 10) -> subprocess.CompletedProcess:
     """Run taskkill to forcibly terminate a Windows process by PID.
 
     Args:
@@ -84,8 +84,8 @@ class ShellMixin:
 
         SAFE_PIPE_COMMANDS = {
             'grep', 'egrep', 'fgrep', 'head', 'tail', 'sort', 'uniq',
-            'wc', 'cat', 'more', 'less', 'awk', 'sed', 'cut', 'tr',
-            'tee', 'xargs', 'comm', 'diff', 'nl', 'rev', 'fold'
+            'wc', 'cat', 'more', 'less', 'cut', 'tr',
+            'comm', 'diff', 'nl', 'rev', 'fold'
         }
 
         SAFE_PRIMARY_COMMANDS = {
@@ -111,7 +111,7 @@ class ShellMixin:
         if primary_cmd not in SAFE_PRIMARY_COMMANDS:
             return False
 
-        # For "find" commands, check that they don't use -exec with dangerous actions
+        # For "find" commands, check that they don't use -exec/-execdir with dangerous actions
         if primary_cmd == 'find':
             if '-exec' in cmd or '-ok' in cmd:
                 return False
@@ -140,10 +140,15 @@ class ShellMixin:
     def _terminate_process_tree_windows(self, pid: int):
         """Kill a Windows process and all its descendants.
 
-        Strategy:
-          1. taskkill /F /T (first pass — kills process + immediate children)
-          2. Brief sleep then second taskkill /F /T for good measure
-          3. WMIC sweep to find deeper descendants, kill them individually
+        Three-stage strategy to handle race conditions where children spawn
+        new processes between termination passes:
+
+          1. taskkill /F (first pass — kills the target + immediate children)
+          2. Brief sleep then second taskkill /F — catches children that were
+             spawned in the window between the first kill and process exit,
+             since a dying process can fork new children before it fully terminates.
+          3. WMIC sweep — discovers deeper descendants (grandchildren+) that may
+             have been created during passes 1–2 and kills them individually.
         """
         from agent_cascade.log import logger
 
