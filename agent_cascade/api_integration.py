@@ -508,7 +508,7 @@ def _safe_get_telemetry(pool: AgentPool, instance_name: str) -> Optional[dict]:
     """Get telemetry summary for an instance (never blocks state building)."""
     if hasattr(pool, 'telemetry') and pool.telemetry:
         try:
-            return pool.telemetry.get_summary(instance_name)
+            return pool.telemetry.get_session_summary()
         except Exception as e:
             logger.debug(f"Telemetry summary fetch failed for {instance_name} (non-critical): {e}")
     return None
