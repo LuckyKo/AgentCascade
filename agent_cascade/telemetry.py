@@ -335,7 +335,7 @@ class TelemetryCollector:
         self,
         instance_name: str,
         agent_class: str,
-        target_instance: str,
+        caller: str,
         latency_ms: float = 0,
     ):
         """Record an agent instance delegation."""
@@ -343,7 +343,7 @@ class TelemetryCollector:
             "type": "agent_instance_call",
             "instance": instance_name,
             "agent_class": agent_class,
-            "target_instance": target_instance,
+            "caller": caller,
             "latency_ms": round(latency_ms, 1),
             "timestamp": _now_iso(),
         }

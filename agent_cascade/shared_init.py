@@ -12,6 +12,7 @@ import signal as _signal_mod  # internal alias — avoids polluting module names
 from pathlib import Path
 
 from agent_cascade.log import logger
+from agent_cascade.telemetry import TelemetryCollector
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -70,12 +71,17 @@ def create_operation_manager(workspace_dir: str):
 
 
 def create_agent_pool(llm_cfg, agents_path: str, workspace_dir: str, operation_manager):
-    """Create and return an AgentPool instance."""
+    """Create and return an AgentPool instance with TelemetryCollector wired up."""
     from agent_cascade.agent_pool import AgentPool
     try:
+        # Create TelemetryCollector — logs go into workspace/telemetry/ relative to the workspace dir
+        telemetry = TelemetryCollector(log_dir=str(Path(workspace_dir) / 'telemetry'))
+        logger.debug("[INIT] TelemetryCollector initialized, log_dir=%s", telemetry.log_dir)
+
         pool = AgentPool(
             llm_cfg, agents_path, workspace_dir=workspace_dir,
             operation_manager=operation_manager,
+            telemetry=telemetry,
         )
         logger.debug("[INIT] AgentPool created successfully")
         return pool

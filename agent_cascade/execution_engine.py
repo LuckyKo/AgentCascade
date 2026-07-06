@@ -1260,6 +1260,15 @@ class ExecutionEngine:
                         f"{rollbacks} times without success. Continuing."
                     )
 
+                # Telemetry: record loop detection (non-blocking)
+                if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                    try:
+                        self.pool.telemetry.record_loop_detected(
+                            inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count,
+                        )
+                    except Exception:
+                        pass
+
                 return True  # Continue loop with fresh state
         else:
             # Clear the cooldown flag now that we've skipped loop detection this turn.
@@ -1557,14 +1566,36 @@ class ExecutionEngine:
         retry_count = 0
         error_already_yielded = False
         
+        # Estimate input tokens for telemetry (rough char-based estimate)
+        _input_tokens_est = sum(len(m.content or '') for m in llm_messages) // 4
+        
         while retry_count <= MAX_RETRIES:
             try:
+                # Telemetry: record LLM call start (non-blocking)
+                if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                    try:
+                        model = getattr(template.llm, 'model', '') or ''
+                        self.pool.telemetry.record_llm_call_start(
+                            inst_name, input_tokens_est=_input_tokens_est, model=model,
+                        )
+                    except Exception:
+                        pass
+                
                 # Streaming UI Content Update Fix: Track partial LLM content for UI updates every ~100ms
                 last_streaming_update_time = time.monotonic()
                 
                 gen = self._execute_llm_call(instance, template, llm_messages, active_functions)
+                _first_token_received = False  # Flag to ensure TTFT is recorded only once per call
                 for output in gen:
                     last_output = output
+                    
+                    # Telemetry: record Time To First Token (TTFT) on the first streaming chunk
+                    if not _first_token_received and hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                        try:
+                            self.pool.telemetry.record_llm_first_token(inst_name)
+                        except Exception:
+                            pass
+                        _first_token_received = True
                     
                     # Check stop/halt mid-stream FIRST (before any work) — ensures fastest response to stop.
                     # Also checks generation change (old run superseded by newer one on resume).
@@ -1641,6 +1672,18 @@ class ExecutionEngine:
                 time.sleep(backoff)
                 yield None
         
+        # Telemetry: record LLM call end with output token estimate (non-blocking)
+        if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+            try:
+                _output_tokens_est = 0
+                if last_output:
+                    for m in last_output:
+                        c = getattr(m, 'content', '') or ''
+                        _output_tokens_est += len(c) // 4
+                self.pool.telemetry.record_llm_call_end(inst_name, output_tokens_est=_output_tokens_est)
+            except Exception:
+                pass
+
         # Final update before yielding results
         if last_output is not None:
             with instance._compression_lock:
@@ -2044,8 +2087,8 @@ class ExecutionEngine:
                 function_id = extra_data.get('function_id')
                 
                 # Telemetry: record tool call start and end for auto-denied tools
-                try:
-                    if hasattr(self.pool, 'telemetry'):
+                if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                    try:
                         self.pool.telemetry.record_tool_call_start(inst_name, tool_name)
                         self.pool.telemetry.record_tool_call_end(
                             inst_name, tool_name,
@@ -2054,9 +2097,9 @@ class ExecutionEngine:
                             truncated=False,
                             error=f"Tool {deny_reason}",
                         )
-                except Exception:
-                    pass
-                
+                    except Exception:
+                        pass
+
                 # Build function result message with denial — include function_id per OpenAI spec
                 fn_msg = Message(
                     role=FUNCTION,
@@ -2083,11 +2126,11 @@ class ExecutionEngine:
             _tool_error = ""
 
             # Telemetry: record tool call start (non-blocking)
-            try:
-                if hasattr(self.pool, 'telemetry'):
+            if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                try:
                     self.pool.telemetry.record_tool_call_start(inst_name, tool_name)
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
             # Extract function_id from the assistant message that had the tool call BEFORE executing
             # This is critical — without it, the LLM API can't match tool results to tool calls
@@ -2141,8 +2184,8 @@ class ExecutionEngine:
 
             finally:
                 # Telemetry: record tool call end (non-blocking, always called)
-                try:
-                    if hasattr(self.pool, 'telemetry'):
+                if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                    try:
                         self.pool.telemetry.record_tool_call_end(
                             inst_name, tool_name,
                             success=_tool_success,
@@ -2150,8 +2193,8 @@ class ExecutionEngine:
                             truncated=_was_truncated,
                             error=_tool_error,
                         )
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
                 # Drain pending compression notifications and tool warnings (always runs even on exceptions)
                 # Only drain when tool_result is defined to avoid errors from early failures
@@ -2265,8 +2308,8 @@ class ExecutionEngine:
                         fn_content = f"Tool execution skipped: instance {inst_name} was halted/stopped"
                     
                     # Telemetry: record tool call start and end (matching primary loop pattern)
-                    try:
-                        if hasattr(self.pool, 'telemetry'):
+                    if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                        try:
                             self.pool.telemetry.record_tool_call_start(inst_name, tool_name)
                             self.pool.telemetry.record_tool_call_end(
                                 inst_name, tool_name,
@@ -2275,9 +2318,9 @@ class ExecutionEngine:
                                 truncated=False,
                                 error=f"Tool {deny_reason}" if deny_reason else "Skipped (halt/stop)",
                             )
-                    except Exception:
-                        pass
-                    
+                        except Exception:
+                            pass
+
                     fn_msg = Message(
                         role=FUNCTION,
                         name=tool_name,
@@ -2980,6 +3023,9 @@ class ExecutionEngine:
         self.stream_publisher.push_initial_state(inst, caller)
 
         try:
+            # Telemetry: track sub-agent call latency (non-blocking)
+            _call_start = time.perf_counter()
+
             # Execute through unified loop — push stream_update events so the
             # frontend sees sub-agent tab updates independently of main agent flow.
             # Without this, the main streaming loop is blocked during tool execution
@@ -3041,6 +3087,17 @@ class ExecutionEngine:
 
             # ── Push final stream_update after sub-agent completes ──
             self.stream_publisher.push_final_state(inst, caller)
+
+            # Telemetry: record successful agent instance call (non-blocking)
+            _call_latency_ms = (time.perf_counter() - _call_start) * 1000
+            if hasattr(self.pool, 'telemetry') and self.pool.telemetry is not None:
+                try:
+                    self.pool.telemetry.record_agent_instance_call(
+                        instance_name, agent_class, caller, latency_ms=_call_latency_ms,
+                    )
+                except Exception:
+                    pass
+
         finally:
             # Always clean up active stack — even on halt or error
             with self.pool._execution._state_lock:
