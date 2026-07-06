@@ -731,7 +731,7 @@ class ExecutionEngine:
 
                 # ── Phase 2: Pre-LLM Checks ────────────────────────────────
                 # Stop/halt checks, async message injection, compression check/force, loop detection
-                logger.debug(f"[PRE_LLM_CHECK] Checking stop/halt/async/compression for {inst_name}")
+                #logger.debug(f"[PRE_LLM_CHECK] Checking stop/halt/async/compression for {inst_name}")
                 if self._pre_llm_checks(instance, messages, llm_messages, response, turns_available):
                     logger.debug(f"[PRE_LLM_CHECK] Condition met, continuing loop")
                     yield response
@@ -740,7 +740,7 @@ class ExecutionEngine:
                 turns_available -= 1
 
                 # ── Phase 3: LLM Call with Injection Points ────────────────
-                logger.debug(f"[LLM_CALL_START] Calling LLM for {inst_name} with {len(llm_messages)} messages")
+                #logger.debug(f"[LLM_CALL_START] Calling LLM for {inst_name} with {len(llm_messages)} messages")
                 turn_output = []
                 for msg in self._call_llm_with_injection(instance, llm_messages):
                     if msg is None:
@@ -784,7 +784,7 @@ class ExecutionEngine:
                     yield response
                     continue
 
-                logger.debug(f"[LLM_DONE] {inst_name} got {len(turn_output)} messages from LLM")
+                # logger.debug(f"[LLM_DONE] {inst_name} got {len(turn_output)} messages from LLM")
                 # ── Phase 4: Response Processing and Tool Execution ─────────
                 if self._process_response(instance, turn_output, messages, llm_messages, response):
                     # logger.debug("tool used - %s looping", instance.instance_name)

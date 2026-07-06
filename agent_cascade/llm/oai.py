@@ -67,10 +67,13 @@ def _get_cached_client(base_url: str, api_key: str) -> openai.OpenAI:
             except Exception:
                 pass
 
-        # Create OpenAI client with default httpx settings (same as main branch)
+        # Create OpenAI client with httpx settings optimized for LM Studio.
+        # Keep alive for 15s to allow connection reuse between calls (streaming
+        # responses take ~3-4s, so connections need to survive longer than that).
         _CLIENT_CACHE[key] = openai.OpenAI(
             base_url=base_url,
             api_key=api_key,
+            http_client=httpx.Client(limits=httpx.Limits(keepalive_expiry=15.0)),
         )
         return _CLIENT_CACHE[key]
 
@@ -131,8 +134,9 @@ class TextChatAtOAI(BaseFnCallModel):
                 api_kwargs['api_key'] = api_key
 
             def _chat_complete_create(*args, **kwargs):
-                # OpenAI API v1 does not allow the following args, must pass by extra_body
                 import time as _time
+                t_enter = _time.perf_counter()
+                # OpenAI API v1 does not allow the following args, must pass by extra_body
                 extra_params = ['top_k', 'repetition_penalty', 'repeat_penalty', 'repeatPenalty', 'min_p']
                 if any((k in kwargs) for k in extra_params):
                     kwargs['extra_body'] = copy.deepcopy(kwargs.get('extra_body', {}))
@@ -148,53 +152,43 @@ class TextChatAtOAI(BaseFnCallModel):
                 if 'api_key' in kwargs:
                     local_api_kwargs['api_key'] = kwargs.pop('api_key')
 
-                t0 = _time.perf_counter()
+                t_cache_start = _time.perf_counter()
                 client = _get_cached_client(
                     base_url=local_api_kwargs.get('base_url'),
                     api_key=local_api_kwargs.get('api_key'),
                 )
-                client_ms = (_time.perf_counter() - t0) * 1000
+                t_cache_end = _time.perf_counter()
+                
+                # Inspect httpx pool state
                 hc = client._client
-                # Inspect httpx connection pool
                 pool = hc._transport._pool
+                pool_info = f"type={type(pool).__name__}, conns={len(pool._connections)}, keepalive={pool._keepalive_expiry}"
+                
                 # Check active connections
                 active_conns = []
                 for i, conn in enumerate(pool._connections):
                     is_idle = getattr(conn, 'is_idle', 'unknown')
                     http2 = getattr(conn, 'http2', None) is not None
-                    active_conns.append(f"conn{i}(idle={is_idle},http2={http2})")
-                pool_stats = f"pool_type={type(pool).__name__}, connections={len(pool._connections)}, keepalive_expiry={pool._keepalive_expiry}, conns={active_conns}"
-                logger.info(f"[UNIFIED_DEBUG] client_lookup={client_ms:.1f}ms httpx_timeout={hc.timeout} pool={pool_stats}")
-                logger.info(f"[UNIFIED_DEBUG] local_api_kwargs={local_api_kwargs}")
-                logger.info(f"[UNIFIED_DEBUG] call_args: model={kwargs.get('model')}, messages_count={len(kwargs.get('messages', []))}, stream={kwargs.get('stream')}, extra_body={kwargs.get('extra_body')}, timeout={kwargs.get('timeout')}")
-                logger.info(f"[TOOL_RECOVERY] HTTP POST ABOUT TO LEAVE — model={kwargs.get('model', 'unknown')}")
+                    active_conns.append(f"c{i}(idle={is_idle},h2={http2})")
                 
-                # Phase 1: Measure DNS/connection setup
-                t_conn = _time.perf_counter()
-                # Force a DNS resolution and connection to server
-                import socket
-                host = "localhost"
-                port = 1234
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(2)
-                dns_start = _time.perf_counter()
-                addr_info = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
-                dns_ms = (_time.perf_counter() - dns_start) * 1000
-                conn_start = _time.perf_counter()
-                sock.connect(addr_info[0][4])
-                conn_ms = (_time.perf_counter() - conn_start) * 1000
-                sock.close()
+                logger.info(f"[PROBE] cache_lookup={((t_cache_end - t_cache_start)*1000):.1f}ms pool={pool_info} conns={active_conns}")
                 
-                # Phase 2: Actual API call
-                t1 = _time.perf_counter()
+                t_post_start = _time.perf_counter()
                 response = client.chat.completions.create(*args, **kwargs)
-                call_ms = (_time.perf_counter() - t1) * 1000
+                t_post_end = _time.perf_counter()
+
+                # Check connections after POST (before streaming/consumption)
+                post_conns = []
+                for i, conn in enumerate(pool._connections):
+                    is_idle = getattr(conn, 'is_idle', 'unknown')
+                    http2 = getattr(conn, 'http2', None) is not None
+                    req_count = getattr(conn, 'request_count', '?')
+                    post_conns.append(f"c{i}(idle={is_idle},count={req_count},h2={http2})")
+
+                total_ms = (t_post_end - t_enter) * 1000
+                post_ms = (t_post_end - t_post_start) * 1000
+                logger.info(f"[PROBE] POST={post_ms:.1f}ms total={total_ms:.1f}ms pool_after={len(pool._connections)} conns={post_conns}")
                 
-                # Check pool state after call
-                pool = client._client._transport._pool
-                after_conns = len(pool._connections)
-                resp_info = f"status={response.http_response.status_code if hasattr(response, 'http_response') else 'N/A'}"
-                logger.info(f"[UNIFIED_DEBUG] POST_breakdown: dns={dns_ms:.1f}ms, tcp_connect={conn_ms:.1f}ms, api_call={call_ms:.1f}ms total={call_ms + conn_ms + dns_ms + client_ms:.1f}ms {resp_info} pool_after={after_conns}")
                 return response
 
             def _complete_create(*args, **kwargs):
@@ -218,7 +212,6 @@ class TextChatAtOAI(BaseFnCallModel):
                     base_url=local_api_kwargs.get('base_url'),
                     api_key=local_api_kwargs.get('api_key'),
                 )
-                logger.info(f"[TOOL_RECOVERY] HTTP POST ABOUT TO LEAVE (completions) — model={kwargs.get('model', 'unknown')}")
                 return client.completions.create(*args, **kwargs)
 
             self._complete_create = _complete_create
@@ -374,7 +367,11 @@ class TextChatAtOAI(BaseFnCallModel):
             logger.debug(f"[TOOL_RECOVERY] _chat_stream _chat_complete_create END (got response iterator)")
 
             if delta_stream:
-                for chunk in response:
+                for sse in response._iter_events():
+                    if sse.data == "[DONE]":
+                        continue
+                    data = sse.json()
+                    chunk = response._client._process_response_data(data=data, cast_to=response._cast_to, response=response.response)
                     # Update local model info if returned by the server (e.g. LM Studio)
                     if hasattr(chunk, 'model') and chunk.model:
                         if chunk.model != self.model:
@@ -392,7 +389,11 @@ class TextChatAtOAI(BaseFnCallModel):
                 full_reasoning_content = ''
                 full_tool_calls = []
                 _first_chunk = True
-                for chunk in response:
+                for sse in response._iter_events():
+                    if sse.data == "[DONE]":
+                        continue
+                    data = sse.json()
+                    chunk = response._client._process_response_data(data=data, cast_to=response._cast_to, response=response.response)
                     if _first_chunk:
                         logger.debug(f"[TOOL_RECOVERY] _chat_stream FIRST CHUNK RECEIVED model={request_model}")
                         _first_chunk = False
@@ -480,8 +481,25 @@ class TextChatAtOAI(BaseFnCallModel):
                         yield res
         except OpenAIError as ex:
             raise ModelServiceError(exception=ex)
-        # No finally block needed — cached client manages its own httpx connection pool.
-        # (Main branch works this way: create client, consume stream, let httpx reuse connections.)
+        finally:
+            # Close response to return connection to the pool for reuse
+            if response is not None:
+                # Check HTTP headers before closing (debug only)
+                raw = getattr(response, 'raw', None)
+                if raw is not None:
+                    conn_header = raw.headers.get('connection', '').lower()
+                    logger.info(f"[PROBE] stream connection header: {conn_header!r}")
+                response.close()
+                # Check pool state after close (debug only)
+                client_entry = _get_cached_client(self.api_base, self.api_key)
+                hc = client_entry._client
+                pool = hc._transport._pool
+                after_conns = []
+                for i, conn in enumerate(pool._connections):
+                    is_idle = getattr(conn, 'is_idle', '?')
+                    req_count = getattr(conn, 'request_count', '?')
+                    after_conns.append(f"c{i}(idle={is_idle},count={req_count})")
+                logger.debug(f"[PROBE] after close pool={len(pool._connections)} conns={after_conns}")
 
     def _chat_no_stream(
         self,
@@ -530,6 +548,7 @@ class TextChatAtOAI(BaseFnCallModel):
             except Exception as e:
                 logger.error(f"Failed to dump API POST: {e}")
 
+        response = None
         try:
             response = self._chat_complete_create(model=request_model, messages=messages, stream=False, **generate_cfg)
 
@@ -589,6 +608,14 @@ class TextChatAtOAI(BaseFnCallModel):
             return result
         except OpenAIError as ex:
             raise ModelServiceError(exception=ex)
+        finally:
+            # Non-streaming responses don't have .close(), but the underlying
+            # HTTP response should be closed to return the connection to pool.
+            # ChatCompletion objects are already fully consumed, so no-op is fine.
+            if response is not None:
+                raw = getattr(response, 'raw', None)
+                if raw is not None:
+                    raw.close()
 
     def close(self) -> None:
         """Flush the shared client cache. Closes all cached httpx connections cleanly."""

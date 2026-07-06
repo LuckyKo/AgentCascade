@@ -67,7 +67,7 @@ rules:
   - Always provide complete, runnable code
   - Include error handling
   - Test your code with the tools at your disposal
-  - Use `code_interpreter` to test small snippets of code or run complex calculations in a safe sandbox
+  - Use `code_interpreter` to test small snippets of code (200 chars max) or run complex calculations in a safe sandbox
   - Use `code_map` to get an overview of large code files before doing targeted reads.
   - Use `write_file` or `edit_file` to modify the workspace directly instead of just printing code.
   - Use `edit_file` for surgical edits (providing `old_content` and `new_content`) to save space and tokens. Only use `write_file` for complete rewrites.
