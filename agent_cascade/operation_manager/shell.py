@@ -8,12 +8,18 @@ import threading
 import time
 from typing import List, Optional, Tuple
 
+# Project imports (used by ShellMixin.execute_shell_command)
+from agent_cascade.log import logger
+from agent_cascade.tool_utils import MAX_SPILL_SIZE, generate_spillover_filename
+
 # ─── Named constants (avoid magic numbers) ──────────────────────────────
 PIPE_READ_SIZE = 4096                   # Bytes per read call on stdout/stderr pipes
 DRAIN_THREAD_JOIN_TIMEOUT = 3           # Seconds to wait for drain threads after process ends
 WINDOWS_UTF8_CODE_PAGE = '65001'        # Windows code page for UTF-8 output
 TASKKILL_RETRY_DELAY = 0.5              # Seconds between taskkill passes on timeout
 MAX_PROCESS_TREE_DEPTH = 10             # Max recursion depth when killing process descendants
+DEFAULT_SHELL_TIMEOUT = 30              # Default seconds before shell command times out
+MAX_SHELL_TIMEOUT = 3600                # Maximum allowed shell command timeout (1 hour)
 
 # Platform flag (evaluated once at import time)
 ON_WINDOWS = os.name == 'nt'
@@ -166,8 +172,6 @@ class ShellMixin:
           3. WMIC sweep — discovers deeper descendants (grandchildren+) that may
              have been created during passes 1–2 and kills them individually.
         """
-        from agent_cascade.log import logger
-
         # First pass: taskkill with tree flag
         try:
             result = _run_taskkill(pid)
@@ -242,8 +246,6 @@ class ShellMixin:
         if len(command) > char_limit:
             return f"ERROR: Command exceeds maximum length of {char_limit} characters."
 
-        DEFAULT_SHELL_TIMEOUT = 30
-        MAX_SHELL_TIMEOUT = 3600
         if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0 or timeout > MAX_SHELL_TIMEOUT):
             return f"ERROR: Invalid timeout value: {timeout}. Must be a positive integer between 1 and {MAX_SHELL_TIMEOUT}."
         effective_timeout = timeout if timeout is not None else DEFAULT_SHELL_TIMEOUT
@@ -273,9 +275,6 @@ class ShellMixin:
             justification_text = reason
 
         try:
-            from agent_cascade.log import logger
-            from agent_cascade.tool_utils import MAX_SPILL_SIZE, generate_spillover_filename
-
             # ── Platform-specific setup ──────────────────────────────
             original_command = command  # keep for multi-line detection hint
             if ON_WINDOWS:
