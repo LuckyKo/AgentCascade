@@ -8,23 +8,55 @@ import threading
 import time
 from typing import List, Optional, Tuple
 
+# ─── Named constants (avoid magic numbers) ──────────────────────────────
+PIPE_READ_SIZE = 4096                   # Bytes per read call on stdout/stderr pipes
+DRAIN_THREAD_JOIN_TIMEOUT = 3           # Seconds to wait for drain threads after process ends
+WINDOWS_UTF8_CODE_PAGE = '65001'        # Windows code page for UTF-8 output
+TASKKILL_RETRY_DELAY = 0.5              # Seconds between taskkill passes on timeout
+MAX_PROCESS_TREE_DEPTH = 10             # Max recursion depth when killing process descendants
 
-# Named constants for shell pipe draining (avoid magic numbers)
-PIPE_READ_SIZE = 4096           # Bytes per read call on stdout/stderr pipes
-DRAIN_THREAD_JOIN_TIMEOUT = 3   # Seconds to wait for drain threads after process ends
+# Platform flag (evaluated once at import time)
+ON_WINDOWS = os.name == 'nt'
 
-# ─── Mixin: Shell methods for OperationManager ─────────────────────────────
+# Cached Windows environment dict (set PYTHONIOENCODING for child Python processes)
+if ON_WINDOWS:
+    _WIN_ENV = os.environ.copy()
+    _WIN_ENV['PYTHONIOENCODING'] = 'utf-8'
+else:
+    _WIN_ENV = None  # noqa: constant used only in method below
+
+
+# ─── Module-level helper (used inside ShellMixin) ──────────────────────
+
+def _run_taskkill(pid: int, timeout: int = 10):
+    """Run taskkill to forcibly terminate a Windows process by PID.
+
+    Args:
+        pid: Process ID to kill.
+        timeout: Seconds before the taskkill call itself times out.
+
+    Returns:
+        subprocess.CompletedProcess on success.
+
+    Raises:
+        Exception if taskkill fails or times out.
+    """
+    return subprocess.run(
+        ['taskkill', '/F', '/PID', str(pid)],
+        capture_output=True, timeout=timeout,
+        encoding='utf-8', errors='replace',
+    )
+
+
+# ─── Mixin: Shell methods for OperationManager ─────────────────────────
 
 class ShellMixin:
     """Shell execution methods. Expects self to have __init__-set attributes."""
 
+    # ------------------------------------------------------------------
     @staticmethod
     def _is_safe_readonly_shell_command(command: str) -> bool:
-        """
-        Check if a shell command is purely read-only (directory listing/search).
-
-        Safe commands: find, dir, ls, tree — without dangerous piggybacking.
-        """
+        """Check if a shell command is purely read-only (directory listing/search)."""
         cmd = command.strip()
         if not cmd:
             return False
@@ -94,7 +126,92 @@ class ShellMixin:
 
         return True
 
-    def execute_shell_command(self, command: str, justification: str, agent_name: str, cwd: str = ".", char_limit: int = 2000, timeout: Optional[int] = None) -> str:
+    # ------------------------------------------------------------------
+    def _configure_windows_utf8(self, command: str) -> Tuple[str, int]:
+        """Prepend chcp 65001 to force CMD into UTF-8 mode on Windows.
+
+        Returns:
+            (modified_command, creationflags) tuple ready for subprocess.Popen.
+        """
+        return (f'chcp {WINDOWS_UTF8_CODE_PAGE} > nul 2>&1 & {command}',
+                subprocess.CREATE_NEW_PROCESS_GROUP)  # type: ignore[arg-type]
+
+    # ------------------------------------------------------------------
+    def _terminate_process_tree_windows(self, pid: int):
+        """Kill a Windows process and all its descendants.
+
+        Strategy:
+          1. taskkill /F /T (first pass — kills process + immediate children)
+          2. Brief sleep then second taskkill /F /T for good measure
+          3. WMIC sweep to find deeper descendants, kill them individually
+        """
+        from agent_cascade.log import logger
+
+        # First pass: taskkill with tree flag
+        try:
+            result = _run_taskkill(pid)
+            if result.returncode != 0:
+                logger.warning(f"taskkill returned code {result.returncode} for PID {pid}")
+        except Exception as e:
+            logger.warning(f"taskkill failed for PID {pid}: {e}")
+
+        # Second pass: retry taskkill after brief delay
+        time.sleep(TASKKILL_RETRY_DELAY)
+        try:
+            result = _run_taskkill(pid)
+            if result.returncode != 0:
+                logger.debug(f"Second-pass taskkill returned code {result.returncode} for PID {pid}")
+        except Exception as e:
+            logger.debug(f"Second-pass taskkill failed (non-critical): {e}")
+
+        # WMIC sweep for deeper descendants
+        try:
+            def _get_child_pids(parent_pid):
+                """Query child PIDs of a given parent via WMIC."""
+                res = subprocess.run(
+                    ['wmic', 'process', 'where',
+                     f'ParentProcessId={parent_pid}',
+                     'get', 'ProcessId'],
+                    capture_output=True, text=True, timeout=5,
+                    encoding='utf-8', errors='replace',
+                )
+                pids = []
+                for line in res.stdout.strip().split('\n'):
+                    line = line.strip()
+                    if line.isdigit():
+                        pids.append(int(line))
+                return pids
+
+            descendants: set = set()
+            to_check = [pid]
+            depth = 0
+
+            # Recurse until no new children are found, bounded by max depth guard
+            while to_check and depth < MAX_PROCESS_TREE_DEPTH:
+                next_level = []
+                for check_pid in to_check:
+                    children = _get_child_pids(check_pid)
+                    for cpid in children:
+                        if cpid not in descendants and cpid != pid:
+                            descendants.add(cpid)
+                            next_level.append(cpid)
+                to_check = next_level
+                depth += 1
+
+            # Kill discovered descendants individually (best effort)
+            for dpid in descendants:
+                try:
+                    _run_taskkill(dpid, timeout=5)
+                except Exception as e:
+                    logger.debug(f"WMIC child kill failed (non-critical): {e}")
+        except Exception as e:
+            logger.warning(f"WMIC descendant sweep failed: {e}")
+
+    # ------------------------------------------------------------------
+    def execute_shell_command(
+        self, command: str, justification: str, agent_name: str,
+        cwd: str = ".", char_limit: int = 2000, timeout: Optional[int] = None,
+    ) -> str:
         """Execute a shell command — auto-approved for safe read-only commands."""
         try:
             resolved_cwd = self._resolve_path(cwd, mode="rw")
@@ -138,19 +255,13 @@ class ShellMixin:
             from agent_cascade.log import logger
             from agent_cascade.tool_utils import MAX_SPILL_SIZE, generate_spillover_filename
 
-            if os.name == 'nt':
-                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore
-                # Prepend chcp 65001 to force CMD into UTF-8 code page mode.
-                # Redirect both stdout and stderr from chcp to keep output clean.
-                command = f'chcp 65001 > nul 2>&1 & {command}'
+            # ── Platform-specific setup ──────────────────────────────
+            if ON_WINDOWS:
+                command, creationflags = self._configure_windows_utf8(command)
+                env = _WIN_ENV  # pre-cached dict with PYTHONIOENCODING set
             else:
                 creationflags = 0
-
-            # Set PYTHONIOENCODING to ensure Python child processes output UTF-8
-            # instead of defaulting to the system code page (e.g., CP1252 on English Windows).
-            env = os.environ.copy() if os.name == 'nt' else None
-            if env is not None:
-                env['PYTHONIOENCODING'] = 'utf-8'
+                env = None
 
             proc = subprocess.Popen(
                 command,
@@ -167,21 +278,13 @@ class ShellMixin:
             )
 
             # Use threaded pipe reading to prevent output loss on timeout/hang.
-            # communicate() blocks until BOTH pipes close; when a process hangs,
-            # data in pipe buffers is not returned and can be lost after killing.
             stdout_chunks: List[str] = []
             stderr_chunks: List[str] = []
-            drain_errors: List[Exception] = []  # Collect exceptions from drain threads
+            drain_errors: List[Exception] = []
 
             def _drain_pipe(pipe, chunks: List[str], errors: List[Exception]) -> None:
-                """Continuously drain a pipe into a list until EOF or error.
-
-                Reads PIPE_READ_SIZE bytes at a time in a loop. After the process is
-                killed (and pipes close), this returns via EOF. Any exception is
-                captured into the shared errors list for post-join inspection.
-                """
+                """Continuously drain a pipe into a list until EOF or error."""
                 try:
-                    # Read PIPE_READ_SIZE bytes at a time until EOF (pipe closed).
                     while True:
                         chunk = pipe.read(PIPE_READ_SIZE)
                         if not chunk:
@@ -201,72 +304,8 @@ class ShellMixin:
                 result_ok = True
             except subprocess.TimeoutExpired:
                 result_ok = False
-                if os.name == 'nt':
-                    try:
-                        subprocess.run(
-                            ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
-                            capture_output=True, timeout=10,
-                            encoding='utf-8', errors='replace',
-                        )
-                    except Exception as e:
-                        logger.warning(f"taskkill failed for PID {proc.pid}: {e}, falling back to proc.kill()")
-                        try:
-                            proc.kill()
-                        except Exception as e:
-                            logger.debug(f"Process kill failed (non-critical): {e}")
-
-                    time.sleep(0.5)
-                    try:
-                        subprocess.run(
-                            ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
-                            capture_output=True, timeout=10,
-                            encoding='utf-8', errors='replace',
-                        )
-                    except Exception as e:
-                        logger.debug(f"Second-pass taskkill failed (non-critical): {e}")
-
-                    try:
-                        def _get_child_pids(parent_pid):
-                            res = subprocess.run(
-                                ['wmic', 'process', 'where',
-                                 f'ParentProcessId={parent_pid}',
-                                 'get', 'ProcessId'],
-                                capture_output=True, text=True, timeout=5,
-                                encoding='utf-8',
-                                errors='replace',
-                            )
-                            pids = []
-                            for line in res.stdout.strip().split('\n'):
-                                line = line.strip()
-                                if line.isdigit():
-                                    pids.append(int(line))
-                            return pids
-
-                        descendants = set()
-                        to_check = [proc.pid]
-                        for _ in range(4):
-                            next_level = []
-                            for pid in to_check:
-                                children = _get_child_pids(pid)
-                                for cpid in children:
-                                    if cpid not in descendants and cpid != proc.pid:
-                                        descendants.add(cpid)
-                                        next_level.append(cpid)
-                            to_check = next_level
-                            if not next_level:
-                                break
-
-                        for dpid in descendants:
-                            try:
-                                subprocess.run(
-                                    ['taskkill', '/F', '/PID', str(dpid)],
-                                    capture_output=True, timeout=5,
-                                    encoding='utf-8', errors='replace',
-                                )
-                            except Exception as e:
-                                logger.debug(f"WMIC child kill failed (non-critical): {e}")
-                    except Exception as e:
-                        logger.warning(f"WMIC descendant sweep failed: {e}")
+                if ON_WINDOWS:
+                    self._terminate_process_tree_windows(proc.pid)
                 else:
                     try:
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -277,18 +316,13 @@ class ShellMixin:
                         except Exception as e:
                             logger.debug(f"Process kill fallback failed (non-critical): {e}")
 
-            # Wait for reader threads to drain remaining pipe buffers before they close.
-            # This ensures all output flushed by the process (or its children) is captured,
-            # even if the process was killed mid-write.
+            # Wait for reader threads to drain remaining pipe buffers.
             t_out.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
             t_err.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
 
-            # Ensure threads have fully terminated before accessing shared lists.
-            # A small grace period handles edge cases where pipes close slowly after kill.
             if t_out.is_alive() or t_err.is_alive():
                 time.sleep(0.1)  # Brief grace period for thread cleanup
 
-            # Check for exceptions from drain threads and log them
             if drain_errors:
                 logger.warning(
                     f"Pipe drain errors on PID {proc.pid}: "
@@ -345,23 +379,24 @@ class ShellMixin:
                     if justification_text:
                         final_msg += f"Security Justification: {justification_text}\n"
                 return final_msg + f"\n{final_output}"
-            else:
-                output = ""
-                if stdout:
-                    output += f"STDOUT (partial):\n{stdout}\n"
-                if stderr:
-                    output += f"STDERR (partial):\n{stderr}\n"
 
-                timeout_msg = (
-                    f"ERROR: Command timed out after {effective_timeout} seconds. "
-                    f"All child processes have been forcibly terminated. "
-                    f"Command was: `{command[:200]}`. "
-                    f"If the process is expected to take a long time, consider using a background command "
-                    f"(e.g. using '&' on linux or 'Start-Job' on windows) or optimizing the task."
-                )
-                if output.strip():
-                    return f"{timeout_msg}\n\n{output}"
-                return timeout_msg
+            # ── Timeout path ────────────────────────────────────────
+            output = ""
+            if stdout:
+                output += f"STDOUT (partial):\n{stdout}\n"
+            if stderr:
+                output += f"STDERR (partial):\n{stderr}\n"
+
+            timeout_msg = (
+                f"ERROR: Command timed out after {effective_timeout} seconds. "
+                f"All child processes have been forcibly terminated. "
+                f"Command was: `{command[:200]}`. "
+                f"If the process is expected to take a long time, consider using a background command "
+                f"(e.g. using '&' on linux or 'Start-Job' on windows) or optimizing the task."
+            )
+            if output.strip():
+                return f"{timeout_msg}\n\n{output}"
+            return timeout_msg
 
         except Exception as e:
             return f"ERROR: Approved but execution failed: {str(e)}"
