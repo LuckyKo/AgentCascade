@@ -843,6 +843,11 @@ class Grep(BaseTool):
             'smart_case': {
                 'type': 'boolean',
                 'description': TOOL_METADATA['grep']['parameters']['smart_case']
+            },
+            'timeout': {
+                'type': 'number',
+                'description': 'Timeout in seconds for the grep operation (default: 30.0). Increase for large codebases.',
+                'default': 30.0
             }
         },
         'required': ['pattern'],
@@ -861,9 +866,20 @@ class Grep(BaseTool):
         path = params.get('path', '.')
         include = params.get('include', '*')
         exclude = params.get('exclude', '')
-        ignore_vcs = params.get('ignore_vcs', True)
+        # FIX: Handle None/Null values properly for ignore_vcs
+        # When JSON has "ignore_vcs": null, params.get('ignore_vcs', True) returns None (key exists)
+        # We need to treat None as True (default behavior). Also handle string values.
+        ignore_vcs = params.get('ignore_vcs')
+        if ignore_vcs is None:
+            ignore_vcs = True
+        elif isinstance(ignore_vcs, str):
+            ignore_vcs = ignore_vcs.lower() in ('true', '1', 'yes', 'on')
+        else:
+            ignore_vcs = bool(ignore_vcs)
         context = params.get('context', 0)
         smart_case = params.get('smart_case', True)
+        # Read timeout parameter with default 30.0
+        timeout = params.get('timeout', 30.0)
 
         # Get the truncation limit from agent/tool options
         char_limit = 2000
@@ -876,11 +892,12 @@ class Grep(BaseTool):
         agent_name = kwargs.get('agent_instance_name', 'unknown')
         spill_file_path = kwargs.get('spill_file_path')  # Pre-computed by orchestrator
         return self.agent_pool.operation_manager.grep(
-            pattern, path, include, 
-            char_limit=int(char_limit), 
+            pattern, path, include,
+            char_limit=int(char_limit),
+            timeout=float(timeout),  # Pass the configurable timeout
             agent_name=agent_name,
             exclude=exclude,
-            ignore_vcs=bool(ignore_vcs),
+            ignore_vcs=ignore_vcs,  # Already resolved to True/False, no need for bool()
             context=int(context),
             smart_case=bool(smart_case),
             spill_file_path=spill_file_path

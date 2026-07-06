@@ -293,7 +293,7 @@ class GrepMixin:
 
     def _grep_single_file(self, file_path: Path, pattern: str, char_limit: int,
                           include: str = "*", exclude: str = "", context: int = 0, smart_case: bool = True,
-                          spill_file_path: Optional[str] = None) -> str:
+                          spill_file_path: Optional[str] = None, timeout: float = 30.0) -> str:
         """Search a single file for a regex pattern. Used when path is a file instead of directory."""
         import fnmatch
 
@@ -331,7 +331,6 @@ class GrepMixin:
         hit_result_limit = False
         was_timed_out = False
         start_time = time.time()
-        timeout = 30.0
 
         if context > 0:
             for line_num, line in enumerate(lines, 1):
@@ -396,7 +395,7 @@ class GrepMixin:
 
         return f"{summary}:\n\n" + output_text
 
-    def grep(self, pattern: str, path: str = ".", include: str = "*", char_limit: int = 2000, agent_name: str = "unknown",
+    def grep(self, pattern: str, path: str = ".", include: str = "*", char_limit: int = 2000, timeout: float = 30.0, agent_name: str = "unknown",
              exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True,
              spill_file_path: Optional[str] = None) -> str:
         """Search for text pattern in files.
@@ -415,12 +414,12 @@ class GrepMixin:
             if resolved.is_file():
                 return self._grep_single_file(resolved, pattern, char_limit, include=include,
                                              exclude=exclude, context=context, smart_case=smart_case,
-                                             spill_file_path=spill_file_path)
-
+                                             spill_file_path=spill_file_path, timeout=timeout)
+            
             # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
             results, count, was_timed_out, _sub_truncated, _orig_output_size = self._try_subprocess_grep(
                 pattern=pattern, path=resolved, include=include,
-                char_limit=char_limit, timeout=30.0,
+                char_limit=char_limit, timeout=timeout,  # Use configurable timeout
                 exclude=exclude, ignore_vcs=ignore_vcs, context=context, smart_case=smart_case,
                 spill_file_path=spill_file_path
             )
@@ -436,7 +435,7 @@ class GrepMixin:
                     if context > 0:
                         summary += f" (with {context} line(s) of context)"
                     if was_timed_out:
-                        summary += f" [TIMED OUT after 30s]"
+                        summary += f" [TIMED OUT after {int(timeout)}s]"
 
                     if char_limit != -1 and len(output_text) > char_limit:
                         full_output = output_text
@@ -479,7 +478,7 @@ class GrepMixin:
                 return f"ERROR: Invalid regex pattern '{pattern}': {str(e)}. Please provide a valid Python regular expression."
 
             start_time = time.time()
-            timeout = 30.0
+            # Use the configurable timeout (already passed as parameter)
             was_timed_out = False
             hit_result_limit = False
             file_count = 0
