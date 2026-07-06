@@ -6,6 +6,11 @@ from agent_cascade.llm.schema import USER, ASSISTANT, FUNCTION, Message
 from agent_cascade.utils.utils import extract_text_from_message
 
 
+def get_message_role(msg) -> str:
+    """Extract role from a message (handles both dict and object formats)."""
+    return msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+
+
 def _has_pending_tool_calls(msg) -> bool:
     """
     Check if an assistant message has pending tool/function calls.
@@ -156,26 +161,22 @@ def _refine_tool_call_boundary(active_set, discard, max_discard):
     Returns:
         Refined discard count that doesn't split tool-call chains.
     """
-    # Helper to get role from a message (works with both dict and object)
-    def _get_role(msg):
-        return msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-
     # Use <= so we also check the position at exactly max_discard — if it's an unsafe
     # boundary (FUNCTION or intermediate A), we advance past it even though that will
     # exceed max_discard. The caller's post-validation will then detect the keep zone breach.
     while discard <= max_discard:
         msg = active_set[discard]
 
-        if _get_role(msg) == FUNCTION:
+        if get_message_role(msg) == FUNCTION:
             # Rule 1: landed on FUNCTION — skip past consecutive Fs
-            while discard < len(active_set) and _get_role(active_set[discard]) == FUNCTION:
+            while discard < len(active_set) and get_message_role(active_set[discard]) == FUNCTION:
                 discard += 1
 
         elif _has_pending_tool_calls(msg) and discard > 0 and _has_pending_tool_calls(active_set[discard - 1]):
             # Rule 2: landed on intermediate A in a batched chain — skip past remaining As then their Fs
             while discard < len(active_set) and _has_pending_tool_calls(active_set[discard]):
                 discard += 1
-            while discard < len(active_set) and _get_role(active_set[discard]) == FUNCTION:
+            while discard < len(active_set) and get_message_role(active_set[discard]) == FUNCTION:
                 discard += 1
 
         else:
@@ -232,6 +233,15 @@ def compute_discard_count(active_set, fraction, force):
     # If discard went past the keep zone boundary (len - 2), no clean split exists
     if discard > len(active_set) - tail_keep:
         return -1  # Signal: tool chains extend past the keep zone with no clean split
+    
+    # Post-refinement guard: verify the first kept message is not a FUNCTION response.
+    # This catches edge cases where refinement landed on an ASSISTANT but its matching
+    # FUNCTION was skipped (e.g., multi-call A with interleaved responses).
+    if discard < len(active_set):
+        msg = active_set[discard]
+        role = get_message_role(msg)
+        if role == FUNCTION:
+            return -1  # Signal: boundary landed on a FUNCTION response
     
     return discard
 

@@ -4,6 +4,7 @@ from agent_cascade.compression.result import CompressResult
 from agent_cascade.compression.helpers import (
     compute_discard_count,
     build_marker_message,
+    get_message_role,
 )
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
 from agent_cascade.utils.utils import extract_text_from_message
@@ -340,6 +341,25 @@ def compress_context(
             f"Insert position {insert_pos} would overwrite or precede SYSTEM message — "
             f"pool state corrupted for agent '{target_agent_name}'"
         )
+
+    # Safety check: verify first kept message is not a FUNCTION response (orphaned from its A).
+    # This catches desync between pool and active_set snapshot taken at step 1.
+    if insert_pos < len(history):
+        first_kept = history[insert_pos]
+        role = get_message_role(first_kept)
+        if role == FUNCTION:
+            return CompressResult(
+                success=False,
+                summary_text=None,
+                marker_message=None,
+                messages_discarded=0,
+                tail_count=len(active_set),
+                error=f"Compression marker would be inserted before a FUNCTION response at position "
+                      f"{insert_pos} — pool/active-set desync detected. "
+                      f"Discard count={target_discard_count}, active_start_idx={active_start_idx}, "
+                      f"history_len={len(history)}",
+                mode=mode,
+            )
 
     # Atomic mutation via copy-and-replace: build new list and assign.
     try:
