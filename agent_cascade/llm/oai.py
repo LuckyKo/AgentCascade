@@ -455,11 +455,16 @@ class TextChatAtOAI(BaseFnCallModel):
                             res += full_tool_calls
                         yield res
         except OpenAIError as ex:
-            raise ModelServiceError(exception=ex)
-        except Exception as ex:
-            # Catch non-OpenAI errors (e.g., httpx.ReadError, ConnectionResetError)
-            # so they are wrapped as ModelServiceError and caught by Layer 1 retry logic
-            raise ModelServiceError(exception=ex)
+            code = getattr(ex, 'code', None) or getattr(ex, 'status_code', None)
+            raise ModelServiceError(exception=ex, code=code)
+        except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException,
+                ConnectionResetError, OSError) as ex:
+            # Catch non-OpenAI network/transport errors so they are wrapped
+            # as ModelServiceError and caught by Layer 1 retry logic
+            code = None
+            if hasattr(ex, 'response') and ex.response is not None:
+                code = str(getattr(ex.response, 'status_code', None) or '')
+            raise ModelServiceError(exception=ex, code=code if code else None)
         finally:
             # Close response to return connection to the httpx pool for reuse
             if response is not None:
@@ -571,11 +576,16 @@ class TextChatAtOAI(BaseFnCallModel):
                                       extra=extra))
             return result
         except OpenAIError as ex:
-            raise ModelServiceError(exception=ex)
-        except Exception as ex:
-            # Catch non-OpenAI errors (e.g., httpx.ReadError, ConnectionResetError)
-            # so they are wrapped as ModelServiceError and caught by Layer 1 retry logic
-            raise ModelServiceError(exception=ex)
+            code = getattr(ex, 'code', None) or getattr(ex, 'status_code', None)
+            raise ModelServiceError(exception=ex, code=code)
+        except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException,
+                ConnectionResetError, OSError) as ex:
+            # Catch non-OpenAI network/transport errors so they are wrapped
+            # as ModelServiceError and caught by Layer 1 retry logic
+            code = None
+            if hasattr(ex, 'response') and ex.response is not None:
+                code = str(getattr(ex.response, 'status_code', None) or '')
+            raise ModelServiceError(exception=ex, code=code if code else None)
         finally:
             # Non-streaming responses don't have .close(), but the underlying
             # HTTP response should be closed to return the connection to pool.
