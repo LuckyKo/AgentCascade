@@ -22,7 +22,13 @@ import time
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 from enum import Enum, auto
 
-from agent_cascade.settings import TOKEN_ESTIMATE_CHAR_DIVISOR, LLM_MAX_RETRIES, LLM_RETRY_BASE_DELAY, LLM_RETRY_MAX_BACKOFF
+from agent_cascade.settings import (
+    COMPRESSION_DEFAULT_FRACTION,
+    LLM_MAX_RETRIES,
+    LLM_RETRY_BASE_DELAY,
+    LLM_RETRY_MAX_BACKOFF,
+    TOKEN_ESTIMATE_CHAR_DIVISOR,
+)
 
 from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
@@ -2265,7 +2271,7 @@ class ExecutionEngine:
                 # Telemetry: record compression event (non-blocking)
                 if (tel := self._telemetry()) is not None:
                     try:
-                        tel.record_compression(inst_name, fraction=0.5)
+                        tel.record_compression(inst_name, fraction=COMPRESSION_DEFAULT_FRACTION)
                     except Exception:
                         pass
 

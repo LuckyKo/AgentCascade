@@ -10,7 +10,12 @@ from agent_cascade.compression.agent_invoker import invoke_compression_agent
 from agent_cascade.utils.utils import extract_text_from_message
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.llm.schema import FUNCTION, Message
-from agent_cascade.settings import CHARS_PER_TOKEN_ESTIMATE, CONTEXT_RESERVATION_RATIO, MESSAGE_TOKEN_ESTIMATE
+from agent_cascade.settings import (
+    CHARS_PER_TOKEN_ESTIMATE,
+    COMPRESSION_DEFAULT_FRACTION,
+    CONTEXT_RESERVATION_RATIO,
+    MESSAGE_TOKEN_ESTIMATE,
+)
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -19,7 +24,7 @@ logger = logging.getLogger(__name__)
 def compress_context(
     agent_pool,
     target_agent_name: str,        # Which agent's context to compress
-    fraction: float = 0.5,         # Fraction of active history to discard
+    fraction: float = COMPRESSION_DEFAULT_FRACTION,  # Fraction of active history to discard
     mode: str = "auto",            # "auto" (LLM generates) or "manual" (summary provided)
     summary_text: str | None = None,  # Required when mode == "manual"
     force: bool = False,           # Bypass validation guards (forced compression at >95%)

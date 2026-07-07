@@ -20,6 +20,11 @@ if TYPE_CHECKING:
 from agent_cascade.log import logger
 from agent_cascade.llm.schema import Message, USER
 from agent_cascade.agent_instance import AgentInstance
+from agent_cascade.settings import (
+    COMPRESSION_DEFAULT_FRACTION,
+    COMPRESSION_MIN_FRACTION,
+    COMPRESSION_MAX_FRACTION,
+)
 from agent_cascade.utils.pool_validation import validate_message_pool
 from agent_cascade.utils.utils import msg_field
 
@@ -443,7 +448,7 @@ class CompressionHandler:
             result = _compress(
                 agent_pool=self.pool,
                 target_agent_name=inst_name,
-                fraction=0.5,
+                fraction=COMPRESSION_DEFAULT_FRACTION,
                 mode='auto',
                 force=True,
             )
@@ -455,7 +460,7 @@ class CompressionHandler:
                 # Telemetry: record forced compression event (non-blocking)
                 if (tel := self.engine._telemetry()) is not None:
                     try:
-                        tel.record_compression(inst_name, fraction=0.5)
+                        tel.record_compression(inst_name, fraction=COMPRESSION_DEFAULT_FRACTION)
                     except Exception:
                         pass
                 
@@ -534,7 +539,7 @@ class CompressionHandler:
             return 'Error: Invalid JSON arguments.'
 
         # Fix #7: Validate fraction to prevent extreme values
-        fraction = max(0.1, min(0.9, args.get('fraction', 0.5)))
+        fraction = max(COMPRESSION_MIN_FRACTION, min(COMPRESSION_MAX_FRACTION, args.get('fraction', COMPRESSION_DEFAULT_FRACTION)))
         mode = args.get('mode', 'auto')
         summary_text = args.get('summary_text')
         force = args.get('force', False)
@@ -641,17 +646,17 @@ class CompressionHandler:
         if '\n/compress' in content:
             return None  # Skip embedded /compress references (e.g., in notifications)
         
-        # Parse fraction from command before modifying content - default 0.5
+        # Parse fraction from command before modifying content - default uses centralized setting
         parts = content.strip().split()
-        fraction = 0.5
+        fraction = COMPRESSION_DEFAULT_FRACTION
         if len(parts) > 1:
             try:
                 fraction = float(parts[1])
             except ValueError as e:
                 logger.warning(f"Invalid fraction in /compress command for {inst_name}: {e}")
         
-        # Clamp fraction to valid range
-        fraction = max(0.1, min(0.9, fraction))
+        # Clamp fraction to valid range using centralized settings
+        fraction = max(COMPRESSION_MIN_FRACTION, min(COMPRESSION_MAX_FRACTION, fraction))
         
         # Replace the /compress command with a descriptive system message to prevent re-detection
         # Convert decimal fraction to percentage (e.g., 0.5 → "50%")

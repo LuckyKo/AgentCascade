@@ -14,7 +14,14 @@ from enum import Enum, auto
 from typing import Callable, List, Optional
 
 from agent_cascade.llm.schema import Message
-from agent_cascade.settings import DEFAULT_COMPRESSION_COOLDOWN_SECONDS, DEFAULT_COMPRESSION_MAX_ATTEMPTS
+from agent_cascade.settings import (
+    DEFAULT_COMPRESSION_COOLDOWN_SECONDS, DEFAULT_COMPRESSION_MAX_ATTEMPTS,
+    COMPRESSION_FORCE_THRESHOLD, COMPRESSION_WARNING_THRESHOLD, COMPRESSION_TIMEOUT,
+    COMPRESSION_SECURITY_CHECK_TIMEOUT,
+    AGENT_IDLE_TIMEOUT, AGENT_IDLE_CHECK_INTERVAL,
+    AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
+    AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL,
+)
 
 
 class AgentState(Enum):
@@ -426,22 +433,22 @@ class AgentInstance:
 class PoolSettings:
     """Configurable thresholds and timeouts for the agent pool."""
 
-    idle_timeout_seconds: float = 300.0       # Auto-dismiss after this much inactivity
-    idle_check_interval: float = 60.0         # Check every N seconds
-    compression_force_threshold: float = 95.0 # Force compress at X% usage
-    compression_warning_threshold: float = 85.0  # Warn at X% usage
-    compression_timeout: float = 120.0        # Max seconds for compression to complete
+    idle_timeout_seconds: float = AGENT_IDLE_TIMEOUT  # Auto-dismiss after this much inactivity
+    idle_check_interval: float = AGENT_IDLE_CHECK_INTERVAL  # Check every N seconds
+    compression_force_threshold: float = COMPRESSION_FORCE_THRESHOLD  # Force compress at X% usage
+    compression_warning_threshold: float = COMPRESSION_WARNING_THRESHOLD  # Warn at X% usage
+    compression_timeout: float = COMPRESSION_TIMEOUT  # Max seconds for compression to complete
     compression_force_cooldown: float = DEFAULT_COMPRESSION_COOLDOWN_SECONDS  # Minimum seconds between forced compressions (prevent thrashing)
     compression_max_attempts: int = DEFAULT_COMPRESSION_MAX_ATTEMPTS  # Safety net max forced compressions (overridable via env var)
-    security_check_timeout: float = 120.0     # Max seconds for security advisor
-    max_auto_rollbacks: int = 3               # Max loop recovery retries
-    max_nesting_depth: int = 10               # Max depth of nested agent calls (prevent infinite chains)
-    max_workers: int = 10                     # ThreadPoolExecutor workers for parallel agent execution
-    auto_continue: bool = True                # Auto-continue on message truncation (respects user toggle)
-    
+    security_check_timeout: float = COMPRESSION_SECURITY_CHECK_TIMEOUT  # Max seconds for security advisor
+    max_auto_rollbacks: int = AGENT_MAX_AUTO_ROLLBACKS  # Max loop recovery retries
+    max_nesting_depth: int = AGENT_MAX_NESTING_DEPTH  # Max depth of nested agent calls (prevent infinite chains)
+    max_workers: int = AGENT_MAX_WORKERS  # ThreadPoolExecutor workers for parallel agent execution
+    auto_continue: bool = True  # Auto-continue on message truncation (respects user toggle)
+
     # SLEEPING state settings (for async tools)
-    sleeping_timeout: float = 300.0           # Max seconds to wait for background tools before timeout
-    sleeping_wakeup_interval: float = 5.0     # Interval between wakeup log messages while SLEEPING
+    sleeping_timeout: float = AGENT_SLEEPING_TIMEOUT  # Max seconds to wait for background tools before timeout
+    sleeping_wakeup_interval: float = AGENT_SLEEPING_WAKEUP_INTERVAL  # Wakeup log interval while SLEEPING
     
     # Tail sync check (design doc §5.2 compliance — D1 fix)
     tail_sync_check_enabled: bool = True      # Enable lightweight tail-length checks after writes

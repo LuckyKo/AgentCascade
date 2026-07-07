@@ -46,6 +46,35 @@ DEFAULT_COMPRESSION_COOLDOWN_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_DEFAULT_COMPRESSION_COOLDOWN_SECONDS', 2.0))  # Minimum seconds between forced compressions to prevent thrashing
 DEFAULT_COMPRESSION_MAX_ATTEMPTS: int = int(os.getenv(
     'QWEN_AGENT_COMPRESSION_MAX_ATTEMPTS', 100))  # Safety net max forced compressions before terminating (true overfeeding detected in core.py)
+COMPRESSION_FORCE_THRESHOLD: float = float(os.getenv(
+    'QWEN_AGENT_COMPRESSION_FORCE_THRESHOLD', 95.0))  # Force compress at X% token usage
+COMPRESSION_WARNING_THRESHOLD: float = float(os.getenv(
+    'QWEN_AGENT_COMPRESSION_WARNING_THRESHOLD', 85.0))  # Warn at X% token usage
+COMPRESSION_TIMEOUT: float = float(os.getenv(
+    'QWEN_AGENT_COMPRESSION_TIMEOUT', 120.0))  # Max seconds for compression to complete
+COMPRESSION_DEFAULT_FRACTION: float = float(os.getenv(
+    'QWEN_AGENT_COMPRESSION_DEFAULT_FRACTION', 0.5))  # Default fraction of history to discard (50%)
+COMPRESSION_MIN_FRACTION: float = float(os.getenv(
+    'QWEN_AGENT_COMPRESSION_MIN_FRACTION', 0.1))  # Minimum allowed compression fraction
+COMPRESSION_MAX_FRACTION: float = float(os.getenv(
+    'QWEN_AGENT_COMPRESSION_MAX_FRACTION', 0.9))  # Maximum allowed compression fraction
+COMPRESSION_SECURITY_CHECK_TIMEOUT: float = float(os.getenv(
+    'QWEN_AGENT_COMPRESSION_SECURITY_CHECK_TIMEOUT', 120.0))  # Max seconds for security advisor during compression
+# Settings for agent pool
+AGENT_IDLE_TIMEOUT: float = float(os.getenv(
+    'QWEN_AGENT_IDLE_TIMEOUT', 300.0))  # Auto-dismiss after X seconds inactivity
+AGENT_IDLE_CHECK_INTERVAL: float = float(os.getenv(
+    'QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))  # Check every N seconds
+AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv(
+    'QWEN_AGENT_MAX_AUTO_ROLLBACKS', 3))  # Max loop recovery retries
+AGENT_MAX_NESTING_DEPTH: int = int(os.getenv(
+    'QWEN_AGENT_MAX_NESTING_DEPTH', 10))  # Max depth of nested agent calls
+AGENT_MAX_WORKERS: int = int(os.getenv(
+    'QWEN_AGENT_MAX_WORKERS', 10))  # ThreadPoolExecutor workers
+AGENT_SLEEPING_TIMEOUT: float = float(os.getenv(
+    'QWEN_AGENT_SLEEPING_TIMEOUT', 300.0))  # Max seconds for background tools
+AGENT_SLEEPING_WAKEUP_INTERVAL: float = float(os.getenv(
+    'QWEN_AGENT_SLEEPING_WAKEUP_INTERVAL', 5.0))  # Wakeup log interval while SLEEPING
 CHARS_PER_TOKEN_ESTIMATE: float = float(os.getenv(
     'QWEN_AGENT_CHARS_PER_TOKEN_ESTIMATE', 5.0))  # Rough chars-per-token ratio for estimations (typical English ~5, use float for precision)
 
