@@ -488,7 +488,11 @@ Safety Net (handler.py, default 100 compressions):
 
 ### 5.3 Loop Detection & Recovery
 
-Agents can occasionally get stuck in repetitive behavior patterns — requesting the same tool repeatedly, producing similar responses, or cycling through failed attempts without making progress. The system detects and recovers from these loops automatically.
+Agent Cascade uses two complementary loop detection systems: one operates at the turn level (inter-turn), and the other operates in real time during LLM streaming (intra-generation).
+
+#### Inter-Turn Loop Detection (Legacy System)
+
+Agents can get stuck in repetitive behavior patterns — requesting the same tool repeatedly, producing similar responses, or cycling through failed attempts without making progress. The system detects and recovers from these loops automatically.
 
 **Detection:**
 
@@ -535,6 +539,66 @@ Loop Detected (LoopDetectedError raised in Phase 4)
 - Caps rollback at 50% of removable history per operation to avoid excessive data loss
 - Refines rollback count to avoid leaving dangling tool calls (rolls back an extra message if needed)
 - Maximum of 3 automatic retries — beyond that, the error propagates up
+
+#### Intra-Generation Loop Detection (Inner Loop Detector)
+
+While inter-turn detection catches repetitive patterns across completed turns, the inner loop detector operates in real time during LLM streaming, catching degenerate output before the model wastes excessive tokens.
+
+**What It Does:**
+
+Monitors each streaming chunk as it arrives from the LLM and analyzes the text for five distinct signals of repetitive or stalled generation. When a loop is detected, the stream is aborted immediately and the generation is retried.
+
+**Detection Signals:**
+
+| Signal | Method | Score | Trigger Condition |
+|--------|--------|-------|-------------------|
+| Character Runs | Consecutive identical character count | +100 (instant) | >70 identical chars in a row |
+| Sentence Repetition | Normalized sentence counter | +80 | Any sentence appears >=7 times |
+| N-gram Repetition | 64-token sliding window counter | +60 | Same n-gram repeats >=5 times |
+| Block Repetition | 128-token sliding window counter | +70 | Same block repeats >=4 times |
+| Entropy Collapse | Shannon entropy of token distribution | +30 | Entropy drops below 2.0 bits |
+
+Signals accumulate toward a cumulative score threshold (default: 200 points). Score decays by 3% per feed cycle to prevent transient repetitions from triggering false positives.
+
+**How It Works:**
+
+```
+LLM Streaming Chunk Arrives
+        │
+        ▼
+┌─────────────────────┐
+│ InnerLoopDetector   │ ← Fresh instance per retry attempt
+│ .feed(chunk)        │   Activated after min_chars threshold (default: 4000)
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│ Check 5 Signals     │ ← Character runs (always), others (after min_chars)
+│ + Accumulate Score  │   Heavy checks also respect batch_interval gate
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│ Score >= Threshold? │ ← Default: 200 points
+└───────┬─────────────┘
+        │ Yes
+        ▼
+┌─────────────────────┐
+│ Abort Stream        │ ← Stop LLM generation, save sample for debugging
+│ + Retry Generation  │   Sample saved to workspace/logs/loop_samples/
+└─────────────────────┘
+```
+
+**Configuration:**
+
+All tunable parameters are centralized in the `InnerLoopSettings` dataclass in `settings.py`. This includes memory bounds (max tokens, counter entries), activation thresholds (min chars, batch interval), structural parameters (n-gram size, block size, entropy window), detection thresholds (sentence/n-gram/block repetition counts, entropy limit), and scoring parameters (score threshold, decay rate). The UI provides a toggle to enable or disable detection, which takes effect in real time on the next streaming chunk.
+
+**Integration:**
+
+- A fresh `InnerLoopDetector` is created at the start of each retry attempt
+- Each streaming chunk is checked against the toggle setting (gated by `pool.settings.inner_loop_detect_enabled`)
+- On detection: the stream is aborted, a sample is saved for debugging, and an exception triggers the retry loop
+- A max-output-token guard (default: 2048, configurable via max_tokens) serves as a safety net if the detector misses a loop
 
 ### 5.4 Parallel Execution
 
