@@ -135,16 +135,16 @@ class TestFalsePositiveRate:
         )
 
     @pytest.mark.skipif(LOG_DIR is None, reason="No log directory found")
-    def test_fp_rate_below_3_percent_default(self):
-        """Stricter check — default params should keep FP < 3 %."""
+    def test_fp_rate_below_1_percent_default(self):
+        """Default params should keep FP < 1 %."""
         texts = extract_assistant_texts(LOG_DIR)
         assert len(texts) >= 500
 
         fp_count = sum(1 for t in texts if feed_chunks(t) is not None)
         rate = fp_count / len(texts) * 100
 
-        assert rate < 3.0, (
-            f"Default FP rate above 3 %: {rate:.1f}% "
+        assert rate < 1.0, (
+            f"Default FP rate too high: {rate:.2f}% "
             f"({fp_count}/{len(texts)} messages)"
         )
 
@@ -173,18 +173,18 @@ class TestCharacterRunDetection:
             f"Section {i} has been verified and looks correct overall."
             for i in range(1, 40)
         ) + "."
-        text = base + " " * 60
+        text = base + " " * 80
         result = feed_chunks(text)
-        assert result is not None, "Should detect a run of 60 spaces"
+        assert result is not None, "Should detect a run of 80 spaces"
 
 
 class TestSentenceRepetition:
-    """Detect the same sentence appearing 3+ times."""
+    """Detect the same sentence appearing 7+ times."""
 
     def test_exact_sentence_repeat(self):
         base = "Let me examine the implementation details more closely. " * 15
         sent = "The function takes three parameters for input processing."
-        text = base + f" {sent}. " * 4 + " More checking needed. " * 20
+        text = base + f" {sent}. " * 7 + " More checking needed. " * 20
         result = feed_chunks(text)
         assert result is not None, "Should detect repeated sentence"
         assert "repeated sentence" in result["reason"].lower()
@@ -193,7 +193,7 @@ class TestSentenceRepetition:
         """Simulate a reviewer restating the same observation."""
         base = "I'll verify each section carefully. " * 20
         obs = "The code looks correct here."
-        text = base + f" {obs}. " * 5 + " Moving on to the next part. " * 15
+        text = base + f" {obs}. " * 8 + " Moving on to the next part. " * 15
         result = feed_chunks(text)
         assert result is not None, "Should detect repeated analysis sentence"
 
@@ -205,7 +205,7 @@ class TestTokenLevelRepetition:
         """A repeating phrase pattern that creates identical n-grams.
 
         The detector uses a 128-token sliding window. If the same 128-token
-        sequence appears 3+ times, the n-gram counter fires.
+        sequence appears 5+ times, the n-gram counter fires.
         """
         # Build unique filler to pass min_chars (2500) without triggering sentence repeat
         base = " ".join(

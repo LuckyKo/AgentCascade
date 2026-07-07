@@ -15,11 +15,11 @@ _MAX_TOKENS = 1000
 
 # Default minimum characters to accumulate before activating full detection.
 # Below this threshold we only track state — no hashing or counter work is done.
-_DEFAULT_MIN_CHARS = 2500
+_DEFAULT_MIN_CHARS = 4000
 
 # Default batch interval: run the heavy checks every N-th feed call instead of
 # on every streaming chunk.  A value of 1 means "check every chunk".
-_DEFAULT_BATCH_INTERVAL = 4
+_DEFAULT_BATCH_INTERVAL = 6
 
 
 class InnerLoopDetector:
@@ -28,8 +28,8 @@ class InnerLoopDetector:
         ngram_size=128,
         block_size=128,
         entropy_window=128,
-        char_run_limit=24,
-        score_threshold=120,
+        char_run_limit=70,
+        score_threshold=200,
         min_chars=_DEFAULT_MIN_CHARS,
         batch_interval=_DEFAULT_BATCH_INTERVAL,
     ):
@@ -165,7 +165,7 @@ class InnerLoopDetector:
 
                 # --- Sentence repetition check (always active, cheap) ---
                 self.sentences[norm] += 1
-                if self.sentences[norm] >= 3:
+                if self.sentences[norm] >= 7:
                     ev = self.add_score(80, "repeated sentence")
                     if ev:
                         return ev
@@ -196,7 +196,7 @@ class InnerLoopDetector:
             h = hashlib.md5(str(ng).encode()).hexdigest()
 
             self.ngrams[h] += 1
-            if self.ngrams[h] >= 3:
+            if self.ngrams[h] >= 5:
                 ev = self.add_score(60, "repeated ngram")
                 if ev:
                     return ev
@@ -213,13 +213,18 @@ class InnerLoopDetector:
             h = hashlib.sha1(block.encode()).hexdigest()
 
             self.blocks[h] += 1
-            if self.blocks[h] >= 2:
+            if self.blocks[h] >= 4:
                 ev = self.add_score(70, "repeated block")
                 if ev:
                     return ev
 
         # Prune block counter.
         self._trim_counter(self.blocks)
+
+        ##################################################
+        # Sentence counter prune (done alongside heavy checks)
+        ##################################################
+        self._trim_counter(self.sentences)
 
         ##################################################
         # Entropy collapse
@@ -244,9 +249,6 @@ class InnerLoopDetector:
                 ev = self.add_score(30, f"low entropy ({entropy:.2f})")
                 if ev:
                     return ev
-
-        # Prune sentence counter (done alongside heavy checks).
-        self._trim_counter(self.sentences)
 
         # Gradual score decay prevents transient spikes from sticking forever.
         self.decay()
@@ -276,7 +278,7 @@ def save_loop_sample(text, reason, instance_name="", filepath=None):
             under the ``loop_samples/`` directory relative to this module.
     """
     if not text:
-        return
+        return None
 
     # Resolve output path — default to one file per day to avoid unbounded growth
     if filepath is None:
@@ -295,5 +297,6 @@ def save_loop_sample(text, reason, instance_name="", filepath=None):
     try:
         with open(filepath, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return filepath
     except OSError:
-        pass  # Non-critical — don't fail execution over debug logging
+        return None  # Non-critical — don't fail execution over debug logging

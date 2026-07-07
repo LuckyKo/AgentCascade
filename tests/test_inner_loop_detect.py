@@ -99,19 +99,19 @@ class TestCharacterRunDetection:
 # ===================================================================
 
 class TestSentenceRepetition:
-    """Feed the same sentence 3+ times → should detect loop."""
+    """Feed the same sentence 7+ times → should detect loop."""
 
     def test_repeated_sentence_detected(self):
         det = make_detector()
         sentence = "The quick brown fox jumps over the lazy dog."
-        text = sentence * 4  # 4 repetitions
+        text = sentence * 7  # 7 repetitions
         result = det.feed(text)
         assert result is not None, "Should detect repeated sentence"
         assert result["loop"] is True
         assert "repeated sentence" in result["reason"].lower()
 
     def test_two_repetitions_no_detection(self):
-        """Two identical sentences should NOT trigger (threshold is 3)."""
+        """Two identical sentences should NOT trigger (threshold is 7)."""
         det = make_detector(min_chars=0)
         sentence = "Hello world."
         result = det.feed(sentence * 2)
@@ -145,7 +145,7 @@ class TestNgramRepetition:
         """
         det = make_detector(ngram_size=8, min_chars=0)
         phrase = "the quick brown fox jumps over the lazy dog near river bank."
-        for _ in range(4):  # 4 feed calls → n-gram hash appears >= 3 times
+        for _ in range(5):  # 5 feed calls → n-gram hash appears >= 5 times (threshold raised)
             result = det.feed(phrase)
         assert result is not None, "Should detect repeated pattern"
         assert result["loop"] is True
@@ -179,7 +179,7 @@ class TestBlockRepetition:
         """
         det = make_detector(block_size=8, min_chars=0)
         phrase = "once upon a time there was a little prince on planet mars."
-        for _ in range(3):  # 3 feed calls → block hash appears >= 2 times
+        for _ in range(4):  # 4 feed calls → block hash appears >= 4 times (threshold raised)
             result = det.feed(phrase)
         assert result is not None, "Should detect repeated pattern"
         assert result["loop"] is True
@@ -263,12 +263,12 @@ class TestResetMethod:
         det = make_detector()
         sentence = "The quick brown fox jumps over the lazy dog."
         # First pass: trigger detection
-        result1 = det.feed(sentence * 4)
+        result1 = det.feed(sentence * 7)
         assert result1 is not None, "First pass should detect loop"
-
+    
         # Reset and feed the same text again
         det.reset()
-        result2 = det.feed(sentence * 4)
+        result2 = det.feed(sentence * 7)
         assert result2 is not None, "Second pass should also detect (fresh state)"
 
     def test_reset_clears_counters(self):
@@ -353,18 +353,18 @@ class TestReturnFormat:
 
     def test_loop_key_is_true(self):
         det = make_detector()
-        result = det.feed("a" * 30)
+        result = det.feed("a" * 70)
         assert result["loop"] is True
 
     def test_reason_is_string(self):
         det = make_detector()
-        result = det.feed("a" * 30)
+        result = det.feed("a" * 70)
         assert isinstance(result["reason"], str)
         assert len(result["reason"]) > 0
 
     def test_score_is_numeric(self):
         det = make_detector()
-        result = det.feed("a" * 30)
+        result = det.feed("a" * 70)
         assert isinstance(result["score"], (int, float))
         assert result["score"] >= det.threshold
 
@@ -394,8 +394,8 @@ class TestMultipleFeedCalls:
     def test_char_run_across_chunks(self):
         """A character run spanning multiple feed calls should be detected."""
         det = make_detector()
-        det.feed("a" * 15)
-        result = det.feed("a" * 15)  # total run = 30
+        det.feed("a" * 35)
+        result = det.feed("a" * 35)  # total run = 70
         assert result is not None, "Run across chunks should trigger detection"
 
     def test_sentence_count_across_feeds(self):
@@ -406,8 +406,16 @@ class TestMultipleFeedCalls:
         assert r1 is None, "First occurrence should not trigger"
         r2 = det.feed(sentence)   # count=2
         assert r2 is None, "Second occurrence should not trigger"
-        r3 = det.feed(sentence)   # count=3 → score += 80 >= threshold(50) → trigger
-        assert r3 is not None, "Third repetition should trigger (score crosses threshold)"
+        r3 = det.feed(sentence)   # count=3
+        assert r3 is None, "Third occurrence should not trigger (threshold is 7)"
+        r4 = det.feed(sentence)   # count=4
+        assert r4 is None, "Fourth occurrence should not trigger"
+        r5 = det.feed(sentence)   # count=5
+        assert r5 is None, "Fifth occurrence should not trigger"
+        r6 = det.feed(sentence)   # count=6
+        assert r6 is None, "Sixth occurrence should not trigger"
+        r7 = det.feed(sentence)   # count=7 → score += 80 >= threshold(50) → trigger
+        assert r7 is not None, "Seventh repetition should trigger (score crosses threshold)"
 
     def test_feed_count_increments(self):
         """_feed_count should track the number of feed calls."""
@@ -507,15 +515,15 @@ class TestEdgeCases:
     def test_mixed_case_sentences(self):
         """Mixed case sentences should be normalized before comparison."""
         det = make_detector(score_threshold=50)
-        # These should all normalize to the same sentence "hello world"
-        text = "Hello world. HELLO WORLD. hello World."
+        # These should all normalize to the same sentence "hello world" (need 7 for threshold)
+        text = "Hello world. HELLO WORLD. hello World. Hello world. hello world. HELLO WORLD. hello World."
         result = det.feed(text)
         assert result is not None, "Case variations of same sentence should match after normalization"
 
     def test_punctuation_variations(self):
         """Different punctuation at end should still detect repetition."""
         det = make_detector(score_threshold=50)
-        text = "Hello world. Hello world! Hello world?"
+        text = "Hello world. Hello world! Hello world? Hello world. hello world. HELLO WORLD. hello World."
         # After normalization these are all "hello world" (punctuation stripped by regex)
         result = det.feed(text)
         assert result is not None, "Punctuation variations should still match after normalization"
@@ -564,10 +572,18 @@ class TestIntegrationScenarios:
             "There lived a young farmer named John. ",
             "John worked hard every day. ",
             "He planted crops and harvested them. ",
-            # Now start repeating patterns
+            # Now start repeating patterns (need 7 for threshold)
             "John worked hard every day. ",
             "He planted crops and harvested them. ",
-            "John worked hard every day. ",  # third repetition → sentence detection
+            "John worked hard every day. ",
+            "He planted crops and harvested them. ",
+            "John worked hard every day. ",
+            "He planted crops and harvested them. ",
+            "John worked hard every day. ",
+            "He planted crops and harvested them. ",
+            "John worked hard every day. ",
+            "He planted crops and harvested them. ",
+            "John worked hard every day. ",  # seventh repetition → sentence detection
         ]
         result = None
         for chunk in chunks:

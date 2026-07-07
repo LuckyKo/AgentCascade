@@ -1699,16 +1699,23 @@ class ExecutionEngine:
                             if _delta_text:
                                 _ev = _inner_detector.feed(_delta_text)
                                 if _ev:  # Loop detected mid-stream
+                                    _sample_path = save_loop_sample(
+                                        text=_total_text[:4000],
+                                        reason=f"inner_loop ({_ev['reason']}, score={_ev['score']})",
+                                        instance_name=inst_name,
+                                    )
                                     yield from _abort_stream(
                                         f"Detected generation loop: {_ev['reason']} (score={_ev['score']})"
                                     )
-                                    break
+                                    if _sample_path:
+                                        logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
+                                    raise Exception(f"inner_loop: {_ev['reason']}")
 
                             # Max-output-token guard: safety net — if LLM exceeds token budget it's likely looping
                             if not _token_guard_triggered:
                                 _est_tokens = len(_total_text) // TOKEN_ESTIMATE_CHAR_DIVISOR
                                 if _est_tokens > _max_output_tokens:
-                                    save_loop_sample(
+                                    _sample_path = save_loop_sample(
                                         text=_total_text[:4000],
                                         reason=f"max_output_exceeded ({_est_tokens}/{_max_output_tokens} est. tokens)",
                                         instance_name=inst_name,
@@ -1716,8 +1723,10 @@ class ExecutionEngine:
                                     yield from _abort_stream(
                                         f"Output token budget exceeded: ~{_est_tokens} tokens (limit {_max_output_tokens})"
                                     )
+                                    if _sample_path:
+                                        logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
                                     _token_guard_triggered = True
-                                    break
+                                    raise Exception(f"max_tokens: ~{_est_tokens} tokens")
                     except Exception as e:
                         logger.debug(f"[INNER_LOOP] Detection error for {inst_name}: {e}")
 
@@ -1774,14 +1783,30 @@ class ExecutionEngine:
                 with instance._compression_lock:
                     instance._streaming_responses = []
                 
-                if retry_count >= LLM_MAX_RETRIES:
+                if retry_count > LLM_MAX_RETRIES:
                     error_msg = str(e).split('\n')[0] if e else "Unknown error"
+                    # Give clearer message for loop detection failures
+                    if 'inner_loop' in error_msg:
+                        display_msg = f"LLM generation loop detected (tried {LLM_MAX_RETRIES} times)"
+                    elif 'max_tokens' in error_msg:
+                        display_msg = f"LLM exceeded token limit (tried {LLM_MAX_RETRIES} times)"
+                    else:
+                        display_msg = f"LLM call failed after {LLM_MAX_RETRIES} retries — {error_msg}"
                     logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {LLM_MAX_RETRIES} retries: {e}")
-                    yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed after {LLM_MAX_RETRIES} retries — {error_msg}]")
+                    yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {display_msg}]")
                     error_already_yielded = True
                     break
                 
-                retry_count += 1
+                # _abort_stream already increments retry_count before raising.
+                # For regular exceptions, increment if we haven't yet (retry_count==0).
+                if retry_count == 0:
+                    retry_count += 1
+                else:
+                    # Already incremented by _abort_stream OR previous round — check if
+                    # we need another increment (only if _abort_stream didn't do it).
+                    # We know _abort_stream incremented if error message contains our markers.
+                    if 'inner_loop' not in str(e) and 'max_tokens' not in str(e):
+                        retry_count += 1
                 backoff = min(LLM_RETRY_BASE_DELAY * (2 ** (retry_count - 1)), LLM_RETRY_MAX_BACKOFF)
                 
                 # Classify error type
