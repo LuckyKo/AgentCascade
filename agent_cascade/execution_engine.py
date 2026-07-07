@@ -1644,7 +1644,7 @@ class ExecutionEngine:
                 _max_output_tokens = 2048  # Default cap per single response
                 _gen_override = getattr(instance, '_generate_cfg_override', None)
                 if _gen_override and isinstance(_gen_override, dict):
-                    _mt = _gen_override.get('max_tokens') or _gen_override.get('max_output_tokens')
+                    _mt = _gen_override.get('max_tokens') or _gen_override.get('max_output_tokens') or _gen_override.get('max_input_tokens')
                     if isinstance(_mt, int) and _mt > 0:
                         _max_output_tokens = _mt
                 # Also check template LLM generate_cfg as fallback
@@ -1697,13 +1697,15 @@ class ExecutionEngine:
                                 retry_count += 1
 
                             if _delta_text:
-                                _ev = _inner_detector.feed(_delta_text)
-                                if _ev:  # Loop detected mid-stream
-                                    _sample_path = save_loop_sample(
-                                        text=_total_text[:4000],
-                                        reason=f"inner_loop ({_ev['reason']}, score={_ev['score']})",
-                                        instance_name=inst_name,
-                                    )
+                                # Inner-loop detection (gated by pool settings toggle)
+                                if getattr(self.pool.settings, 'inner_loop_detect_enabled', False):
+                                    _ev = _inner_detector.feed(_delta_text)
+                                    if _ev:  # Loop detected mid-stream
+                                        _sample_path = save_loop_sample(
+                                            text=_total_text[:4000],
+                                            reason=f"inner_loop ({_ev['reason']}, score={_ev['score']})",
+                                            instance_name=inst_name,
+                                        )
                                     yield from _abort_stream(
                                         f"Detected generation loop: {_ev['reason']} (score={_ev['score']})"
                                     )

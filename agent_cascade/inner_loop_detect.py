@@ -18,13 +18,13 @@ _DEFAULT_MIN_CHARS = 4000
 
 # Default batch interval: run the heavy checks every N-th feed call instead of
 # on every streaming chunk to save CPU.  Lower values detect faster but cost more.
-_DEFAULT_BATCH_INTERVAL = 6
+_DEFAULT_BATCH_INTERVAL = 1
 
 
 class InnerLoopDetector:
     def __init__(
         self,
-        ngram_size=128,
+        ngram_size=64,
         block_size=128,
         entropy_window=128,
         char_run_limit=70,
@@ -133,8 +133,10 @@ class InnerLoopDetector:
         # Split accumulated text into sentence chunks in one pass.
         # Track the last match end position; if no sentences are found,
         # the entire buffer is preserved (handles code, poetry, etc.).
+        # The regex also captures trailing text without terminal punctuation
+        # so that sentences ending mid-stream are still tokenized.
         last_end = 0
-        for sent_match in re.finditer(r'([^.?!]*[.?!])', self.text):
+        for sent_match in re.finditer(r'([^.?!]+[.?!]|[^.?!]+$)', self.text):
             sent = sent_match.group(1)
             last_end = sent_match.end()
 
@@ -147,7 +149,13 @@ class InnerLoopDetector:
                 # Accumulate sentence counts (checked later, gated by min_chars).
                 self.sentences[norm] += 1
 
+        trimmed = len(self.text) - len(self.text[last_end:])
         self.text = self.text[last_end:]
+
+        # Keep _chars_fed bounded: subtract chars that were tokenized and discarded.
+        # This prevents unbounded growth over long generation streams.
+        if trimmed > 0:
+            self._chars_fed = max(0, self._chars_fed - trimmed)
 
         ##################################################
         # Character repetition (per-char scan — always runs to maintain state)
