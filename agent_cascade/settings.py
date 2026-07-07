@@ -75,8 +75,11 @@ AGENT_SLEEPING_TIMEOUT: float = float(os.getenv(
     'QWEN_AGENT_SLEEPING_TIMEOUT', 300.0))  # Max seconds for background tools
 AGENT_SLEEPING_WAKEUP_INTERVAL: float = float(os.getenv(
     'QWEN_AGENT_SLEEPING_WAKEUP_INTERVAL', 5.0))  # Wakeup log interval while SLEEPING
+# Conservative estimate used for compression template overhead estimation.
+# Counts system prompt overhead and structural tokens, so a higher divisor
+# (more chars per token) yields safer/more conservative estimates.
 CHARS_PER_TOKEN_ESTIMATE: float = float(os.getenv(
-    'QWEN_AGENT_CHARS_PER_TOKEN_ESTIMATE', 5.0))  # Rough chars-per-token ratio for estimations (typical English ~5, use float for precision)
+    'QWEN_AGENT_CHARS_PER_TOKEN_ESTIMATE', 5.0))
 
 # Settings for forget_last tool (Feature 021)
 DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS: int = int(os.getenv(
@@ -87,8 +90,11 @@ ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv(
     'QWEN_AGENT_ENDPOINT_SLOT_ACQUIRE_TIMEOUT', 30))  # Timeout in seconds for acquiring endpoint scheduling slots
 
 # Settings for token estimation
+# Aggressive estimate used for telemetry and output estimation.
+# Based on typical English text (~4 chars/token), this is more optimistic
+# than CHARS_PER_TOKEN_ESTIMATE (5.0) which accounts for system prompt overhead.
 TOKEN_ESTIMATE_CHAR_DIVISOR: float = float(os.getenv(
-    'QWEN_AGENT_TOKEN_ESTIMATE_CHAR_DIVISOR', 4.0))  # Chars-per-token divisor for telemetry/estimation
+    'QWEN_AGENT_TOKEN_ESTIMATE_CHAR_DIVISOR', 4.0))
 IMAGE_TOKEN_ESTIMATE: int = int(os.getenv(
     'QWEN_AGENT_IMAGE_TOKEN_ESTIMATE', 255))  # Estimated tokens per image in message counting
 MESSAGE_TOKEN_ESTIMATE: int = int(os.getenv(

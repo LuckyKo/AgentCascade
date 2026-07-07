@@ -3341,9 +3341,9 @@ class ExecutionEngine:
                 msg_obj = Message(**msg) if isinstance(msg, dict) else msg
                 text = extract_text_from_message(msg_obj, add_upload_info=True)
                 
-                # Also count reasoning_content separately to avoid undercounting.
+                # Count reasoning_content separately to avoid undercounting.
                 # extract_text_from_message only includes reasoning as fallback when
-                # content is empty, but for accurate token counting we need it always.
+                # content is empty, so we always count it explicitly here.
                 rc = msg_field(msg_obj, 'reasoning_content') or msg_field(msg_obj, 'reasoning')
                 if rc:
                     if isinstance(rc, list):
@@ -3355,12 +3355,15 @@ class ExecutionEngine:
                         rc_str = ' '.join(rc_texts)
                     else:
                         rc_str = str(rc).strip()
-                    # Avoid double-counting: extract_text already includes reasoning
-                    # when content is empty. Only add extra count if text doesn't contain it.
-                    if not text or '[THOUGHT:' not in text:
-                        total += qwen_count(rc_str)
-                
+                else:
+                    rc_str = ''
+
                 total += qwen_count(text)
+
+                # Add reasoning content tokens, but skip if main content is empty
+                # (extract_text already included reasoning as fallback in that case).
+                if text and rc_str:
+                    total += qwen_count(rc_str)
 
             # Update cache
             if inst:

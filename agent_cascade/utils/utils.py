@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 from agent_cascade.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION, ROLE, SYSTEM, USER, ContentItem, Message
 from agent_cascade.log import logger
+from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
 
 # Max length for function/tool call arguments before truncation (shared across utils and agent_invoker)
 MAX_FC_ARGS_LEN = 2048
@@ -1101,7 +1102,6 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
     else:
         text = extract_text_from_message(msg_obj, add_upload_info=True)
         image_tokens = 0
-        from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
 
         def repl(match):
             nonlocal image_tokens
