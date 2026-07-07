@@ -5,49 +5,58 @@ import math
 import os
 import re
 
+from agent_cascade.settings import InnerLoopSettings
 
-# Max entries per Counter before pruning stale keys (prevents unbounded memory growth).
-_MAX_COUNTER_ENTRIES = 200
-
-# Max tokens to keep in the sliding window (keeps token list bounded).
-_MAX_TOKENS = 1000
-
-# Default minimum characters to accumulate before activating full detection.
-# Below this threshold we only track state — no hashing or counter work is done.
-_DEFAULT_MIN_CHARS = 4000
-
-# Default batch interval: run the heavy checks every N-th feed call instead of
-# on every streaming chunk to save CPU.  Lower values detect faster but cost more.
-_DEFAULT_BATCH_INTERVAL = 1
+# Precompiled regex patterns (avoid recompilation on every feed call).
+_SENTENCE_RE = re.compile(r'([^.?!]+[.?!]|[^.?!]+$)')
+_NON_WORD_RE = re.compile(r'\W+')
+_WORD_RE = re.compile(r'\b\w+\b')
 
 
 class InnerLoopDetector:
     def __init__(
         self,
-        ngram_size=64,
-        block_size=128,
-        entropy_window=128,
-        char_run_limit=70,
-        score_threshold=200,
-        min_chars=_DEFAULT_MIN_CHARS,
-        batch_interval=_DEFAULT_BATCH_INTERVAL,
+        ngram_size: int | None = None,
+        block_size: int | None = None,
+        entropy_window: int | None = None,
+        char_run_limit: int | None = None,
+        score_threshold: int | None = None,
+        min_chars: int | None = None,
+        batch_interval: int | None = None,
+        settings: InnerLoopSettings | None = None,
     ):
+        """Initialize the inner-loop detector.
+
+        Args:
+            settings:  Optional ``InnerLoopSettings`` instance providing defaults
+                       for all tunable parameters.  If omitted a default instance
+                       is used (all values match current production behaviour).
+            ngram_size, block_size, … : Override individual fields from *settings*.
+                                        Passing an explicit value always wins over
+                                        whatever the ``settings`` object contains.
+        """
+        if settings is None:
+            settings = InnerLoopSettings()
         self.text = ""
         # Bounded token storage: deque with maxlen to cap memory usage.
-        self.tokens = deque(maxlen=_MAX_TOKENS)
+        self.tokens = deque(maxlen=settings.max_tokens)
 
-        self.ngram_size = ngram_size
-        self.block_size = block_size
-        self.entropy_window = entropy_window
-        self.char_run_limit = char_run_limit
+        # Per-parameter overrides: explicit arg wins, otherwise fall back to settings default.
+        self.ngram_size = ngram_size if ngram_size is not None else settings.ngram_size
+        self.block_size = block_size if block_size is not None else settings.block_size
+        self.entropy_window = entropy_window if entropy_window is not None else settings.entropy_window
+        self.char_run_limit = char_run_limit if char_run_limit is not None else settings.char_run_limit
 
         # Minimum characters to accumulate before running heavy checks.
-        self.min_chars = min_chars
+        self.min_chars = min_chars if min_chars is not None else settings.default_min_chars
         # Run full detection only every batch_interval-th feed call.
-        self.batch_interval = max(1, batch_interval)
+        self.batch_interval = max(1, batch_interval if batch_interval is not None else settings.default_batch_interval)
 
         self.score = 0
-        self.threshold = score_threshold
+        self.threshold = score_threshold if score_threshold is not None else settings.score_threshold
+
+        # Cached reference to settings for thresholds used in detection logic.
+        self._settings = settings
 
         self.ngrams = Counter()
         self.blocks = Counter()
@@ -79,7 +88,7 @@ class InnerLoopDetector:
 
     def decay(self):
         """Gradually reduce score so transient repetitions don't accumulate forever."""
-        self.score *= 0.97
+        self.score *= self._settings.score_decay_rate
 
     def add_score(self, amount, reason):
         """Add to the loop score; return an event dict if threshold is crossed."""
@@ -94,13 +103,14 @@ class InnerLoopDetector:
 
     # ── Counter maintenance (prune oldest entries when over budget) ─────
 
-    @staticmethod
-    def _trim_counter(counter: Counter, max_entries: int = _MAX_COUNTER_ENTRIES) -> None:
+    def _trim_counter(self, counter: Counter, max_entries: int | None = None) -> None:
         """Remove the least-representative keys when a Counter grows too large.
 
         Keeps the top-N by count, then fills remaining slots from the rest.
         This is O(k log k) where k = len(counter), called only when over budget.
         """
+        if max_entries is None:
+            max_entries = self._settings.max_counter_entries
         if len(counter) <= max_entries:
             return
         # Sort by count descending; keep the most frequent entries first.
@@ -121,6 +131,9 @@ class InnerLoopDetector:
           1. min_chars   — skip until enough text has accumulated to be meaningful.
           2. batch_interval — only run every N-th feed call to reduce overhead per chunk.
         """
+        # Guard against empty or whitespace-only chunks (no-op, avoids accumulating junk).
+        if not chunk or not chunk.strip():
+            return None
 
         ##################################################
         # Accumulate text and tokenize into sentences
@@ -136,20 +149,20 @@ class InnerLoopDetector:
         # The regex also captures trailing text without terminal punctuation
         # so that sentences ending mid-stream are still tokenized.
         last_end = 0
-        for sent_match in re.finditer(r'([^.?!]+[.?!]|[^.?!]+$)', self.text):
+        for sent_match in _SENTENCE_RE.finditer(self.text):
             sent = sent_match.group(1)
             last_end = sent_match.end()
 
             # Tokenize with proper word-boundary handling instead of str.split().
-            norm = re.sub(r'\W+', ' ', sent.lower()).strip()
+            norm = _NON_WORD_RE.sub(' ', sent.lower()).strip()
 
             if norm:
-                toks = re.findall(r'\b\w+\b', norm)
+                toks = _WORD_RE.findall(norm)
                 self.tokens.extend(toks)
                 # Accumulate sentence counts (checked later, gated by min_chars).
                 self.sentences[norm] += 1
 
-        trimmed = len(self.text) - len(self.text[last_end:])
+        trimmed = last_end
         self.text = self.text[last_end:]
 
         # Keep _chars_fed bounded: subtract chars that were tokenized and discarded.
@@ -193,7 +206,7 @@ class InnerLoopDetector:
         ##################################################
 
         for norm_count in self.sentences.items():
-            if norm_count[1] >= 7:
+            if norm_count[1] >= self._settings.sentence_repetition_threshold:
                 ev = self.add_score(80, "repeated sentence")
                 if ev:
                     return ev
@@ -214,7 +227,7 @@ class InnerLoopDetector:
         if len(self.tokens) >= self.ngram_size:
             ng = tuple(self.tokens)[-self.ngram_size:]  # O(k) where k=ngram_size, not O(N)
             self.ngrams[ng] += 1
-            if self.ngrams[ng] >= 5:
+            if self.ngrams[ng] >= self._settings.ngram_repetition_threshold:
                 ev = self.add_score(60, "repeated ngram")
                 if ev:
                     return ev
@@ -229,7 +242,7 @@ class InnerLoopDetector:
         if len(self.tokens) >= self.block_size:
             block = tuple(self.tokens)[-self.block_size:]  # O(k) where k=block_size, not O(N)
             self.blocks[block] += 1
-            if self.blocks[block] >= 4:
+            if self.blocks[block] >= self._settings.block_repetition_threshold:
                 ev = self.add_score(70, "repeated block")
                 if ev:
                     return ev
@@ -261,7 +274,7 @@ class InnerLoopDetector:
                 p = c / len(window)
                 entropy -= p * math.log2(p)
 
-            if entropy < 2.0:
+            if entropy < self._settings.entropy_threshold:
                 ev = self.add_score(30, f"low entropy ({entropy:.2f})")
                 if ev:
                     return ev

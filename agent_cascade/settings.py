@@ -14,6 +14,7 @@
 
 import ast
 import os
+from dataclasses import dataclass
 from typing import List, Literal
 
 # Settings for LLMs
@@ -49,11 +50,11 @@ DEFAULT_COMPRESSION_MAX_ATTEMPTS: int = int(os.getenv(
 COMPRESSION_FORCE_THRESHOLD: float = float(os.getenv(
     'QWEN_AGENT_COMPRESSION_FORCE_THRESHOLD', 95.0))  # Force compress at X% token usage
 COMPRESSION_WARNING_THRESHOLD: float = float(os.getenv(
-    'QWEN_AGENT_COMPRESSION_WARNING_THRESHOLD', 85.0))  # Warn at X% token usage
+    'QWEN_AGENT_COMPRESSION_WARNING_THRESHOLD', 90.0))  # Warn at X% token usage
 COMPRESSION_TIMEOUT: float = float(os.getenv(
     'QWEN_AGENT_COMPRESSION_TIMEOUT', 120.0))  # Max seconds for compression to complete
 COMPRESSION_DEFAULT_FRACTION: float = float(os.getenv(
-    'QWEN_AGENT_COMPRESSION_DEFAULT_FRACTION', 0.5))  # Default fraction of history to discard (50%)
+    'QWEN_AGENT_COMPRESSION_DEFAULT_FRACTION', 0.7))  # Default fraction of history to discard (70%)
 COMPRESSION_MIN_FRACTION: float = float(os.getenv(
     'QWEN_AGENT_COMPRESSION_MIN_FRACTION', 0.1))  # Minimum allowed compression fraction
 COMPRESSION_MAX_FRACTION: float = float(os.getenv(
@@ -62,7 +63,7 @@ COMPRESSION_SECURITY_CHECK_TIMEOUT: float = float(os.getenv(
     'QWEN_AGENT_COMPRESSION_SECURITY_CHECK_TIMEOUT', 120.0))  # Max seconds for security advisor during compression
 # Settings for agent pool
 AGENT_IDLE_TIMEOUT: float = float(os.getenv(
-    'QWEN_AGENT_IDLE_TIMEOUT', 300.0))  # Auto-dismiss after X seconds inactivity
+    'QWEN_AGENT_IDLE_TIMEOUT', 900.0))  # Auto-dismiss after X seconds inactivity
 AGENT_IDLE_CHECK_INTERVAL: float = float(os.getenv(
     'QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))  # Check every N seconds
 AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv(
@@ -94,7 +95,7 @@ ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv(
 # Based on typical English text (~4 chars/token), this is more optimistic
 # than CHARS_PER_TOKEN_ESTIMATE (5.0) which accounts for system prompt overhead.
 TOKEN_ESTIMATE_CHAR_DIVISOR: float = float(os.getenv(
-    'QWEN_AGENT_TOKEN_ESTIMATE_CHAR_DIVISOR', 4.0))
+    'QWEN_AGENT_TOKEN_ESTIMATE_CHAR_DIVISOR', 5.0))
 IMAGE_TOKEN_ESTIMATE: int = int(os.getenv(
     'QWEN_AGENT_IMAGE_TOKEN_ESTIMATE', 255))  # Estimated tokens per image in message counting
 MESSAGE_TOKEN_ESTIMATE: int = int(os.getenv(
@@ -123,3 +124,36 @@ MAX_EVENTS_IN_MEMORY: int = int(os.getenv(
 # Settings for LM Studio
 LM_STUDIO_KEEPALIVE_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_LM_STUDIO_KEEPALIVE', 3.0))  # Keepalive expiry in seconds
+
+# ── Inner-loop detection settings (Feature: loop detection tuning) ─────────────
+@dataclass
+class InnerLoopSettings:
+    """Tunable parameters for the inner-loop repetition detector.
+
+    All fields have defaults matching current production values. Override by
+    constructing a custom instance and passing it to ``InnerLoopDetector``.
+    """
+
+    # Memory bounds
+    max_counter_entries: int = 200          # Max entries per Counter before pruning
+    max_tokens: int = 1000                 # Max tokens in the sliding window
+
+    # Activation thresholds
+    default_min_chars: int = 4000          # Min chars to accumulate before full detection
+    default_batch_interval: int = 1        # Run heavy checks every N-th feed call
+
+    # Structural parameters (passed to InnerLoopDetector constructor)
+    ngram_size: int = 64                   # Token window size for n-gram repetition
+    block_size: int = 128                  # Token window size for block repetition
+    entropy_window: int = 128             # Token window for Shannon entropy calculation
+    char_run_limit: int = 70              # Max consecutive identical chars before alert
+    score_threshold: int = 200            # Cumulative score to trigger loop detection
+
+    # Detection thresholds (hardcoded in detection logic)
+    sentence_repetition_threshold: int = 7   # Sentence count to flag repetition
+    ngram_repetition_threshold: int = 5      # N-gram count to flag repetition
+    block_repetition_threshold: int = 4      # Block count to flag repetition
+    entropy_threshold: float = 2.0          # Shannon entropy below which a loop is suspected
+
+    # Scoring
+    score_decay_rate: float = 0.97         # Multiplicative decay per feed cycle
