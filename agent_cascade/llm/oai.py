@@ -455,8 +455,8 @@ class TextChatAtOAI(BaseFnCallModel):
                             res += full_tool_calls
                         yield res
         except OpenAIError as ex:
-            code = getattr(ex, 'code', None) or getattr(ex, 'status_code', None)
-            raise ModelServiceError(exception=ex, code=code)
+            code = str(getattr(ex, 'code', None) or getattr(ex, 'status_code', None) or '')
+            raise ModelServiceError(exception=ex, code=code if code else None)
         except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException,
                 ConnectionResetError, OSError) as ex:
             # Catch non-OpenAI network/transport errors so they are wrapped
@@ -576,8 +576,8 @@ class TextChatAtOAI(BaseFnCallModel):
                                       extra=extra))
             return result
         except OpenAIError as ex:
-            code = getattr(ex, 'code', None) or getattr(ex, 'status_code', None)
-            raise ModelServiceError(exception=ex, code=code)
+            code = str(getattr(ex, 'code', None) or getattr(ex, 'status_code', None) or '')
+            raise ModelServiceError(exception=ex, code=code if code else None)
         except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException,
                 ConnectionResetError, OSError) as ex:
             # Catch non-OpenAI network/transport errors so they are wrapped

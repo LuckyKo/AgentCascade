@@ -92,7 +92,8 @@ class BaseChatModel(ABC):
             generate_cfg['max_retries'] = cfg['max_retries']
             
         cache_dir = cfg.get('cache_dir', generate_cfg.pop('cache_dir', None))
-        self.max_retries = generate_cfg.pop('max_retries', 2)
+        mr = generate_cfg.pop('max_retries', 2)
+        self.max_retries = mr if isinstance(mr, int) and mr >= 0 else 2
         self.generate_cfg = generate_cfg
         self.model_type = cfg.get('model_type', '')
         
