@@ -149,9 +149,12 @@ class InnerLoopDetector:
         self._feed_count += 1
 
         # Split accumulated text into sentence chunks in one pass.
-        remaining = ""
+        # Track the last match end position; if no sentences are found,
+        # the entire buffer is preserved (handles code, poetry, etc.).
+        last_end = 0
         for sent_match in re.finditer(r'([^.?!]*[.?!])', self.text):
             sent = sent_match.group(1)
+            last_end = sent_match.end()
 
             # Tokenize with proper word-boundary handling instead of str.split().
             norm = re.sub(r'\W+', ' ', sent.lower()).strip()
@@ -167,9 +170,7 @@ class InnerLoopDetector:
                     if ev:
                         return ev
 
-            remaining = self.text[sent_match.end():]
-
-        self.text = remaining
+        self.text = self.text[last_end:]
 
         ##################################################
         # Heavy checks — gated by min_chars AND batch_interval
@@ -187,6 +188,7 @@ class InnerLoopDetector:
 
         ##################################################
         # n-gram detection (deterministic hashing via md5)
+        # Deque doesn't support slicing, so we convert only the tail window.
         ##################################################
 
         if len(self.tokens) >= self.ngram_size:

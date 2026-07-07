@@ -1682,22 +1682,26 @@ class ExecutionEngine:
                             _delta_text = _total_text[_prev_text_len:]
                             _prev_text_len = len(_total_text)
 
+                            # --- Interrupt helper (shared by inner-loop and max-token guards) ---
+                            def _abort_stream(reason_msg):
+                                with instance._compression_lock:
+                                    instance._streaming_responses = []
+                                try:
+                                    gen.close()
+                                except RuntimeError:
+                                    pass  # Already closed/exhausted
+                                yield None  # Signal UI
+                                logger.debug(f"[STREAM_GUARD] {reason_msg} for {inst_name}. Retrying…")
+                                nonlocal last_output, retry_count
+                                last_output = None
+                                retry_count += 1
+
                             if _delta_text:
                                 _ev = _inner_detector.feed(_delta_text)
                                 if _ev:  # Loop detected mid-stream
-                                    with instance._compression_lock:
-                                        instance._streaming_responses = []
-                                    try:
-                                        gen.close()
-                                    except RuntimeError:
-                                        pass  # Already closed/exhausted
-                                    yield None  # Signal UI
-                                    logger.debug(
-                                        f"[INNER_LOOP] Detected generation loop for {inst_name}: "
-                                        f"{_ev['reason']} (score={_ev['score']}). Retrying…"
+                                    yield from _abort_stream(
+                                        f"Detected generation loop: {_ev['reason']} (score={_ev['score']})"
                                     )
-                                    last_output = None  # Force retry
-                                    retry_count += 1  # Advance retry counter to avoid infinite loop
                                     break
 
                             # Max-output-token guard: safety net — if LLM exceeds token budget it's likely looping
@@ -1709,19 +1713,9 @@ class ExecutionEngine:
                                         reason=f"max_output_exceeded ({_est_tokens}/{_max_output_tokens} est. tokens)",
                                         instance_name=inst_name,
                                     )
-                                    with instance._compression_lock:
-                                        instance._streaming_responses = []
-                                    try:
-                                        gen.close()
-                                    except RuntimeError:
-                                        pass  # Already closed/exhausted
-                                    yield None  # Signal UI
-                                    logger.debug(
-                                        f"[MAX_TOKENS] Output token budget exceeded for {inst_name}: "
-                                        f"~{_est_tokens} tokens (limit {_max_output_tokens}). Retrying…"
+                                    yield from _abort_stream(
+                                        f"Output token budget exceeded: ~{_est_tokens} tokens (limit {_max_output_tokens})"
                                     )
-                                    last_output = None  # Force retry
-                                    retry_count += 1
                                     _token_guard_triggered = True
                                     break
                     except Exception as e:
