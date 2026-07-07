@@ -388,7 +388,7 @@ class GrepMixin:
                     from agent_cascade.log import logger
                     logger.warning(f"Failed to write grep spill file {spill_file_path}: {e}")
 
-            output_text += f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded."
+            output_text += f"\n\n[TRUNCATED — Character limit exceeded."
             if spill_file_path is not None:
                 output_text += f" Full output ({len(full_output)} chars) saved to: {spill_file_path}"
             output_text += "\nYou can read it with read_file if needed.]"
@@ -450,13 +450,13 @@ class GrepMixin:
                             except Exception as e:
                                 logger.warning(f"Failed to write grep spill file {spill_file_path}: {e}")
 
-                        output_text += f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded."
+                        output_text += f"\n\n[TRUNCATED — Character limit exceeded."
                         if spill_file_path is not None:
                             output_text += f" Full output ({len(full_output)} chars) saved to: {spill_file_path}"
                         output_text += "\nYou can read it with read_file if needed.]"
                     elif _sub_truncated and spill_file_path is not None:
                         summary += " [TRUNCATED]"
-                        output_text += f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. Full output ({_orig_output_size} chars) saved to: {spill_file_path}\nYou can read it with read_file if needed.]"
+                        output_text += f"\n\n[TRUNCATED — Character limit exceeded. Full output ({_orig_output_size} chars) saved to: {spill_file_path}\nYou can read it with read_file if needed.]"
 
                     return f"{summary}:\n\n" + output_text
 
@@ -592,7 +592,7 @@ class GrepMixin:
                     except Exception as e:
                         logger.warning(f"Failed to write grep spill file {spill_file_path}: {e}")
 
-                output_text += f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded."
+                output_text += f"\n\n[TRUNCATED — Character limit exceeded."
                 if spill_file_path is not None:
                     output_text += f" Full output ({len(full_output)} chars) saved to: {spill_file_path}"
                 output_text += "\nYou can read it with read_file if needed.]"

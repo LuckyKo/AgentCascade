@@ -450,6 +450,9 @@ class PoolSettings:
     sleeping_timeout: float = AGENT_SLEEPING_TIMEOUT  # Max seconds to wait for background tools before timeout
     sleeping_wakeup_interval: float = AGENT_SLEEPING_WAKEUP_INTERVAL  # Wakeup log interval while SLEEPING
     
+    # Inner-loop detection toggle (off by default until sensitivity is fixed)
+    inner_loop_detect_enabled: bool = False   # Enable in-message loop detection during streaming
+
     # Tail sync check (design doc §5.2 compliance — D1 fix)
     tail_sync_check_enabled: bool = True      # Enable lightweight tail-length checks after writes
     

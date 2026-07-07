@@ -394,7 +394,7 @@ class ShellMixin:
                     except Exception as e:
                         rel_spill = f"ERROR SAVING SPILL: {e}"
 
-                    final_output = output[:char_limit] + f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. Full output saved to: {rel_spill}]"
+                    final_output = output[:char_limit] + f"\n\n[TRUNCATED — Character limit exceeded. Full output saved to: {rel_spill}]"
                     status += " [TRUNCATED]"
 
                 if is_safe:

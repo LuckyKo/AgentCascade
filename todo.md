@@ -49,7 +49,12 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] add optional justification argument to forget_last tool that will append to the truncated messages like "... [TRUNCATED] Forgotten because {reason}". also the the tool response could be compacted a bit to save some tokens.
 - [ ] retry is broken, it duplicates the user message
 - [ ] max tokens does not change when a new API endpoint is acquired 
-- [ ] adit_file: remove the two redundant file paths in response (they are always the same)
+- [ ] edit_file: remove the two redundant file paths in response (they are always the same):
+```
+--- a/N:\work\WD\AgentCascade_unified\agent_cascade\inner_loop_detect.py
++++ b/N:\work\WD\AgentCascade_unified\agent_cascade\inner_loop_detect.py
+@@ -186,7 +186,7 @@
+```
 - [ ] make sampling options toggleable per entry; add custom sampling per API endpoint; move vision enabled per API endpoint.
 - [x] we have about 10-15% discrepancy (less) between the nr of tokens we measure and the actual count that LMStudio processes — FIXED: reasoning_content now always counted, all magic numbers centralized in settings.py 
 - [x] child agent kicked back — FIXED: (1) LLM-level retry default 0→2, (2) non-OpenAI errors now wrapped as ModelServiceError, (3) 'terminated'/'fetch failed' added to retryable patterns, (4) endpoint max_retries now flows through to_llm_cfg into base LLM class
@@ -60,5 +65,175 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] investigate if we can make shell cmd accept special character and multi-line `python -c` commands
 
 # Errors to investigate:
+
+# noisy fallback
+2026-07-07 05:49:55,830 - ws_handlers.py - 737 - INFO - [update_endpoints] Received: 15 endpoints, 7 agent priority mappings
+2026-07-07 05:49:57,369 - ws_handlers.py - 737 - INFO - [update_endpoints] Received: 15 endpoints, 7 agent priority mappings
+2026-07-07 05:49:58,368 - ws_handlers.py - 737 - INFO - [update_endpoints] Received: 15 endpoints, 7 agent priority mappings
+2026-07-07 05:50:00,142 - ws_handlers.py - 737 - INFO - [update_endpoints] Received: 15 endpoints, 7 agent priority mappings
+2026-07-07 05:50:00,929 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 27985, Available tokens: 108931
+2026-07-07 05:50:14,643 - ws_handlers.py - 737 - INFO - [update_endpoints] Received: 15 endpoints, 7 agent priority mappings
+2026-07-07 05:50:44,849 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 29929, Available tokens: 108931
+2026-07-07 05:50:45,150 - oai.py - 315 - INFO - LLM infrastructure changed. Re-detecting context for: https://opencode.ai/zen/v1
+2026-07-07 05:50:45,614 - oai.py - 280 - DEBUG - Could not identify a target model in https://opencode.ai/zen/v1/models for context length detection.
+2026-07-07 05:50:45,615 - oai.py - 77 - DEBUG - [CACHE] MISS creating new client key=('https://opencode.ai/zen/v1', 'sk-6yjmx8gEYAi0Cv0ShnQyfpm7x9ntBavdr0GW6kTPyyFalWIegs4FpI1D4RW9Ayxe')
+2026-07-07 05:50:46,579 - base.py - 1052 - WARNING - ModelServiceError - Error code: 401 - {'type': 'error', 'error': {'type': 'ModelError', 'message': 'Model Hy3-free is not supported'}}
+2026-07-07 05:50:51,435 - base.py - 1052 - WARNING - ModelServiceError - Error code: 401 - {'type': 'error', 'error': {'type': 'ModelError', 'message': 'Model Hy3-free is not supported'}}
+2026-07-07 05:51:01,767 - base.py - 1052 - WARNING - ModelServiceError - Error code: 401 - {'type': 'error', 'error': {'type': 'ModelError', 'message': 'Model Hy3-free is not supported'}}
+2026-07-07 05:51:01,769 - log.py - 41 - WARNING - [APIRouter] Endpoint 'Hy3-free' @ https://opencode.ai/zen/v1 attempt 1/2: Maximum number of retries (2) exceeded.
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 978, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 920, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 523, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 383, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 507, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1017, in retry_model_service_iterator
+    num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1055, in _raise_or_delay
+    raise ModelServiceError(exception=Exception(f'Maximum number of retries ({max_retries}) exceeded.')) from None
+agent_cascade.llm.base.ModelServiceError: Maximum number of retries (2) exceeded.
+[APIRouter] Endpoint 'Hy3-free' @ https://opencode.ai/zen/v1 attempt 1/2: Maximum number of retries (2) exceeded.
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 978, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 920, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 523, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 383, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 507, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1017, in retry_model_service_iterator
+    num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1055, in _raise_or_delay
+    raise ModelServiceError(exception=Exception(f'Maximum number of retries ({max_retries}) exceeded.')) from None
+agent_cascade.llm.base.ModelServiceError: Maximum number of retries (2) exceeded.
+
+2026-07-07 05:51:02,865 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 29929, Available tokens: 108931
+2026-07-07 05:51:03,411 - base.py - 1052 - WARNING - ModelServiceError - Error code: 401 - {'type': 'error', 'error': {'type': 'ModelError', 'message': 'Model Hy3-free is not supported'}}
+2026-07-07 05:51:08,302 - base.py - 1052 - WARNING - ModelServiceError - Error code: 401 - {'type': 'error', 'error': {'type': 'ModelError', 'message': 'Model Hy3-free is not supported'}}
+2026-07-07 05:51:09,615 - ws_handlers.py - 737 - INFO - [update_endpoints] Received: 15 endpoints, 7 agent priority mappings
+2026-07-07 05:51:17,946 - base.py - 1052 - WARNING - ModelServiceError - Error code: 401 - {'type': 'error', 'error': {'type': 'ModelError', 'message': 'Model Hy3-free is not supported'}}
+2026-07-07 05:51:17,947 - log.py - 41 - WARNING - [APIRouter] Endpoint 'Hy3-free' @ https://opencode.ai/zen/v1 attempt 2/2: Maximum number of retries (2) exceeded.
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 978, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 920, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 523, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 383, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 507, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1017, in retry_model_service_iterator
+    num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1055, in _raise_or_delay
+    raise ModelServiceError(exception=Exception(f'Maximum number of retries ({max_retries}) exceeded.')) from None
+agent_cascade.llm.base.ModelServiceError: Maximum number of retries (2) exceeded.
+[APIRouter] Endpoint 'Hy3-free' @ https://opencode.ai/zen/v1 attempt 2/2: Maximum number of retries (2) exceeded.
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 978, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 920, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 523, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 383, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 507, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1017, in retry_model_service_iterator
+    num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1055, in _raise_or_delay
+    raise ModelServiceError(exception=Exception(f'Maximum number of retries ({max_retries}) exceeded.')) from None
+agent_cascade.llm.base.ModelServiceError: Maximum number of retries (2) exceeded.
+
+2026-07-07 05:51:17,964 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 29929, Available tokens: 108931
+2026-07-07 05:51:18,257 - oai.py - 315 - INFO - LLM infrastructure changed. Re-detecting context for: http://127.0.0.1:1234/v1
+2026-07-07 05:51:18,278 - oai.py - 257 - DEBUG - Missing context metadata in list. Trying specific endpoint: http://127.0.0.1:1234/v1/models/qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved
+2026-07-07 05:51:18,294 - oai.py - 278 - INFO - Model qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved found, but could not detect context length via API.
+2026-07-07 05:51:59,520 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 31788, Available tokens: 108931
+2026-07-07 05:52:25,720 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 33429, Available tokens: 108931
+2026-07-07 05:52:43,135 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 34803, Available tokens: 108931
+
+
+# compression fucked
+2026-07-07 11:28:41,926 - agent_pool.py - 398 - DEBUG - Async registry executor recreated
+2026-07-07 11:28:41,927 - agent_pool.py - 401 - DEBUG - Stopped flag cleared — ready for new execution
+2026-07-07 11:28:41,928 - ws_handlers.py - 235 - DEBUG - Starting generation gen_id=2, instances={'Maine': 'IDLE'}, active_stack=0
+2026-07-07 11:28:41,929 - agent_pool.py - 382 - DEBUG - Idle checker restarted
+2026-07-07 11:28:41,929 - agent_pool.py - 398 - DEBUG - Async registry executor recreated
+2026-07-07 11:28:41,929 - agent_pool.py - 401 - DEBUG - Stopped flag cleared — ready for new execution
+2026-07-07 11:28:41,930 - execution_engine.py - 634 - DEBUG - engine.run() ENTRY - instance=Maine
+2026-07-07 11:28:41,930 - agent_pool.py - 1793 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
+2026-07-07 11:28:41,930 - execution_engine.py - 476 - DEBUG - [SLOT_ACQUIRE] initial - instance=Maine, class=orchestrator
+2026-07-07 11:28:41,930 - execution_engine.py - 695 - DEBUG - [TURN_START] Calling _setup_turn for Maine
+2026-07-07 11:28:41,931 - execution_engine.py - 990 - INFO - [CACHE_REBUILD] Rebuilding working set for Maine (conv_len=428)
+2026-07-07 11:28:41,932 - execution_engine.py - 1068 - DEBUG - [CACHE_REBUILD] System prompt content CHANGED for Maine
+2026-07-07 11:28:41,942 - agent_instance_logger.py - 458 - INFO - Rewrote agent log n:\work\WD\AgentWorkspace\logs\orchestrator_Maine_20260707_112809.jsonl with 428 messages.
+2026-07-07 11:28:41,943 - execution_engine.py - 727 - DEBUG - [TURN_DONE] Got messages=428, llm_messages=427
+2026-07-07 11:28:41,962 - execution_engine.py - 781 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
+2026-07-07 11:28:42,188 - lifecycle_manager.py - 176 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for Compressor_1
+2026-07-07 11:28:42,256 - execution_engine.py - 634 - DEBUG - engine.run() ENTRY - instance=Compressor_1
+2026-07-07 11:28:42,264 - execution_engine.py - 695 - DEBUG - [TURN_START] Calling _setup_turn for Compressor_1
+2026-07-07 11:28:42,265 - execution_engine.py - 990 - INFO - [CACHE_REBUILD] Rebuilding working set for Compressor_1 (conv_len=2)
+2026-07-07 11:28:42,266 - execution_engine.py - 1068 - DEBUG - [CACHE_REBUILD] System prompt content CHANGED for Compressor_1
+2026-07-07 11:28:42,268 - agent_instance_logger.py - 458 - INFO - Rewrote agent log n:\work\WD\AgentWorkspace\logs\compressor_Compressor_1_20260707_112842.jsonl with 2 messages.
+2026-07-07 11:28:42,269 - execution_engine.py - 727 - DEBUG - [TURN_DONE] Got messages=2, llm_messages=2
+2026-07-07 11:28:42,305 - base.py - 953 - INFO - Agent [Compressor] - ALL tokens: 40709, Available tokens: 124591
+2026-07-07 11:28:42,307 - oai.py - 77 - DEBUG - [CACHE] MISS creating new client key=('http://127.0.0.1:1234/v1', 'EMPTY')
+2026-07-07 11:29:31,098 - execution_engine.py - 918 - DEBUG - EXIT - Compressor_1 RUNNING→IDLE
+2026-07-07 11:29:31,295 - handler.py - 816 - INFO - /compress applied for Maine: ERROR: Compression marker would be inserted before a FUNCTION response at position 228 — pool/active-set desync detected. Discard count=225, active_start_idx=3, history_len=429
+2026-07-07 11:29:31,295 - handler.py - 290 - DEBUG - Logger sync after /compress command for 'Maine': pool_len=429, using reset_history() for full sync
+2026-07-07 11:29:31,317 - agent_instance_logger.py - 677 - INFO - Synced compression marker in n:\work\WD\AgentWorkspace\logs\orchestrator_Maine_20260707_112809.jsonl (429 messages).
+2026-07-07 11:29:31,350 - execution_engine.py - 1466 - DEBUG - Rebuilt working sets for Maine: messages=429, llm_messages=428
+2026-07-07 11:29:31,468 - execution_engine.py - 1278 - DEBUG - [PRE_LLM] Compress command handled for Maine
+2026-07-07 11:29:31,468 - execution_engine.py - 781 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
+2026-07-07 11:29:31,611 - execution_engine.py - 1958 - INFO - Endpoint allocation updated for orchestrator: {'endpoint': 'LMS-27B-unc-MTP', 'api_base': 'http://127.0.0.1:1234/v1', 'model': 'qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved', 'max_input_tokens': 110000, 'rate_limit_rpm': 0, 'concurrency_limit': 0, 'prev_max_input_tokens': 0}
+2026-07-07 11:29:31,674 - base.py - 953 - INFO - Agent [Orchestrator] - ALL tokens: 93502, Available tokens: 108322
+
+# loop rollback causing desync?
+2026-07-07 13:31:05,463 - file_operations.py - 404 - DEBUG - Error listing directory: name 'os' is not defined
+2026-07-07 13:31:05,525 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 62346, Available tokens: 108930
+2026-07-07 13:31:08,412 - file_operations.py - 404 - DEBUG - Error listing directory: name 'os' is not defined
+2026-07-07 13:31:08,469 - execution_engine.py - 1295 - DEBUG - [LOOP_DETECTED] InnerLoopFixer: pattern=sequence (assistant, function) repeated 3 times, pop_count=4, messages=46
+2026-07-07 13:31:08,501 - tail_sync_check.py - 200 - WARNING - [TAIL SYNC DRIFT] 'InnerLoopFixer' after rollback: pool_tail=42 (conv_len=42, marker=no_marker) vs jsonl_tail=39 (total_msgs=122, marker=marker@line=84)
+2026-07-07 13:31:08,506 - execution_engine.py - 1466 - DEBUG - Rebuilt working sets for InnerLoopFixer: messages=43, llm_messages=43
+2026-07-07 13:31:08,506 - execution_engine.py - 781 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
+2026-07-07 13:31:08,567 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 62332, Available tokens: 108930
+2026-07-07 13:31:12,117 - file_operations.py - 404 - DEBUG - Error listing directory: name 'os' is not defined
+2026-07-07 13:31:12,192 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 62378, Available tokens: 108930
+
 
 # EOF

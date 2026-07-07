@@ -652,12 +652,12 @@ class ToolDispatcher:
             # operation_manager.py and code_interpreter.py across the unified branch
             if spill_rel:
                 return (
-                    f"{truncated}\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. "
+                    f"{truncated}\n\n[TRUNCATED — Character limit exceeded. "
                     f"Full output ({len(tool_result)} chars) saved to: {spill_rel}"
                 )
             else:
                 return (
-                    f"{truncated}\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. "
+                    f"{truncated}\n\n[TRUNCATED — Character limit exceeded. "
                 )
 
         except Exception as e:
@@ -669,10 +669,10 @@ class ToolDispatcher:
                 mark_tool_call_truncated(instance_name, tool_name)
                 if spill_rel:
                     return (
-                        f"{tool_result[:8000]}\n\n[TOOL RESPONSE TRUNCATED — fallback path. "
+                        f"{tool_result[:8000]}\n\n[TRUNCATED — fallback path. "
                         f"Full output ({len(tool_result)} chars) saved to: {spill_rel}"
                     )
-                return f"{tool_result[:8000]}\n\n[TOOL RESPONSE TRUNCATED — fallback path. Spillover file could not be saved (disk error).]"
+                return f"{tool_result[:8000]}\n\n[TRUNCATED — fallback path. Spillover file could not be saved (disk error).]"
             return tool_result
 
     def _write_spillover_file(

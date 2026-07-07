@@ -719,7 +719,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
             
             # Cap output to prevent disk exhaustion from massive code interpreter outputs
             if len(result) > MAX_SPILL_SIZE:
-                result_copy = result[:MAX_SPILL_SIZE] + "\n\n[SPILL FILE TRUNCATED — exceeded maximum size]"
+                result_copy = result[:MAX_SPILL_SIZE] + "\n\n[TRUNCATED — exceeded maximum size]"
             else:
                 result_copy = result
             
@@ -738,7 +738,7 @@ class CodeInterpreter(BaseToolWithFileAccess):
             except Exception as e:
                 rel_spill = f"ERROR SAVING SPILL: {e}"
 
-            result = result[:char_limit] + f"\n\n[TOOL RESPONSE TRUNCATED — Character limit exceeded. Full output saved to: {rel_spill}]"
+            result = result[:char_limit] + f"\n\n[TRUNCATED — Character limit exceeded. Full output saved to: {rel_spill}]"
 
         return result
 

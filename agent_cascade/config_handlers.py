@@ -147,6 +147,13 @@ def _handle_auto_continue(ui_cfg: dict, agent_pool: Optional[Any], agents: list)
         agent_pool.settings.auto_continue = bool(ui_cfg['auto_continue'])
 
 
+@register_config_handler('inner_loop_detect_enabled')
+def _handle_inner_loop_detect(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle inner-loop detection during streaming (catches LLM generation loops mid-stream)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.inner_loop_detect_enabled = bool(ui_cfg['inner_loop_detect_enabled'])
+
+
 # LLM config keys — all share one handler (defense-in-depth optimization).
 # Registered under each key so any LLM key present triggers the check.
 
