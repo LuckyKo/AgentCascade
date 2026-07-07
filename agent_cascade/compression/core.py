@@ -10,7 +10,7 @@ from agent_cascade.compression.agent_invoker import invoke_compression_agent
 from agent_cascade.utils.utils import extract_text_from_message
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.llm.schema import FUNCTION, Message
-from agent_cascade.settings import CHARS_PER_TOKEN_ESTIMATE
+from agent_cascade.settings import CHARS_PER_TOKEN_ESTIMATE, CONTEXT_RESERVATION_RATIO, MESSAGE_TOKEN_ESTIMATE
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -136,9 +136,8 @@ def compress_context(
 
             if max_tokens:
                 # Reserve ~90% of compression agent's context for input messages (10% for summary output)
-                available_for_messages = int(max_tokens * 0.9)
-                estimated_tokens_per_message = 500
-                max_discardable = available_for_messages // estimated_tokens_per_message
+                available_for_messages = int(max_tokens * CONTEXT_RESERVATION_RATIO)
+                max_discardable = available_for_messages // MESSAGE_TOKEN_ESTIMATE
                 target_discard_count = min(target_discard_count, max_discardable)
     except Exception:
         pass  # If we can't determine the limit, proceed with original count

@@ -19,17 +19,11 @@ from typing import Dict, List, Optional
 
 _logger = logging.getLogger('agent_cascade.telemetry')
 
-# Token estimation: ~4 chars per token (rule of thumb for LLM tokenization)
-TOKEN_ESTIMATE_CHAR_DIVISOR = 4
-
-# Max characters for system prompt before hashing in config fingerprint
-SYSTEM_PROMPT_HASH_MAX_CHARS = 2000
-
-# Default number of recent events to return in get_recent_events()
-DEFAULT_RECENT_EVENT_COUNT = 50
-
-# Max events to keep in memory before trimming
-MAX_EVENTS_IN_MEMORY = 5000
+from agent_cascade.settings import (
+    SYSTEM_PROMPT_HASH_MAX_CHARS,
+    DEFAULT_RECENT_EVENT_COUNT,
+    MAX_EVENTS_IN_MEMORY,
+)
 
 
 class TelemetryCollector:

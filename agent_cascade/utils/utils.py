@@ -1101,9 +1101,11 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
     else:
         text = extract_text_from_message(msg_obj, add_upload_info=True)
         image_tokens = 0
+        from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
+
         def repl(match):
             nonlocal image_tokens
-            image_tokens += 255
+            image_tokens += IMAGE_TOKEN_ESTIMATE
             return f"[Image: {match.group(1)}]"
         
         text_for_tokens = IMAGE_REGEX.sub(repl, text)

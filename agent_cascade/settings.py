@@ -56,3 +56,35 @@ DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS: int = int(os.getenv(
 # Settings for endpoint scheduling
 ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv(
     'QWEN_AGENT_ENDPOINT_SLOT_ACQUIRE_TIMEOUT', 30))  # Timeout in seconds for acquiring endpoint scheduling slots
+
+# Settings for token estimation
+TOKEN_ESTIMATE_CHAR_DIVISOR: float = float(os.getenv(
+    'QWEN_AGENT_TOKEN_ESTIMATE_CHAR_DIVISOR', 4.0))  # Chars-per-token divisor for telemetry/estimation
+IMAGE_TOKEN_ESTIMATE: int = int(os.getenv(
+    'QWEN_AGENT_IMAGE_TOKEN_ESTIMATE', 255))  # Estimated tokens per image in message counting
+MESSAGE_TOKEN_ESTIMATE: int = int(os.getenv(
+    'QWEN_AGENT_MESSAGE_TOKEN_ESTIMATE', 500))  # Estimated tokens per message during compression
+CONTEXT_RESERVATION_RATIO: float = float(os.getenv(
+    'QWEN_AGENT_CONTEXT_RESERVATION_RATIO', 0.9))  # Reserve 90% for input, 10% for output during compression
+
+# Settings for LLM retry/backoff
+DEFAULT_MAX_TOKENS: int = int(os.getenv(
+    'QWEN_AGENT_DEFAULT_MAX_TOKENS', 128000))  # Default max tokens for LLM calls
+LLM_MAX_RETRIES: int = int(os.getenv(
+    'QWEN_AGENT_LLM_MAX_RETRIES', 1))  # Max retries for LLM calls
+LLM_RETRY_BASE_DELAY: float = float(os.getenv(
+    'QWEN_AGENT_LLM_RETRY_BASE_DELAY', 1.0))  # Base delay in seconds for retry backoff
+LLM_RETRY_MAX_BACKOFF: float = float(os.getenv(
+    'QWEN_AGENT_LLM_RETRY_MAX_BACKOFF', 5.0))  # Maximum backoff cap in seconds
+
+# Settings for telemetry
+SYSTEM_PROMPT_HASH_MAX_CHARS: int = int(os.getenv(
+    'QWEN_AGENT_SYSTEM_PROMPT_HASH_MAX_CHARS', 2000))  # Max chars for system prompt before hashing
+DEFAULT_RECENT_EVENT_COUNT: int = int(os.getenv(
+    'QWEN_AGENT_DEFAULT_RECENT_EVENT_COUNT', 50))  # Default recent events count
+MAX_EVENTS_IN_MEMORY: int = int(os.getenv(
+    'QWEN_AGENT_MAX_EVENTS_IN_MEMORY', 5000))  # Max events in memory before trimming
+
+# Settings for LM Studio
+LM_STUDIO_KEEPALIVE_SECONDS: float = float(os.getenv(
+    'QWEN_AGENT_LM_STUDIO_KEEPALIVE', 3.0))  # Keepalive expiry in seconds

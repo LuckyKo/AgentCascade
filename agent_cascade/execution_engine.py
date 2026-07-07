@@ -22,8 +22,7 @@ import time
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 from enum import Enum, auto
 
-# Token estimation: ~4 chars per token (rule of thumb for LLM tokenization)
-TOKEN_ESTIMATE_CHAR_DIVISOR = 4
+from agent_cascade.settings import TOKEN_ESTIMATE_CHAR_DIVISOR, LLM_MAX_RETRIES, LLM_RETRY_BASE_DELAY, LLM_RETRY_MAX_BACKOFF
 
 from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
@@ -1607,9 +1606,6 @@ class ExecutionEngine:
             Message objects or None for progress updates
         """
         inst_name = instance.instance_name
-        MAX_RETRIES = 1
-        BASE_DELAY = 1.0
-        
         last_output = None
         retry_count = 0
         error_already_yielded = False
@@ -1617,7 +1613,7 @@ class ExecutionEngine:
         # Estimate input tokens for telemetry (rough char-based estimate)
         _input_tokens_est = sum(len(m.content or '') for m in llm_messages) // TOKEN_ESTIMATE_CHAR_DIVISOR
         
-        while retry_count <= MAX_RETRIES:
+        while retry_count <= LLM_MAX_RETRIES:
             try:
                 # Telemetry: record LLM call start (non-blocking)
                 if (tel := self._telemetry()) is not None:
@@ -1690,15 +1686,15 @@ class ExecutionEngine:
                 with instance._compression_lock:
                     instance._streaming_responses = []
                 
-                if retry_count >= MAX_RETRIES:
+                if retry_count >= LLM_MAX_RETRIES:
                     error_msg = str(e).split('\n')[0] if e else "Unknown error"
-                    logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {MAX_RETRIES} retries: {e}")
-                    yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed after {MAX_RETRIES} retries — {error_msg}]")
+                    logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {LLM_MAX_RETRIES} retries: {e}")
+                    yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed after {LLM_MAX_RETRIES} retries — {error_msg}]")
                     error_already_yielded = True
                     break
                 
                 retry_count += 1
-                backoff = min(BASE_DELAY * (2 ** (retry_count - 1)), 5.0)
+                backoff = min(LLM_RETRY_BASE_DELAY * (2 ** (retry_count - 1)), LLM_RETRY_MAX_BACKOFF)
                 
                 # Classify error type
                 error_type = self._classify_llm_error(e)
@@ -1711,12 +1707,12 @@ class ExecutionEngine:
                     break
                 
                 logger.warning(
-                    f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{MAX_RETRIES}. "
+                    f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{LLM_MAX_RETRIES}. "
                     f"Retrying in {backoff:.1f}s with new endpoint... Error: {e}"
                 )
                 
                 # Signal retry to UI before blocking on sleep
-                yield self._make_retrying_message(instance, retry_count, MAX_RETRIES, backoff)
+                yield self._make_retrying_message(instance, retry_count, LLM_MAX_RETRIES, backoff)
                 time.sleep(backoff)
                 yield None
         
@@ -3322,13 +3318,42 @@ class ExecutionEngine:
                 role = msg_field(msg, 'role', '')
                 func_call = msg_field(msg, 'function_call')
 
-                # For assistant with function call, count only the function call string
+                # For assistant with function call, count the function call string
+                # plus any reasoning_content that might accompany it
                 if role == ASSISTANT and func_call:
                     total += qwen_count(f'{func_call}')
+                    # Also count reasoning_content for function call messages
+                    rc = msg_field(msg, 'reasoning_content') or msg_field(msg, 'reasoning')
+                    if rc:
+                        rc_str = str(rc).strip() if not isinstance(rc, list) else ' '.join(
+                            (item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', ''))
+                            for item in rc if (item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', None))
+                        )
+                        total += qwen_count(rc_str)
                     continue
 
                 msg_obj = Message(**msg) if isinstance(msg, dict) else msg
                 text = extract_text_from_message(msg_obj, add_upload_info=True)
+                
+                # Also count reasoning_content separately to avoid undercounting.
+                # extract_text_from_message only includes reasoning as fallback when
+                # content is empty, but for accurate token counting we need it always.
+                rc = msg_field(msg_obj, 'reasoning_content') or msg_field(msg_obj, 'reasoning')
+                if rc:
+                    if isinstance(rc, list):
+                        rc_texts = []
+                        for item in rc:
+                            t = item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')
+                            if t:
+                                rc_texts.append(str(t))
+                        rc_str = ' '.join(rc_texts)
+                    else:
+                        rc_str = str(rc).strip()
+                    # Avoid double-counting: extract_text already includes reasoning
+                    # when content is empty. Only add extra count if text doesn't contain it.
+                    if not text or '[THOUGHT:' not in text:
+                        total += qwen_count(rc_str)
+                
                 total += qwen_count(text)
 
             # Update cache
@@ -3339,11 +3364,22 @@ class ExecutionEngine:
             return total
         except Exception as e:
             logger.debug(f"Token counting failed (using rough estimate): {e}")
-            # Fallback: rough estimate (4 chars per token)
-            total_chars = sum(
-                len(str(m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')))
-                for m in messages if not isinstance(m, list)
-            )
+            # Fallback: rough estimate (4 chars per token), including reasoning_content
+            total_chars = 0
+            for m in messages:
+                if isinstance(m, list):
+                    continue
+                content = m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')
+                total_chars += len(str(content or ''))
+                # Also count reasoning_content to avoid undercounting
+                rc = m.get('reasoning_content') if isinstance(m, dict) else getattr(m, 'reasoning_content', None)
+                if rc:
+                    if isinstance(rc, list):
+                        for item in rc:
+                            txt = item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')
+                            total_chars += len(str(txt or ''))
+                    else:
+                        total_chars += len(str(rc))
             return max(total_chars // TOKEN_ESTIMATE_CHAR_DIVISOR, 100)
 
     # ── _detect_loop removed — now uses canonical detect_loop from loop_detection.py ──

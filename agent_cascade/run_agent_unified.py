@@ -271,12 +271,13 @@ def get_token_stats_unified(
     """
     instance = pool.get_instance(instance_name)
     if instance is None:
+        from agent_cascade.settings import DEFAULT_MAX_TOKENS
         return {
             'history_tokens': 0,
             'history_words': 0,
             'total_messages': 0,
             'active_messages': 0,
-            'max_tokens': 128000,
+            'max_tokens': DEFAULT_MAX_TOKENS,
         }
 
     # Get the active working set (after compression slicing)

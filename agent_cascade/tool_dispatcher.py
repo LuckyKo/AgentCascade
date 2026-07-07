@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from agent_cascade.agent_instance import AgentInstance
 
 from agent_cascade.log import logger
-from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS
+from agent_cascade.settings import DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_MAX_TOKENS
 from agent_cascade.tool_utils import (
     MAX_SPILL_SIZE,
     mark_tool_call_truncated,
@@ -585,7 +585,7 @@ class ToolDispatcher:
             return tool_result
 
         inst = self.pool.get_instance(instance_name)
-        max_tokens = self.engine._get_max_tokens(inst) if inst else 128000
+        max_tokens = self.engine._get_max_tokens(inst) if inst else DEFAULT_MAX_TOKENS
         if max_tokens <= 0:
             return tool_result
 

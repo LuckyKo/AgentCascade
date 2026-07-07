@@ -71,8 +71,9 @@ def _get_cached_client(base_url: str, api_key: str) -> openai.OpenAI:
         # Create OpenAI client with httpx settings optimized for LM Studio.
         # keepalive_expiry defaults to 3.0s (below LM Studio's 5s server timeout)
         # so idle connections are proactively discarded before becoming stale.
-        # Override via env var LM_STUDIO_KEEPALIVE if needed per environment.
-        keepalive = float(os.environ.get('LM_STUDIO_KEEPALIVE', '3.0'))
+        # Override via env var QWEN_AGENT_LM_STUDIO_KEEPALIVE if needed per environment.
+        from agent_cascade.settings import LM_STUDIO_KEEPALIVE_SECONDS
+        keepalive = float(os.environ.get('QWEN_AGENT_LM_STUDIO_KEEPALIVE', str(LM_STUDIO_KEEPALIVE_SECONDS)))
         logger.debug(f"[CACHE] MISS creating new client key={key}")
         _CLIENT_CACHE[key] = openai.OpenAI(
             base_url=base_url,
