@@ -1706,12 +1706,12 @@ class ExecutionEngine:
                                             reason=f"inner_loop ({_ev['reason']}, score={_ev['score']})",
                                             instance_name=inst_name,
                                         )
-                                    yield from _abort_stream(
-                                        f"Detected generation loop: {_ev['reason']} (score={_ev['score']})"
-                                    )
-                                    if _sample_path:
-                                        logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
-                                    raise Exception(f"inner_loop: {_ev['reason']}")
+                                        yield from _abort_stream(
+                                            f"Detected generation loop: {_ev['reason']} (score={_ev['score']})"
+                                        )
+                                        if _sample_path:
+                                            logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
+                                        raise Exception(f"inner_loop: {_ev['reason']}")
 
                             # Max-output-token guard: safety net — if LLM exceeds token budget it's likely looping
                             if not _token_guard_triggered:

@@ -23,7 +23,7 @@ _spec.loader.exec_module(_mod)
 InnerLoopDetector = _mod.InnerLoopDetector
 
 # Load all samples from the JSONL file
-SAMPLE_FILE = CASCADE_ROOT / "loop_samples" / "samples_2026-07-07.jsonl"
+SAMPLE_FILE = CASCADE_ROOT / "workspace" / "logs" / "loop_samples" / "samples_2026-07-07.jsonl"
 
 samples = []
 with open(SAMPLE_FILE, "r", encoding="utf-8") as f:

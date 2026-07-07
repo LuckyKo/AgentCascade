@@ -5,7 +5,7 @@ import math
 import os
 import re
 
-from agent_cascade.settings import InnerLoopSettings
+from agent_cascade.settings import InnerLoopSettings, DEFAULT_WORKSPACE
 
 # Precompiled regex patterns (avoid recompilation on every feed call).
 _SENTENCE_RE = re.compile(r'([^.?!]+[.?!]|[^.?!]+$)')
@@ -287,10 +287,8 @@ class InnerLoopDetector:
 
 # ── Loop sample saving helper ────────────────────────────────────────────────
 
-# Default path for loop samples: relative to the agent_cascade package directory.
-_LOOP_SAMPLES_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "loop_samples"
-)
+# Default path for loop samples: under the workspace logs directory.
+_LOOP_SAMPLES_DIR = os.path.join(DEFAULT_WORKSPACE, "logs", "loop_samples")
 
 
 def save_loop_sample(text, reason, instance_name="", filepath=None):
@@ -304,7 +302,7 @@ def save_loop_sample(text, reason, instance_name="", filepath=None):
         reason: Human-readable explanation of why the loop was detected.
         instance_name: Name of the agent instance (e.g., "coder1").
         filepath: Override path for the JSONL file. If None, a daily file is used
-            under the ``loop_samples/`` directory relative to this module.
+            under the ``workspace/logs/loop_samples/`` directory (DEFAULT_WORKSPACE).
     """
     if not text:
         return None
