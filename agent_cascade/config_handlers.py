@@ -11,6 +11,9 @@ No circular dependencies — this module imports only from existing modules.
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from agent_cascade.settings import (
+    CI_MIN_EXECUTION_TIMEOUT, CI_MIN_WATCHDOG_TIMEOUT, CI_MIN_STALE_CONTAINER_TTL,
+)
 
 # ── LLM config key set (defined locally to avoid circular import with api_server) ────
 LLM_CONFIG_KEYS = frozenset({
@@ -158,21 +161,22 @@ def _handle_inner_loop_detect(ui_cfg: dict, agent_pool: Optional[Any], agents: l
 def _handle_ci_execution_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update code interpreter execution timeout."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.ci_execution_timeout = max(10, int(ui_cfg['ci_execution_timeout']))
-
+        agent_pool.settings.ci_execution_timeout = max(
+            CI_MIN_EXECUTION_TIMEOUT, int(ui_cfg['ci_execution_timeout']))
 
 @register_config_handler('ci_watchdog_timeout')
 def _handle_ci_watchdog_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update code interpreter watchdog timeout."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.ci_watchdog_timeout = max(30, int(ui_cfg['ci_watchdog_timeout']))
-
+        agent_pool.settings.ci_watchdog_timeout = max(
+            CI_MIN_WATCHDOG_TIMEOUT, int(ui_cfg['ci_watchdog_timeout']))
 
 @register_config_handler('ci_stale_container_ttl')
 def _handle_ci_stale_container_ttl(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update code interpreter stale container TTL."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.ci_stale_container_ttl = max(30, int(ui_cfg['ci_stale_container_ttl']))
+        agent_pool.settings.ci_stale_container_ttl = max(
+            CI_MIN_STALE_CONTAINER_TTL, int(ui_cfg['ci_stale_container_ttl']))
 
 
 # LLM config keys — all share one handler (defense-in-depth optimization).

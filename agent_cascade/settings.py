@@ -162,3 +162,6 @@ class InnerLoopSettings:
 CI_EXECUTION_TIMEOUT: int = int(os.getenv('M6_CODE_INTERPRETER_EXEC_TIMEOUT', '120'))   # Per-call execution timeout (seconds)
 CI_WATCHDOG_TIMEOUT: int = int(os.getenv('M6_CODE_INTERPRETER_WATCHDOG_TIMEOUT', '300'))  # Kernel inactivity watchdog timeout (seconds)
 CI_STALE_CONTAINER_TTL: int = int(os.getenv('M6_CODE_INTERPRETER_STALE_TTL', '600'))      # Stale container cleanup TTL (seconds)
+CI_MIN_EXECUTION_TIMEOUT: int = 10    # Minimum per-call execution timeout (seconds)
+CI_MIN_WATCHDOG_TIMEOUT: int = 30     # Minimum watchdog timeout (seconds)
+CI_MIN_STALE_CONTAINER_TTL: int = 30  # Minimum stale container TTL (seconds)

@@ -75,23 +75,12 @@ class ToolDispatcher:
         Walks up the parent chain to find the root instance (no parent).
         The root instance's name is the session name used for shared resources
         like code interpreter containers.
-
-        Args:
-            instance: Any agent instance in the pool
-
-        Returns:
-            Instance name of the root (parentless) agent in this session chain
         """
         current = instance
-        visited = {current.instance_name}
-        for _ in range(20):  # Safety limit to prevent infinite loops
-            parent_name = current.parent_instance
-            if parent_name is None:
+        for _ in range(10):  # Max nesting depth guard (AGENT_MAX_NESTING_DEPTH is 10)
+            if current.parent_instance is None:
                 break
-            if parent_name in visited:
-                break  # Cycle detected — treat current as root
-            visited.add(parent_name)
-            parent_inst = self.pool.get_instance(parent_name)
+            parent_inst = self.pool.get_instance(current.parent_instance)
             if parent_inst is None:
                 break
             current = parent_inst

@@ -413,15 +413,14 @@ class CodeInterpreter(BaseToolWithFileAccess):
             fresh = bool(validated_params.get('fresh', False)) or fresh
 
         # ── Resolve timeouts: explicit param > config > pool settings > module default ──
-        # Use None sentinel pattern for all three to ensure consistent priority chain
         exec_timeout = timeout
         if exec_timeout is None:
-            exec_timeout = self.cfg.get('execution_timeout', None)
+            exec_timeout = self.cfg.get('execution_timeout')
 
-        wd_timeout = None
-        stale_ttl = None
+        wd_timeout = self.cfg.get('wd_timeout')
+        stale_ttl = self.cfg.get('stale_ttl')
 
-        # Try to get dynamic values from pool settings (UI-configured overrides)
+        # Try pool settings (UI-configured overrides)
         agent_obj = kwargs.get('agent_obj')
         if agent_obj is not None:
             pool = getattr(agent_obj, 'pool', None)
@@ -433,13 +432,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 if stale_ttl is None:
                     stale_ttl = pool.settings.ci_stale_container_ttl
 
-        # Fall back to module-level defaults if still unset
-        if exec_timeout is None:
-            exec_timeout = CODE_EXECUTION_TIMEOUT
-        if wd_timeout is None:
-            wd_timeout = CONTAINER_WATCHDOG_TIMEOUT
-        if stale_ttl is None:
-            stale_ttl = STALE_CONTAINER_TTL
+        # Fall back to module-level defaults
+        exec_timeout = exec_timeout or CODE_EXECUTION_TIMEOUT
+        wd_timeout = wd_timeout or CONTAINER_WATCHDOG_TIMEOUT
+        stale_ttl = stale_ttl or STALE_CONTAINER_TTL
 
         # ── Build session-scoped kernel_id (all agents in same session share one container) ──
         # Sanitize session_name: replace non-alphanumeric chars with underscores for safe Docker naming
@@ -465,8 +461,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 if kernel_id in _KERNEL_CLIENTS:
                     try:
                         _KERNEL_CLIENTS[kernel_id].shutdown()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Fresh cleanup: kernel shutdown failed: {e}")
 
                 # Stop and remove the old container
                 if kernel_id in _DOCKER_CONTAINERS:
@@ -474,14 +470,36 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     try:
                         subprocess.run(['docker', 'stop', '-t', '2', cid], capture_output=True, timeout=5)
                         subprocess.run(['docker', 'rm', '-f', cid], capture_output=True, timeout=5)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Fresh cleanup: container stop/rm failed: {e}")
 
                 # Clear state so a fresh kernel is started below
                 _KERNEL_CLIENTS.pop(kernel_id, None)
                 _DOCKER_CONTAINERS.pop(kernel_id, None)
                 _KERNEL_ACTIVITY.pop(kernel_id, None)
                 _STALE_CONTAINERS.pop(kernel_id, None)
+
+                # Clean up connection files and launch scripts
+                work_dir_base = self.work_dir
+                for suffix in ['_host.json', '_container.json']:
+                    conn_file = os.path.join(work_dir_base, f'kernel_connection_file_{kernel_id}{suffix}')
+                    try:
+                        if os.path.exists(conn_file):
+                            os.remove(conn_file)
+                    except OSError:
+                        pass
+                launch_script = os.path.join(work_dir_base, f'launch_kernel_{kernel_id}.py')
+                try:
+                    if os.path.exists(launch_script):
+                        os.remove(launch_script)
+                except OSError:
+                    pass
+                mapping_file = os.path.join(work_dir_base, f'path_mapping_{kernel_id}.json')
+                try:
+                    if os.path.exists(mapping_file):
+                        os.remove(mapping_file)
+                except OSError:
+                    pass
 
             # Check if the kernel was killed by the watchdog — clean up and start fresh (thread-safe)
             while True:
