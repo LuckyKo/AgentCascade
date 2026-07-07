@@ -1621,6 +1621,26 @@ class AgentPool:
         active_set = conv[active_start_idx:]
         return active_start_idx, active_set, latest_marker
 
+    def get_compression_target_set_from_conversation(self, instance_name: str, conv: List[Message]):
+        """Like get_compression_target_set but accepts a pre-fetched conversation snapshot.
+
+        Used by compress_context() to avoid stale references when compressor agent
+        adds messages to the pool between discard calculation and pool mutation."""
+        if not conv:
+            return 0, [], -1
+
+        latest_marker = self.find_last_marker(conv)
+
+        if latest_marker >= 0:
+            active_start_idx = latest_marker + 1
+        else:
+            from agent_cascade.llm.schema import SYSTEM as SYS_ROLE
+            first_role = conv[0].get('role') if isinstance(conv[0], dict) else getattr(conv[0], 'role', '')
+            active_start_idx = 2 if first_role == SYS_ROLE else 1
+
+        active_set = conv[active_start_idx:]
+        return active_start_idx, active_set, latest_marker
+
     def slice_history_for_llm(self, history: List[Message]) -> List[Message]:
         """Extract the working set from a conversation.
 

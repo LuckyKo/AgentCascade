@@ -79,9 +79,13 @@ def compress_context(
             mode=mode,
         )
 
-    # ── 1. Get active set from pool ──
+    # ── 1. Snapshot pool state (single source of truth for entire compression) ──
+    # Fetch history once here and reuse throughout. The compressor agent
+    # adds messages to the pool during preview/apply, so fetching fresh history
+    # at step 10 would cause insert_pos to point to wrong messages (desync bug).
+    history = agent_pool.get_conversation(target_agent_name)
     active_start_idx, active_set, latest_summary_idx = (
-        agent_pool.get_compression_target_set(target_agent_name)
+        agent_pool.get_compression_target_set_from_conversation(target_agent_name, history)
     )
 
     if not active_set:
@@ -189,7 +193,7 @@ def compress_context(
         )
 
     # ── 6. Determine messages to send to the Compression Agent ──
-    history = agent_pool.get_conversation(target_agent_name)
+    # Reuse `history` snapshot from step 1 (single source of truth).
     
     if latest_summary_idx != -1:
         # Include the new active messages being discarded (NOT the marker — its summary
@@ -335,8 +339,7 @@ def compress_context(
     # NOTE: This is single-threaded by design — forced compression halts all other agents
     # before running, so no concurrent pool mutations can occur during this block.
     
-    # NOTE: get_conversation() returns a copy of inst.conversation (see agent_pool.py:1124).
-    history = agent_pool.get_conversation(target_agent_name)
+    # Reuse `history` snapshot from step 1 (single source of truth).
     insert_pos = active_start_idx + target_discard_count
 
     # Safety check: insert position must be after the SYSTEM message

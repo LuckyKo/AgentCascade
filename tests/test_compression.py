@@ -130,16 +130,22 @@ class MockAgentPool:
     def get_compression_target_set(self, agent_name):
         """Same logic as AgentPool.get_compression_target_set."""
         history = self.get_conversation(agent_name)
-        if not history:
-            return None, [], -1
+        return self.get_compression_target_set_from_conversation(agent_name, history)
 
-        # Match production behavior: skip SYSTEM (index 0) AND U0 (index 1) to protect them from compression.
-        # Production code in agent_pool.py uses active_start_idx=2 when a system message exists.
-        start_idx = 2 if (history[0].get('role') == SYSTEM if isinstance(history[0], dict) else getattr(history[0], 'role', '') == SYSTEM) else 1
-        latest_summary_idx = self.find_last_marker(history)
-        active_start_idx = latest_summary_idx + 1 if latest_summary_idx != -1 else start_idx
-        messages_to_compress = history[active_start_idx:]
-        return active_start_idx, messages_to_compress, latest_summary_idx
+    def get_compression_target_set_from_conversation(self, agent_name, conv):
+        """Same logic as AgentPool.get_compression_target_set_from_conversation."""
+        if not conv:
+            return 0, [], -1
+
+        latest_marker = self.find_last_marker(conv)
+        if latest_marker >= 0:
+            active_start_idx = latest_marker + 1
+        else:
+            first_role = conv[0].get('role') if isinstance(conv[0], dict) else getattr(conv[0], 'role', '')
+            active_start_idx = 2 if first_role == SYSTEM else 1
+
+        active_set = conv[active_start_idx:]
+        return active_start_idx, active_set, latest_marker
 
 
 def _build_pool_with_history(num_user_msgs=10):
@@ -816,7 +822,7 @@ class TestGetCompressionTargetSet:
             pool.get_compression_target_set("Nobody")
         )
 
-        assert active_start_idx is None
+        assert active_start_idx == 0
         assert messages_to_compress == []
         assert latest_summary_idx == -1
 
@@ -1143,6 +1149,9 @@ class TestCompressContextPoolMutationFailure:
 
             def get_compression_target_set(self, name):
                 return self._base.get_compression_target_set(name)
+
+            def get_compression_target_set_from_conversation(self, name, conv):
+                return self._base.get_compression_target_set_from_conversation(name, conv)
 
             @property
             def instance_conversations(self):
