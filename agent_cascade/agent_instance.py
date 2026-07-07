@@ -21,6 +21,7 @@ from agent_cascade.settings import (
     AGENT_IDLE_TIMEOUT, AGENT_IDLE_CHECK_INTERVAL,
     AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
     AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL,
+    CI_EXECUTION_TIMEOUT, CI_WATCHDOG_TIMEOUT, CI_STALE_CONTAINER_TTL,
 )
 
 
@@ -452,6 +453,11 @@ class PoolSettings:
     
     # Inner-loop detection toggle (off by default until sensitivity is fixed)
     inner_loop_detect_enabled: bool = False   # Enable in-message loop detection during streaming
+
+    # Code interpreter settings (Feature: CI session sharing)
+    ci_execution_timeout: int = CI_EXECUTION_TIMEOUT      # Per-call code execution timeout (seconds)
+    ci_watchdog_timeout: int = CI_WATCHDOG_TIMEOUT         # Kernel inactivity watchdog timeout (seconds)
+    ci_stale_container_ttl: int = CI_STALE_CONTAINER_TTL   # Stale container cleanup TTL (seconds)
 
     # Tail sync check (design doc §5.2 compliance — D1 fix)
     tail_sync_check_enabled: bool = True      # Enable lightweight tail-length checks after writes

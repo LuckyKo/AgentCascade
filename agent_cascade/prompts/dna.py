@@ -283,6 +283,7 @@ TOOL_METADATA = {
         'parameters': {
             'code': 'The Python code to execute.',
             'fix_paths': 'Auto-translate Windows host paths to Docker container paths. Default is true. Set to false to disable.',
+            'fresh': 'Force a fresh kernel with a new container, discarding all existing state. This will terminate any existing container shared by agents in this session. Default is false. Use when you need a clean environment.',
         }
     },
     'shell_cmd': {

@@ -154,6 +154,27 @@ def _handle_inner_loop_detect(ui_cfg: dict, agent_pool: Optional[Any], agents: l
         agent_pool.settings.inner_loop_detect_enabled = bool(ui_cfg['inner_loop_detect_enabled'])
 
 
+@register_config_handler('ci_execution_timeout')
+def _handle_ci_execution_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update code interpreter execution timeout."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.ci_execution_timeout = max(10, int(ui_cfg['ci_execution_timeout']))
+
+
+@register_config_handler('ci_watchdog_timeout')
+def _handle_ci_watchdog_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update code interpreter watchdog timeout."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.ci_watchdog_timeout = max(30, int(ui_cfg['ci_watchdog_timeout']))
+
+
+@register_config_handler('ci_stale_container_ttl')
+def _handle_ci_stale_container_ttl(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update code interpreter stale container TTL."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.ci_stale_container_ttl = max(30, int(ui_cfg['ci_stale_container_ttl']))
+
+
 # LLM config keys — all share one handler (defense-in-depth optimization).
 # Registered under each key so any LLM key present triggers the check.
 

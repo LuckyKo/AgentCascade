@@ -67,6 +67,36 @@ class ToolDispatcher:
         """Set engine reference after all handlers constructed (two-phase init)."""
         self._engine = engine
 
+    # ── Session Name Resolution ───────────────────────────────────────────────
+
+    def _resolve_session_name(self, instance: 'AgentInstance') -> str:
+        """Get the session name (root instance name) for an agent instance.
+
+        Walks up the parent chain to find the root instance (no parent).
+        The root instance's name is the session name used for shared resources
+        like code interpreter containers.
+
+        Args:
+            instance: Any agent instance in the pool
+
+        Returns:
+            Instance name of the root (parentless) agent in this session chain
+        """
+        current = instance
+        visited = {current.instance_name}
+        for _ in range(20):  # Safety limit to prevent infinite loops
+            parent_name = current.parent_instance
+            if parent_name is None:
+                break
+            if parent_name in visited:
+                break  # Cycle detected — treat current as root
+            visited.add(parent_name)
+            parent_inst = self.pool.get_instance(parent_name)
+            if parent_inst is None:
+                break
+            current = parent_inst
+        return current.instance_name
+
     # ── Main Tool Execution Entry Point ──────────────────────────────────────
     
     def execute_tool(
@@ -130,6 +160,7 @@ class ToolDispatcher:
                 agent_instance_name=instance.instance_name,
                 agent_obj=self.engine,
                 messages=llm_messages,
+                session_name=self._resolve_session_name(instance),
             )
             self.engine._cache_tool_args(instance.instance_name, tool_name, resolved)
             return result

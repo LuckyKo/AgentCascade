@@ -76,7 +76,10 @@ DOCKER_IMAGE_FILE = str(Path(__file__).absolute().parent / 'resource' / 'code_in
 _KERNEL_CLIENTS: dict = {}
 _DOCKER_CONTAINERS: Dict[str, str] = {}
 
-# Track last activity per kernel for watchdog (value is {'last_active': float, 'work_dir': str})
+# Track last activity per kernel for watchdog.
+# Value format: {'last_active': float, 'work_dir': str, 'watchdog_timeout': int, 'stale_ttl': int}
+# The timeout/stale_ttl fields are set at kernel start from pool settings and allow the
+# watchdog thread to use dynamic (UI-configured) values instead of module-level constants.
 _KERNEL_ACTIVITY: Dict[str, dict] = {}
 
 # Thread-safe lock + condition for mutating shared kernel state (_KERNEL_CLIENTS, _DOCKER_CONTAINERS, _KERNEL_ACTIVITY)
@@ -179,24 +182,25 @@ _WATCHDOG_TERMINATE = threading.Event()
 
 def _kernel_watchdog():
     """Background thread that kills unresponsive kernels.
-    
+
     Checks every 5 seconds if any kernel has been inactive for more than
-    CONTAINER_WATCHDOG_TIMEOUT. If so, it stops and removes the container,
-    cleans up the client, and logs a warning.
+    its configured watchdog timeout (per-kernel, from pool settings). If so, it stops
+    and removes the container, cleans up the client, and logs a warning.
     """
     while not _WATCHDOG_TERMINATE.is_set():
         _WATCHDOG_TERMINATE.wait(timeout=5)
         now = time.time()
-        stale_kernels = []
+        stale_kernels: list[tuple] = []  # (kernel_id, timeout_used)
         with _KERNEL_LOCK:
             for kernel_id, activity in list(_KERNEL_ACTIVITY.items()):
-                if now - activity['last_active'] > CONTAINER_WATCHDOG_TIMEOUT:
-                    stale_kernels.append(kernel_id)
-        
-        for kernel_id in stale_kernels:
+                wd_timeout = activity.get('watchdog_timeout', CONTAINER_WATCHDOG_TIMEOUT)
+                if now - activity['last_active'] > wd_timeout:
+                    stale_kernels.append((kernel_id, wd_timeout))
+
+        for kernel_id, wd_timeout in stale_kernels:
             logger.warning(
                 f"Code interpreter watchdog: Kernel {kernel_id} inactive for "
-                f"{CONTAINER_WATCHDOG_TIMEOUT}s. Killing container."
+                f"{wd_timeout}s. Killing container."
             )
             
             # Mark as watchdog-killed and remove from client/container tracking atomically
@@ -266,10 +270,11 @@ def _kernel_watchdog():
 
 
 def _cleanup_stale_containers(now: float):
-    """Remove stale containers older than STALE_CONTAINER_TTL.
+    """Remove stale containers older than their configured TTL.
 
     Keeps the stale container registry from accumulating entries indefinitely.
-    Called from the watchdog loop on each tick.
+    Called from the watchdog loop on each tick. Uses per-kernel stale_ttl if set,
+    falling back to module-level STALE_CONTAINER_TTL for backward compatibility.
 
     Lock strategy: scan under lock, docker rm outside lock, then batch-delete
     from the dict under a single lock acquisition to minimize hold time.
@@ -277,8 +282,11 @@ def _cleanup_stale_containers(now: float):
     expired_stale = []
     with _KERNEL_LOCK:
         for kernel_id, info in list(_STALE_CONTAINERS.items()):
+            # Use per-kernel TTL if available (set at kernel start from pool settings)
+            activity = _KERNEL_ACTIVITY.get(kernel_id, {})
+            ttl = activity.get('stale_ttl', STALE_CONTAINER_TTL)
             age = now - info.get('timestamp', 0)
-            if age > STALE_CONTAINER_TTL:
+            if age > ttl:
                 expired_stale.append((kernel_id, info['container_id']))
 
     # Remove containers outside the lock (docker ops can be slow)
@@ -321,6 +329,11 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 'description': 'Auto-translate Windows host paths (e.g. N:\\work\\...) to Docker container paths (/workspace/...). Set to false to disable.',
                 'type': 'boolean',
                 'default': True,
+            },
+            'fresh': {
+                'description': 'Force a fresh kernel with a new container (discard existing state). Default is false.',
+                'type': 'boolean',
+                'default': False,
             }
         },
         'required': ['code'],
@@ -389,17 +402,87 @@ class CodeInterpreter(BaseToolWithFileAccess):
         if isinstance(params, dict) and 'fix_paths' in params:
             fix_paths = bool(params.get('fix_paths', True))
 
-        # Use configured timeout: explicit param > config > default
+        # ── Resolve session name for shared container (session-scoped kernels) ──
+        session_name = kwargs.get('session_name', kwargs.get('agent_instance_name', 'default'))
+
+        # ── Handle fresh flag: force a new container even if one exists ────────
+        fresh = False
+        if isinstance(params, dict):
+            fresh = bool(params.get('fresh', False))
+        if 'validated_params' in dir():
+            fresh = bool(validated_params.get('fresh', False)) or fresh
+
+        # ── Resolve timeouts: explicit param > config > pool settings > module default ──
+        # Use None sentinel pattern for all three to ensure consistent priority chain
         exec_timeout = timeout
         if exec_timeout is None:
-            exec_timeout = self.cfg.get('execution_timeout', CODE_EXECUTION_TIMEOUT)
+            exec_timeout = self.cfg.get('execution_timeout', None)
 
-        kernel_id: str = f'{self.instance_id}_{os.getpid()}'
+        wd_timeout = None
+        stale_ttl = None
+
+        # Try to get dynamic values from pool settings (UI-configured overrides)
+        agent_obj = kwargs.get('agent_obj')
+        if agent_obj is not None:
+            pool = getattr(agent_obj, 'pool', None)
+            if pool is not None and hasattr(pool, 'settings'):
+                if exec_timeout is None:
+                    exec_timeout = pool.settings.ci_execution_timeout
+                if wd_timeout is None:
+                    wd_timeout = pool.settings.ci_watchdog_timeout
+                if stale_ttl is None:
+                    stale_ttl = pool.settings.ci_stale_container_ttl
+
+        # Fall back to module-level defaults if still unset
+        if exec_timeout is None:
+            exec_timeout = CODE_EXECUTION_TIMEOUT
+        if wd_timeout is None:
+            wd_timeout = CONTAINER_WATCHDOG_TIMEOUT
+        if stale_ttl is None:
+            stale_ttl = STALE_CONTAINER_TTL
+
+        # ── Build session-scoped kernel_id (all agents in same session share one container) ──
+        # Sanitize session_name: replace non-alphanumeric chars with underscores for safe Docker naming
+        safe_session = ''.join(c if c.isalnum() or c == '_' else '_' for c in session_name)
+        # Add short hash to prevent collision between different names that sanitize to the same string
+        session_hash = str(hash(session_name))[:6]
+        kernel_id: str = f'ci_{safe_session}_{session_hash}_{os.getpid()}'
+
+        # Store resolved timeouts as instance attrs so _start_kernel/_warm_restart can use them
+        self._wd_timeout = wd_timeout
+        self._stale_ttl = stale_ttl
 
         # Phase 1: Acquire lock, check state, and reserve kernel slot atomically.
         # Use a condition variable so concurrent callers wait for the starter to finish
         # instead of all racing to start duplicate kernels (TOCTOU fix).
         with _KERNEL_READY:
+            # ── Handle fresh flag: clean up existing kernel for this session ───
+            if fresh:
+                logger.info(f"Fresh kernel requested for session {session_name}; cleaning up existing kernel.")
+                _WATCHDOG_KILLED.discard(kernel_id)
+
+                # Shutdown the kernel client
+                if kernel_id in _KERNEL_CLIENTS:
+                    try:
+                        _KERNEL_CLIENTS[kernel_id].shutdown()
+                    except Exception:
+                        pass
+
+                # Stop and remove the old container
+                if kernel_id in _DOCKER_CONTAINERS:
+                    cid = _DOCKER_CONTAINERS[kernel_id]
+                    try:
+                        subprocess.run(['docker', 'stop', '-t', '2', cid], capture_output=True, timeout=5)
+                        subprocess.run(['docker', 'rm', '-f', cid], capture_output=True, timeout=5)
+                    except Exception:
+                        pass
+
+                # Clear state so a fresh kernel is started below
+                _KERNEL_CLIENTS.pop(kernel_id, None)
+                _DOCKER_CONTAINERS.pop(kernel_id, None)
+                _KERNEL_ACTIVITY.pop(kernel_id, None)
+                _STALE_CONTAINERS.pop(kernel_id, None)
+
             # Check if the kernel was killed by the watchdog — clean up and start fresh (thread-safe)
             while True:
                 if kernel_id in _WATCHDOG_KILLED:
@@ -648,7 +731,12 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 if kernel_id in _KERNEL_ACTIVITY and isinstance(_KERNEL_ACTIVITY[kernel_id], dict):
                     _KERNEL_ACTIVITY[kernel_id]['last_active'] = time.time()
                 else:
-                    _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
+                    _KERNEL_ACTIVITY[kernel_id] = {
+                        'last_active': time.time(),
+                        'work_dir': self.work_dir,
+                        'watchdog_timeout': getattr(self, '_wd_timeout', CONTAINER_WATCHDOG_TIMEOUT),
+                        'stale_ttl': getattr(self, '_stale_ttl', STALE_CONTAINER_TTL),
+                    }
             
             # Return timeout message along with any partial output collected
             if exec_timeout and isinstance(e, TimeoutError):
@@ -828,21 +916,31 @@ class CodeInterpreter(BaseToolWithFileAccess):
         return interrupted, partial_output
 
     def __del__(self):
-        # Recycle the jupyter subprocess and Docker container:
-        k: str = f'{self.instance_id}_{os.getpid()}'
+        # Recycle all kernels matching this instance's ID prefix.
+        # Session-based kernel_ids are "ci_{session_name}_{pid}" but we also match
+        # legacy format "{instance_id}_{pid}" for backward compatibility.
+        pid = os.getpid()
+        session_prefixes = [f'ci_']  # Match all ci_ prefixed kernels owned by this PID
 
         # Collect state under lock (minimize hold time)
         kc_list = []
         container_ids = []
         stale_cids = []
         with _KERNEL_LOCK:
-            if k in _KERNEL_CLIENTS:
+            # Match both new session-based format and legacy instance_id format
+            for k in list(_KERNEL_CLIENTS.keys()):
+                if not k.endswith(f'_{pid}'):
+                    continue
                 kc_list.append(_KERNEL_CLIENTS[k])
                 del _KERNEL_CLIENTS[k]
-            if k in _DOCKER_CONTAINERS:
+            for k in list(_DOCKER_CONTAINERS.keys()):
+                if not k.endswith(f'_{pid}'):
+                    continue
                 container_ids.append(_DOCKER_CONTAINERS[k])
                 del _DOCKER_CONTAINERS[k]
-            if k in _STALE_CONTAINERS:
+            for k in list(_STALE_CONTAINERS.keys()):
+                if not k.endswith(f'_{pid}'):
+                    continue
                 stale_cids.append(_STALE_CONTAINERS[k]['container_id'])
                 del _STALE_CONTAINERS[k]
 
@@ -1204,9 +1302,14 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Create client and wait for kernel readiness (shared helper)
         kc = self._create_kernel_client(host_connection_file, container_id)
 
-        # Initialize activity tracking for watchdog (include work_dir for cleanup)
+        # Initialize activity tracking for watchdog (include work_dir + dynamic timeouts)
         with _KERNEL_LOCK:
-            _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
+            _KERNEL_ACTIVITY[kernel_id] = {
+                'last_active': time.time(),
+                'work_dir': self.work_dir,
+                'watchdog_timeout': getattr(self, '_wd_timeout', CONTAINER_WATCHDOG_TIMEOUT),
+                'stale_ttl': getattr(self, '_stale_ttl', STALE_CONTAINER_TTL),
+            }
 
         return kc, container_id
 
@@ -1299,9 +1402,14 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Create client and wait for kernel readiness
         kc = self._create_kernel_client(host_connection_file, container_id)
 
-        # Initialize activity tracking for watchdog
+        # Initialize activity tracking for watchdog (include dynamic timeouts)
         with _KERNEL_LOCK:
-            _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
+            _KERNEL_ACTIVITY[kernel_id] = {
+                'last_active': time.time(),
+                'work_dir': self.work_dir,
+                'watchdog_timeout': getattr(self, '_wd_timeout', CONTAINER_WATCHDOG_TIMEOUT),
+                'stale_ttl': getattr(self, '_stale_ttl', STALE_CONTAINER_TTL),
+            }
 
         return kc, container_id
 
@@ -1324,7 +1432,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
         """
         if kernel_id is None:
             logger.warning("kernel_id not passed to _execute_code; using default")
-            kernel_id = f'{self.instance_id}_{os.getpid()}'
+            # Use session-based format consistent with call() method
+            kernel_id = f'ci_default_{os.getpid()}'
         if timeout is None:
             timeout = CODE_EXECUTION_TIMEOUT
 
@@ -1433,7 +1542,12 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 if kernel_id in _KERNEL_ACTIVITY and isinstance(_KERNEL_ACTIVITY[kernel_id], dict):
                     _KERNEL_ACTIVITY[kernel_id]['last_active'] = time.time()
                 else:
-                    _KERNEL_ACTIVITY[kernel_id] = {'last_active': time.time(), 'work_dir': self.work_dir}
+                    _KERNEL_ACTIVITY[kernel_id] = {
+                        'last_active': time.time(),
+                        'work_dir': self.work_dir,
+                        'watchdog_timeout': getattr(self, '_wd_timeout', CONTAINER_WATCHDOG_TIMEOUT),
+                        'stale_ttl': getattr(self, '_stale_ttl', STALE_CONTAINER_TTL),
+                    }
 
             if text:
                 result += f'\n\n{msg_type}:\n\n```\n{text}\n```'
