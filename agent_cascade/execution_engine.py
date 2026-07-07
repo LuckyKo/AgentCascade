@@ -56,6 +56,7 @@ from .compression.handler import CompressionHandler
 from .tool_dispatcher import ToolDispatcher
 from .stream_publisher import StreamPublisher
 from .loop_detection import detect_loop as _canonical_detect_loop
+from .inner_loop_detect import InnerLoopDetector, save_loop_sample
 from .operation_manager import set_current_instance_name, clear_current_instance_name
 
 
@@ -1633,12 +1634,99 @@ class ExecutionEngine:
                 
                 # Streaming UI Content Update Fix: Track partial LLM content for UI updates every ~100ms
                 last_streaming_update_time = time.monotonic()
-                
+
+                # Inner-loop detector: fresh instance per retry attempt to catch generation loops mid-stream
+                _inner_detector = InnerLoopDetector()
+                _prev_text_len = 0  # Tracks accumulated text length for delta extraction (delta_stream=False)
+
+                # Max-output-token guard: safety net against LLMs exceeding their token budget
+                # Resolve the output token limit from generate_cfg override, template config, or default
+                _max_output_tokens = 2048  # Default cap per single response
+                _gen_override = getattr(instance, '_generate_cfg_override', None)
+                if _gen_override and isinstance(_gen_override, dict):
+                    _mt = _gen_override.get('max_tokens') or _gen_override.get('max_output_tokens')
+                    if isinstance(_mt, int) and _mt > 0:
+                        _max_output_tokens = _mt
+                # Also check template LLM generate_cfg as fallback
+                if _max_output_tokens == 2048:
+                    _llm_cfg = getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {}
+                    _mt = _llm_cfg.get('max_tokens') or _llm_cfg.get('max_output_tokens')
+                    if isinstance(_mt, int) and _mt > 0:
+                        _max_output_tokens = _mt
+
+                _accumulated_chars = 0  # Running char count for token estimation
+                _token_guard_triggered = False  # Prevent double-trigger within same iteration
+
                 gen = self._execute_llm_call(instance, template, llm_messages, active_functions)
                 _first_token_received = False  # Flag to ensure TTFT is recorded only once per call
                 for output in gen:
                     last_output = output
-                    
+
+                    # Feed delta text to inner-loop detector (extracts new content from accumulated response)
+                    try:
+                        _last_msg = output[-1] if output else None
+                        if _last_msg is not None:
+                            _content = msg_field(_last_msg, 'content', '') or ''
+                            _reasoning = msg_field(_last_msg, 'reasoning_content') or ''
+                            # Handle multimodal content (list of items) for both fields
+                            if isinstance(_content, list):
+                                _content = ' '.join(str(c) for c in _content if isinstance(c, str))
+                            else:
+                                _content = str(_content)
+                            if isinstance(_reasoning, list):
+                                _reasoning = ' '.join(str(c) for c in _reasoning if isinstance(c, str))
+                            else:
+                                _reasoning = str(_reasoning)
+                            _total_text = _reasoning + _content
+                            # Generator is append-only (delta_stream=False), so slicing by previous length gives the new delta
+                            _delta_text = _total_text[_prev_text_len:]
+                            _prev_text_len = len(_total_text)
+
+                            if _delta_text:
+                                _ev = _inner_detector.feed(_delta_text)
+                                if _ev:  # Loop detected mid-stream
+                                    with instance._compression_lock:
+                                        instance._streaming_responses = []
+                                    try:
+                                        gen.close()
+                                    except RuntimeError:
+                                        pass  # Already closed/exhausted
+                                    yield None  # Signal UI
+                                    logger.debug(
+                                        f"[INNER_LOOP] Detected generation loop for {inst_name}: "
+                                        f"{_ev['reason']} (score={_ev['score']}). Retrying…"
+                                    )
+                                    last_output = None  # Force retry
+                                    retry_count += 1  # Advance retry counter to avoid infinite loop
+                                    break
+
+                            # Max-output-token guard: safety net — if LLM exceeds token budget it's likely looping
+                            if not _token_guard_triggered:
+                                _est_tokens = len(_total_text) // TOKEN_ESTIMATE_CHAR_DIVISOR
+                                if _est_tokens > _max_output_tokens:
+                                    save_loop_sample(
+                                        text=_total_text[:4000],
+                                        reason=f"max_output_exceeded ({_est_tokens}/{_max_output_tokens} est. tokens)",
+                                        instance_name=inst_name,
+                                    )
+                                    with instance._compression_lock:
+                                        instance._streaming_responses = []
+                                    try:
+                                        gen.close()
+                                    except RuntimeError:
+                                        pass  # Already closed/exhausted
+                                    yield None  # Signal UI
+                                    logger.debug(
+                                        f"[MAX_TOKENS] Output token budget exceeded for {inst_name}: "
+                                        f"~{_est_tokens} tokens (limit {_max_output_tokens}). Retrying…"
+                                    )
+                                    last_output = None  # Force retry
+                                    retry_count += 1
+                                    _token_guard_triggered = True
+                                    break
+                    except Exception as e:
+                        logger.debug(f"[INNER_LOOP] Detection error for {inst_name}: {e}")
+
                     # Telemetry: record Time To First Token (TTFT) on the first streaming chunk
                     if not _first_token_received and (tel := self._telemetry()) is not None:
                         try:
