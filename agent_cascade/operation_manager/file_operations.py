@@ -1020,8 +1020,9 @@ class FileOpsMixin:
                 new_file_content = file_content.replace(actual_old_content, new_content, 1)
 
             # Generate unified diff before writing (both old and new content available)
-            old_lines = file_content.splitlines(keepends=True)
-            new_lines = new_file_content.splitlines(keepends=True)
+            # keepends=False: avoids double-newlines when joined with '\n' below
+            old_lines = file_content.splitlines()
+            new_lines = new_file_content.splitlines()
             diff_lines = list(difflib.unified_diff(
                 old_lines, new_lines,
                 fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''
@@ -1091,9 +1092,9 @@ class FileOpsMixin:
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
 
-            # Unified diff snippet in code block
+            # Unified diff snippet in code block (no redundant ---/+++ headers, both point to same file)
             if diff_content:
-                res_msg += f'\n```\n--- a/{path}\n+++ b/{path}\n{diff_content}\n```'
+                res_msg += f'\n```\n{diff_content}\n```'
 
             if backup_path_str:
                 res_msg += f'\n  backup → {backup_path_str}'
