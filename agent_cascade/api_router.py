@@ -71,6 +71,7 @@ class APIEndpoint:
             'api_key': self.api_key,
             'model_type': self.model_type,
             'max_input_tokens': self.max_input_tokens,
+            'max_retries': self.max_retries,  # Pass endpoint-level retry count to LLM module
         }
 
     def to_dict(self) -> dict:

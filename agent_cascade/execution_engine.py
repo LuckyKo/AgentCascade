@@ -1512,6 +1512,7 @@ class ExecutionEngine:
             'connection', 'timeout', 'timed out', 'ssl', 
             'broken pipe', 'disconnected', 'eof', 
             'reset by peer', 'refused',
+            'terminated', 'fetch failed',  # Connection termination patterns from logs
             '503', '502', '504', '429',  # Server errors + rate limiting
             'network unreachable', 'dns', 'resolution failed',  # Network/DNS issues
             'temporary', 'overloaded', 'service unavailable'  # Transient server states

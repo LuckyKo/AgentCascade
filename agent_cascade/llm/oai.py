@@ -456,6 +456,10 @@ class TextChatAtOAI(BaseFnCallModel):
                         yield res
         except OpenAIError as ex:
             raise ModelServiceError(exception=ex)
+        except Exception as ex:
+            # Catch non-OpenAI errors (e.g., httpx.ReadError, ConnectionResetError)
+            # so they are wrapped as ModelServiceError and caught by Layer 1 retry logic
+            raise ModelServiceError(exception=ex)
         finally:
             # Close response to return connection to the httpx pool for reuse
             if response is not None:
@@ -567,6 +571,10 @@ class TextChatAtOAI(BaseFnCallModel):
                                       extra=extra))
             return result
         except OpenAIError as ex:
+            raise ModelServiceError(exception=ex)
+        except Exception as ex:
+            # Catch non-OpenAI errors (e.g., httpx.ReadError, ConnectionResetError)
+            # so they are wrapped as ModelServiceError and caught by Layer 1 retry logic
             raise ModelServiceError(exception=ex)
         finally:
             # Non-streaming responses don't have .close(), but the underlying

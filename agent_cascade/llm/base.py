@@ -87,9 +87,12 @@ class BaseChatModel(ABC):
         # Support max_input_tokens at the top level of cfg
         if 'max_input_tokens' in cfg and 'max_input_tokens' not in generate_cfg:
             generate_cfg['max_input_tokens'] = cfg['max_input_tokens']
+        # Support max_retries at the top level of cfg (from endpoint settings)
+        if 'max_retries' in cfg and 'max_retries' not in generate_cfg:
+            generate_cfg['max_retries'] = cfg['max_retries']
             
         cache_dir = cfg.get('cache_dir', generate_cfg.pop('cache_dir', None))
-        self.max_retries = generate_cfg.pop('max_retries', 0)
+        self.max_retries = generate_cfg.pop('max_retries', 2)
         self.generate_cfg = generate_cfg
         self.model_type = cfg.get('model_type', '')
         
