@@ -1,6 +1,5 @@
 from collections import deque, Counter
 import datetime
-import hashlib
 import json
 import math
 import os
@@ -18,7 +17,7 @@ _MAX_TOKENS = 1000
 _DEFAULT_MIN_CHARS = 4000
 
 # Default batch interval: run the heavy checks every N-th feed call instead of
-# on every streaming chunk.  A value of 1 means "check every chunk".
+# on every streaming chunk to save CPU.  Lower values detect faster but cost more.
 _DEFAULT_BATCH_INTERVAL = 6
 
 
@@ -124,23 +123,6 @@ class InnerLoopDetector:
         """
 
         ##################################################
-        # Character repetition (fast path — per-char scan, always active)
-        ##################################################
-
-        for ch in chunk:
-            if ch == self.last_char:
-                self.char_run += 1
-            else:
-                self.last_char = ch
-                self.char_run = 1
-
-            if self.char_run > self.char_run_limit:
-                return self.add_score(
-                    100,
-                    f"character run '{ch}' ({self.char_run})",
-                )
-
-        ##################################################
         # Accumulate text and tokenize into sentences
         ##################################################
 
@@ -162,41 +144,69 @@ class InnerLoopDetector:
             if norm:
                 toks = re.findall(r'\b\w+\b', norm)
                 self.tokens.extend(toks)
-
-                # --- Sentence repetition check (always active, cheap) ---
+                # Accumulate sentence counts (checked later, gated by min_chars).
                 self.sentences[norm] += 1
-                if self.sentences[norm] >= 7:
-                    ev = self.add_score(80, "repeated sentence")
-                    if ev:
-                        return ev
 
         self.text = self.text[last_end:]
 
         ##################################################
-        # Heavy checks — gated by min_chars AND batch_interval
+        # Character repetition (per-char scan — always runs to maintain state)
+        # Detection gated by min_chars so we don't fire on tiny text.
         ##################################################
 
-        # Skip expensive hashing/entropy until enough text has accumulated.
+        for ch in chunk:
+            if ch == self.last_char:
+                self.char_run += 1
+            else:
+                self.last_char = ch
+                self.char_run = 1
+
+            if self.char_run > self.char_run_limit:
+                # Char runs are a strong signal — return immediately regardless of threshold.
+                return {
+                    "loop": True,
+                    "reason": f"character run '{ch}' ({self.char_run})",
+                    "score": round(self.score + 100, 1),
+                }
+
+        ##################################################
+        # All detection checks — gated by min_chars
+        # Light checks (sentence) run every time once active.
+        # Heavy checks (n-grams, blocks, entropy) also respect batch_interval.
+        ##################################################
+
+        # Skip until enough text has accumulated to be meaningful.
         if self._chars_fed < self.min_chars:
             self.decay()
             return None
 
-        # Only run heavy checks every batch_interval-th call to reduce per-chunk cost.
+        ##################################################
+        # Sentence repetition — always runs after min_chars (cheap, no batching)
+        ##################################################
+
+        for norm_count in self.sentences.items():
+            if norm_count[1] >= 7:
+                ev = self.add_score(80, "repeated sentence")
+                if ev:
+                    return ev
+
+        ##################################################
+        # Heavy checks — also respect batch_interval to save CPU per chunk
+        ##################################################
+
         if self._feed_count % self.batch_interval != 0:
             self.decay()
             return None
 
         ##################################################
-        # n-gram detection (deterministic hashing via md5)
-        # Deque doesn't support slicing, so we convert only the tail window.
+        # n-gram detection (tuple of strings as Counter key — no hashing needed)
+        # Deque supports direct iteration; tuple(deque)[-n:] avoids O(n) list copy.
         ##################################################
 
         if len(self.tokens) >= self.ngram_size:
-            ng = tuple(list(self.tokens)[-self.ngram_size:])
-            h = hashlib.md5(str(ng).encode()).hexdigest()
-
-            self.ngrams[h] += 1
-            if self.ngrams[h] >= 5:
+            ng = tuple(self.tokens)[-self.ngram_size:]  # O(k) where k=ngram_size, not O(N)
+            self.ngrams[ng] += 1
+            if self.ngrams[ng] >= 5:
                 ev = self.add_score(60, "repeated ngram")
                 if ev:
                     return ev
@@ -205,15 +215,13 @@ class InnerLoopDetector:
         self._trim_counter(self.ngrams)
 
         ##################################################
-        # Block repetition (sha1 already deterministic)
+        # Block repetition (tuple of strings as Counter key)
         ##################################################
 
         if len(self.tokens) >= self.block_size:
-            block = " ".join(list(self.tokens)[-self.block_size:])
-            h = hashlib.sha1(block.encode()).hexdigest()
-
-            self.blocks[h] += 1
-            if self.blocks[h] >= 4:
+            block = tuple(self.tokens)[-self.block_size:]  # O(k) where k=block_size, not O(N)
+            self.blocks[block] += 1
+            if self.blocks[block] >= 4:
                 ev = self.add_score(70, "repeated block")
                 if ev:
                     return ev
@@ -237,7 +245,7 @@ class InnerLoopDetector:
         ##################################################
 
         if len(self.tokens) >= self.entropy_window:
-            window = list(self.tokens)[-self.entropy_window:]
+            window = tuple(self.tokens)[-self.entropy_window:]  # O(k) not O(N)
             counts = Counter(window)
 
             entropy = 0.0

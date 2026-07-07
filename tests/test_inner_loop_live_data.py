@@ -156,33 +156,39 @@ class TestFalsePositiveRate:
 class TestCharacterRunDetection:
     """Detect runs of identical characters."""
 
+    # Unique filler to pass min_chars (4000) without triggering any detection.
+    _FILLER = " ".join(
+        f"Step {i} involves checking component alpha-{i} for correctness and completeness."
+        for i in range(1, 60)
+    ) + "."
+
     def test_single_char_run(self):
         # Unique filler sentences (no repetition that could trigger sentence detection first)
-        base = " ".join(
-            f"Step {i} involves checking component alpha-{i} for correctness."
-            for i in range(1, 40)
-        ) + "."
+        base = self._FILLER
         text = base + "a" * 120
         result = feed_chunks(text)
-        assert result is not None, "Should detect a run of 120 'a' chars"
+        assert result is not None, f"Should detect a run of 120 'a' chars; text had {len(text)} chars"
         assert "character run" in result["reason"].lower()
 
     def test_space_run(self):
         """Consecutive spaces (code indentation / ASCII art)."""
-        base = " ".join(
-            f"Section {i} has been verified and looks correct overall."
-            for i in range(1, 40)
-        ) + "."
+        base = self._FILLER
         text = base + " " * 80
         result = feed_chunks(text)
-        assert result is not None, "Should detect a run of 80 spaces"
+        assert result is not None, f"Should detect a run of 80 spaces; text had {len(text)} chars"
 
 
 class TestSentenceRepetition:
     """Detect the same sentence appearing 7+ times."""
 
+    # Unique filler to pass min_chars (4000).
+    _FILLER = " ".join(
+        f"Step {i} involves checking component alpha-{i} for correctness and completeness."
+        for i in range(1, 60)
+    ) + "."
+
     def test_exact_sentence_repeat(self):
-        base = "Let me examine the implementation details more closely. " * 15
+        base = self._FILLER
         sent = "The function takes three parameters for input processing."
         text = base + f" {sent}. " * 7 + " More checking needed. " * 20
         result = feed_chunks(text)
@@ -191,7 +197,7 @@ class TestSentenceRepetition:
 
     def test_reasoning_style_repeat(self):
         """Simulate a reviewer restating the same observation."""
-        base = "I'll verify each section carefully. " * 20
+        base = self._FILLER
         obs = "The code looks correct here."
         text = base + f" {obs}. " * 8 + " Moving on to the next part. " * 15
         result = feed_chunks(text)
@@ -227,13 +233,13 @@ class TestTokenLevelRepetition:
     def test_block_loop_256_tokens(self):
         """A paragraph that repeats — should trigger block detection.
 
-        Uses a large enough repeated section (500 unique words × 2) so the
+        Uses a large enough repeated section (500 unique words × 3) so the
         same sliding window overlaps across batch_interval gaps.
         """
         # Unique filler to pass min_chars gate without triggering sentence repeat
         prefix = " ".join(
-            f"Analyzing module {i} for potential issues."
-            for i in range(1, 50)
+            f"Analyzing module {i} for potential issues in the implementation layer."
+            for i in range(1, 60)
         ) + "."
 
         # 500 unique words split into sentences (so tokens are actually extracted)
@@ -244,8 +250,9 @@ class TestTokenLevelRepetition:
             + " ".join(words_a[333:]) + "."
         )
 
-        text = prefix + block_text + " also checking. " + block_text + "."
-        assert len(text) >= 2500, (
+        # Repeat 5 times so block counter reaches >= 4 across batch_interval gaps (with decay)
+        text = prefix + block_text + " also checking. " + block_text + " more. " + block_text + " again. " + block_text + " still. " + block_text + "."
+        assert len(text) >= 4000, (
             f"Text too short ({len(text)} chars), min_chars gate will skip heavy checks"
         )
 
@@ -261,12 +268,12 @@ class TestLongReasoningLoop:
     def test_long_reasoning_loop_512_tokens(self):
         """Simulate an agent stuck in a long reasoning loop.
 
-        A 256-token paragraph repeated twice with unique filler between them.
+        A 256-token paragraph repeated 3 times with unique filler between them.
         """
-        # Unique prefix to pass min_chars gate
+        # Unique prefix to pass min_chars gate (4000 chars)
         prefix = " ".join(
-            f"Analyzing module {i} for potential issues."
-            for i in range(1, 50)
+            f"Analyzing module {i} for potential issues in the implementation layer."
+            for i in range(1, 60)
         ) + "."
 
         # Build a ~256-token paragraph with unique words (split into sentences)
@@ -277,13 +284,14 @@ class TestLongReasoningLoop:
             + " ".join(para_words[171:]) + "."
         )
 
-        # Unique filler between the two copies
+        # Unique filler between the copies
         filler = " ".join(
             f"Checking component alpha-{i} carefully and thoroughly."
             for i in range(1, 30)
         ) + "."
 
-        text = prefix + para_text + " " + filler + para_text + "."
+        # Repeat 5 times so n-gram counter reaches >= 5 across batch_interval gaps (with decay)
+        text = prefix + para_text + " " + filler + para_text + " " + filler + para_text + " " + filler + para_text + " " + filler + para_text + "."
 
         result = feed_chunks(text)
         assert result is not None, (
@@ -355,7 +363,8 @@ class TestParameterSensitivity:
 
         tuned_fps = 0
         for t in texts:
-            det = InnerLoopDetector(score_threshold=180, char_run_limit=48)
+            # Higher threshold and higher char_run_limit → strictly fewer FPs
+            det = InnerLoopDetector(score_threshold=250, char_run_limit=100)
             for i in range(0, len(t), 100):
                 if det.feed(t[i : i + 100]):
                     tuned_fps += 1

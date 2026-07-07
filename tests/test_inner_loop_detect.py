@@ -65,9 +65,15 @@ def make_detector(**kwargs):
 class TestCharacterRunDetection:
     """Feed a chunk with >24 identical characters → should detect loop."""
 
+    # Helper: unique filler to pass min_chars (500) without triggering anything.
+    _FILLER = " ".join(
+        f"Word{i} has properties that are interesting for analysis."
+        for i in range(1, 20)
+    ) + "."
+
     def test_single_char_run_detected(self):
         det = make_detector()
-        result = det.feed("a" * 30)
+        result = det.feed(self._FILLER + "a" * 30)
         assert result is not None, "Should detect a run of 30 identical chars"
         assert result["loop"] is True
         assert "character run" in result["reason"].lower()
@@ -75,7 +81,7 @@ class TestCharacterRunDetection:
     def test_run_at_exactly_limit_plus_one(self):
         """25 identical chars (limit=24 + 1) should trigger."""
         det = make_detector()
-        result = det.feed("x" * 25)
+        result = det.feed(self._FILLER + "x" * 25)
         assert result is not None
         assert result["loop"] is True
 
@@ -84,13 +90,13 @@ class TestCharacterRunDetection:
         det = make_detector()
         # char_run starts at 0; first char sets run=1. After 24 chars run==24.
         # Condition is `> self.char_run_limit` i.e. > 24, so 24 chars → no alert.
-        result = det.feed("y" * 24)
+        result = det.feed(self._FILLER + "y" * 24)
         assert result is None
 
     def test_alternating_chars_no_detection(self):
         """Alternating characters should never trigger a run."""
         det = make_detector()
-        result = det.feed("ab" * 50)
+        result = det.feed(self._FILLER + "ab" * 50)
         assert result is None
 
 
@@ -101,10 +107,16 @@ class TestCharacterRunDetection:
 class TestSentenceRepetition:
     """Feed the same sentence 7+ times → should detect loop."""
 
+    # Helper: unique filler to pass min_chars (500) without triggering anything.
+    _FILLER = " ".join(
+        f"Step{i} involves examining component alpha-{i} for correctness."
+        for i in range(1, 20)
+    ) + "."
+
     def test_repeated_sentence_detected(self):
         det = make_detector()
         sentence = "The quick brown fox jumps over the lazy dog."
-        text = sentence * 7  # 7 repetitions
+        text = self._FILLER + sentence * 7  # filler + 7 repetitions
         result = det.feed(text)
         assert result is not None, "Should detect repeated sentence"
         assert result["loop"] is True
@@ -259,16 +271,22 @@ class TestNoLoopOnNormalText:
 class TestResetMethod:
     """Feed some text, reset, feed the same text again → should not detect on second pass."""
 
+    # Helper: unique filler to pass min_chars (500) without triggering anything.
+    _FILLER = " ".join(
+        f"Step{i} involves examining component alpha-{i} for correctness."
+        for i in range(1, 20)
+    ) + "."
+
     def test_reset_clears_state(self):
         det = make_detector()
         sentence = "The quick brown fox jumps over the lazy dog."
-        # First pass: trigger detection
-        result1 = det.feed(sentence * 7)
+        # First pass: trigger detection (filler passes min_chars gate)
+        result1 = det.feed(self._FILLER + sentence * 7)
         assert result1 is not None, "First pass should detect loop"
-    
+
         # Reset and feed the same text again
         det.reset()
-        result2 = det.feed(sentence * 7)
+        result2 = det.feed(self._FILLER + sentence * 7)
         assert result2 is not None, "Second pass should also detect (fresh state)"
 
     def test_reset_clears_counters(self):
@@ -291,7 +309,7 @@ class TestResetMethod:
     def test_reset_allows_reuse(self):
         """After reset, the detector should work normally for new text."""
         det = make_detector()
-        det.feed("a" * 30)  # trigger loop
+        det.feed(self._FILLER + "a" * 30)  # filler + trigger loop
         det.reset()
         result = det.feed("Normal sentence. Another one. Yet another.")
         assert result is None
@@ -329,11 +347,20 @@ class TestMinCharsGate:
         result = det.feed(text)
         assert result is None
 
-    def test_char_run_always_active(self):
-        """Character run detection should work even below min_chars."""
+    def test_char_run_gated_by_min_chars(self):
+        """Character run detection should fire even below min_chars (always active)."""
         det = make_detector(min_chars=5000)
+        # Feed only 30 chars — char runs are always active, no min_chars gate
         result = det.feed("z" * 30)
         assert result is not None
+
+    def test_char_run_works_above_min_chars(self):
+        """Character run should trigger once min_chars is passed."""
+        det = make_detector(min_chars=5000)
+        # Feed enough unique text to pass the gate (filler > 5000 chars), then a char run
+        filler = " ".join(f"Word{i} has properties that are interesting for analysis." for i in range(1, 200)) + "."
+        result = det.feed(filler + "z" * 30)
+        assert result is not None, f"filler was {len(filler)} chars, total {len(filler)+30}"
 
 
 # ===================================================================
@@ -343,9 +370,15 @@ class TestMinCharsGate:
 class TestReturnFormat:
     """When loop detected, verify the dict has keys 'loop', 'reason', 'score'."""
 
+    # Helper: unique filler to pass min_chars (500).
+    _FILLER = " ".join(
+        f"Word{i} has properties that are interesting for analysis."
+        for i in range(1, 20)
+    ) + "."
+
     def test_return_has_required_keys(self):
         det = make_detector()
-        result = det.feed("a" * 30)
+        result = det.feed(self._FILLER + "a" * 30)
         assert isinstance(result, dict)
         assert "loop" in result
         assert "reason" in result
@@ -353,18 +386,18 @@ class TestReturnFormat:
 
     def test_loop_key_is_true(self):
         det = make_detector()
-        result = det.feed("a" * 70)
+        result = det.feed(self._FILLER + "a" * 70)
         assert result["loop"] is True
 
     def test_reason_is_string(self):
         det = make_detector()
-        result = det.feed("a" * 70)
+        result = det.feed(self._FILLER + "a" * 70)
         assert isinstance(result["reason"], str)
         assert len(result["reason"]) > 0
 
     def test_score_is_numeric(self):
         det = make_detector()
-        result = det.feed("a" * 70)
+        result = det.feed(self._FILLER + "a" * 70)
         assert isinstance(result["score"], (int, float))
         assert result["score"] >= det.threshold
 
@@ -382,6 +415,12 @@ class TestReturnFormat:
 class TestMultipleFeedCalls:
     """Feed in small chunks, verify state accumulates correctly across calls."""
 
+    # Helper: unique filler to pass min_chars (500).
+    _FILLER = " ".join(
+        f"Word{i} has properties that are interesting for analysis."
+        for i in range(1, 20)
+    ) + "."
+
     def test_state_accumulates_across_feeds(self):
         det = make_detector()
         sentence = "The quick brown fox jumps over the lazy dog."
@@ -394,6 +433,8 @@ class TestMultipleFeedCalls:
     def test_char_run_across_chunks(self):
         """A character run spanning multiple feed calls should be detected."""
         det = make_detector()
+        # Feed filler first to pass min_chars, then char runs across chunks
+        det.feed(self._FILLER)
         det.feed("a" * 35)
         result = det.feed("a" * 35)  # total run = 70
         assert result is not None, "Run across chunks should trigger detection"
@@ -401,6 +442,9 @@ class TestMultipleFeedCalls:
     def test_sentence_count_across_feeds(self):
         """Sentence repetition count should accumulate across feed calls."""
         det = make_detector()
+        # Feed filler first to pass min_chars gate
+        det.feed(self._FILLER)
+
         sentence = "Hello world."
         r1 = det.feed(sentence)   # count=1
         assert r1 is None, "First occurrence should not trigger"
@@ -514,7 +558,9 @@ class TestEdgeCases:
 
     def test_mixed_case_sentences(self):
         """Mixed case sentences should be normalized before comparison."""
+        filler = " ".join(f"Word{i} is interesting." for i in range(1, 20)) + "."
         det = make_detector(score_threshold=50)
+        det.feed(filler)
         # These should all normalize to the same sentence "hello world" (need 7 for threshold)
         text = "Hello world. HELLO WORLD. hello World. Hello world. hello world. HELLO WORLD. hello World."
         result = det.feed(text)
@@ -522,7 +568,9 @@ class TestEdgeCases:
 
     def test_punctuation_variations(self):
         """Different punctuation at end should still detect repetition."""
+        filler = " ".join(f"Word{i} is interesting." for i in range(1, 20)) + "."
         det = make_detector(score_threshold=50)
+        det.feed(filler)
         text = "Hello world. Hello world! Hello world? Hello world. hello world. HELLO WORLD. hello World."
         # After normalization these are all "hello world" (punctuation stripped by regex)
         result = det.feed(text)
@@ -556,17 +604,28 @@ class TestEdgeCases:
 class TestIntegrationScenarios:
     """Realistic integration tests combining multiple signals."""
 
+    # Helper: unique filler to pass min_chars (500).
+    _FILLER = " ".join(
+        f"Word{i} has properties that are interesting for analysis."
+        for i in range(1, 20)
+    ) + "."
+
     def test_compound_detection(self):
         """Multiple weak signals should compound to exceed threshold."""
-        det = make_detector(score_threshold=150)
-        # Feed text with slight repetition + low entropy words
+        det = make_detector(score_threshold=100, batch_interval=1)
+        # Feed filler first to pass min_chars gate
+        det.feed(self._FILLER)
+        # Feed text with slight repetition + low entropy words (repeated enough to trigger)
         phrase = "the the a is the a is the the a is. "
-        result = det.feed(phrase * 20)
-        assert result is not None, "Compound signals should trigger detection"
+        result = det.feed(phrase * 30)
+        assert result is not None, f"Compound signals should trigger detection; score={det.score}"
 
     def test_streaming_simulation(self):
         """Simulate streaming LLM output with gradual repetition."""
         det = make_detector(batch_interval=1, score_threshold=50)
+        # Feed filler first to pass min_chars gate
+        det.feed(self._FILLER)
+
         chunks = [
             "The story begins in a small village. ",
             "There lived a young farmer named John. ",
@@ -703,3 +762,65 @@ class TestScoreMechanics:
         # Verify it's rounded: no more than 1 decimal place
         formatted = f"{result['score']:.1f}"
         assert abs(float(formatted) - result["score"]) < 0.001
+
+
+# ===================================================================
+# Performance / latency test
+# ===================================================================
+
+class TestFeedPerformance:
+    """Measure feed() latency on large text to catch regressions from O(n) ops."""
+
+    def test_feed_latency_large_text(self):
+        """Feed ~20KB of text in 100-char chunks and verify total time < 500ms.
+
+        This catches performance regressions such as:
+        - Converting the entire deque to a list on every heavy check (O(n) per call).
+        - Cryptographic hashing (md5/sha1) instead of native tuple hashing.
+        """
+        import time
+
+        det = make_detector(batch_interval=1, min_chars=0)
+        # Build ~20KB of varied text (~400 sentences × 50 chars each)
+        chunks: list[str] = []
+        for i in range(400):
+            chunks.append(
+                f"In section {i} the analysis reveals that component "
+                f"alpha-{i % 20} interacts with module beta-{i // 10} "
+                f"in a non-trivial manner. "
+            )
+
+        start = time.perf_counter()
+        for chunk in chunks:
+            det.feed(chunk)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        assert elapsed_ms < 500, (
+            f"feed() took {elapsed_ms:.0f}ms over {len(chunks)} chunks "
+            f"(~{sum(len(c) for c in chunks):,} chars). "
+            f"This suggests O(n) operations in the hot path."
+        )
+
+    def test_feed_latency_default_params(self):
+        """Same latency check but with default detector params (batch_interval=6)."""
+        import time
+
+        det = InnerLoopDetector()  # defaults: batch_interval=6, min_chars=4000
+        # Feed enough to pass the min_chars gate (~5KB of text in small chunks)
+        chunk_size = 80
+        total_chars_needed = det.min_chars + 2000  # overshoot past the gate
+
+        start = time.perf_counter()
+        fed = 0
+        i = 0
+        while fed < total_chars_needed:
+            chunk = f"Word{i} has properties that are interesting for analysis. "
+            det.feed(chunk)
+            fed += len(chunk)
+            i += 1
+
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        assert elapsed_ms < 500, (
+            f"Default detector feed() took {elapsed_ms:.0f}ms over {i} chunks "
+            f"(~{fed:,} chars). Performance regression detected."
+        )
