@@ -121,10 +121,10 @@ class SystemInfo(BaseTool):
             # Fallback to agent_obj attributes if template not available
             if template and hasattr(template, 'function_map'):
                 all_tools = sorted(template.function_map.keys())
-                active_tools_schemas = template._get_active_functions() if hasattr(template, '_get_active_functions') else []
+                active_tools_schemas = template._get_active_functions(pool=self.agent_pool) if hasattr(template, '_get_active_functions') else []
             elif hasattr(agent_obj, 'function_map'):
                 all_tools = sorted(agent_obj.function_map.keys())
-                active_tools_schemas = agent_obj._get_active_functions() if hasattr(agent_obj, '_get_active_functions') else []
+                active_tools_schemas = agent_obj._get_active_functions(pool=self.agent_pool) if hasattr(agent_obj, '_get_active_functions') else []
             else:
                 all_tools = []
                 active_tools_schemas = []

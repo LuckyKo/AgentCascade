@@ -216,6 +216,12 @@ def setup_signal_handler(agent_pool, server=None):
                 logger.debug("[INIT] Telemetry session_end recorded")
             except Exception as e:
                 logger.warning("Failed to record telemetry session_end: %s", e)
+            finally:
+                # Issue #6: close the log file handle during shutdown
+                try:
+                    agent_pool.telemetry.close()
+                except Exception as e:
+                    logger.debug("[INIT] Telemetry close failed (non-critical): %s", e)
 
         if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
             try:
