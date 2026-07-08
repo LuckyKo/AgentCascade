@@ -2301,6 +2301,7 @@ class ExecutionEngine:
                             result_chars=len(tool_result),
                             truncated=False,
                             error=f"Tool {deny_reason}",
+                            is_call_agent=(tool_name == 'call_agent'),
                         )
                     except Exception:
                         pass
@@ -2397,6 +2398,7 @@ class ExecutionEngine:
                             result_chars=len(tool_result) if isinstance(tool_result, str) else 0,
                             truncated=_was_truncated,
                             error=_tool_error,
+                            is_call_agent=(tool_name == 'call_agent'),
                         )
                     except Exception:
                         pass
@@ -2529,6 +2531,7 @@ class ExecutionEngine:
                                 result_chars=len(fn_content),
                                 truncated=False,
                                 error=f"Tool {deny_reason}" if deny_reason else "Skipped (halt/stop)",
+                                is_call_agent=(tool_name == 'call_agent'),
                             )
                         except Exception:
                             pass

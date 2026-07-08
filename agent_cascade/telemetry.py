@@ -60,6 +60,7 @@ class TelemetryCollector:
             "total_llm_latency_ms": 0,
             "total_ttft_ms": 0,
             "total_tool_latency_ms": 0,
+            "call_agent_latency_ms": 0,
             "total_loops_detected": 0,
             "total_retries": 0,
             "total_compressions": 0,
@@ -298,6 +299,7 @@ class TelemetryCollector:
         result_chars: int = 0,
         truncated: bool = False,
         error: str = "",
+        is_call_agent: bool = False,
     ):
         """Mark the end of a tool execution."""
         key = f"{instance_name}:{tool_name}"
@@ -322,9 +324,12 @@ class TelemetryCollector:
 
         self._write_event(event)
 
-        # Update session stats
+        # Update session stats (call_agent excluded from avg tool latency)
         self._session_stats["total_tool_calls"] += 1
-        self._session_stats["total_tool_latency_ms"] += latency_ms
+        if is_call_agent:
+            self._session_stats["call_agent_latency_ms"] += latency_ms
+        else:
+            self._session_stats["total_tool_latency_ms"] += latency_ms
         self._session_stats["tool_calls_by_name"][tool_name] += 1
         if not success:
             self._session_stats["tool_failures_by_name"][tool_name] += 1
@@ -413,7 +418,10 @@ class TelemetryCollector:
 
         avg_tps = stats["total_output_tokens_est"] / total_streaming_time_sec if total_streaming_time_sec > 0 else 0
         avg_llm_latency = stats["total_llm_latency_ms"] / stats["total_llm_calls"] if stats["total_llm_calls"] > 0 else 0
-        avg_tool_latency = stats["total_tool_latency_ms"] / stats["total_tool_calls"] if stats["total_tool_calls"] > 0 else 0
+        # Exclude call_agent count from denominator to match numerator (call_agent latency routed separately)
+        call_agent_count = stats["tool_calls_by_name"].get("call_agent", 0)
+        non_agent_tool_calls = stats["total_tool_calls"] - call_agent_count
+        avg_tool_latency = stats["total_tool_latency_ms"] / non_agent_tool_calls if non_agent_tool_calls > 0 else 0
 
         # Tool success rates
         tool_success_rates = {}
@@ -437,6 +445,8 @@ class TelemetryCollector:
             "avg_tps": round(avg_tps, 1),
             "avg_llm_latency_ms": round(avg_llm_latency, 1),
             "avg_tool_latency_ms": round(avg_tool_latency, 1),
+            "call_agent_count": call_agent_count,
+            "call_agent_latency_ms": stats.get("call_agent_latency_ms", 0),
             "total_loops_detected": stats["total_loops_detected"],
             "total_retries": stats["total_retries"],
             "total_compressions": stats["total_compressions"],
