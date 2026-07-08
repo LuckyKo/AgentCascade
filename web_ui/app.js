@@ -3611,9 +3611,60 @@ chatInput.addEventListener('paste', (e) => {
 
 // ── Event listeners ──────────────────────────────────────────────────────────
 
+// ── Image Preview System ─────────────────────────────────────────────────────
+// Parse textarea content for ![name](data:image/...base64) patterns and show thumbnails.
+const imagePreviewContainer = document.getElementById('imagePreviewContainer');
+
+// Regex to match markdown image syntax with base64 data URIs
+const IMAGE_MARKDOWN_RE = /!\[([^\]]*)\]\((data:image\/[^;]+;base64,[a-zA-Z0-9+/=]+\))/g;
+
+// Debounce timer for image preview updates (avoids lag with large base64 strings)
+let previewUpdateTimer = null;
+
+/** Update the image preview thumbnails based on current textarea content. */
+function updateImagePreviews() {
+  if (!imagePreviewContainer) return;
+  const text = chatInput.value;
+  const matches = [...text.matchAll(IMAGE_MARKDOWN_RE)];
+
+  // Clear existing previews
+  imagePreviewContainer.innerHTML = '';
+
+  for (const match of matches) {
+    const [, name, dataUri] = match;
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'image-preview-thumbnail';
+    wrapper.title = name || 'Image attachment';
+
+    const img = document.createElement('img');
+    img.src = dataUri;
+    img.alt = name || 'preview';
+    img.loading = 'eager'; // Show immediately, these are already in memory
+
+    // Remove button — strips the corresponding markdown from textarea
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'image-preview-remove';
+    removeBtn.textContent = '×';
+    removeBtn.title = 'Remove image';
+    const imageMarkdown = match[0]; // Capture before closure
+    removeBtn.addEventListener('click', () => {
+      chatInput.value = chatInput.value.replace(imageMarkdown, '').replace(/\n{2,}/g, '\n').trim();
+      autoResize(chatInput);
+      updateImagePreviews();
+    });
+
+    wrapper.appendChild(img);
+    wrapper.appendChild(removeBtn);
+    imagePreviewContainer.appendChild(wrapper);
+  }
+}
+
 // Auto-resize on every input event. The autoResize function preserves cursor position internally.
 chatInput.addEventListener('input', () => {
   autoResize(chatInput);
+  clearTimeout(previewUpdateTimer);
+  previewUpdateTimer = setTimeout(updateImagePreviews, 200);
 });
 continueBtn.onclick = continueMessage;
 
@@ -3826,6 +3877,7 @@ function sendMessage(inputEl) {
   const text = formatMultimodalContent(rawText);
   targetInput.value = '';
   autoResize(targetInput);
+  imagePreviewContainer.innerHTML = ''; // Clear image previews after sending
 
   if (state.generating) {
     // Async injection: route to the active agent (session primary or selected sub-tab)
