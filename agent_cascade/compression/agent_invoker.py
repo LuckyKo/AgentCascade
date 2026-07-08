@@ -69,10 +69,25 @@ def _format_messages_for_summary(target_messages):
                     text = item.get('text', '') or ''
                     if text:
                         text_parts.append(str(text))
+                    # Include image captions instead of dropping images silently
+                    img = item.get('image')
+                    if img:
+                        caption = item.get('caption')
+                        if caption:
+                            text_parts.append(f'[Image: {caption}]')
+                        else:
+                            text_parts.append('[Image]')
                 else:
                     text = getattr(item, 'text', None)
                     if text:
                         text_parts.append(str(text))
+                    # Include image captions for ContentItem objects
+                    if getattr(item, 'image', None):
+                        caption = getattr(item, 'caption', None)
+                        if caption:
+                            text_parts.append(f'[Image: {caption}]')
+                        else:
+                            text_parts.append('[Image]')
             content = " ".join(text_parts)
 
         # Check for reasoning_content even if content is populated (handles str and list types)

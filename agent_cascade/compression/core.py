@@ -217,7 +217,7 @@ def compress_context(
                     wrapped = Message(**msg)
                 else:
                     wrapped = msg
-                content = extract_text_from_message(wrapped, add_upload_info=True)
+                content = extract_text_from_message(wrapped, add_upload_info=False)
                 tokens = qwen_count(content)
                 target_token_count += tokens
 
