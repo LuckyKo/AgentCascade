@@ -576,6 +576,20 @@ class WsMessageHandler:
         last_user_msg = None
         count_to_trim = 0
 
+        # 1. Rollback agent instances to the start of the last turn FIRST
+        # (before trimming, so snapshot lengths are honored exactly and no duplicate user messages)
+        if self.agent_pool and self.session.get('last_turn_snapshots'):
+            self.agent_pool.rollback_to_snapshots(self.session['last_turn_snapshots'], reason="User retry")
+
+            # Update instance state for sub-agents
+            for name in self.session['last_turn_snapshots']:
+                if name != self.session['session_name'] and name in self.agent_pool.instance_state:
+                    sa_inst = self.agent_pool.get_instance(name)
+                    if sa_inst is not None:
+                        with sa_inst._compression_lock:
+                            conv_snapshot = list(sa_inst.conversation)
+                        self.agent_pool.instance_state[name]['messages'] = conv_snapshot
+
         # Remove trailing assistant/function messages + the user message using unified rollback helper.
         # The helper handles cache clearing and logger sync internally, so we skip manual sync steps.
         if self.agent_pool:
@@ -613,18 +627,6 @@ class WsMessageHandler:
         if self.agent_pool:
             self.agent_pool.active_stack_clear()
             self.agent_pool.last_tool_args.clear()
-
-            # 1. Rollback agent instances to the start of the last turn
-            if self.session.get('last_turn_snapshots'):
-                self.agent_pool.rollback_to_snapshots(self.session['last_turn_snapshots'], reason="User retry")
-
-                for name in self.session['last_turn_snapshots']:
-                    if name != self.session['session_name'] and name in self.agent_pool.instance_state:
-                        sa_inst = self.agent_pool.get_instance(name)
-                        if sa_inst is not None:
-                            with sa_inst._compression_lock:
-                                conv_snapshot = list(sa_inst.conversation)
-                            self.agent_pool.instance_state[name]['messages'] = conv_snapshot
 
         # Re-append the user message to pool instance
         if last_user_msg and self.agent_pool:
