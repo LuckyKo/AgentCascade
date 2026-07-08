@@ -1887,15 +1887,20 @@ class ExecutionEngine:
 
     @staticmethod
     def _build_merged_cfg(llm, instance, endpoint_cfg: dict = None) -> dict:
-        """Merge config layers: template defaults → endpoint config → user override."""
+        """Merge config layers: template defaults → user override → endpoint sampler override.
+
+        When an endpoint has custom sampling enabled (use_custom_sampling=True), its
+        sampler parameters take final precedence over the global UI settings so that
+        per-endpoint sampling values are not silently overwritten.
+        """
         merged = {}
         if getattr(llm, 'generate_cfg', None):
             merged.update(llm.generate_cfg)              # Layer 1: template defaults
-        if endpoint_cfg:
-            merged.update(endpoint_cfg)                   # Layer 2: endpoint config (if provided)
         override = getattr(instance, '_generate_cfg_override', None)
         if override is not None:
-            merged.update(override)                       # Layer 3: user override
+            merged.update(override)                       # Layer 2: user override
+        if endpoint_cfg:
+            merged.update(endpoint_cfg)                   # Layer 3: endpoint config (sampler params win)
         return merged
 
     @staticmethod
@@ -1991,8 +1996,8 @@ class ExecutionEngine:
             def _do_call(llm_cfg: dict) -> Iterator[List[Message]]:
                 # Config merge priority (lowest → highest):
                 #   1. Template LLM generate_cfg     – base defaults
-                #   2. Endpoint config from fallback chain – correct max_input_tokens for the current endpoint
-                #   3. Per-instance override            – user-specified values via UI (highest priority)
+                #   2. Per-instance override           – user-specified values via UI
+                #   3. Endpoint config from fallback chain – sampler params (when use_custom_sampling=True) win
                 merged_cfg = self._build_merged_cfg(llm, instance, endpoint_cfg=llm_cfg)
                 merged_cfg['agent_name'] = template.name
                 

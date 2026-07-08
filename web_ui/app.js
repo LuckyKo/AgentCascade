@@ -4054,79 +4054,136 @@ function renderApiEndpoints() {
   });
 
   listEl.innerHTML = endpoints.map((ep, index) => {
-    const isFirst = index === 0;
-    const isLast = index === endpoints.length - 1;
-    const isOpen = openDetails.has(ep.id);
-    
-    return `
-      <div class="api-endpoint-card ${ep.enabled ? '' : 'disabled'}" data-id="${escapeHtml(ep.id)}">
-        <div class="api-endpoint-header">
-          <input type="checkbox" class="api-endpoint-toggle" ${ep.enabled ? 'checked' : ''} title="Enable/Disable">
-          <div class="api-endpoint-name" title="${escapeHtml(ep.name)}">${escapeHtml(ep.name)}</div>
-          <div class="api-endpoint-meta">${escapeHtml(ep.model || 'No model specified')}</div>
-          
-          <div class="api-endpoint-arrows">
-            <button class="api-endpoint-move-up" ${isFirst ? 'disabled style="opacity:0.2"' : ''} title="Move Up">▲</button>
-            <button class="api-endpoint-move-down" ${isLast ? 'disabled style="opacity:0.2"' : ''} title="Move Down">▼</button>
-          </div>
-          <button class="api-endpoint-expand ${isOpen ? 'open' : ''}">▸</button>
-        </div>
-        
-        <div class="api-endpoint-details ${isOpen ? 'open' : ''}" data-id="${escapeHtml(ep.id)}">
-          <label class="setting-field">
-            <span>Name</span>
-            <input type="text" class="ep-input-name" value="${escapeHtml(ep.name)}">
-          </label>
-          <label class="setting-field">
-            <span>API Endpoint</span>
-            <input type="text" class="ep-input-base" value="${escapeHtml(ep.api_base)}">
-          </label>
-          <label class="setting-field">
-            <span>API Key</span>
-            <div class="api-key-field">
-              <input type="password" class="ep-input-key" value="${escapeHtml(ep.api_key)}">
-              <button class="api-key-toggle" title="Show/Hide">👁</button>
-            </div>
-          </label>
-          <label class="setting-field">
-            <span>Model</span>
-            <input type="text" class="ep-input-model" value="${escapeHtml(ep.model)}">
-          </label>
-          <div style="display:flex;gap:8px;">
-            <label class="setting-field" style="flex:1;">
-              <span>Retries</span>
-              <input type="number" min="0" max="10" class="ep-input-retries" value="${ep.max_retries}">
-            </label>
-            <label class="setting-field" style="flex:1;">
-              <span>Concurrency</span>
-              <input type="number" min="0" max="100" class="ep-input-concurrency" value="${ep.concurrency_limit || 0}" title="0 = Unlimited. Set to 1 for local servers like LM Studio.">
-            </label>
-            <label class="setting-field" style="flex:1;">
-              <span>Token Limit</span>
-              <input type="number" min="0" step="1000" class="ep-input-tokens" value="${ep.max_input_tokens || 0}" title="0 = Use General Settings. Caps context for this endpoint.">
-            </label>
-          </div>
-          <div style="display:flex;gap:8px;margin-top:6px;">
-            <label class="setting-field" style="flex:1;">
-              <span>Backoff Base (s)</span>
-              <input type="number" min="0.1" max="60" step="0.5" class="ep-input-base-delay" value="${ep.base_retry_delay || 1.0}" title="Base delay for exponential backoff on retry">
-            </label>
-            <label class="setting-field" style="flex:1;">
-              <span>Backoff Max (s)</span>
-              <input type="number" min="1" max="60" step="1" class="ep-input-max-delay" value="${ep.max_retry_delay || 30.0}" title="Maximum cap on retry delay">
-            </label>
-            <label class="setting-field" style="flex:1;">
-              <span>Rate Limit (rpm)</span>
-              <input type="number" min="0" step="1" class="ep-input-rate-limit" value="${ep.rate_limit_rpm || 0}" title="Requests per minute. 0 = unlimited">
-            </label>
-          </div>
-          <button class="api-endpoint-delete">Delete Endpoint</button>
-        </div>
-      </div>
-    `;
-  }).join('');
+      const isFirst = index === 0;
+      const isLast = index === endpoints.length - 1;
+      const isOpen = openDetails.has(ep.id);
 
-  // ── Event Delegation (no per-card listeners to leak) ──────────────────────
+      // Defaults for new fields (backward compat: old endpoints may not have these)
+      const epVision = ep.vision_enabled !== false;       // default True
+      const epCustomSampling = !!ep.use_custom_sampling;  // default False
+
+      return `
+         <div class="api-endpoint-card ${ep.enabled ? '' : 'disabled'}" data-id="${escapeHtml(ep.id)}">
+           <div class="api-endpoint-header">
+             <input type="checkbox" class="api-endpoint-toggle" ${ep.enabled ? 'checked' : ''} title="Enable/Disable">
+             <div class="api-endpoint-name" title="${escapeHtml(ep.name)}">${escapeHtml(ep.name)}</div>
+             <div class="api-endpoint-meta">${escapeHtml(ep.model || 'No model specified')}</div>
+
+             <div class="api-endpoint-arrows">
+               <button class="api-endpoint-move-up" ${isFirst ? 'disabled style="opacity:0.2"' : ''} title="Move Up">▲</button>
+               <button class="api-endpoint-move-down" ${isLast ? 'disabled style="opacity:0.2"' : ''} title="Move Down">▼</button>
+             </div>
+
+             <!-- Per-endpoint feature toggles in header -->
+             <label class="ep-header-toggle-label" title="Vision enabled for this endpoint">
+               👁<input type="checkbox" class="ep-input-vision" ${epVision ? 'checked' : ''}>
+             </label>
+             <label class="ep-header-toggle-label" title="Use custom sampling params instead of global settings">
+               🎲<input type="checkbox" class="ep-input-custom-sampling" ${epCustomSampling ? 'checked' : ''}>
+             </label>
+
+             <button class="api-endpoint-expand ${isOpen ? 'open' : ''}">▸</button>
+           </div>
+
+           <div class="api-endpoint-details ${isOpen ? 'open' : ''}" data-id="${escapeHtml(ep.id)}">
+             <label class="setting-field">
+               <span>Name</span>
+               <input type="text" class="ep-input-name" value="${escapeHtml(ep.name)}">
+             </label>
+             <label class="setting-field">
+               <span>API Endpoint</span>
+               <input type="text" class="ep-input-base" value="${escapeHtml(ep.api_base)}">
+             </label>
+             <label class="setting-field">
+               <span>API Key</span>
+               <div class="api-key-field">
+                 <input type="password" class="ep-input-key" value="${escapeHtml(ep.api_key)}">
+                 <button class="api-key-toggle" title="Show/Hide">👁</button>
+               </div>
+             </label>
+             <label class="setting-field">
+               <span>Model</span>
+               <input type="text" class="ep-input-model" value="${escapeHtml(ep.model)}">
+             </label>
+             <div style="display:flex;gap:8px;">
+               <label class="setting-field" style="flex:1;">
+                 <span>Retries</span>
+                 <input type="number" min="0" max="10" class="ep-input-retries" value="${ep.max_retries}">
+               </label>
+               <label class="setting-field" style="flex:1;">
+                 <span>Concurrency</span>
+                 <input type="number" min="0" max="100" class="ep-input-concurrency" value="${ep.concurrency_limit || 0}" title="0 = Unlimited. Set to 1 for local servers like LM Studio.">
+               </label>
+               <label class="setting-field" style="flex:1;">
+                 <span>Token Limit</span>
+                 <input type="number" min="0" step="1000" class="ep-input-tokens" value="${ep.max_input_tokens || 0}" title="0 = Use General Settings. Caps context for this endpoint.">
+               </label>
+             </div>
+             <div style="display:flex;gap:8px;margin-top:6px;">
+               <label class="setting-field" style="flex:1;">
+                 <span>Backoff Base (s)</span>
+                 <input type="number" min="0.1" max="60" step="0.5" class="ep-input-base-delay" value="${ep.base_retry_delay || 1.0}" title="Base delay for exponential backoff on retry">
+               </label>
+               <label class="setting-field" style="flex:1;">
+                 <span>Backoff Max (s)</span>
+                 <input type="number" min="1" max="60" step="1" class="ep-input-max-delay" value="${ep.max_retry_delay || 30.0}" title="Maximum cap on retry delay">
+               </label>
+               <label class="setting-field" style="flex:1;">
+                 <span>Rate Limit (rpm)</span>
+                 <input type="number" min="0" step="1" class="ep-input-rate-limit" value="${ep.rate_limit_rpm || 0}" title="Requests per minute. 0 = unlimited">
+               </label>
+             </div>
+
+             <!-- Collapsible Sampling Parameters section (shown/hidden based on custom sampling toggle) -->
+             <div class="ep-sampling-section ${epCustomSampling ? '' : 'ep-sampling-hidden'}">
+               <div class="ep-sampling-header">Sampling Parameters</div>
+               <div style="display:flex;gap:8px;margin-top:4px;">
+                 <label class="setting-field" style="flex:1;">
+                   <span>Temperature <output>${ep.temperature || '—'}</output></span>
+                   <input type="range" min="0" max="2" step="0.05" class="ep-input-temperature" value="${ep.temperature || 0}">
+                 </label>
+                 <label class="setting-field" style="flex:1;">
+                   <span>Top-P <output>${ep.top_p || '—'}</output></span>
+                   <input type="range" min="0" max="1" step="0.01" class="ep-input-top-p" value="${ep.top_p || 0}">
+                 </label>
+               </div>
+               <div style="display:flex;gap:8px;margin-top:4px;">
+                 <label class="setting-field" style="flex:1;">
+                   <span>Top-K</span>
+                   <input type="number" min="0" max="200" step="1" class="ep-input-top-k" value="${ep.top_k || 0}" title="0 = use default">
+                 </label>
+                 <label class="setting-field" style="flex:1;">
+                   <span>Min-P</span>
+                   <input type="number" min="0" max="1" step="0.01" class="ep-input-min-p" value="${ep.min_p || 0}" title="0 = use default">
+                 </label>
+                 <label class="setting-field" style="flex:1;">
+                   <span>Repeat Penalty</span>
+                   <input type="number" min="1" max="2" step="0.01" class="ep-input-repeat-penalty" value="${ep.repeat_penalty || 0}" title="0 = use default">
+                 </label>
+               </div>
+               <div style="display:flex;gap:8px;margin-top:4px;">
+                 <label class="setting-field" style="flex:1;">
+                   <span>Presence Penalty</span>
+                   <input type="number" min="-2" max="2" step="0.1" class="ep-input-presence-penalty" value="${ep.presence_penalty || 0}" title="0 = use default">
+                 </label>
+                 <label class="setting-field" style="flex:1;">
+                   <span>Frequency Penalty</span>
+                   <input type="number" min="-2" max="2" step="0.1" class="ep-input-frequency-penalty" value="${ep.frequency_penalty || 0}" title="0 = use default">
+                 </label>
+                 <label class="setting-field" style="flex:1;">
+                   <span>Max Tokens</span>
+                   <input type="number" min="0" step="256" class="ep-input-max-tokens" value="${ep.max_tokens || 0}" title="0 = use default">
+                 </label>
+               </div>
+             </div>
+
+             <button class="api-endpoint-delete">Delete Endpoint</button>
+           </div>
+         </div>
+       `;
+    }).join('');
+
+    // ── Event Delegation (no per-card listeners to leak) ──────────────────────
   // Flag guard prevents accumulating listeners on listEl across render calls
   if (!apiEndpointsListenersAttached) {
     apiEndpointsListenersAttached = true;
@@ -4142,6 +4199,9 @@ function renderApiEndpoints() {
 
     // Keydown handler for input fields — Enter triggers save via blur (capture phase)
     listEl.addEventListener('keydown', handleApiEndpointKeydown, true);
+
+    // Live update of range slider output values (temperature, top-p display)
+    listEl.addEventListener('input', handleApiEndpointRangeInput);
   }
 }
 
@@ -4200,12 +4260,45 @@ function handleApiEndpointClick(e) {
 }
 
 function handleApiEndpointToggle(e) {
+  // Enable/disable endpoint toggle
   const toggle = e.target.closest('.api-endpoint-toggle');
-  if (!toggle) return;
-  const card = toggle.closest('.api-endpoint-card');
-  const endpoints = state.api_router?.endpoints || [];
-  const ep = endpoints.find(ep => ep.id === card.dataset.id);
-  if (ep) { ep.enabled = e.target.checked; sendApiRouterUpdate(); }
+  if (toggle) {
+    const card = toggle.closest('.api-endpoint-card');
+    const endpoints = state.api_router?.endpoints || [];
+    const ep = endpoints.find(ep => ep.id === card.dataset.id);
+    if (ep) { ep.enabled = e.target.checked; sendApiRouterUpdate(); }
+    return;
+  }
+
+  // Custom sampling toggle — show/hide the sampling section and save state
+  const customSamplingToggle = e.target.closest('.ep-input-custom-sampling');
+  if (customSamplingToggle) {
+    const card = customSamplingToggle.closest('.api-endpoint-card');
+    const endpoints = state.api_router?.endpoints || [];
+    const ep = endpoints.find(ep => ep.id === card.dataset.id);
+    if (ep) {
+      ep.use_custom_sampling = e.target.checked;
+      // Toggle visibility of the sampling parameters section
+      const section = card.querySelector('.ep-sampling-section');
+      if (section) {
+        section.classList.toggle('ep-sampling-hidden', !e.target.checked);
+      }
+      sendApiRouterUpdate();
+    }
+    return;
+  }
+
+  // Vision toggle — just save state immediately
+  const visionToggle = e.target.closest('.ep-input-vision');
+  if (visionToggle) {
+    const card = visionToggle.closest('.api-endpoint-card');
+    const endpoints = state.api_router?.endpoints || [];
+    const ep = endpoints.find(ep => ep.id === card.dataset.id);
+    if (ep) {
+      ep.vision_enabled = e.target.checked;
+      sendApiRouterUpdate();
+    }
+  }
 }
 
 function handleApiEndpointBlur(e) {
@@ -4223,20 +4316,58 @@ function handleApiEndpointBlur(e) {
   ep.max_retries = parseInt(card.querySelector('.ep-input-retries').value) || 0;
   ep.concurrency_limit = parseInt(card.querySelector('.ep-input-concurrency').value) || 0;
   ep.max_input_tokens = parseInt(card.querySelector('.ep-input-tokens').value) || 0;
-  // NEW: Read the new backoff and rate limit fields with NaN checks for robust defaults
+  // Read backoff and rate limit fields with NaN checks for robust defaults
   const baseDelayVal = parseFloat(card.querySelector('.ep-input-base-delay').value);
   ep.base_retry_delay = Number.isNaN(baseDelayVal) ? 1.0 : baseDelayVal;
   const maxDelayVal = parseFloat(card.querySelector('.ep-input-max-delay').value);
   ep.max_retry_delay = Number.isNaN(maxDelayVal) ? 30.0 : maxDelayVal;
   const rpmVal = parseInt(card.querySelector('.ep-input-rate-limit').value, 10);
   ep.rate_limit_rpm = Number.isNaN(rpmVal) ? 0 : rpmVal;
+
+  // Read vision and custom sampling toggles from header checkboxes
+  const visionCb = card.querySelector('.ep-input-vision');
+  if (visionCb) ep.vision_enabled = visionCb.checked;
+  const customSamplingCb = card.querySelector('.ep-input-custom-sampling');
+  if (customSamplingCb) ep.use_custom_sampling = customSamplingCb.checked;
+
+  // Read sampler parameters from the sampling section inputs (with NaN-safe defaults)
+  const tempVal = parseFloat(card.querySelector('.ep-input-temperature').value);
+  ep.temperature = Number.isNaN(tempVal) ? 0.0 : tempVal;
+  const topPVal = parseFloat(card.querySelector('.ep-input-top-p').value);
+  ep.top_p = Number.isNaN(topPVal) ? 0.0 : topPVal;
+  const topKVal = parseInt(card.querySelector('.ep-input-top-k').value, 10);
+  ep.top_k = Number.isNaN(topKVal) ? 0 : topKVal;
+  const minPVal = parseFloat(card.querySelector('.ep-input-min-p').value);
+  ep.min_p = Number.isNaN(minPVal) ? 0.0 : minPVal;
+  const repeatPenVal = parseFloat(card.querySelector('.ep-input-repeat-penalty').value);
+  ep.repeat_penalty = Number.isNaN(repeatPenVal) ? 0.0 : repeatPenVal;
+  const presPenVal = parseFloat(card.querySelector('.ep-input-presence-penalty').value);
+  ep.presence_penalty = Number.isNaN(presPenVal) ? 0.0 : presPenVal;
+  const freqPenVal = parseFloat(card.querySelector('.ep-input-frequency-penalty').value);
+  ep.frequency_penalty = Number.isNaN(freqPenVal) ? 0.0 : freqPenVal;
+  const maxTokVal = parseInt(card.querySelector('.ep-input-max-tokens').value, 10);
+  ep.max_tokens = Number.isNaN(maxTokVal) ? 0 : maxTokVal;
+
   sendApiRouterUpdate();
 }
 
 function handleApiEndpointKeydown(e) {
   if (e.key !== 'Enter') return;
-  const input = e.target.closest('input.ep-input-name, input.ep-input-base, input.ep-input-key, input.ep-input-model, input.ep-input-retries, input.ep-input-concurrency, input.ep-input-tokens, input.ep-input-base-delay, input.ep-input-max-delay, input.ep-input-rate-limit');
+  const input = e.target.closest('input.ep-input-name, input.ep-input-base, input.ep-input-key, input.ep-input-model, input.ep-input-retries, input.ep-input-concurrency, input.ep-input-tokens, input.ep-input-base-delay, input.ep-input-max-delay, input.ep-input-rate-limit, input.ep-input-top-k, input.ep-input-min-p, input.ep-input-repeat-penalty, input.ep-input-presence-penalty, input.ep-input-frequency-penalty, input.ep-input-max-tokens');
   if (input) input.blur();
+}
+
+// Live update range slider output values (temperature, top-p display next to label)
+function handleApiEndpointRangeInput(e) {
+  const slider = e.target.closest('input.ep-input-temperature, input.ep-input-top-p');
+  if (!slider) return;
+  // Find the <output> element in the same setting-field label
+  const outputEl = slider.parentElement.querySelector('output');
+  if (outputEl && parseFloat(slider.value) > 0) {
+    outputEl.textContent = slider.value;
+  } else if (outputEl) {
+    outputEl.textContent = '—';
+  }
 }
 
 function renderAgentApiAssignments() {

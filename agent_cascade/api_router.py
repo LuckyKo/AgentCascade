@@ -58,13 +58,30 @@ class APIEndpoint:
     max_retry_delay: float = 30.0      # Maximum cap on retry delay in seconds
     rate_limit_rpm: int = 0            # Rate limit in requests per minute (0 = unlimited)
 
+    # ── Sampler parameters (per-endpoint overrides) ──────────────────────
+    temperature: float = 0.0           # 0.0 = use global/default
+    top_p: float = 0.0                 # 0.0 = use global/default
+    top_k: int = 0                     # 0 = use global/default
+    min_p: float = 0.0                 # 0.0 = use global/default
+    repeat_penalty: float = 0.0        # 0.0 = use global/default
+    presence_penalty: float = 0.0      # 0.0 = use global/default
+    frequency_penalty: float = 0.0     # 0.0 = use global/default
+    max_tokens: int = 0                # 0 = use global/default
+
+    vision_enabled: bool = True        # Whether this endpoint supports vision
+    use_custom_sampling: bool = False  # Master toggle — if False, all sampler params above are ignored
+
     def __post_init__(self):
         if not self.id:
             self.id = str(uuid.uuid4())
 
     def to_llm_cfg(self) -> dict:
-        """Convert to the llm_cfg dict format used by agent_cascade."""
-        return {
+        """Convert to the llm_cfg dict format used by agent_cascade.
+
+        When use_custom_sampling is True, per-endpoint sampler parameters are included.
+        Only non-zero values override — zero/empty sentinel values mean "use global/default".
+        """
+        cfg = {
             'model': self.model,
             'model_server': self.api_base,
             'api_base': self.api_base,
@@ -73,6 +90,30 @@ class APIEndpoint:
             'max_input_tokens': self.max_input_tokens,
             'max_retries': self.max_retries,  # Pass endpoint-level retry count to LLM module
         }
+
+        if self.use_custom_sampling:
+            # Only include non-zero sampler params (zero = "use default")
+            if self.temperature > 0:
+                cfg['temperature'] = self.temperature
+            if self.top_p > 0:
+                cfg['top_p'] = self.top_p
+            if self.top_k > 0:
+                cfg['top_k'] = self.top_k
+            if self.min_p > 0:
+                cfg['min_p'] = self.min_p
+            if self.repeat_penalty > 0:
+                # Normalize repeat_penalty keys for compatibility with various backends
+                cfg['repeat_penalty'] = self.repeat_penalty
+                cfg['repetition_penalty'] = self.repeat_penalty
+                cfg['repeatPenalty'] = self.repeat_penalty
+            if self.presence_penalty != 0.0:
+                cfg['presence_penalty'] = self.presence_penalty
+            if self.frequency_penalty != 0.0:
+                cfg['frequency_penalty'] = self.frequency_penalty
+            if self.max_tokens > 0:
+                cfg['max_tokens'] = self.max_tokens
+
+        return cfg
 
     def to_dict(self) -> dict:
         return asdict(self)
