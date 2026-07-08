@@ -4301,6 +4301,17 @@ function handleApiEndpointToggle(e) {
   }
 }
 
+// Helper: safely read a numeric value from an input element within a card.
+// Returns defaultValue if the element is missing, parsing fails, or result is NaN/null/undefined.
+function _epVal(card, selector, parseFn, defaultValue) {
+  const el = card.querySelector(selector);
+  if (!el) return defaultValue;
+  try {
+    const v = parseFn(el.value);
+    return (Number.isNaN(v) || v === null || v === undefined) ? defaultValue : v;
+  } catch { return defaultValue; }
+}
+
 function handleApiEndpointBlur(e) {
   const card = e.target.closest('.api-endpoint-card');
   if (!card || !card.querySelector(':scope > .api-endpoint-header')) return;
@@ -4309,44 +4320,37 @@ function handleApiEndpointBlur(e) {
   const ep = endpoints.find(ep => ep.id === id);
   if (!ep) return;
 
-  ep.name = card.querySelector('.ep-input-name').value.trim();
-  ep.api_base = card.querySelector('.ep-input-base').value.trim();
-  ep.api_key = card.querySelector('.ep-input-key').value.trim() || 'EMPTY';
-  ep.model = card.querySelector('.ep-input-model').value.trim();
-  ep.max_retries = parseInt(card.querySelector('.ep-input-retries').value) || 0;
-  ep.concurrency_limit = parseInt(card.querySelector('.ep-input-concurrency').value) || 0;
-  ep.max_input_tokens = parseInt(card.querySelector('.ep-input-tokens').value) || 0;
-  // Read backoff and rate limit fields with NaN checks for robust defaults
-  const baseDelayVal = parseFloat(card.querySelector('.ep-input-base-delay').value);
-  ep.base_retry_delay = Number.isNaN(baseDelayVal) ? 1.0 : baseDelayVal;
-  const maxDelayVal = parseFloat(card.querySelector('.ep-input-max-delay').value);
-  ep.max_retry_delay = Number.isNaN(maxDelayVal) ? 30.0 : maxDelayVal;
-  const rpmVal = parseInt(card.querySelector('.ep-input-rate-limit').value, 10);
-  ep.rate_limit_rpm = Number.isNaN(rpmVal) ? 0 : rpmVal;
+  // String fields (trim, fallback to defaults where applicable)
+  ep.name = _epVal(card, '.ep-input-name', v => v.trim(), '');
+  ep.api_base = _epVal(card, '.ep-input-base', v => v.trim(), '');
+  ep.api_key = _epVal(card, '.ep-input-key', v => v.trim() || 'EMPTY', 'EMPTY');
+  ep.model = _epVal(card, '.ep-input-model', v => v.trim(), '');
 
-  // Read vision and custom sampling toggles from header checkboxes
+  // Integer fields (NaN-safe with zero defaults)
+  ep.max_retries = _epVal(card, '.ep-input-retries', parseInt, 0);
+  ep.concurrency_limit = _epVal(card, '.ep-input-concurrency', parseInt, 0);
+  ep.max_input_tokens = _epVal(card, '.ep-input-tokens', parseInt, 0);
+
+  // Float fields (NaN-safe with appropriate defaults)
+  ep.base_retry_delay = _epVal(card, '.ep-input-base-delay', parseFloat, 1.0);
+  ep.max_retry_delay = _epVal(card, '.ep-input-max-delay', parseFloat, 30.0);
+  ep.rate_limit_rpm = _epVal(card, '.ep-input-rate-limit', parseInt, 0);
+
+  // Checkbox toggles (optional elements)
   const visionCb = card.querySelector('.ep-input-vision');
   if (visionCb) ep.vision_enabled = visionCb.checked;
   const customSamplingCb = card.querySelector('.ep-input-custom-sampling');
   if (customSamplingCb) ep.use_custom_sampling = customSamplingCb.checked;
 
-  // Read sampler parameters from the sampling section inputs (with NaN-safe defaults)
-  const tempVal = parseFloat(card.querySelector('.ep-input-temperature').value);
-  ep.temperature = Number.isNaN(tempVal) ? 0.0 : tempVal;
-  const topPVal = parseFloat(card.querySelector('.ep-input-top-p').value);
-  ep.top_p = Number.isNaN(topPVal) ? 0.0 : topPVal;
-  const topKVal = parseInt(card.querySelector('.ep-input-top-k').value, 10);
-  ep.top_k = Number.isNaN(topKVal) ? 0 : topKVal;
-  const minPVal = parseFloat(card.querySelector('.ep-input-min-p').value);
-  ep.min_p = Number.isNaN(minPVal) ? 0.0 : minPVal;
-  const repeatPenVal = parseFloat(card.querySelector('.ep-input-repeat-penalty').value);
-  ep.repeat_penalty = Number.isNaN(repeatPenVal) ? 0.0 : repeatPenVal;
-  const presPenVal = parseFloat(card.querySelector('.ep-input-presence-penalty').value);
-  ep.presence_penalty = Number.isNaN(presPenVal) ? 0.0 : presPenVal;
-  const freqPenVal = parseFloat(card.querySelector('.ep-input-frequency-penalty').value);
-  ep.frequency_penalty = Number.isNaN(freqPenVal) ? 0.0 : freqPenVal;
-  const maxTokVal = parseInt(card.querySelector('.ep-input-max-tokens').value, 10);
-  ep.max_tokens = Number.isNaN(maxTokVal) ? 0 : maxTokVal;
+  // Sampler parameters (NaN-safe, zero means "use default")
+  ep.temperature = _epVal(card, '.ep-input-temperature', parseFloat, 0);
+  ep.top_p = _epVal(card, '.ep-input-top-p', parseFloat, 0);
+  ep.top_k = _epVal(card, '.ep-input-top-k', parseInt, 0);
+  ep.min_p = _epVal(card, '.ep-input-min-p', parseFloat, 0);
+  ep.repeat_penalty = _epVal(card, '.ep-input-repeat-penalty', parseFloat, 0);
+  ep.presence_penalty = _epVal(card, '.ep-input-presence-penalty', parseFloat, 0);
+  ep.frequency_penalty = _epVal(card, '.ep-input-frequency-penalty', parseFloat, 0);
+  ep.max_tokens = _epVal(card, '.ep-input-max-tokens', parseInt, 0);
 
   sendApiRouterUpdate();
 }

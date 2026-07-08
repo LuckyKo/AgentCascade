@@ -1519,11 +1519,10 @@ def _apply_ui_config(
         else:
             sanitized[k] = v
 
-    # Normalize penalty keys
+    # Normalize repeat_penalty key variants for backend compatibility
+    from agent_cascade.api_router import _normalize_repeat_penalty
     if 'repeat_penalty' in sanitized:
-        pen = sanitized['repeat_penalty']
-        sanitized['repetition_penalty'] = pen
-        sanitized['repeatPenalty'] = pen
+        _normalize_repeat_penalty(sanitized, 'repeat_penalty', sanitized['repeat_penalty'])
 
     # Normalize token key
     if 'maxTokens' in sanitized:

@@ -93,24 +93,23 @@ class APIEndpoint:
 
         if self.use_custom_sampling:
             # Only include non-zero sampler params (zero = "use default")
-            if self.temperature > 0:
+            # Using != 0 consistently so negative values are also captured where valid
+            if self.temperature != 0:
                 cfg['temperature'] = self.temperature
-            if self.top_p > 0:
+            if self.top_p != 0:
                 cfg['top_p'] = self.top_p
-            if self.top_k > 0:
+            if self.top_k != 0:
                 cfg['top_k'] = self.top_k
-            if self.min_p > 0:
+            if self.min_p != 0:
                 cfg['min_p'] = self.min_p
-            if self.repeat_penalty > 0:
-                # Normalize repeat_penalty keys for compatibility with various backends
-                cfg['repeat_penalty'] = self.repeat_penalty
-                cfg['repetition_penalty'] = self.repeat_penalty
-                cfg['repeatPenalty'] = self.repeat_penalty
-            if self.presence_penalty != 0.0:
+            rp = self.repeat_penalty
+            if rp != 0:
+                _normalize_repeat_penalty(cfg, 'repeat_penalty', rp)
+            if self.presence_penalty != 0:
                 cfg['presence_penalty'] = self.presence_penalty
-            if self.frequency_penalty != 0.0:
+            if self.frequency_penalty != 0:
                 cfg['frequency_penalty'] = self.frequency_penalty
-            if self.max_tokens > 0:
+            if self.max_tokens != 0:
                 cfg['max_tokens'] = self.max_tokens
 
         return cfg
@@ -126,6 +125,20 @@ class APIEndpoint:
         known = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known}
         return cls(**filtered)
+
+def _normalize_repeat_penalty(cfg: dict, key: str = 'repeat_penalty', val=None) -> None:
+    """Add repeat_penalty key variants for backend compatibility.
+
+    If *val* is provided it is used directly; otherwise the value is read from cfg[key].
+    All three common naming conventions are written via setdefault so existing entries
+    (e.g. already loaded from a config file) take precedence.
+    """
+    if val is None:
+        val = cfg.get(key)
+    if val is not None:
+        cfg.setdefault('repeat_penalty', val)
+        cfg.setdefault('repetition_penalty', val)
+        cfg.setdefault('repeatPenalty', val)
 
 
 # ── Endpoint Scheduler (Lifecycle-aware serialization) ───────────────────────
