@@ -4,7 +4,7 @@ import logging
 from typing import Union
 
 from agent_cascade.tools.base import BaseTool
-from agent_cascade.settings import DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS
+from agent_cascade.settings import DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS, DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT
 from agent_cascade.compression import rebuild_working_set
 
 logger = logging.getLogger(__name__)
@@ -29,8 +29,10 @@ class ForgetLast(BaseTool):
         "Retroactively truncate the output of the last N tool call responses in the "
         "active conversation history. Each truncated response is shortened to "
         f"{DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS} characters max, with a marker indicating "
-        "truncation. This frees up context space without losing the fact that the "
-        "tool was called. Affects both the in-memory pool and the log file."
+        f"truncation. Responses already ≤ {DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT} chars are skipped as they're short enough. "
+        "An optional justification parameter appends a reason to the truncation marker for context awareness. "
+        "This frees up context space without losing the fact that the tool was called. "
+        "Affects both the in-memory pool and the log file."
     )
     
     parameters = {
@@ -46,6 +48,13 @@ class ForgetLast(BaseTool):
                 'minimum': 1,
                 'maximum': 100,  # Guardrail against runaway truncation
                 'default': 1,
+            },
+            'justification': {
+                'type': 'string',
+                'description': (
+                    'Optional reason for truncation. Appended to the truncation marker '
+                    'for context awareness.'
+                ),
             },
         },
         'required': [],
@@ -81,7 +90,9 @@ class ForgetLast(BaseTool):
         
         # Defensive guard against n <= 0 (even though schema validates this)
         n = max(1, int(params.get('count', 1)))
+        justification = params.get('justification', '')
         max_chars = self.cfg.get('truncate_max_chars', DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS)
+        min_char_limit = self.cfg.get('min_char_limit', DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT)
         
         # Resolve agent_name using multi-source fallback (same pattern as CompressContext)
         agent_obj = kwargs.get('agent_obj')
@@ -113,7 +124,7 @@ class ForgetLast(BaseTool):
         indices_to_truncate.reverse()
         
         if not indices_to_truncate:
-            return f"No tool call responses found to forget_last. (Searched for {n})."
+            return f"No tool responses found (searched {n})."
         
         # Collect tool names before truncation (for the report)
         tool_names = []
@@ -136,15 +147,16 @@ class ForgetLast(BaseTool):
             
             original_len = len(original_content)
             
-            if original_len <= max_chars:
-                continue  # Already short enough
+            if original_len <= min_char_limit:
+                continue  # Already short enough, no point truncating small messages
             
-            # Truncate with marker — format: <first N chars> ... [TRUNCATED] Forget_last trimmed ~X characters.
+            # Build truncation marker (conditional justification for context awareness)
             chars_trimmed = original_len - max_chars
-            new_content = (
-                original_content[:max_chars]
-                + f" ... [TRUNCATED] Forget_last trimmed ~{chars_trimmed} characters."
-            )
+            if justification:
+                marker = f" ... [TRUNCATED] Forgotten because {justification}. Trimmed ~{chars_trimmed} chars."
+            else:
+                marker = f" ... [TRUNCATED] Forget_last trimmed ~{chars_trimmed} characters."
+            new_content = original_content[:max_chars] + marker
             
             # Update in-place in the history list
             self._set_content(msg, new_content)
@@ -153,10 +165,7 @@ class ForgetLast(BaseTool):
             total_chars_saved += (original_len - len(new_content))
         
         if truncated_count == 0:
-            return (
-                f"All {len(indices_to_truncate)} tool response(s) found are already short "
-                f"(< {max_chars} chars). Nothing to truncate."
-            )
+            return f"All {len(indices_to_truncate)} response(s) ≤ {min_char_limit} chars. Nothing to truncate."
         
         # Sync truncated messages back to the pool (get_conversation returns a shallow copy,
         # so in-place mutations on history[] already affect inst.conversation — just invalidate caches)
@@ -174,10 +183,7 @@ class ForgetLast(BaseTool):
                 logger_inst.update_history(history)
         
             except Exception as e:
-                return (
-                    f"Truncated {truncated_count} tool response(s), saving ~{total_chars_saved} chars, "
-                    f"but encountered an error updating the log: {e}"
-                )
+                return f"Truncated {truncated_count}/{n} [-{total_chars_saved} chars]. Log sync error: {e}"
         
         # Sync caller's working set (same pattern as CompressContext)
         if 'messages' in kwargs:
@@ -189,8 +195,4 @@ class ForgetLast(BaseTool):
         )
         
         # Build success message
-        return (
-            f"ForgetLast complete: Truncated {truncated_count} of {n} requested tool response(s). "
-            f"Tools affected: {', '.join(tool_names) if tool_names else 'none identified'}. "
-            f"Approximately {total_chars_saved} characters freed from context."
-        )
+        return f"Truncated {truncated_count}/{n} response(s) [-{total_chars_saved} chars]. Tools: {', '.join(tool_names) or '<none>'}"

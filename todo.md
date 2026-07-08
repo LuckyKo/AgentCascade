@@ -46,23 +46,14 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 # BUGS:
 
 - [ ] Activity banner still doesn't change when tools are written
-- [ ] add optional justification argument to forget_last tool that will append to the truncated messages like "... [TRUNCATED] Forgotten because {reason}". also the the tool response could be compacted a bit to save some tokens.
+- [x] add optional justification argument to forget_last tool that will append to the truncated messages like "... [TRUNCATED] Forgotten because {reason}". also the the tool response could be compacted a bit to save some tokens. — FIXED: added `justification` param (optional string) that changes the truncation marker to "Forgotten because {reason}. Trimmed ~X chars." when provided; backward-compatible with existing behavior. All 4 return messages compacted for token savings.
 - [ ] retry is broken, it duplicates the user message
 - [ ] max tokens does not change when a new API endpoint is acquired 
-- [ ] edit_file: remove the two redundant file paths in response (they are always the same):
-```
---- a/N:\work\WD\AgentCascade_unified\agent_cascade\inner_loop_detect.py
-+++ b/N:\work\WD\AgentCascade_unified\agent_cascade\inner_loop_detect.py
-@@ -186,7 +186,7 @@
-```
-- [ ] make sampling options toggleable per entry; add custom sampling per API endpoint; move vision enabled per API endpoint.
+- [x] forget last should have a min char limit setting in setting.py (wont truncate messages under that char limit) — FIXED: added DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT setting (default 200 chars), forget_last skips truncation for responses ≤ this threshold
+- [ ] make sampling options toggleable per entry; add custom sampling toggle per API endpoint; move vision enabled per API endpoint.
 - [x] we have about 10-15% discrepancy (less) between the nr of tokens we measure and the actual count that LMStudio processes — FIXED: reasoning_content now always counted, all magic numbers centralized in settings.py 
-- [x] child agent kicked back — FIXED: (1) LLM-level retry default 0→2, (2) non-OpenAI errors now wrapped as ModelServiceError, (3) 'terminated'/'fetch failed' added to retryable patterns, (4) endpoint max_retries now flows through to_llm_cfg into base LLM class
-- [x] stop breaks something because i cant resume activity after, probably leaves allocate API slots stuck - it should clear up ALL the API slots. after 1000 fixed this still happens!
 - [ ] images don't get properly pasted in chat
-- [x] Pause function interferes with streaming and halts the system in an odd state, it should only affect tool response startup.
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent once it reached conclusion
-- [x] investigate if we can make shell cmd accept special character and multi-line `python -c` commands
 
 # Errors to investigate:
 
