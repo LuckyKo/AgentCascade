@@ -641,8 +641,13 @@ class WsMessageHandler:
         os.execl(sys.executable, sys.executable, *sys.argv)
 
     async def handle_update_config(self, data: dict) -> None:
-        """Handle 'update_config' — delegate to ConfigUpdateRouter for key dispatch."""
+        """Handle 'update_config' — delegate to ConfigUpdateRouter for key dispatch.
+
+        Also updates the live disabled_tools cache in agent_pool and applies UI config
+        to all active instances immediately so tool assignment changes take effect in real time.
+        """
         from agent_cascade.config_handlers import ConfigUpdateRouter
+        from agent_cascade.api_integration import _apply_ui_config
 
         if 'generate_cfg' in data:
             self.session['generate_cfg'] = data['generate_cfg']
@@ -650,6 +655,14 @@ class WsMessageHandler:
 
             router = ConfigUpdateRouter(self.agent_pool, self.agents)
             await router.apply(ui_cfg)
+
+            # Update live disabled_tools config in agent_pool for real-time resolution
+            if 'disabled_tools' in ui_cfg and self.agent_pool:
+                self.agent_pool.set_ui_disabled_tools(ui_cfg['disabled_tools'])
+                # Apply UI config to all active instances so changes take effect immediately.
+                # Snapshot keys first to avoid RuntimeError from dict changing during iteration.
+                for instance_name in list(self.agent_pool.instances.keys()):
+                    _apply_ui_config(self.agent_pool, instance_name, ui_cfg)
 
         await self._broadcast()
 

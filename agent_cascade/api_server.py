@@ -876,8 +876,8 @@ def create_app(agents, agent_pool, config=None):
                 'name': getattr(a, 'name', f'Agent-{i}'),
                 'index': i,
                 'description': getattr(a, 'description', ''),
-                # Use _get_active_functions() to respect disabled_tools configuration
-                'tools': [f['name'] for f in a._get_active_functions()] if hasattr(a, '_get_active_functions') else [],
+                # Use _get_active_functions() to respect disabled_tools configuration (including live pool config)
+                'tools': [f['name'] for f in a._get_active_functions(pool=agent_pool)] if hasattr(a, '_get_active_functions') else [],
             }
             for i, a in enumerate(agents)
         ]

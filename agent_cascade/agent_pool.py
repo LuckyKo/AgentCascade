@@ -312,6 +312,12 @@ class AgentPool:
         # Used by ExecutionEngine._setup_turn() to detect if system prompt needs rebuild.
         self._config_version = 0
 
+        # ── Live UI disabled_tools cache (real-time tool assignment) ─────────
+        # Stores the current per-agent disabled_tools dict from the UI settings panel.
+        # All agent instances read from this during each turn for real-time updates.
+        self._ui_disabled_tools: Dict[str, Any] = {}
+        self._ui_disabled_tools_lock = threading.RLock()
+
         # Dismissal callbacks (used by api_server to broadcast real-time tab removal)
         self._on_dismissed_callbacks: list = []
 
@@ -347,6 +353,67 @@ class AgentPool:
         if template is None:
             template = self.templates.get(name.title())
         return template
+
+    # ── Live UI disabled_tools management (real-time tool assignment) ────────
+
+    def set_ui_disabled_tools(self, disabled_tools_dict: dict | None = None) -> None:
+        """Update the live UI disabled_tools config from the settings panel.
+
+        Thread-safe write that replaces the entire cache atomically.
+        Called by ws_handlers.handle_update_config() when user changes tool assignments.
+
+        Args:
+            disabled_tools_dict: Per-agent disabled tools dict from UI (or empty dict to clear).
+        """
+        if disabled_tools_dict is None:
+            disabled_tools_dict = {}
+        elif not isinstance(disabled_tools_dict, dict):
+            from agent_cascade.log import logger
+            logger.warning(
+                f"[tool_assignment] set_ui_disabled_tools called with non-dict type "
+                f"{type(disabled_tools_dict).__name__}, ignoring"
+            )
+            return
+        with self._ui_disabled_tools_lock:
+            self._ui_disabled_tools = dict(disabled_tools_dict)
+
+    def get_ui_disabled_tools_for_agent(self, agent_name: str, agent_type: str = '') -> set:
+        """Get current disabled tools for a specific agent class from live UI config.
+
+        Thread-safe read that returns a snapshot of the disabled set for this agent.
+        Used by execution_engine during each turn to apply real-time tool assignments.
+
+        Reuses the centralized resolver from utils.disabled_tools for the lookup
+        chain (name → slugified → agent_type → lowercase type) to avoid duplication.
+
+        Args:
+            agent_name: Display/template name of the agent class.
+            agent_type: Agent type string for defense-in-depth lookups.
+
+        Returns:
+            Set of tool names that should be disabled for this agent.
+        """
+        from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
+
+        # Shallow copy inside lock to guard against concurrent mutation
+        with self._ui_disabled_tools_lock:
+            dt = dict(self._ui_disabled_tools)
+
+        if not dt:
+            return set()
+
+        # Use the centralized resolver to extract per-agent tools from our live cache.
+        # We pass it as instance_override (highest priority layer) with no template_cfg,
+        # so it only reads from the live cache and applies the standard lookup chain.
+        # Note: The resolver includes defense-in-depth defaults here as well. This is
+        # intentional because set union is idempotent and provides extra safety — any
+        # tool disabled by either source remains disabled.
+        return resolve_disabled_tools_for_agent(
+            instance_override={'disabled_tools': dt},
+            template_cfg=None,
+            agent_name=agent_name,
+            agent_type=agent_type,
+        )
 
     def start(self):
         """Start background services (idle checker, etc.). Call after pool initialization."""

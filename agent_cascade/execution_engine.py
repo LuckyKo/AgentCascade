@@ -66,7 +66,7 @@ class SleepAction(Enum):
     BREAK_LOOP = auto()     # Transitioned to COMPLETING/TERMINATED, exit while loop
 
 
-def _get_active_functions_from_template(template, instance=None) -> list:
+def _get_active_functions_from_template(template, instance=None, pool=None) -> list:
     """
     Build the list of active function schemas from a template's function_map,
     filtering out any tools disabled via the template's LLM generate_cfg.
@@ -74,10 +74,15 @@ def _get_active_functions_from_template(template, instance=None) -> list:
     Uses the centralized disabled_tools resolver for all resolution logic.
     Defense-in-depth (Security/Compressor defaults) is built into the resolver.
 
+    Also reads from agent_pool._ui_disabled_tools for real-time tool assignment
+    updates from the UI settings panel when pool is provided.
+
     Args:
         template: The agent template with function_map and llm.generate_cfg.
         instance: Optional AgentInstance — if provided, its _generate_cfg_override
                   takes precedence over the template config for disabled_tools.
+        pool: Optional AgentPool — if provided, live UI disabled_tools are read
+              from it for real-time tool assignment updates (highest priority).
 
     Returns:
         List of active function schema dicts (tool definitions for the LLM).
@@ -118,16 +123,16 @@ def _get_active_functions_from_template(template, instance=None) -> list:
         agent_type=agent_type,
     )
 
+    # Check live pool config for real-time tool updates.
+    if pool is not None and hasattr(pool, 'get_ui_disabled_tools_for_agent'):
+        live_disabled = pool.get_ui_disabled_tools_for_agent(agent_name, agent_type)
+        disabled |= live_disabled
+
     # Defensive: template.function_map may be None for templates without tools
     func_map = getattr(template, 'function_map', None)
     if not func_map:
         logger.info(f"[{inst_name}] _get_active_functions_from_template: No function_map, returning empty list")
         return []
-
-    # Build the active functions list and log what's being filtered out
-    all_tool_names = set(func_map.keys())
-    filtered_out = all_tool_names & disabled
-    active_tool_names = all_tool_names - disabled
 
     return [func.function for name, func in func_map.items() if name not in disabled]
 
@@ -244,15 +249,11 @@ def _build_resources_block(pool, template, instance=None) -> str:
 
     res = "\n\n--- CURRENT AVAILABLE RESOURCES (Auto-Injected) ---\n"
 
-    # Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
-    from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
-
-    disabled_tools = resolve_disabled_tools_for_agent(
-        instance_override=getattr(instance, '_generate_cfg_override', None),
-        template_cfg=getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {},
-        agent_name=getattr(template, 'name', ''),
-        agent_type=getattr(template, 'agent_type', ''),
-    )
+    # Get active functions — single source of truth for disabled_tools resolution.
+    # _get_active_functions_from_template reads instance override, template config,
+    # AND live pool config for real-time tool assignment updates.
+    active_functions = _get_active_functions_from_template(template, instance, pool=pool)
+    disabled_tools = set(template.function_map.keys()) - {f['name'] for f in active_functions}
 
     can_call_agents = 'call_agent' in template.function_map and 'call_agent' not in disabled_tools
 
@@ -272,7 +273,6 @@ def _build_resources_block(pool, template, instance=None) -> str:
 
     # List enabled tools (excluding disabled ones)
     # Descriptions are omitted — LLM already knows them via native function schemas
-    active_functions = _get_active_functions_from_template(template, instance)
     enabled_tools = sorted(f['name'] for f in active_functions)
     if enabled_tools:
         res += "\nEnabled Tools (can change per interaction): " + ", ".join(enabled_tools) + "\n"
@@ -1922,7 +1922,7 @@ class ExecutionEngine:
             return
 
         # Get active functions (tool schemas) from template
-        active_functions = _get_active_functions_from_template(template, instance)
+        active_functions = _get_active_functions_from_template(template, instance, pool=self.pool)
 
         # Delegate to extracted method - Phase 3.6
         yield from self._execute_llm_call_with_retry(instance, llm_messages, template, active_functions)

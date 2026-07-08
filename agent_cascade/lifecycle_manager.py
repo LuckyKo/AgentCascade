@@ -574,6 +574,12 @@ class AgentLifecycleManager:
                 # Also merge child-specific disabled tools extracted from caller's per-agent dict.
                 # This ensures entries like {'Compressor': [...]} are properly applied to the child.
                 merged = merge_disabled_tools(merged, child_disabled_from_caller_cfg)
+
+                # Check live pool config for real-time tool updates.
+                if self.pool and hasattr(self.pool, 'get_ui_disabled_tools_for_agent'):
+                    live_disabled = self.pool.get_ui_disabled_tools_for_agent(target_name, target_type)
+                    merged = merge_disabled_tools(merged, live_disabled)
+
                 cfg['disabled_tools'] = list(merged)  # store as list for JSON serialization
                 instance._generate_cfg_override = cfg
 

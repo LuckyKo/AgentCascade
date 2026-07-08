@@ -186,10 +186,13 @@ class Agent(ABC):
                                  new_generate_cfg=extra_generate_cfg,
                              ))
 
-    def _get_active_functions(self) -> list:
+    def _get_active_functions(self, pool=None) -> list:
         """Return function schemas for tools not disabled by the current config.
 
         Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
+
+        Also reads from agent_pool._ui_disabled_tools for real-time tool assignment
+        updates when pool is provided.
         """
         from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
 
@@ -197,8 +200,16 @@ class Agent(ABC):
             instance_override=None,  # This method is for template-level queries
             template_cfg=(getattr(self.llm, 'generate_cfg', None) or {}),
             agent_name=self.name,
-            agent_type=getattr(self, 'agent_type', ''),
+            agent_type=getattr(self, 'agent_type', '') or '',
         )
+
+        # Check live pool config for real-time tool updates.
+        if pool is not None and hasattr(pool, 'get_ui_disabled_tools_for_agent'):
+            live_disabled = pool.get_ui_disabled_tools_for_agent(
+                self.name, getattr(self, 'agent_type', '') or ''
+            )
+            disabled |= live_disabled
+
         return [func.function for name, func in self.function_map.items() if name not in disabled]
 
     def _get_disabled_tool_names(self) -> set:
