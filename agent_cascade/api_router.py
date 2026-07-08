@@ -1000,8 +1000,6 @@ class APIRouter:
 
             for attempt in range(max_retries + 1):
                 try:
-                    kwargs['llm_cfg'] = llm_cfg
-                    
                     # Try to get the agent instance name from kwargs if available
                     agent_obj = kwargs.get('agent_obj')
                     current_agent_name = (
