@@ -4127,16 +4127,14 @@ function renderApiEndpoints() {
              </div>
              
              <!-- Per-endpoint feature toggles -->
-             <div style="display:flex;gap:12px;margin-top:8px;">
-             <label class="setting-field toggle-field" style="margin:0;padding:4px 0;font-size:12px;cursor:pointer;">
-             <span>👁 Vision Enabled</span>
-             <input type="checkbox" class="ep-input-vision" ${epVision ? 'checked' : ''}>
+             <label class="setting-field toggle-field" style="margin:8px 0 0 0;font-size:12px;cursor:pointer;">
+               <span>👁 Vision Enabled</span>
+               <input type="checkbox" class="ep-input-vision" ${epVision ? 'checked' : ''}>
              </label>
-             <label class="setting-field toggle-field" style="margin:0;padding:4px 0;font-size:12px;cursor:pointer;" title="When enabled, per-endpoint sampler params override global settings">
-             <span>🎲 Custom Sampling</span>
-             <input type="checkbox" class="ep-input-custom-sampling" ${epCustomSampling ? 'checked' : ''}>
+             <label class="setting-field toggle-field" style="margin:4px 0 0 0;font-size:12px;cursor:pointer;" title="When enabled, per-endpoint sampler params override global settings">
+               <span>🎲 Custom Sampling</span>
+               <input type="checkbox" class="ep-input-custom-sampling" ${epCustomSampling ? 'checked' : ''}>
              </label>
-             </div>
              
              <!-- Collapsible Sampling Parameters section (shown/hidden based on custom sampling toggle) -->
              <div class="ep-sampling-section ${epCustomSampling ? '' : 'ep-sampling-hidden'}">
