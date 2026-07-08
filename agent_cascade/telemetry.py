@@ -89,6 +89,7 @@ class TelemetryCollector:
         generate_cfg: Optional[Dict] = None,
         system_prompt: str = "",
         tools: Optional[List[str]] = None,
+        api_base: str = "",
     ) -> str:
         """
         Create a stable hash fingerprint from the current agent configuration.
@@ -105,8 +106,10 @@ class TelemetryCollector:
         ]
         params = {k: cfg.get(k) for k in relevant_keys if cfg.get(k) is not None}
 
+        # Group by API endpoint (api_base) rather than specific model,
+        # so that all models from the same provider/endpoint share a fingerprint.
         fingerprint_data = {
-            "model": model,
+            "api_base": api_base or model,  # fallback to model if api_base empty
             "params": params,
             "system_prompt_hash": hashlib.md5(system_prompt[:SYSTEM_PROMPT_HASH_MAX_CHARS].encode()).hexdigest()[:8],
             "tools": sorted(tools or []),
@@ -120,11 +123,13 @@ class TelemetryCollector:
         model: str = "",
         generate_cfg: Optional[Dict] = None,
         tools: Optional[List[str]] = None,
+        api_base: str = "",
     ) -> Dict:
         """Return a human-readable config description for display."""
         cfg = generate_cfg or {}
         return {
             "model": model,
+            "api_base": api_base,
             "temperature": cfg.get("temperature"),
             "top_p": cfg.get("top_p"),
             "top_k": cfg.get("top_k"),

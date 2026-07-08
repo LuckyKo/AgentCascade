@@ -704,6 +704,8 @@ class ExecutionEngine:
                     template = self.pool.get_template(instance.agent_class)
                     model = getattr(getattr(template, 'llm', None), 'model', '') or ''
                     cfg = getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {}
+                    llm_cfg = getattr(getattr(template, 'llm', None), 'cfg', None) or {}
+                    api_base = llm_cfg.get('api_base', '') or llm_cfg.get('model_server', '') or ''
                     sys_prompt = ""
                     if template:
                         try:
@@ -720,8 +722,9 @@ class ExecutionEngine:
                         tools_list = sorted(template.function_map.keys())
                     fp = tel.fingerprint_config(
                         model=model, generate_cfg=cfg, system_prompt=sys_prompt, tools=tools_list,
+                        api_base=api_base,
                     )
-                    desc = tel.describe_config(model=model, generate_cfg=cfg, tools=tools_list)
+                    desc = tel.describe_config(model=model, generate_cfg=cfg, tools=tools_list, api_base=api_base)
                     tel.record_turn_start(instance.instance_name,
                                          config_fingerprint=fp, config_description=desc)
                 except Exception:
