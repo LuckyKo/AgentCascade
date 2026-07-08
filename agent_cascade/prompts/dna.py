@@ -440,14 +440,12 @@ TOOL_METADATA = {
         'description': (
             'Retroactively truncate the output of the last N tool call responses in the active conversation history. '
             'Each truncated response is shortened to ~100 characters max, with a marker indicating truncation. '
-            'Responses already ≤ 200 chars are skipped as they\'re short enough. '
-            'An optional justification parameter appends a reason to the truncation marker for context awareness. '
-            'This frees up context space without losing the fact that the tool was called. '
+            'This frees up context space if the tool data is not useful. '
             'Affects both the in-memory pool and the log file.'
         ),
         'parameters': {
             'count': 'Number of recent tool call responses to truncate. Counts backwards from the most recent function result, skipping non-function messages. Default is 1.',
-            'justification': 'Optional reason for truncation. Appended to the truncation marker for context awareness.',
+            'justification': 'Optional reason for truncation. Appended to the truncation marker for context awareness. Keep it very short (e.g. "useless data").',
         }
     },
     'syntax_check': {

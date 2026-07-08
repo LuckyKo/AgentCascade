@@ -128,6 +128,7 @@ tool_usage_notes:
   forget_last: |
     Use `forget_last` when a tool (like read_file) produces very large outputs that consume too much context.
     This retroactively truncates the stored content to ~100 characters while keeping the fact that the tool was called.
+    Messages already ≤200 chars are skipped — no point truncating small responses.
     Example: {"name": "forget_last", "arguments": {"count": 1}} truncates the last tool response.
 
 remember:

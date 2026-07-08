@@ -274,6 +274,7 @@ class FileOpsMixin:
         self, path: str, resolved: Path, include_fn, exclude_fn, sort_by: str, max_depth: int, max_entries: int
     ) -> Tuple[str, int, int, int]:
         """Recursive directory listing via os.walk. Returns (output_str, dirs, files, size)."""
+        import os
         entries_by_dir: dict = OrderedDict()
         visited_dirs: set = set()
         entry_count = 0
