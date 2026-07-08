@@ -89,6 +89,7 @@ class APIEndpoint:
             'model_type': self.model_type,
             'max_input_tokens': self.max_input_tokens,
             'max_retries': self.max_retries,  # Pass endpoint-level retry count to LLM module
+            'vision_enabled': self.vision_enabled,  # Vision capability flag for routing decisions
         }
 
         if self.use_custom_sampling:
@@ -794,17 +795,22 @@ class APIRouter:
         # This ensures consistent behavior across restarts regardless of source ordering
         return CANONICAL_AGENT_TYPES.get(agent_type_lower, agent_type)
 
-    def get_endpoint_chain(self, agent_type: str, allocated_tokens: Optional[int] = None) -> List[dict]:
+    def get_endpoint_chain(self, agent_type: str, allocated_tokens: Optional[int] = None, requires_vision: bool = False) -> List[dict]:
         """
         Returns an ordered list of LLM configs to try for the given agent type:
           1. Agent-specific endpoints (priority order, enabled only) — Tier 1
           2. Last successful endpoint (if available and validated) — Tier 2
           3. General Settings default (always last) — Tier 3
         
+        Priority order is preserved as configured by the user. When requires_vision=True,
+        images are captioned beforehand so any endpoint in the chain can handle them
+        without reordering. This ensures the admin's preferred endpoint always gets tried first.
+        
         Args:
             agent_type: The type of agent requesting endpoints
             allocated_tokens: Optional - the agent's allocated context size in tokens.
                             When provided, used to filter/weight endpoint selection for sufficient capacity.
+            requires_vision: If True, signals that images are present (captioning is handled upstream).
         """
         # Read general_limit inside lock scope for thread safety (same pattern as get_effective_max_tokens)
         general_limit = 0
@@ -878,7 +884,7 @@ class APIRouter:
             effective_limit = default_cfg.get('max_input_tokens', 0)
             if effective_limit > 0 and effective_limit < allocated_tokens:
                 default_cfg['max_input_tokens'] = allocated_tokens
-        
+
         return configs
 
     # ── Retry + Fallback Execution ───────────────────────────────────────
@@ -889,6 +895,7 @@ class APIRouter:
         call_fn: Callable,
         *args,
         allocated_tokens: Optional[int] = None,
+        requires_vision: bool = False,
         **kwargs
     ) -> Any:
         """
@@ -902,9 +909,10 @@ class APIRouter:
             call_fn: The function to execute with the selected endpoint config
             allocated_tokens: Optional - the agent's allocated context size in tokens.
                            When provided, used for endpoint selection to ensure sufficient capacity.
+            requires_vision: If True, signals that images are present (captioning handled upstream).
             *args, **kwargs: Additional arguments passed to call_fn
         """
-        chain = self.get_endpoint_chain(agent_type, allocated_tokens=allocated_tokens)
+        chain = self.get_endpoint_chain(agent_type, allocated_tokens=allocated_tokens, requires_vision=requires_vision)
         all_errors = []
 
         for cfg_idx, llm_cfg in enumerate(chain):
@@ -1066,6 +1074,159 @@ class APIRouter:
             f"All API endpoints exhausted for agent type '{agent_type}'.\n"
             + "\n".join(all_errors)
         )
+
+    # ── Image Captioning ─────────────────────────────────────────────────
+    # When images lack captions and the target endpoint is text-only, generate
+    # a caption using any available vision-capable endpoint.
+
+    CAPTION_PROMPT = (
+        "Describe this image in one concise sentence suitable for use as an alt-text description. "
+        "Focus on key visual elements: objects, people, colors, layout, and any text visible."
+    )
+
+    @staticmethod
+    def _has_uncaptioned_images(messages):
+        """Check if any message contains images without captions."""
+        from agent_cascade.llm.schema import ContentItem
+        for msg in messages:
+            if isinstance(msg.content, list):
+                for item in msg.content:
+                    if isinstance(item, dict) and item.get('image'):
+                        if not item.get('caption'):
+                            return True
+                    elif hasattr(item, 'image') and item.image:
+                        if not getattr(item, 'caption', None):
+                            return True
+        return False
+
+    def _get_any_vision_endpoint(self) -> Optional[dict]:
+        """Return the config of any enabled vision-capable endpoint."""
+        with self._lock:
+            for ep in self.endpoints.values():
+                if ep.enabled and getattr(ep, 'vision_enabled', True):
+                    return ep.to_llm_cfg()
+            # Fallback: default config (assume vision by default)
+            if self.default_llm_cfg:
+                cfg = copy.deepcopy(self.default_llm_cfg)
+                cfg.setdefault('vision_enabled', True)
+                return cfg
+        return None
+
+    def caption_images(
+        self, messages, agent_type: str = 'generalist'
+    ) -> List:
+        """
+        Generate captions for uncaptioned images in the message list.
+        
+        Uses any available vision-capable endpoint to produce a short text
+        description for each image that doesn't already have one. The caption
+        is stored as metadata on the ContentItem so it survives text-only fallback.
+        
+        Args:
+            messages: List of Message objects (may contain images)
+            agent_type: Agent type used for endpoint resolution
+            
+        Returns:
+            Modified message list with captions attached to images.
+        """
+        if not self._has_uncaptioned_images(messages):
+            return messages
+
+        from agent_cascade.llm.schema import ContentItem
+        vision_cfg = self._get_any_vision_endpoint()
+        if not vision_cfg:
+            # Replace uncaptioned images with placeholder text to ensure safe fallback
+            logger.warning("[APIRouter] No vision-capable endpoint found for image captioning — replacing with placeholders")
+            for msg in messages:
+                items = msg.content if isinstance(msg.content, list) else []
+                for item in items:
+                    img_val = item.get('image') if isinstance(item, dict) else getattr(item, 'image', None)
+                    existing_caption = item.get('caption') if isinstance(item, dict) else getattr(item, 'caption', None)
+                    if img_val and not existing_caption:
+                        cap = '[Image]'
+                        if isinstance(item, dict):
+                            item['caption'] = cap
+                        else:
+                            item.caption = cap
+            return messages
+
+        from agent_cascade.llm import get_chat_model
+
+        # Build a simple conversation with the prompt + all uncaptioned images
+        caption_messages: List[Message] = []
+        uncaptioned_items = []  # (msg_index, item_index) tuples to patch back
+
+        for msg_idx, msg in enumerate(messages):
+            items = msg.content if isinstance(msg.content, list) else []
+            for item_idx, item in enumerate(items):
+                img_val = item.get('image') if isinstance(item, dict) else getattr(item, 'image', None)
+                existing_caption = item.get('caption') if isinstance(item, dict) else getattr(item, 'caption', None)
+                if img_val and not existing_caption:
+                    uncaptioned_items.append((msg_idx, item_idx, img_val))
+
+        if not uncaptioned_items:
+            return messages
+
+        # Process each uncaptioned image individually for accurate captions
+        all_captions = {}  # key = (msg_idx, item_idx) -> caption text
+        
+        # Batch: send prompt + one image at a time to get per-image captions
+        model_type = vision_cfg.get('model_type', 'qwenvl_oai')  # Use endpoint's actual model type
+        for msg_idx, item_idx, img_val in uncaptioned_items:
+            try:
+                chat_model = get_chat_model(model_type, vision_cfg)
+                cap_msg = Message(
+                    role='user',
+                    content=[
+                        ContentItem(text=self.CAPTION_PROMPT),
+                        ContentItem(image=img_val),
+                    ]
+                )
+                result_iter = chat_model.chat(
+                    messages=[cap_msg],
+                    stream=True,
+                    delta_stream=False,
+                    extra_generate_cfg=vision_cfg,
+                )
+                # Consume the generator to get the final response
+                last_chunk = None
+                for chunk in result_iter:
+                    last_chunk = chunk
+                if last_chunk and len(last_chunk) > 0:
+                    caption_text = ''
+                    for m in last_chunk:
+                        # Handle both Message objects and dicts returned by chat models
+                        content = getattr(m, 'content', None) or (m.get('content') if isinstance(m, dict) else None)
+                        if isinstance(content, str):
+                            caption_text += content
+                        elif isinstance(content, list):
+                            for ci in content:
+                                txt = getattr(ci, 'text', '') or (ci.get('text') if isinstance(ci, dict) else '')
+                                if txt:
+                                    caption_text += txt
+                    caption_text = caption_text.strip()[:300]  # Cap length to avoid bloating messages
+                else:
+                    caption_text = '[Image]'
+            except Exception as e:
+                logger.warning(f"[APIRouter] Failed to generate image caption: {e}")
+                caption_text = '[Image]'
+
+            all_captions[(msg_idx, item_idx)] = caption_text
+
+        # Patch captions back into messages in-place
+        for msg_idx, item_idx, _ in uncaptioned_items:
+            key = (msg_idx, item_idx)
+            caption = all_captions.get(key, '[Image]')
+            items = messages[msg_idx].content if isinstance(messages[msg_idx].content, list) else []
+            if item_idx < len(items):
+                item = items[item_idx]
+                if isinstance(item, dict):
+                    item['caption'] = caption
+                else:
+                    item.caption = caption
+
+        logger.info(f"[APIRouter] Captioned {len(uncaptioned_items)} image(s) for vision fallback")
+        return messages
 
     # ── Semaphore Reset (for stop+resume) ────────────────────────────────
 

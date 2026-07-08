@@ -1596,6 +1596,30 @@ class ExecutionEngine:
             content=f"[ERROR {instance.instance_name}: {error_msg}]"
         )
 
+    @staticmethod
+    def _has_images(messages):
+        """Check if any message in the list contains image content."""
+        for msg in messages:
+            items = msg.content if isinstance(msg.content, list) else []
+            for item in items:
+                img_val = item.get('image') if isinstance(item, dict) else getattr(item, 'image', None)
+                if img_val:
+                    return True
+        return False
+
+    def _ensure_image_captions(self, messages):
+        """Generate captions for uncaptioned images using any vision-capable endpoint.
+        
+        Captions are stored as metadata on ContentItem so they survive when falling
+        back to text-only endpoints. This is called before LLM calls that may route
+        through non-vision endpoints.
+        """
+        router = getattr(self.pool, 'api_router', None)
+        if router and hasattr(router, 'caption_images'):
+            agent_type = 'generalist'  # Use generalist for captioning to avoid circular routing
+            return router.caption_images(messages, agent_type=agent_type)
+        return messages
+
     def _execute_llm_call_with_retry(
         self,
         instance: AgentInstance,
@@ -1629,7 +1653,13 @@ class ExecutionEngine:
         
         # Estimate input tokens for telemetry (rough char-based estimate)
         _input_tokens_est = sum(len(m.content or '') for m in llm_messages) // TOKEN_ESTIMATE_CHAR_DIVISOR
-        
+
+        # Ensure images have captions before any LLM call — this enables graceful fallback
+        # to text-only endpoints by replacing image data with text descriptions.
+        # Captions are generated ONCE and cached on ContentItem objects, so subsequent retries reuse them.
+        if self._has_images(llm_messages):
+            llm_messages = self._ensure_image_captions(llm_messages)
+
         while retry_count <= LLM_MAX_RETRIES:
             try:
                 # Telemetry: record LLM call start (non-blocking)
@@ -2025,8 +2055,13 @@ class ExecutionEngine:
                     extra_generate_cfg=merged_cfg,
                 )
 
+            # Check if conversation has images requiring vision support
+            requires_vision = self._has_images(messages)
+
             # Pass _do_call directly — call_with_fallback handles generator lifecycle via finally blocks
-            return self.pool.api_router.call_with_fallback(agent_type, _do_call, allocated_tokens=allocated_tokens)
+            return self.pool.api_router.call_with_fallback(
+                agent_type, _do_call, allocated_tokens=allocated_tokens, requires_vision=requires_vision
+            )
         else:
             # Direct call without router — same merge priority as fallback path:
             merged_cfg = self._build_merged_cfg(llm, instance)  # no endpoint config layer in direct call
