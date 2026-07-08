@@ -250,6 +250,14 @@ class WsMessageHandler:
         gen_id = self._start_generation()
         if self.agent_pool:
             self.agent_pool.stopped = False
+
+            # Diagnostic: Check pool state before starting
+            from agent_cascade.log import logger
+            with self.agent_pool._execution._state_lock:
+                stack = len(self.agent_pool._execution.active_stack)
+            states = {n: i.state.name for n, i in self.agent_pool.instances.items()}
+            logger.debug(f"Starting generation gen_id={gen_id}, instances={states}, active_stack={stack}")
+
         agent_runner = self._get_agent()
         loop = asyncio.get_event_loop()
 
@@ -603,6 +611,9 @@ class WsMessageHandler:
         self._apply_session_cfg(data)
         instance_name = self._resolve_instance_name(data)
 
+        last_user_msg = None
+        count_to_trim = 0
+
         # 1. Rollback all agents to start of last turn
         if self.agent_pool and self.session.get('last_turn_snapshots'):
             self.agent_pool.rollback_to_snapshots(
@@ -625,12 +636,13 @@ class WsMessageHandler:
                         reason="User retry: trim trailing messages",
                     )
 
-            # Early exit if no usable state
-            inst = self.agent_pool.get_instance(instance_name)
-            if (not inst or not inst.conversation) and not last_user_msg:
-                await self._broadcast()
-                return
+        # Early exit if no usable state
+        inst = self.agent_pool.get_instance(instance_name) if self.agent_pool else None
+        if (not inst or not inst.conversation) and not last_user_msg:
+            await self._broadcast()
+            return
 
+        if self.agent_pool:
             # Clear active tools/agent stack
             self.agent_pool.active_stack_clear()
             self.agent_pool.last_tool_args.clear()
