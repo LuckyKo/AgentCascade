@@ -949,7 +949,7 @@ class APIRouter:
 
             def execute_with_sem(current_agent_name=None):
                 if not sem:
-                    return call_fn(*args, **kwargs)
+                    return call_fn(llm_cfg, *args, **kwargs)
                 
                 # Track waiting agents by name
                 if current_agent_name:
@@ -965,7 +965,7 @@ class APIRouter:
                         with self._sem_lock:
                             self._waiting_agents.discard(current_agent_name)
 
-                    result = call_fn(*args, **kwargs)
+                    result = call_fn(llm_cfg, *args, **kwargs)
                     if hasattr(result, '__iter__') and not isinstance(result, (list, dict, str)):
                         # It's a generator. Pull first chunk to detect API errors early
                         # (connection/auth/model failures only surface on first next()).
