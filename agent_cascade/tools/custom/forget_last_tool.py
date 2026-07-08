@@ -90,7 +90,9 @@ class ForgetLast(BaseTool):
         
         # Defensive guard against n <= 0 (even though schema validates this)
         n = max(1, int(params.get('count', 1)))
-        justification = params.get('justification', '')
+        justification = params.get('justification', '').strip()
+        if len(justification) > 100:
+            justification = justification[:97] + '...'
         max_chars = self.cfg.get('truncate_max_chars', DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS)
         min_char_limit = self.cfg.get('min_char_limit', DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT)
         
@@ -147,13 +149,13 @@ class ForgetLast(BaseTool):
             
             original_len = len(original_content)
             
-            if original_len <= min_char_limit:
-                continue  # Already short enough, no point truncating small messages
+            if original_len <= min_char_limit or original_len <= max_chars:
+                continue  # Already short enough — skip to avoid truncation increasing message size
             
             # Build truncation marker (conditional justification for context awareness)
             chars_trimmed = original_len - max_chars
             if justification:
-                marker = f" ... [TRUNCATED] Forgotten because {justification}. Trimmed ~{chars_trimmed} chars."
+                marker = f" ... [TRUNCATED] Truncated: {justification}. ~{chars_trimmed} chars freed."
             else:
                 marker = f" ... [TRUNCATED] Forget_last trimmed ~{chars_trimmed} characters."
             new_content = original_content[:max_chars] + marker

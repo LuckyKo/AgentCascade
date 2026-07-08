@@ -86,7 +86,7 @@ CHARS_PER_TOKEN_ESTIMATE: float = float(os.getenv(
 DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS: int = int(os.getenv(
     'QWEN_AGENT_FORGET_LAST_TRUNCATE_MAX_CHARS', 100))  # Maximum characters to keep when truncating tool responses
 DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT: int = int(os.getenv(
-    'QWEN_AGENT_FORGET_LAST_MIN_CHAR_LIMIT', 200))  # Won't truncate tool responses smaller than this many characters
+    'QWEN_AGENT_FORGET_LAST_MIN_CHAR_LIMIT', 200))  # Skip truncation for responses ≤ this size (too small to benefit from truncation)
 
 # Settings for endpoint scheduling
 ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv(

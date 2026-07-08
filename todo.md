@@ -46,7 +46,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 # BUGS:
 
 - [ ] Activity banner still doesn't change when tools are written
-- [x] add optional justification argument to forget_last tool that will append to the truncated messages like "... [TRUNCATED] Forgotten because {reason}". also the the tool response could be compacted a bit to save some tokens. — FIXED: added `justification` param (optional string) that changes the truncation marker to "Forgotten because {reason}. Trimmed ~X chars." when provided; backward-compatible with existing behavior. All 4 return messages compacted for token savings.
+- [x] add optional justification argument to forget_last tool that will append to the truncated messages like "... [TRUNCATED] Forgotten because {reason}". also the tool response could be compacted a bit to save some tokens. — FIXED: added `justification` param (optional string) that changes the truncation marker to "Forgotten because {reason}. Trimmed ~X chars." when provided; backward-compatible with existing behavior. All 4 return messages compacted for token savings.
 - [ ] retry is broken, it duplicates the user message
 - [ ] max tokens does not change when a new API endpoint is acquired 
 - [x] forget last should have a min char limit setting in setting.py (wont truncate messages under that char limit) — FIXED: added DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT setting (default 200 chars), forget_last skips truncation for responses ≤ this threshold
