@@ -562,8 +562,13 @@ class ExecutionEngine:
         processed_messages = []
         for item in raw_data:
             msg = factory(item)
-            if msg.content.strip():  # Skip empty messages
-                processed_messages.append(msg)
+            # Handle both string and list (multimodal) content types
+            if isinstance(msg.content, list):
+                if not msg.content:
+                    continue
+            elif not msg.content.strip():
+                continue
+            processed_messages.append(msg)
 
         if not processed_messages:
             return True
@@ -734,11 +739,16 @@ class ExecutionEngine:
                 queued = self.pool.drain_queue(inst_name)
                 for item in queued:
                     msg = self._make_user_message(item)
-                    if msg.content.strip():
-                        try:
-                            self._append_and_log(instance, msg)
-                        except Exception as e:
-                            logger.error(f"Failed to append queued message for {inst_name}: {e}")
+                    # Handle both string and list (multimodal) content types
+                    if isinstance(msg.content, list):
+                        if not msg.content:
+                            continue
+                    elif not msg.content.strip():
+                        continue
+                    try:
+                        self._append_and_log(instance, msg)
+                    except Exception as e:
+                        logger.error(f"Failed to append queued message for {inst_name}: {e}")
                 
                 # ── Tail sync check after early-exit logging (design doc §5.2 — D1 fix) ──
                 if queued and getattr(self.pool.settings, 'tail_sync_check_enabled', True):

@@ -179,8 +179,10 @@ class WsMessageHandler:
         if is_generating:
             # Async injection while agent is running — route to target agent
             if self.agent_pool:
+                from agent_cascade.api_server import _parse_multimodal_content
                 target = data.get('target_agent') or self.session.get('session_name', 'Maine')
-                self.agent_pool.enqueue_message(target, text)
+                parsed_content = _parse_multimodal_content(text)
+                self.agent_pool.enqueue_message(target, parsed_content)
             return
 
         # Update session config if provided

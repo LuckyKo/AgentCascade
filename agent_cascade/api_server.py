@@ -838,7 +838,8 @@ def create_app(agents, agent_pool, config=None):
                 return JSONResponse(status_code=400, content={"message": "Empty message text"})
                 
             if agent_pool:
-                agent_pool.enqueue_message(target, text)
+                parsed_content = _parse_multimodal_content(text)
+                agent_pool.enqueue_message(target, parsed_content)
                 logger.info(f"REST API: Injected message into {target}: {text[:50]}...")
                 return {"status": "success", "queued": True, "target": target}
             else:
