@@ -164,6 +164,102 @@ class WsMessageHandler:
         with self._session_lock:
             self.session['stop_requested'] = True
 
+    # ── Shared helpers used across handlers ─────────────────────────────
+
+    def _resolve_instance_name(self, data: dict) -> str:
+        """Resolve target agent name from message data."""
+        return data.get('target_agent') or self.session['session_name']
+
+    def _apply_session_cfg(self, data: dict) -> None:
+        """Apply session config updates (agent_index, session_name, generate_cfg)."""
+        if 'agent_index' in data:
+            self.session['agent_index'] = int(data['agent_index'])
+        if 'session_name' in data:
+            self.session['session_name'] = data['session_name']
+        if 'generate_cfg' in data:
+            _validate_disabled_tools(data['generate_cfg'])
+            self.session['generate_cfg'] = data['generate_cfg']
+
+    def _trim_trailing_messages(self, inst) -> tuple:
+        """Count trailing ASSISTANT/FUNCTION messages + one USER message.
+
+        Returns (user_message, trim_count).
+        """
+        from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER
+        from agent_cascade.utils.utils import msg_field
+
+        count = 0
+        while inst.conversation and count < len(inst.conversation):
+            if msg_field(inst.conversation[-1 - count], 'role') in (ASSISTANT, FUNCTION):
+                count += 1
+            else:
+                break
+
+        user_msg = None
+        if inst.conversation and count < len(inst.conversation):
+            candidate_idx = len(inst.conversation) - 1 - count
+            if msg_field(inst.conversation[candidate_idx], 'role') == USER:
+                user_msg = inst.conversation[candidate_idx]
+                count += 1
+
+        return user_msg, count
+
+    def _reinsert_message(self, instance_name: str, user_msg: dict) -> None:
+        """Re-insert a user message at the correct position and sync the logger."""
+        if not self.agent_pool:
+            return
+
+        from agent_cascade.api_integration import (
+            _find_user_message_insertion_point,
+            create_main_agent_instance,
+        )
+
+        inst = self.agent_pool.get_instance(instance_name)
+        if inst is not None:
+            insert_pos = _find_user_message_insertion_point(inst.conversation)
+            inst.insert_message_at(insert_pos, user_msg)
+
+            try:
+                log_inst = self.agent_pool.get_logger(instance_name, inst.agent_class)
+                with inst._compression_lock:
+                    conv_snapshot = list(inst.conversation)
+                log_inst.update_history(conv_snapshot)
+            except Exception as e:
+                from agent_cascade.log import logger
+                logger.debug(f"Logger sync after re-insert failed for {instance_name}: {e}")
+        else:
+            create_main_agent_instance(
+                pool=self.agent_pool,
+                instance_name=instance_name,
+                system_message_content="",
+            )
+            self.agent_pool.enqueue_message(instance_name, user_msg.content)
+
+    def _sync_sub_agent_states(self) -> None:
+        """Update instance_state for sub-agents after snapshot rollback."""
+        for name in self.session['last_turn_snapshots']:
+            if name != self.session['session_name'] and name in self.agent_pool.instance_state:
+                sa_inst = self.agent_pool.get_instance(name)
+                if sa_inst is not None:
+                    with sa_inst._compression_lock:
+                        conv_snapshot = list(sa_inst.conversation)
+                    self.agent_pool.instance_state[name]['messages'] = conv_snapshot
+
+    def _start_gen_thread(self, history_copy=None, instance_name: str = '') -> None:
+        """Launch the generation thread (shared boilerplate)."""
+        gen_id = self._start_generation()
+        if self.agent_pool:
+            self.agent_pool.stopped = False
+        agent_runner = self._get_agent()
+        loop = asyncio.get_event_loop()
+
+        thread = threading.Thread(
+            target=self._start_gen_fn,
+            args=(history_copy, agent_runner, gen_id, loop, instance_name),
+            daemon=True,
+        )
+        thread.start()
+
     # ════════════════════════════════════════════════════════════════════
     #  Handler Methods (one per message type)
     # ════════════════════════════════════════════════════════════════════
@@ -174,32 +270,20 @@ class WsMessageHandler:
         if not text:
             return
 
-        is_generating = self._is_generating()
-
-        if is_generating:
-            # Async injection while agent is running — route to target agent
+        if self._is_generating():
             if self.agent_pool:
                 from agent_cascade.api_server import _parse_multimodal_content
-                target = data.get('target_agent') or self.session.get('session_name', 'Maine')
+                target = self._resolve_instance_name(data)
                 parsed_content = _parse_multimodal_content(text)
                 self.agent_pool.enqueue_message(target, parsed_content)
             return
 
-        # Update session config if provided
-        if 'agent_index' in data:
-            self.session['agent_index'] = int(data['agent_index'])
-        if 'session_name' in data:
-            self.session['session_name'] = data['session_name']
-        if 'generate_cfg' in data:
-            _validate_disabled_tools(data['generate_cfg'])
-            self.session['generate_cfg'] = data['generate_cfg']
+        self._apply_session_cfg(data)
 
-        # Parse multimodal content and resolve target instance
         from agent_cascade.api_server import _parse_multimodal_content, _extract_system_message
         parsed_content = _parse_multimodal_content(text)
-        instance_name = data.get('target_agent') or self.session['session_name']
+        instance_name = self._resolve_instance_name(data)
 
-        # Ensure the main agent instance exists before adding the message
         if self.agent_pool:
             inst = self.agent_pool.get_instance(instance_name)
             if inst is None or not inst.conversation:
@@ -212,7 +296,6 @@ class WsMessageHandler:
                         system_message_content=sys_content,
                     )
 
-            # Clear any stale continue state for fresh turn
             inst = self.agent_pool.get_instance(instance_name)
             if inst is not None:
                 with inst._compression_lock:
@@ -221,89 +304,37 @@ class WsMessageHandler:
                         logger.debug(f"[CONTINUE_FIX] Cleared stale _continue_saved_msg for {instance_name} on new message")
                         inst._continue_saved_msg = None
 
-            # Enqueue the user message
             self.agent_pool.enqueue_message(instance_name, parsed_content)
 
-        # Start agent generation
-        gen_id = self._start_generation()
-        if self.agent_pool:
-            self.agent_pool.stopped = False
-
-            # Diagnostic: Check pool state before starting
-            from agent_cascade.log import logger
-            with self.agent_pool._execution._state_lock:
-                stack = len(self.agent_pool._execution.active_stack)
-            states = {n: i.state.name for n, i in self.agent_pool.instances.items()}
-            logger.debug(f"Starting generation gen_id={gen_id}, instances={states}, active_stack={stack}")
-
-        agent_runner = self._get_agent()
-        loop = asyncio.get_event_loop()
-
-        thread = threading.Thread(
-            target=self._start_gen_fn,
-            args=(None, agent_runner, gen_id, loop, instance_name),
-            daemon=True,
-        )
-        thread.start()
-
+        self._start_gen_thread(instance_name=instance_name)
         await self._broadcast(generating=True)
 
     async def handle_continue(self, data: dict) -> None:
         """Handle 'continue' — resume generation without inserting a new user message."""
-        is_generating = self._is_generating()
-        if is_generating:
+        if self._is_generating():
             return
 
-        # Update session config if provided
-        if 'agent_index' in data:
-            self.session['agent_index'] = int(data['agent_index'])
-        if 'session_name' in data:
-            self.session['session_name'] = data['session_name']
-        if 'generate_cfg' in data:
-            _validate_disabled_tools(data['generate_cfg'])
-            self.session['generate_cfg'] = data['generate_cfg']
+        self._apply_session_cfg(data)
 
-        # Resolve the target instance
-        continue_instance_name = data.get('target_agent') or self.session['session_name']
-        inst = None
-        if self.agent_pool:
-            inst = self.agent_pool.get_instance(continue_instance_name)
-
-        # Start agent generation with existing history (no new user message)
-        gen_id = self._start_generation()
-        if self.agent_pool:
-            self.agent_pool.stopped = False
-
-        agent_runner = self._get_agent()
-        loop = asyncio.get_event_loop()
+        instance_name = self._resolve_instance_name(data)
+        inst = self.agent_pool.get_instance(instance_name) if self.agent_pool else None
 
         if inst is None:
             await self.broadcast_fn({'type': 'error', 'message': 'No agent instance found to continue'})
             return
 
-        # Pop trailing assistant message before deepcopying history
-        from agent_cascade.llm.schema import ASSISTANT, ROLE
+        from agent_cascade.llm.schema import ASSISTANT
         from agent_cascade.utils.utils import msg_field
 
-        saved_assistant_msg = None
         with inst._compression_lock:
             if inst.conversation:
                 last_msg = inst.conversation[-1]
-                last_role = msg_field(last_msg, 'role')
-                if last_role == ASSISTANT:
-                    saved_assistant_msg = inst.conversation.pop()
-                    # Store on instance for merging in execution_engine._process_response
-                    inst._continue_saved_msg = saved_assistant_msg
+                if msg_field(last_msg, 'role') == ASSISTANT:
+                    inst._continue_saved_msg = inst.conversation.pop()
 
         history_copy = copy.deepcopy(inst.conversation)
 
-        thread = threading.Thread(
-            target=self._start_gen_fn,
-            args=(history_copy, agent_runner, gen_id, loop, continue_instance_name),
-            daemon=True,
-        )
-        thread.start()
-
+        self._start_gen_thread(history_copy=history_copy, instance_name=instance_name)
         await self._broadcast(generating=True)
 
     async def handle_stop(self, data: dict) -> None:
@@ -566,106 +597,49 @@ class WsMessageHandler:
 
     async def handle_retry(self, data: dict) -> None:
         """Handle 'retry' — trim tail, roll back snapshots, re-enqueue message."""
-        is_generating = self._is_generating()
-        if is_generating:
+        if self._is_generating():
             return
 
-        instance_name = data.get('target_agent') or self.session['session_name']
+        self._apply_session_cfg(data)
+        instance_name = self._resolve_instance_name(data)
 
-        last_user_msg = None
-        count_to_trim = 0
-
-        # 1. Rollback agent instances to the start of the last turn FIRST
-        # (before trimming, so snapshot lengths are honored exactly and no duplicate user messages)
+        # 1. Rollback all agents to start of last turn
         if self.agent_pool and self.session.get('last_turn_snapshots'):
-            self.agent_pool.rollback_to_snapshots(self.session['last_turn_snapshots'], reason="User retry")
+            self.agent_pool.rollback_to_snapshots(
+                self.session['last_turn_snapshots'], reason="User retry"
+            )
+            self._sync_sub_agent_states()
 
-            # Update instance state for sub-agents
-            for name in self.session['last_turn_snapshots']:
-                if name != self.session['session_name'] and name in self.agent_pool.instance_state:
-                    sa_inst = self.agent_pool.get_instance(name)
-                    if sa_inst is not None:
-                        with sa_inst._compression_lock:
-                            conv_snapshot = list(sa_inst.conversation)
-                        self.agent_pool.instance_state[name]['messages'] = conv_snapshot
-
-        # 2. Fetch the target instance once and trim trailing messages
+        # 2. Trim trailing messages from target instance
         if self.agent_pool:
             inst = self.agent_pool.get_instance(instance_name)
             if inst is not None:
-                from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER
-                from agent_cascade.utils.utils import msg_field
-
-                while inst.conversation and count_to_trim < len(inst.conversation) \
-                        and msg_field(inst.conversation[-1 - count_to_trim], 'role') in (ASSISTANT, FUNCTION):
-                    count_to_trim += 1
-
-                if inst.conversation and count_to_trim < len(inst.conversation):
-                    candidate_idx = len(inst.conversation) - 1 - count_to_trim
-                    if msg_field(inst.conversation[candidate_idx], 'role') == USER:
-                        last_user_msg = inst.conversation[candidate_idx]
-                        count_to_trim += 1
+                last_user_msg, count_to_trim = self._trim_trailing_messages(inst)
 
                 if count_to_trim > 0:
                     self.agent_pool._rollback_instance(
                         instance_name,
                         pop_count=count_to_trim,
                         sync_logger=True,
-                        preserve_system_user=False,  # Exact trim, no safety clamp
+                        preserve_system_user=False,
                         reason="User retry: trim trailing messages",
                     )
 
-        # Early exit if no usable state exists (no instance with messages and no captured user msg)
-        inst = self.agent_pool.get_instance(instance_name) if self.agent_pool else None
-        if (not inst or not inst.conversation) and not last_user_msg:
-            await self._broadcast()
-            return
+            # Early exit if no usable state
+            inst = self.agent_pool.get_instance(instance_name)
+            if (not inst or not inst.conversation) and not last_user_msg:
+                await self._broadcast()
+                return
 
-        # Clear active tools/agent stack since we are retrying from the main input level
-        if self.agent_pool:
+            # Clear active tools/agent stack
             self.agent_pool.active_stack_clear()
             self.agent_pool.last_tool_args.clear()
 
-        # Re-append the user message to pool instance
-        if last_user_msg and self.agent_pool:
-            inst = self.agent_pool.get_instance(instance_name)
-            if inst is not None:
-                from agent_cascade.api_integration import _find_user_message_insertion_point
-                insert_pos = _find_user_message_insertion_point(inst.conversation)
-                inst.insert_message_at(insert_pos, last_user_msg)
+            # 3. Re-insert the user message
+            if last_user_msg:
+                self._reinsert_message(instance_name, last_user_msg)
 
-                try:
-                    log_inst = self.agent_pool.get_logger(instance_name, inst.agent_class)
-                    with inst._compression_lock:
-                        conv_snapshot = list(inst.conversation)
-                    log_inst.update_history(conv_snapshot)
-                except Exception as e:
-                    from agent_cascade.log import logger
-                    logger.debug(f"Logger sync after retry re-insert failed for {instance_name} (non-critical): {e}")
-            else:
-                from agent_cascade.api_integration import create_main_agent_instance
-                create_main_agent_instance(
-                    pool=self.agent_pool,
-                    instance_name=instance_name,
-                    system_message_content="",
-                )
-                self.agent_pool.enqueue_message(instance_name, last_user_msg.content)
-
-        if 'generate_cfg' in data:
-            self.session['generate_cfg'] = data['generate_cfg']
-
-        gen_id = self._start_generation()
-        if self.agent_pool:
-            self.agent_pool.stopped = False
-        agent_runner = self._get_agent()
-        loop = asyncio.get_event_loop()
-
-        thread = threading.Thread(
-            target=self._start_gen_fn,
-            args=(None, agent_runner, gen_id, loop, instance_name),
-            daemon=True,
-        )
-        thread.start()
+        self._start_gen_thread(instance_name=instance_name)
         await self._broadcast(generating=True)
 
     async def handle_reset(self, data: dict) -> None:
