@@ -58,6 +58,7 @@ class TelemetryCollector:
             "total_input_tokens_est": 0,
             "total_output_tokens_est": 0,
             "total_llm_latency_ms": 0,
+            "total_ttft_ms": 0,
             "total_tool_latency_ms": 0,
             "total_loops_detected": 0,
             "total_retries": 0,
@@ -249,6 +250,8 @@ class TelemetryCollector:
         latency_ms = (end_time - call["start_time"]) * 1000
         ttft_ms = ((call["first_token_time"] - call["start_time"]) * 1000) if call["first_token_time"] > 0 else 0
 
+        streaming_time_ms = max(latency_ms - ttft_ms, 0)
+
         event = {
             "type": "llm_call",
             "instance": instance_name,
@@ -257,7 +260,8 @@ class TelemetryCollector:
             "output_tokens_est": output_tokens_est,
             "latency_ms": round(latency_ms, 1),
             "ttft_ms": round(ttft_ms, 1),
-            "tps": round(output_tokens_est / (latency_ms / 1000), 1) if latency_ms > 0 and output_tokens_est > 0 else 0,
+            "streaming_time_ms": round(streaming_time_ms, 1),
+            "tps": round(output_tokens_est / (streaming_time_ms / 1000), 1) if streaming_time_ms > 0 and output_tokens_est > 0 else 0,
             "timestamp": _now_iso(),
         }
         self._write_event(event)
@@ -267,6 +271,7 @@ class TelemetryCollector:
         self._session_stats["total_input_tokens_est"] += call["input_tokens_est"]
         self._session_stats["total_output_tokens_est"] += output_tokens_est
         self._session_stats["total_llm_latency_ms"] += latency_ms
+        self._session_stats["total_ttft_ms"] += ttft_ms
         self._session_stats["llm_calls_by_model"][call["model"]] += 1
 
         # Update active turn
@@ -403,8 +408,10 @@ class TelemetryCollector:
         # Calculate derived metrics
         total_tokens = stats["total_input_tokens_est"] + stats["total_output_tokens_est"]
         total_llm_time_sec = stats["total_llm_latency_ms"] / 1000 if stats["total_llm_latency_ms"] > 0 else 0
+        total_ttft_sec = stats.get("total_ttft_ms", 0) / 1000
+        total_streaming_time_sec = max(total_llm_time_sec - total_ttft_sec, 0)
 
-        avg_tps = stats["total_output_tokens_est"] / total_llm_time_sec if total_llm_time_sec > 0 else 0
+        avg_tps = stats["total_output_tokens_est"] / total_streaming_time_sec if total_streaming_time_sec > 0 else 0
         avg_llm_latency = stats["total_llm_latency_ms"] / stats["total_llm_calls"] if stats["total_llm_calls"] > 0 else 0
         avg_tool_latency = stats["total_tool_latency_ms"] / stats["total_tool_calls"] if stats["total_tool_calls"] > 0 else 0
 
