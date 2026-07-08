@@ -4073,15 +4073,7 @@ function renderApiEndpoints() {
                <button class="api-endpoint-move-up" ${isFirst ? 'disabled style="opacity:0.2"' : ''} title="Move Up">▲</button>
                <button class="api-endpoint-move-down" ${isLast ? 'disabled style="opacity:0.2"' : ''} title="Move Down">▼</button>
              </div>
-
-             <!-- Per-endpoint feature toggles in header -->
-             <label class="ep-header-toggle-label" title="Vision enabled for this endpoint">
-               👁<input type="checkbox" class="ep-input-vision" ${epVision ? 'checked' : ''}>
-             </label>
-             <label class="ep-header-toggle-label" title="Use custom sampling params instead of global settings">
-               🎲<input type="checkbox" class="ep-input-custom-sampling" ${epCustomSampling ? 'checked' : ''}>
-             </label>
-
+             
              <button class="api-endpoint-expand ${isOpen ? 'open' : ''}">▸</button>
            </div>
 
@@ -4133,7 +4125,19 @@ function renderApiEndpoints() {
                  <input type="number" min="0" step="1" class="ep-input-rate-limit" value="${ep.rate_limit_rpm || 0}" title="Requests per minute. 0 = unlimited">
                </label>
              </div>
-
+             
+             <!-- Per-endpoint feature toggles -->
+             <div style="display:flex;gap:12px;margin-top:8px;">
+             <label class="setting-field toggle-field" style="margin:0;padding:4px 0;font-size:12px;cursor:pointer;">
+             <span>👁 Vision Enabled</span>
+             <input type="checkbox" class="ep-input-vision" ${epVision ? 'checked' : ''}>
+             </label>
+             <label class="setting-field toggle-field" style="margin:0;padding:4px 0;font-size:12px;cursor:pointer;" title="When enabled, per-endpoint sampler params override global settings">
+             <span>🎲 Custom Sampling</span>
+             <input type="checkbox" class="ep-input-custom-sampling" ${epCustomSampling ? 'checked' : ''}>
+             </label>
+             </div>
+             
              <!-- Collapsible Sampling Parameters section (shown/hidden based on custom sampling toggle) -->
              <div class="ep-sampling-section ${epCustomSampling ? '' : 'ep-sampling-hidden'}">
                <div class="ep-sampling-header">Sampling Parameters</div>
