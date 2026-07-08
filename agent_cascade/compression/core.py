@@ -333,6 +333,8 @@ def compress_context(
             tail_count=len(active_set) - target_discard_count,
             error=None,
             mode=mode,
+            tokens_before=total_tokens,
+            tokens_after=0,  # dry_run: no actual mutation happened
         )
 
     # ── 10. Apply to pool: trim → insert marker (atomic mutation via copy-and-replace) ──
@@ -409,10 +411,32 @@ def compress_context(
     # which calls reset_history(conv, rewrite=True) for all compression paths.
     # The insert_compression_marker() method in agent_instance_logger.py is deprecated.
 
-    # ── 12. Log the successful compression event ──
+    # ── 12. Calculate post-compression token count for telemetry (BUG 6 fix) ──
+    # Estimate tokens_after by counting tokens of the summary marker message
+    # plus the remaining tail messages (total_tokens - discarded_tokens + summary_tokens)
+    try:
+        # Count tokens in discarded messages
+        discarded_tokens = 0
+        for msg in active_set[:target_discard_count]:
+            if isinstance(msg, dict):
+                wrapped = Message(**msg)
+            else:
+                wrapped = msg
+            content = extract_text_from_message(wrapped, add_upload_info=True)
+            discarded_tokens += qwen_count(content)
+        # Count tokens in the marker/summary message that replaces them
+        summary_content = extract_text_from_message(marker_message, add_upload_info=True) if marker_message else ""
+        summary_tokens = qwen_count(summary_content) if summary_content else 0
+        tokens_after = max(total_tokens - discarded_tokens + summary_tokens, 0)
+    except Exception:
+        # Token counting is advisory — fall back to total_tokens estimate
+        tokens_after = total_tokens
+
+    # ── 13. Log the successful compression event ──
     logger.info(
         f"Clean-trim compression: Discarded {target_discard_count} messages "
-        f"for agent '{target_agent_name}'. Tail count: {tail_count}."
+        f"for agent '{target_agent_name}'. Tail count: {tail_count}. "
+        f"Tokens: {total_tokens} -> {tokens_after}."
     )
 
     return CompressResult(
@@ -423,4 +447,6 @@ def compress_context(
         tail_count=tail_count,
         error=None,
         mode=mode,
+        tokens_before=total_tokens,
+        tokens_after=tokens_after,
     )

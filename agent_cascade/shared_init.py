@@ -208,6 +208,15 @@ def setup_signal_handler(agent_pool, server=None):
     def handle_shutdown(signum, frame):
         logger.info("\n[INFO] Initiating graceful shutdown...")
         agent_pool.stopped = True
+
+        # Write session_end telemetry event with final stats (BUG 8 fix)
+        if hasattr(agent_pool, 'telemetry') and agent_pool.telemetry is not None:
+            try:
+                agent_pool.telemetry.record_session_end()
+                logger.debug("[INIT] Telemetry session_end recorded")
+            except Exception as e:
+                logger.warning("Failed to record telemetry session_end: %s", e)
+
         if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
             try:
                 agent_pool.operation_manager.cleanup_backups()

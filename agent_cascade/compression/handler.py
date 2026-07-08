@@ -460,7 +460,10 @@ class CompressionHandler:
                 # Telemetry: record forced compression event (non-blocking)
                 if (tel := self.engine._telemetry()) is not None:
                     try:
-                        tel.record_compression(inst_name, fraction=COMPRESSION_DEFAULT_FRACTION)
+                        tel.record_compression(
+                            inst_name, fraction=COMPRESSION_DEFAULT_FRACTION,
+                            tokens_before=result.tokens_before, tokens_after=result.tokens_after,
+                        )
                     except Exception:
                         pass
                 
@@ -563,7 +566,10 @@ class CompressionHandler:
             # Telemetry: record compression event from tool handler path (non-blocking)
             if (tel := self.engine._telemetry()) is not None:
                 try:
-                    tel.record_compression(target_agent_name, fraction=fraction)
+                    tel.record_compression(
+                        target_agent_name, fraction=fraction,
+                        tokens_before=result.tokens_before, tokens_after=result.tokens_after,
+                    )
                 except Exception:
                     pass
 
@@ -828,10 +834,18 @@ class CompressionHandler:
 
             self._sync_logger_after_compression(inst_name, instance.agent_class, "/compress command", instance)
 
-            # Telemetry: record /compress command compression event (non-blocking)
+            # Telemetry: record /compress command compression event with actual token counts (non-blocking)
             if (tel := self.engine._telemetry()) is not None:
                 try:
-                    tel.record_compression(inst_name, fraction=fraction)
+                    from agent_cascade.settings import TOKEN_ESTIMATE_CHAR_DIVISOR
+                    # Estimate tokens after compression by counting chars in the compressed conversation
+                    _after = sum(len(msg.content or '') for msg in conv) // TOKEN_ESTIMATE_CHAR_DIVISOR if conv else 0
+                    # Estimate tokens before by dividing by (1 - fraction) since we discarded `fraction` of history
+                    _before = int(_after / (1.0 - fraction)) if fraction < 1.0 else _after * 2
+                    tel.record_compression(
+                        inst_name, fraction=fraction,
+                        tokens_before=_before, tokens_after=_after,
+                    )
                 except Exception:
                     pass
 

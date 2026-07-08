@@ -74,6 +74,9 @@ class TelemetryCollector:
         # Per-config aggregates for A/B comparison
         self._config_stats: Dict[str, Dict] = {}
 
+        # Guard against duplicate session_end events (BUG 8 fix)
+        self._session_ended = False
+
         # Write session header
         self._write_event({
             "type": "session_start",
@@ -164,6 +167,24 @@ class TelemetryCollector:
             "retries": 0,
         }
 
+        # Initialize per-config stats on first turn so latency tracking works immediately (BUG 5 fix)
+        if config_fingerprint and config_fingerprint not in self._config_stats:
+            self._config_stats[config_fingerprint] = {
+                "config_description": config_description or {},
+                "turns": 0,
+                "llm_calls": 0,
+                "tool_calls": 0,
+                "input_tokens_est": 0,
+                "output_tokens_est": 0,
+                "total_duration_ms": 0,
+                "total_llm_latency_ms": 0,
+                "total_ttft_ms": 0,
+                "loops_detected": 0,
+                "retries": 0,
+                "tool_calls_by_name": defaultdict(int),
+                "tool_failures_by_name": defaultdict(int),
+            }
+
         event = {
             "type": "turn_start",
             "instance": instance_name,
@@ -212,6 +233,8 @@ class TelemetryCollector:
                     "input_tokens_est": 0,
                     "output_tokens_est": 0,
                     "total_duration_ms": 0,
+                    "total_llm_latency_ms": 0,
+                    "total_ttft_ms": 0,
                     "loops_detected": 0,
                     "retries": 0,
                     "tool_calls_by_name": defaultdict(int),
@@ -280,12 +303,17 @@ class TelemetryCollector:
         self._session_stats["total_ttft_ms"] += ttft_ms
         self._session_stats["llm_calls_by_model"][call["model"]] += 1
 
-        # Update active turn
+        # Update active turn and per-config latency stats
         turn = self._active_turns.get(instance_name)
         if turn:
             turn["llm_calls"] += 1
             turn["input_tokens_est"] += call["input_tokens_est"]
             turn["output_tokens_est"] += output_tokens_est
+            # Update per-config latency fields (BUG 5 fix)
+            fp = turn.get("config_fingerprint", "")
+            if fp and fp in self._config_stats:
+                self._config_stats[fp]["total_llm_latency_ms"] += latency_ms
+                self._config_stats[fp]["total_ttft_ms"] += ttft_ms
 
     def record_tool_call_start(self, instance_name: str, tool_name: str):
         """Mark the start of a tool execution."""
@@ -507,6 +535,45 @@ class TelemetryCollector:
 
     # ── Persistence ───────────────────────────────────────────────────────
 
+    def record_session_end(self):
+        """Write a session_end event with final session statistics.
+
+        Call this during graceful shutdown to close out the telemetry session
+        that was opened in __init__(). Includes a full summary of all aggregated
+        session stats and per-config breakdowns for A/B comparison.
+
+        Safe to call multiple times — only writes once (idempotent).
+        """
+        if self._session_ended:
+            _logger.debug("Session %s already ended, skipping duplicate record_session_end", self.session_id)
+            return
+        self._session_ended = True
+
+        summary = self.get_session_summary()
+        config_comparison = self.get_config_comparison()
+
+        event = {
+            "type": "session_end",
+            "session_id": self.session_id,
+            "timestamp": _now_iso(),
+            "summary": summary,
+            "config_comparison": config_comparison,
+        }
+        self._write_critical_event(event)
+
+    def _write_critical_event(self, event: Dict):
+        """Append an event to the JSONL log file; raise on I/O failure.
+
+        Unlike ``_write_event`` this does not swallow exceptions — use for
+        events that should be guaranteed to persist (e.g., session_end).
+        """
+        self.events.append(event)
+        if len(self.events) > self.max_events:
+            self.events = self.events[-self.max_events:]
+
+        with open(self.log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+
     def _write_event(self, event: Dict):
         """Append an event to the JSONL log file and in-memory buffer."""
         self.events.append(event)
@@ -523,4 +590,4 @@ class TelemetryCollector:
 
 def _now_iso() -> str:
     """Return current UTC timestamp in ISO format."""
-    return datetime.datetime.now().isoformat()
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()

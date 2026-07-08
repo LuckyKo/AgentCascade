@@ -763,6 +763,12 @@ class ExecutionEngine:
                     except Exception:
                         pass  # Non-critical check
                 logger.debug("early exit - %s (_setup_turn returned empty)", instance.instance_name)
+                # Telemetry: record turn end for early exit (non-blocking)
+                if (tel := self._telemetry()) is not None:
+                    try:
+                        tel.record_turn_end(inst_name)
+                    except Exception:
+                        pass
                 return  # Manual command handled or error
 
             max_turns = instance.max_turns or 50
@@ -872,6 +878,12 @@ class ExecutionEngine:
         except Exception as e:
             # C4 fix: Catch unhandled exceptions — log and yield error state
             logger.error("EXCEPTION - %s: %s: %s", instance.instance_name, type(e).__name__, e)
+            # Telemetry: record turn end on exception (non-blocking)
+            if (tel := self._telemetry()) is not None:
+                try:
+                    tel.record_turn_end(instance.instance_name)
+                except Exception:
+                    pass
             error_msg = Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {e}]")
             yield [error_msg]
 
@@ -1789,6 +1801,12 @@ class ExecutionEngine:
                     # CRITICAL: Use _is_stop_interrupted() which excludes pause — pause should NOT abort
                     # ongoing streaming; it only blocks tool execution after streaming completes.
                     if self._is_stop_interrupted(inst_name):
+                        # Telemetry: record LLM call end for mid-stream stop (non-blocking)
+                        if (tel := self._telemetry()) is not None:
+                            try:
+                                tel.record_llm_call_end(inst_name, output_tokens_est=0)
+                            except Exception:
+                                pass
                         with instance._compression_lock:
                             instance._streaming_responses = []
                         try:
@@ -1808,6 +1826,12 @@ class ExecutionEngine:
                     # Re-check stop/halt after UI update (defense in depth — catches stop during slow streaming)
                     # CRITICAL: Use _is_stop_interrupted() which excludes pause — same as above.
                     if self._is_stop_interrupted(inst_name):
+                        # Telemetry: record LLM call end for mid-stream stop (non-blocking)
+                        if (tel := self._telemetry()) is not None:
+                            try:
+                                tel.record_llm_call_end(inst_name, output_tokens_est=0)
+                            except Exception:
+                                pass
                         with instance._compression_lock:
                             instance._streaming_responses = []
                         try:
@@ -1821,13 +1845,36 @@ class ExecutionEngine:
                     yield None
                 
                 if last_output is not None:
+                    # Telemetry: record LLM call end for successful completion (non-blocking)
+                    _output_tokens_est = 0
+                    for m in last_output:
+                        c = getattr(m, 'content', '') or ''
+                        _output_tokens_est += len(c) // TOKEN_ESTIMATE_CHAR_DIVISOR
+                    if (tel := self._telemetry()) is not None:
+                        try:
+                            tel.record_llm_call_end(inst_name, output_tokens_est=_output_tokens_est)
+                        except Exception:
+                            pass
                     break
+                
+                # Telemetry: record LLM call end for empty response before retrying (non-blocking)
+                if (tel := self._telemetry()) is not None:
+                    try:
+                        tel.record_llm_call_end(inst_name, output_tokens_est=0)
+                    except Exception:
+                        pass
                 
             except Exception as e:
                 with instance._compression_lock:
                     instance._streaming_responses = []
                 
                 if retry_count > LLM_MAX_RETRIES:
+                    # Telemetry: record LLM call end for exhausted retries (non-blocking)
+                    if (tel := self._telemetry()) is not None:
+                        try:
+                            tel.record_llm_call_end(inst_name, output_tokens_est=0)
+                        except Exception:
+                            pass
                     error_msg = str(e).split('\n')[0] if e else "Unknown error"
                     # Give clearer message for loop detection failures
                     if 'inner_loop' in error_msg:
@@ -1856,7 +1903,21 @@ class ExecutionEngine:
                 # Classify error type
                 error_type = self._classify_llm_error(e)
                 
+                # Telemetry: record LLM call end for failed retry attempt before continuing (non-blocking)
+                # Skip for fatal errors — they have their own end call below
+                if error_type != 'fatal' and (tel := self._telemetry()) is not None:
+                    try:
+                        tel.record_llm_call_end(inst_name, output_tokens_est=0)
+                    except Exception:
+                        pass
+                
                 if error_type == 'fatal':
+                    # Telemetry: record LLM call end for fatal error (non-blocking)
+                    if (tel := self._telemetry()) is not None:
+                        try:
+                            tel.record_llm_call_end(inst_name, output_tokens_est=0)
+                        except Exception:
+                            pass
                     error_msg = str(e).split('\n')[0] if e else "Unknown error"
                     logger.warning(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable error: {e}")
                     yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {error_msg}]")
@@ -1873,18 +1934,6 @@ class ExecutionEngine:
                 time.sleep(backoff)
                 yield None
         
-        # Telemetry: record LLM call end with output token estimate (non-blocking)
-        if (tel := self._telemetry()) is not None:
-            try:
-                _output_tokens_est = 0
-                if last_output:
-                    for m in last_output:
-                        c = getattr(m, 'content', '') or ''
-                        _output_tokens_est += len(c) // TOKEN_ESTIMATE_CHAR_DIVISOR
-                tel.record_llm_call_end(inst_name, output_tokens_est=_output_tokens_est)
-            except Exception:
-                pass
-
         # Final update before yielding results
         if last_output is not None:
             with instance._compression_lock:
@@ -2428,14 +2477,7 @@ class ExecutionEngine:
                 if conv and not validate_message_pool(conv, inst_name):
                     logger.error(f"[MSG POOL VALIDATION] Pool invalid after agent-triggered compression for '{inst_name}'")
 
-                # Telemetry: record compression event (non-blocking)
-                if (tel := self._telemetry()) is not None:
-                    try:
-                        tel.record_compression(inst_name, fraction=COMPRESSION_DEFAULT_FRACTION)
-                    except Exception:
-                        pass
-
-            # Build function result message — include function_id and tool_success per OpenAI spec
+                # Build function result message — include function_id and tool_success per OpenAI spec
             # function_id was extracted BEFORE _execute_tool call above
             fn_msg = Message(
                 role=FUNCTION,

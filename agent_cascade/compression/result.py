@@ -12,3 +12,5 @@ class CompressResult:
     tail_count: int                  # Messages remaining after the marker
     error: str | None                # Error message if success is False
     mode: str                        # "auto" or "manual"
+    tokens_before: int = 0           # Token count before compression (BUG 6 fix)
+    tokens_after: int = 0            # Token count after compression (BUG 6 fix)
