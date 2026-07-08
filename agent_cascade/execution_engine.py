@@ -3423,8 +3423,15 @@ class ExecutionEngine:
             latest_summary = ''
             if not is_initial and final_resp:
                 last_msg = final_resp[-1]
+                role = msg_field(last_msg, 'role', '')
                 content = msg_field(last_msg, 'content', '')
-                latest_summary = str(content)[:500] if content else ''
+                # For FUNCTION role (tool results), include tool name in summary
+                if role == FUNCTION:
+                    from agent_cascade.utils.utils import format_tool_result_preview
+                    tool_name = msg_field(last_msg, 'name', '')
+                    latest_summary = format_tool_result_preview(tool_name, content, max_len=450)
+                else:
+                    latest_summary = str(content)[:500] if content else ''
             
             # Thread-safe state read - snapshot under lock before building dict
             with inst._state_lock:

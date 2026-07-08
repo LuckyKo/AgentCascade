@@ -170,6 +170,12 @@ def run_agent_thread_unified(
                         streaming_text = str(reasoning)
                     else:
                         streaming_text = str(content)
+                elif msg_role == FUNCTION:
+                    # Tool result (FUNCTION role): show which tool completed + brief preview
+                    from agent_cascade.utils.utils import format_tool_result_preview, msg_field
+                    tool_name = msg_field(last_msg, 'name', '')
+                    content = msg_field(last_msg, 'content', '')
+                    streaming_text = format_tool_result_preview(tool_name, content, max_len=120)
 
             # ── WebSocket broadcast (shared helper handles all throttling) ──
             # Tool events are signaled via is_streaming_tick=True so the helper

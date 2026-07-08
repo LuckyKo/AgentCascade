@@ -1155,3 +1155,15 @@ def get_history_stats(messages: List[Union[Message, dict, list, bool, None]]) ->
         total_tokens += stats['tokens']
         total_words += stats['words']
     return {'tokens': total_tokens, 'words': total_words}
+
+
+def format_tool_result_preview(tool_name: str, content: str, max_len: int = 120) -> str:
+    """Format a tool result message for display in activity banners.
+    
+    Returns strings like 'Tool read_file: Found 3 matches...' or 'Tool read_file completed'.
+    """
+    name = tool_name or 'tool'
+    stripped = str(content).strip() if content else ''
+    if stripped:
+        return f"Tool {name}: {stripped[:max_len]}"
+    return f"Tool {name} completed"

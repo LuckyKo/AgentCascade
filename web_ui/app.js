@@ -3388,6 +3388,16 @@ function getActivityPreview(msg) {
     return `🛠️ Calling ${name}...`;
   }
 
+  // Tool results (FUNCTION role): show which tool completed + brief result preview
+  if (msg.role === 'function') {
+    const name = msg.name || 'tool';
+    const content = (msg.content || '').trim();
+    if (content.length > 0) {
+      return `✅ ${name}: ${getLastWords(content.slice(-300), 15)}`;
+    }
+    return `✅ ${name} completed`;
+  }
+
   // Regular content or reasoning
   const text = ((msg.reasoning_content || '') + (msg.content || '')).slice(-300);
   return getLastWords(text, 20) || 'Streaming...';

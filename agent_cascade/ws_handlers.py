@@ -4,7 +4,6 @@ Extracted from api_server.py ws_chat() function (Phase 2 refactoring).
 Each WebSocket message type has its own handler method dispatched via a lookup table.
 """
 import asyncio
-import copy
 import json
 import os
 import threading
@@ -180,61 +179,6 @@ class WsMessageHandler:
             _validate_disabled_tools(data['generate_cfg'])
             self.session['generate_cfg'] = data['generate_cfg']
 
-    def _trim_trailing_messages(self, inst) -> tuple:
-        """Count trailing ASSISTANT/FUNCTION messages + one USER message.
-
-        Returns (user_message, trim_count).
-        """
-        from agent_cascade.llm.schema import ASSISTANT, FUNCTION, USER
-        from agent_cascade.utils.utils import msg_field
-
-        count = 0
-        while inst.conversation and count < len(inst.conversation):
-            if msg_field(inst.conversation[-1 - count], 'role') in (ASSISTANT, FUNCTION):
-                count += 1
-            else:
-                break
-
-        user_msg = None
-        if inst.conversation and count < len(inst.conversation):
-            candidate_idx = len(inst.conversation) - 1 - count
-            if msg_field(inst.conversation[candidate_idx], 'role') == USER:
-                user_msg = inst.conversation[candidate_idx]
-                count += 1
-
-        return user_msg, count
-
-    def _reinsert_message(self, instance_name: str, user_msg: dict) -> None:
-        """Re-insert a user message at the correct position and sync the logger."""
-        if not self.agent_pool:
-            return
-
-        from agent_cascade.api_integration import (
-            _find_user_message_insertion_point,
-            create_main_agent_instance,
-        )
-
-        inst = self.agent_pool.get_instance(instance_name)
-        if inst is not None:
-            insert_pos = _find_user_message_insertion_point(inst.conversation)
-            inst.insert_message_at(insert_pos, user_msg)
-
-            try:
-                log_inst = self.agent_pool.get_logger(instance_name, inst.agent_class)
-                with inst._compression_lock:
-                    conv_snapshot = list(inst.conversation)
-                log_inst.update_history(conv_snapshot)
-            except Exception as e:
-                from agent_cascade.log import logger
-                logger.debug(f"Logger sync after re-insert failed for {instance_name}: {e}")
-        else:
-            create_main_agent_instance(
-                pool=self.agent_pool,
-                instance_name=instance_name,
-                system_message_content="",
-            )
-            self.agent_pool.enqueue_message(instance_name, user_msg.content)
-
     def _sync_sub_agent_states(self) -> None:
         """Update instance_state for sub-agents after snapshot rollback."""
         for name in self.session['last_turn_snapshots']:
@@ -318,7 +262,7 @@ class WsMessageHandler:
         await self._broadcast(generating=True)
 
     async def handle_continue(self, data: dict) -> None:
-        """Handle 'continue' — resume generation without inserting a new user message."""
+        """Handle 'continue' — send current stack as-is to the LLM."""
         if self._is_generating():
             return
 
@@ -331,16 +275,8 @@ class WsMessageHandler:
             await self.broadcast_fn({'type': 'error', 'message': 'No agent instance found to continue'})
             return
 
-        from agent_cascade.llm.schema import ASSISTANT
-        from agent_cascade.utils.utils import msg_field
-
         with inst._compression_lock:
-            if inst.conversation:
-                last_msg = inst.conversation[-1]
-                if msg_field(last_msg, 'role') == ASSISTANT:
-                    inst._continue_saved_msg = inst.conversation.pop()
-
-        history_copy = copy.deepcopy(inst.conversation)
+            history_copy = list(inst.conversation)
 
         self._start_gen_thread(history_copy=history_copy, instance_name=instance_name)
         await self._broadcast(generating=True)
@@ -604,15 +540,12 @@ class WsMessageHandler:
             await self._broadcast()
 
     async def handle_retry(self, data: dict) -> None:
-        """Handle 'retry' — trim tail, roll back snapshots, re-enqueue message."""
+        """Handle 'retry' — remove trailing assistant/function messages, keep user message, send stack."""
         if self._is_generating():
             return
 
         self._apply_session_cfg(data)
         instance_name = self._resolve_instance_name(data)
-
-        last_user_msg = None
-        count_to_trim = 0
 
         # 1. Rollback all agents to start of last turn
         if self.agent_pool and self.session.get('last_turn_snapshots'):
@@ -621,24 +554,32 @@ class WsMessageHandler:
             )
             self._sync_sub_agent_states()
 
-        # 2. Trim trailing messages from target instance
+        # 2. Trim only trailing ASSISTANT/FUNCTION messages (leave user message in place)
         if self.agent_pool:
             inst = self.agent_pool.get_instance(instance_name)
             if inst is not None:
-                last_user_msg, count_to_trim = self._trim_trailing_messages(inst)
+                from agent_cascade.llm.schema import ASSISTANT, FUNCTION
+                from agent_cascade.utils.utils import msg_field
 
-                if count_to_trim > 0:
+                count = 0
+                while inst.conversation and count < len(inst.conversation):
+                    if msg_field(inst.conversation[-1 - count], 'role') in (ASSISTANT, FUNCTION):
+                        count += 1
+                    else:
+                        break
+
+                if count > 0:
                     self.agent_pool._rollback_instance(
                         instance_name,
-                        pop_count=count_to_trim,
+                        pop_count=count,
                         sync_logger=True,
                         preserve_system_user=False,
-                        reason="User retry: trim trailing messages",
+                        reason="User retry: trim trailing assistant/function messages",
                     )
 
         # Early exit if no usable state
         inst = self.agent_pool.get_instance(instance_name) if self.agent_pool else None
-        if (not inst or not inst.conversation) and not last_user_msg:
+        if not inst or not inst.conversation:
             await self._broadcast()
             return
 
@@ -646,10 +587,6 @@ class WsMessageHandler:
             # Clear active tools/agent stack
             self.agent_pool.active_stack_clear()
             self.agent_pool.last_tool_args.clear()
-
-            # 3. Re-insert the user message
-            if last_user_msg:
-                self._reinsert_message(instance_name, last_user_msg)
 
         self._start_gen_thread(instance_name=instance_name)
         await self._broadcast(generating=True)

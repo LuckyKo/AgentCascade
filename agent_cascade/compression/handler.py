@@ -480,7 +480,7 @@ class CompressionHandler:
                     # which would violate OpenAI API alternation rules (consecutive USER messages after marker).
                     notification_text = (
                         f"[SYSTEM] Context exceeded {usage_pct:.1f}%. "
-                        f"Forced compression applied. Continue your work — context has been preserved."
+                        f"Forced compression applied, full context has been preserved in your jsonl log. Continue your work."
                     )
 
                     self._sync_logger_after_compression(inst_name, instance.agent_class, "forced compression", instance)

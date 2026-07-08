@@ -50,7 +50,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] max tokens does not change when a new API endpoint is acquired 
 - [x] make llm sampler options toggleable per entry (add a toggle on the right side of each one); add custom sampling toggle per API endpoint; move vision enabled per API endpoint — DONE: added use_custom_sampling flag, all 8 sampler params to dataclass + UI, vision toggle in header, collapsible sampling section
 - [x] we have about 10-15% discrepancy (less) between the nr of tokens we measure and the actual count that LMStudio processes — FIXED: reasoning_content now always counted, all magic numbers centralized in settings.py 
-- [ ] images don't get properly pasted in chat
+- [x] images don't get properly pasted in chat
 - [ ] add auto-rollback feature on edit_file fail
 - [ ] agent tab needs refresh when switching to it from another
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent once it reached conclusion
