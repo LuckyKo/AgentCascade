@@ -548,6 +548,7 @@ def create_app(agents, agent_pool, config=None):
                 'max_tokens': fallback_max_tokens,
                 'summary': '',
                 'has_queued_messages': has_queued,
+                'queued_messages': agent_pool.get_queue_previews(instance_name) or [],
                 'stopped': stopped,
                 'paused': agent_pool.is_paused() if agent_pool else False,
                 'agents': agents_list,
@@ -888,7 +889,7 @@ def create_app(agents, agent_pool, config=None):
             return build_state()
         except Exception as e:
             logger.warning("State build failed: %s", e, exc_info=True)
-            return {"agents": [], "messages": [], "agent_instances": {}, "instances": {}, "active_stack": [], "generating": False, "session_name": "Maine", "instance_name": "Maine", "total_tokens": 0, "total_words": 0, "max_tokens": 2048, "summary": "", "has_queued_messages": False, "stopped": False, "current_model": "Unknown", "telemetry": None, "default_workspace": str(DEFAULT_WORKSPACE), "is_waiting": False, "api_router": {"endpoints": [], "agent_priorities": {}}}
+            return {"agents": [], "messages": [], "agent_instances": {}, "instances": {}, "active_stack": [], "generating": False, "session_name": "Maine", "instance_name": "Maine", "total_tokens": 0, "total_words": 0, "max_tokens": 2048, "summary": "", "has_queued_messages": False, "queued_messages": [], "stopped": False, "current_model": "Unknown", "telemetry": None, "default_workspace": str(DEFAULT_WORKSPACE), "is_waiting": False, "api_router": {"endpoints": [], "agent_priorities": {}}}
 
     @app.post("/api/reset")
     async def api_reset():

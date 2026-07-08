@@ -292,6 +292,7 @@ class AgentPool:
         # Maintained for agent_invoker.py and session rename patterns.
         self.instance_state: Dict[str, dict] = {}
         self.message_queues: Dict[str, List[str]] = {}     # per-agent message queues
+        self._queue_lock = threading.Lock()                # Protects message_queues mutations
 
         # ── Async Tools Infrastructure (SLEEPING state support) ─────────────
         # These attributes support the SLEEPING state guard for async background tools.
@@ -528,7 +529,8 @@ class AgentPool:
         self._instances_version += 1  # Fix #3: signal that instances changed
         self.instances.pop(instance_name, None)
         self.terminated_instances.discard(instance_name)  # Issue #4 fix: prevent memory leaks
-        self.message_queues.pop(instance_name, None)
+        with self._queue_lock:
+            self.message_queues.pop(instance_name, None)
         # Clean up mapping's dict storage to prevent stale keys
         if hasattr(self, '_instance_conversations'):
             try:
@@ -646,11 +648,12 @@ class AgentPool:
                 logger.debug(f"Draining async results for {instance_name} failed (non-critical): {e}")
 
         # Clear message queue to prevent stale messages from being processed
-        if instance_name in self.message_queues:
-            try:
-                self.message_queues[instance_name].clear()
-            except Exception as e:
-                logger.debug(f"Clearing message queue for {instance_name} failed (non-critical): {e}")
+        with self._queue_lock:
+            if instance_name in self.message_queues:
+                try:
+                    self.message_queues[instance_name].clear()
+                except Exception as e:
+                    logger.debug(f"Clearing message queue for {instance_name} failed (non-critical): {e}")
 
         # Clear _streaming_responses to discard half-completed LLM output.
         # Without this, the streaming UI keeps showing partial content from a terminated agent.
@@ -985,12 +988,13 @@ class AgentPool:
                         instance._last_config_version = 0  # Force rebuild
                         cache_cleared += 1
                 # Clear message queue for this instance
-                if inst_name in self.message_queues:
-                    try:
-                        self.message_queues[inst_name].clear()
-                        queue_cleared += 1
-                    except Exception:
-                        pass
+                with self._queue_lock:
+                    if inst_name in self.message_queues:
+                        try:
+                            self.message_queues[inst_name].clear()
+                            queue_cleared += 1
+                        except Exception:
+                            pass
                 # Drain async results buffer
                 if hasattr(self, '_async_results'):
                     try:
@@ -1765,11 +1769,13 @@ class AgentPool:
 
     def send_message(self, from_name: str, to_name: str, text: str):
         """Route a message to an agent."""
-        self.message_queues.setdefault(to_name, []).append(text)
+        with self._queue_lock:
+            self.message_queues.setdefault(to_name, []).append(text)
 
     def enqueue_message(self, instance_name: str, text: str):
         """Push a message into a specific agent's queue (no sender tracking)."""
-        self.message_queues.setdefault(instance_name, []).append(text)
+        with self._queue_lock:
+            self.message_queues.setdefault(instance_name, []).append(text)
         self._mark_activity(instance_name)
 
     def drain_queue(self, instance_name: str) -> List[str]:
@@ -1788,11 +1794,59 @@ class AgentPool:
             List of message texts (may be empty). Original queue is cleared.
         """
         # Atomic pop ensures thread-safe batched drain
-        return self.message_queues.pop(instance_name, [])
+        with self._queue_lock:
+            return self.message_queues.pop(instance_name, [])
 
     def has_messages(self, instance_name: str) -> bool:
         """Check if there are pending messages for an instance."""
-        return bool(self.message_queues.get(instance_name))
+        with self._queue_lock:
+            return bool(self.message_queues.get(instance_name))
+
+    def get_queue_previews(self, instance_name: str, max_length: int = 100) -> list:
+        """Get truncated previews of queued messages for an instance.
+
+        Args:
+            instance_name: The agent instance name to query.
+            max_length: Maximum character length per preview string.
+
+        Returns:
+            List of truncated message strings (empty if no queue).
+        """
+        with self._queue_lock:
+            queue = list(self.message_queues.get(instance_name, []))
+        return [
+            msg[:max_length] + ('...' if len(msg) > max_length else '')
+            for msg in queue
+        ]
+
+    def dismiss_queue_message(self, instance_name: str, message_index: int) -> bool:
+        """Remove a specific message from the queue by index.
+
+        Args:
+            instance_name: The agent instance name.
+            message_index: Index of the message to remove (0-based).
+                          Use -1 to clear all queued messages.
+
+        Returns:
+            True if a message was removed, False otherwise.
+        """
+        with self._queue_lock:
+            queue = self.message_queues.get(instance_name)
+            if queue is None or len(queue) == 0:
+                return False
+
+            if message_index == -1:
+                # Clear all queued messages for this instance
+                self.message_queues.pop(instance_name, None)
+                return True
+
+            if 0 <= message_index < len(queue):
+                queue.pop(message_index)
+                if not queue:
+                    self.message_queues.pop(instance_name, None)
+                return True
+
+        return False
 
     # ── Async Results Buffer (SLEEPING state support) ───────────────────────
 

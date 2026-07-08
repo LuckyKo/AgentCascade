@@ -99,6 +99,7 @@ class WsMessageHandler:
             'set_session_name': self.handle_set_session_name,
             'load_session': self.handle_load_session,
             'inject': self.handle_inject,
+            'dismiss_queue': self.handle_dismiss_queue,
         }
 
     # ── Public dispatch entry point ───────────────────────────────────────
@@ -868,5 +869,25 @@ class WsMessageHandler:
         target = data.get('target_agent') or self.session.get('session_name', 'Maine')
         if text and self.agent_pool:
             self.agent_pool.enqueue_message(target, text)
+
+    async def handle_dismiss_queue(self, data: dict) -> None:
+        """Handle 'dismiss_queue' — remove a queued message by index.
+
+        Client sends: {"type": "dismiss_queue", "instance_name": "...", "message_index": N}
+        Use message_index=-1 to clear all queued messages for the instance.
+        """
+        if not self.agent_pool:
+            return
+
+        instance_name = data.get('instance_name') or self.session.get('session_name', 'Maine')
+        try:
+            message_index = int(data.get('message_index', 0))
+        except (ValueError, TypeError):
+            logger.debug(f"Invalid message_index in dismiss_queue: {data.get('message_index')}")
+            return
+
+        removed = self.agent_pool.dismiss_queue_message(instance_name, message_index)
+        if removed:
+            await self._broadcast()
 
     # ── Internal helpers (none needed — SecurityAdvisorHandler handles everything) ──

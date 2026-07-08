@@ -708,6 +708,99 @@ body {
   opacity: 0.7;
 }
 
+/* ─── Queue Banner ────────────────────────────────────────────────────────── */
+
+.queue-banner {
+  position: sticky;
+  bottom: calc(var(--input-area-height, 120px) + 8px);
+  margin: 0 8px;
+  padding: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  max-height: 200px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  z-index: 11;
+}
+
+.queue-banner-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--bg-elevated);
+  margin-bottom: 6px;
+  flex-shrink: 0;
+}
+
+.queue-banner-title {
+  font-size: 12px;
+  font-weight: bold;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.queue-message-list {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.queue-message-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 4px 6px;
+  margin-bottom: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.queue-message-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.queue-message-dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: bold;
+  padding: 0 4px;
+  line-height: 1;
+  transition: color 0.15s;
+}
+
+.queue-message-dismiss:hover {
+  color: #ff6b6b;
+}
+
+.btn-small {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--bg-elevated);
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-small:hover {
+  color: #ff6b6b;
+  border-color: #ff6b6b;
+}
+
 /* ─── Right Panel ─────────────────────────────────────────────────────────── */
 
 .side-panel {

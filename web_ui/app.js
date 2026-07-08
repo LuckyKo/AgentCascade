@@ -186,6 +186,10 @@ const ActivityBar = {
   lastRenderTime: 0, // Throttle timer for render()
   _lastPushTime: 0,      // Throttle timer for pushImmediate()
   
+  // Queue banner refs
+  queueBanner: null,       // DOM ref to #queueBanner
+  queueMessageList: null,  // DOM ref to #queueMessageList
+  
   // Cached values for pushImmediate dedup (avoids JSON.stringify overhead)
   _dedupInstance: null,
   _dedupPreview: '',
@@ -198,6 +202,30 @@ const ActivityBar = {
     if (this.el) {
       this.fifoEl = this.el.querySelector('.activity-fifo');
       this.queuedEl = this.el.querySelector('.activity-queued');
+    }
+    
+    // Queue banner initialization
+    this.queueBanner = document.getElementById('queueBanner');
+    this.queueMessageList = document.getElementById('queueMessageList');
+    if (this.queueMessageList) {
+      this.queueMessageList.addEventListener('click', (e) => {
+        const dismissBtn = e.target.closest('.queue-message-dismiss');
+        if (dismissBtn) {
+          const item = dismissBtn.closest('.queue-message-item');
+          if (item) {
+            const index = Array.from(this.queueMessageList.children).indexOf(item);
+            send({ type: 'dismiss_queue', instance_name: getActiveInstanceName(), message_index: index });
+          }
+        }
+      });
+    }
+    
+    const clearAllBtn = document.getElementById('clearAllQueueBtn');
+    if (clearAllBtn) {
+      clearAllBtn.addEventListener('click', () => {
+        // Send dismiss all via WebSocket (index -1 clears entire queue)
+        send({ type: 'dismiss_queue', instance_name: getActiveInstanceName(), message_index: -1 });
+      });
     }
   },
   
@@ -252,6 +280,9 @@ const ActivityBar = {
     if (this.queuedEl) {
       this.queuedEl.style.display = agentData?.has_queued_messages ? 'block' : 'none';
     }
+
+    // Render queue banner with actual message previews
+    this.renderQueueBanner(agentData?.queued_messages);
   },
   
   getFilterInstance() {
@@ -298,6 +329,42 @@ render(streamingText) {
     if (this.queuedEl) {
     this.queuedEl.style.display = agentData?.has_queued_messages ? 'block' : 'none';
     }
+
+    // Render queue banner with actual message previews
+    this.renderQueueBanner(agentData?.queued_messages);
+  },
+  
+  /** Render the queue banner showing queued messages with dismiss buttons */
+  renderQueueBanner(queuedMessages) {
+    if (!this.queueBanner || !this.queueMessageList) return;
+
+    // Hide banner if no queued messages
+    if (!queuedMessages || queuedMessages.length === 0) {
+      this.queueBanner.style.display = 'none';
+      return;
+    }
+
+    this.queueBanner.style.display = 'flex';
+    this.queueMessageList.innerHTML = '';
+
+    queuedMessages.forEach((msg) => {
+      const item = document.createElement('div');
+      item.className = 'queue-message-item';
+
+      const textSpan = document.createElement('span');
+      textSpan.className = 'queue-message-text';
+      textSpan.textContent = msg;
+      textSpan.title = msg; // Full message on hover
+
+      const dismissBtn = document.createElement('button');
+      dismissBtn.className = 'queue-message-dismiss';
+      dismissBtn.textContent = '✕';
+      dismissBtn.title = 'Dismiss this queued message';
+
+      item.appendChild(textSpan);
+      item.appendChild(dismissBtn);
+      this.queueMessageList.appendChild(item);
+    });
   }
 };
 
@@ -1224,7 +1291,7 @@ function handleServerMessage(data) {
               // during content streaming, history_count stays constant while message content grows.
               if (hCount < (existing._lastHistoryCount || 0)) {
                  // Stale: only sync metadata fields explicitly, don't touch message array.
-                 const metaFields = ['active', 'is_halted', 'agent_class', 'has_queued_messages', 'is_waiting'];
+                 const metaFields = ['active', 'is_halted', 'agent_class', 'has_queued_messages', 'queued_messages', 'is_waiting'];
                  for (const f of metaFields) {
                    if (sa[f] !== undefined) existing[f] = sa[f];
                  }
@@ -2928,6 +2995,16 @@ function switchMainTab(tabId) {
   state.activeSubTab = tabId;
   ActivityBar.setActiveTab(tabId);
   
+  // Invalidate target panel's content key cache to force a full re-render.
+  // Without this, if the agent didn't receive new messages while hidden,
+  // the content key matches and ALL rendering is skipped (including activity bar
+  // updates, context bar updates, and status bar updates). This ensures the
+  // visible tab always gets a proper render on tab switch.
+  if (panel) {
+    delete panel.dataset.contentKey;
+    delete panel.dataset.lastRenderedCount;
+  }
+  
   // Reset throttle timer so the new tab renders immediately
   state.genStats.lastSubAgentRender = 0;
   
@@ -2938,8 +3015,9 @@ function switchMainTab(tabId) {
   // we tried to add 'active' above — re-apply now that they've been created.)
   const targetTab = mainTabBar.querySelector(`.main-tab[data-tab="${tabId}"]`);
   if (targetTab) targetTab.classList.add('active');
-  const targetPanel = document.getElementById('panelSub-' + name);
-  if (targetPanel) targetPanel.classList.add('active');
+  // Re-query in case panel was just created by renderSubAgents() for a new agent
+  const finalPanel = document.getElementById('panelSub-' + name);
+  if (finalPanel) finalPanel.classList.add('active');
 }
 
 // Root tab is now created dynamically via renderSubAgents() — no static wiring needed

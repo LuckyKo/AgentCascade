@@ -161,6 +161,15 @@
           <div class="activity-queued" style="display:none;">⚡ Queued</div>
         </div>
 
+        <!-- Queue Banner (shows queued messages with dismiss buttons) -->
+        <div id="queueBanner" class="queue-banner" style="display:none;">
+          <div class="queue-banner-header">
+            <span class="queue-banner-title">⚡ Queued Messages</span>
+            <button id="clearAllQueueBtn" class="btn btn-small" title="Clear all queued messages">Clear All</button>
+          </div>
+          <div id="queueMessageList" class="queue-message-list"></div>
+        </div>
+
         <!-- Input area (outside tab panels so it's always visible) -->
         <div class="input-area">
           <div class="input-wrapper">

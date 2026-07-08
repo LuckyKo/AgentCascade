@@ -741,6 +741,7 @@ def build_state_from_pool(
         'max_tokens': max_tokens,
         'summary': current_summary,
         'has_queued_messages': pool.has_messages(instance_name),
+        'queued_messages': pool.get_queue_previews(instance_name) if pool else [],
         'stopped': pool.stopped,
         'paused': pool.is_paused(),  # Pause state for frontend "Paused" indicator
         # Extra fields for frontend display
@@ -1301,6 +1302,7 @@ def _serialize_instance(
         'is_halted': pool.is_instance_halted(inst.instance_name),
         'parent_instance': inst.parent_instance,
         'has_queued_messages': pool.has_messages(inst.instance_name),
+        'queued_messages': pool.get_queue_previews(inst.instance_name) if pool else [],
         # Include is_waiting so ActivityBar can show "Waiting for API slot..."
         'is_waiting': _check_is_waiting(pool, inst.instance_name),
     }
@@ -1643,6 +1645,7 @@ def get_agent_state_from_pool(
         'is_halted': pool.is_instance_halted(instance_name),
         'parent_instance': instance.parent_instance,
         'has_queued_messages': pool.has_messages(instance_name),
+        'queued_messages': pool.get_queue_previews(instance_name) if pool else [],
         'compression_summary': instance.compression_summary,
         'message_count': msg_count,
     }
