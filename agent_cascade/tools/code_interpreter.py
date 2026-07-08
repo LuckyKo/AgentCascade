@@ -97,6 +97,22 @@ _STALE_CONTAINERS: Dict[str, dict] = {}
 # TTL for stale containers in seconds (10 minutes)
 STALE_CONTAINER_TTL = int(os.getenv('M6_CODE_INTERPRETER_STALE_TTL', '600'))
 
+# Mount point prefixes for extra work folders (used consistently across validation and mounting)
+EXTRA_RW_MOUNT_PREFIX = '/extra_rw_'
+EXTRA_RO_MOUNT_PREFIX = '/extra_ro_'
+
+
+def _normalize_path_for_docker(path: str) -> str:
+    """Convert host path to Docker-compatible format.
+
+    On Windows, Docker expects forward slashes in mount specifications.
+    This converts backslashes to forward slashes so paths like N:\\work become N:/work.
+    On Linux/macOS the path is returned unchanged.
+    """
+    if os.name == 'nt':
+        return path.replace('\\', '/')
+    return path
+
 
 def _check_container_healthy(container_id: str) -> bool:
     """Check if a Docker container exists and is running via docker inspect.
@@ -1025,6 +1041,43 @@ class CodeInterpreter(BaseToolWithFileAccess):
             extra_ro = list(self.extra_work_folders_ro)
         return extra_rw, extra_ro
 
+    def _process_extra_folders(
+        self, folders: List[str], allowed_prefixes: set, is_ro: bool
+    ) -> List[dict]:
+        """Validate and resolve extra work folders into mount entries.
+
+        Each folder is resolved via realpath (symlink-safe), checked for existence,
+        validated against allowed prefixes, and returned as a dict with Docker-ready
+        host paths (normalized for Windows) and container mount points.
+
+        Args:
+            folders: List of folder paths to process.
+            allowed_prefixes: Set of allowed real-path prefixes for security check.
+            is_ro: True for read-only mounts, False for read-write.
+        Returns:
+            List of {'host': ..., 'container': ...} dicts for valid folders.
+        """
+        mounted = []
+        prefix = EXTRA_RO_MOUNT_PREFIX if is_ro else EXTRA_RW_MOUNT_PREFIX
+        label = "RO" if is_ro else "RW"
+
+        for folder_path in folders:
+            resolved = os.path.realpath(folder_path)  # resolve symlinks
+            if not os.path.isdir(resolved):
+                logger.warning("Extra %s mount path does not exist, skipping: %s", label, resolved)
+                continue
+            if not self._is_path_allowed(resolved, allowed_prefixes):
+                logger.warning(
+                    "Extra %s mount path %s is outside allowed directories, skipping", label, resolved
+                )
+                continue
+            # Normalize host path for Docker (Windows backslash → forward slash)
+            docker_host = _normalize_path_for_docker(resolved)
+            mount_point = f"{prefix}{len(mounted)}"
+            mounted.append({'host': docker_host, 'container': mount_point})
+
+        return mounted
+
     def _build_path_mapping(self, kernel_id: str, mounted_rw: List[dict], mounted_ro: List[dict]) -> dict:
         """Build the path mapping dict for a kernel.
         
@@ -1041,19 +1094,24 @@ class CodeInterpreter(BaseToolWithFileAccess):
             'extra_ro': [m['container'] for m in mounted_ro],
         }
         path_mapping['host_to_container'] = {}
+        # Use realpath consistently (matches validation path resolution) and normalize for Docker
+        work_host = _normalize_path_for_docker(
+            os.path.realpath(self.work_dir) if self.work_dir else ''
+        )
         path_mapping['host_to_container']['work_dir'] = {
-            'host': os.path.abspath(self.work_dir),
+            'host': work_host,
             'container': self.container_work_dir,
         }
+        # Mapping keys strip the leading '/' from mount points (e.g., '/extra_rw_0' → 'extra_rw_0')
         for i, m in enumerate(mounted_rw):
-            key = f'extra_rw_{i}'
+            key = f'{EXTRA_RW_MOUNT_PREFIX.strip("/")}{i}'
             path_mapping['host_to_container'][key] = {
                 'host': m['host'],
                 'container': m['container'],
                 'access': 'read-write',
             }
         for i, m in enumerate(mounted_ro):
-            key = f'extra_ro_{i}'
+            key = f'{EXTRA_RO_MOUNT_PREFIX.strip("/")}{i}'
             path_mapping['host_to_container'][key] = {
                 'host': m['host'],
                 'container': m['container'],
@@ -1198,43 +1256,17 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Resolve extra folders dynamically (picks up runtime config changes if operation_manager is set)
         extra_rw, extra_ro = self._resolve_extra_folders()
 
-        # Track which extra folders were actually mounted (for path mapping)
-        mounted_rw = []
-        mounted_ro = []
-
-        # Allowed prefixes for path security validation — prevent mounting arbitrary host paths
-        # Use work_dir as the allowed root; also add extra folder paths themselves since they
-        # come from trusted config and may be siblings of work_dir (not children)
+        # Allowed prefixes for path security validation — prevent mounting arbitrary host paths.
+        # Include work_dir as root; extra folders may be siblings of work_dir, not children.
         allowed_prefixes = {os.path.realpath(self.work_dir)} if self.work_dir else set()
         for fp in [*extra_rw, *extra_ro]:
-            rp = os.path.realpath(fp)
-            allowed_prefixes.add(rp)
+            allowed_prefixes.add(os.path.realpath(fp))
 
-        # Mount extra RW work folders as /extra_rw_0, /extra_rw_1, etc.
-        for folder_path in extra_rw:
-            abs_path = os.path.realpath(folder_path)  # resolves symlinks for security check
-            if not os.path.isdir(abs_path):
-                logger.warning("Extra RW mount path does not exist, skipping: %s", abs_path)
-                continue
-            if not self._is_path_allowed(abs_path, allowed_prefixes):
-                logger.warning("Extra RW mount path %s is outside allowed directories, skipping", abs_path)
-                continue
-            mount_point = f'/extra_rw_{len(mounted_rw)}'
-            mounted_rw.append({'host': abs_path, 'container': mount_point})
+        # Validate and resolve extra folders into mount entries (deduplicated helper)
+        mounted_rw = self._process_extra_folders(extra_rw, allowed_prefixes, is_ro=False)
+        mounted_ro = self._process_extra_folders(extra_ro, allowed_prefixes, is_ro=True)
 
-        # Mount extra RO work folders as /extra_ro_0, /extra_ro_1, etc. (read-only)
-        for folder_path in extra_ro:
-            abs_path = os.path.realpath(folder_path)  # resolves symlinks for security check
-            if not os.path.isdir(abs_path):
-                logger.warning("Extra RO mount path does not exist, skipping: %s", abs_path)
-                continue
-            if not self._is_path_allowed(abs_path, allowed_prefixes):
-                logger.warning("Extra RO mount path %s is outside allowed directories, skipping", abs_path)
-                continue
-            mount_point = f'/extra_ro_{len(mounted_ro)}'
-            mounted_ro.append({'host': abs_path, 'container': mount_point})
-
-        # Create path mapping data (file is written AFTER container starts to avoid orphaned files)
+        # Build path mapping data (written AFTER container starts to avoid orphaned files)
         path_mapping = self._build_path_mapping(kernel_id, mounted_rw, mounted_ro)
         path_mapping_file = os.path.join(self.work_dir, f'path_mapping_{kernel_id}.json')
 
@@ -1258,20 +1290,18 @@ class CodeInterpreter(BaseToolWithFileAccess):
             '--pids-limit=' + str(CONTAINER_PID_LIMIT),
         ]
 
-        # Mount extra RW work folders as /extra_rw_0, /extra_rw_1, etc.
-        # NOTE: These mounts are added BEFORE the main work_dir mount so Docker processes
-        # the more specific paths first, avoiding overlay filesystem stacking issues where
-        # writes to subdirectories don't persist back to the host disk (Fix MountStacking).
+        # Add extra mounts BEFORE the main work_dir so Docker processes more specific
+        # paths first, avoiding overlay filesystem stacking issues (Fix MountStacking).
         for entry in mounted_rw:
             docker_run_cmd.extend(['-v', f"{entry['host']}:{entry['container']}"])
 
-        # Mount extra RO work folders as /extra_ro_0, /extra_ro_1, etc. (read-only)
         for entry in mounted_ro:
             docker_run_cmd.extend(['-v', f"{entry['host']}:{entry['container']}:ro"])
 
         # Mount main work directory AFTER extra mounts so specific subdirectory mounts take precedence.
+        # Use realpath (consistent with validation) and normalize for Docker on Windows.
         docker_run_cmd.extend([
-            '-v', f'{os.path.abspath(self.work_dir)}:{self.container_work_dir}',
+            '-v', f'{_normalize_path_for_docker(os.path.realpath(self.work_dir))}:{self.container_work_dir}',
             '-w', self.container_work_dir,
         ])
 
@@ -1342,18 +1372,19 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Read original ports from existing connection file BEFORE deleting it.
         # The container has fixed port bindings that we must reuse for traffic forwarding.
         original_ports = None
-        if os.path.exists(host_connection_file):
-            try:
-                with open(host_connection_file, 'r') as f:
-                    old_conn_data = json.load(f)
-                port_names = ['shell_port', 'iopub_port', 'stdin_port', 'hb_port', 'control_port']
-                original_ports = [old_conn_data.get(p) for p in port_names]
-                if None in original_ports:
-                    logger.warning(f"Warm restart: incomplete port data in connection file, falling back to full start")
-                    raise RuntimeError("Invalid connection file, cannot reuse ports")
-            except Exception as e:
-                logger.warning(f"Warm restart: failed to read old connection file ({e}), falling back to full start")
-                raise RuntimeError("Failed to read connection file, cannot reuse ports")
+        try:
+            with open(host_connection_file, 'r') as f:
+                old_conn_data = json.load(f)
+            port_names = ['shell_port', 'iopub_port', 'stdin_port', 'hb_port', 'control_port']
+            original_ports = [old_conn_data.get(p) for p in port_names]
+            if None in original_ports:
+                logger.warning("Warm restart: incomplete port data, falling back to full start")
+                raise RuntimeError("Connection file missing required ports")
+        except FileNotFoundError:
+            pass  # No connection file yet; new ports will be assigned below
+        except Exception as e:
+            logger.warning(f"Warm restart: failed to read connection file ({e}), falling back to full start")
+            raise
 
         # Delete old connection files so we start fresh
         for f in [host_connection_file, container_connection_file]:
