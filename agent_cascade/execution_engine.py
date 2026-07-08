@@ -13,7 +13,6 @@ to specialized handlers (LifecycleManager, CompressionHandler, ToolDispatcher,
 StreamPublisher). Each phase method (~20-60 lines) is independently testable.
 """
 
-import asyncio
 import copy
 import json
 import os
@@ -2055,12 +2054,9 @@ class ExecutionEngine:
                     extra_generate_cfg=merged_cfg,
                 )
 
-            # Check if conversation has images requiring vision support
-            requires_vision = self._has_images(messages)
-
             # Pass _do_call directly — call_with_fallback handles generator lifecycle via finally blocks
             return self.pool.api_router.call_with_fallback(
-                agent_type, _do_call, allocated_tokens=allocated_tokens, requires_vision=requires_vision
+                agent_type, _do_call, allocated_tokens=allocated_tokens
             )
         else:
             # Direct call without router — same merge priority as fallback path:
