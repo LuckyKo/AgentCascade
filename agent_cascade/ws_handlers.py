@@ -572,7 +572,6 @@ class WsMessageHandler:
 
         instance_name = data.get('target_agent') or self.session['session_name']
 
-        # Initialize variables before the instance check to avoid undefined references
         last_user_msg = None
         count_to_trim = 0
 
@@ -590,8 +589,7 @@ class WsMessageHandler:
                             conv_snapshot = list(sa_inst.conversation)
                         self.agent_pool.instance_state[name]['messages'] = conv_snapshot
 
-        # Remove trailing assistant/function messages + the user message using unified rollback helper.
-        # The helper handles cache clearing and logger sync internally, so we skip manual sync steps.
+        # 2. Fetch the target instance once and trim trailing messages
         if self.agent_pool:
             inst = self.agent_pool.get_instance(instance_name)
             if inst is not None:
@@ -602,7 +600,6 @@ class WsMessageHandler:
                         and msg_field(inst.conversation[-1 - count_to_trim], 'role') in (ASSISTANT, FUNCTION):
                     count_to_trim += 1
 
-                # Check the message BEFORE the trailing assistant/function messages for USER role
                 if inst.conversation and count_to_trim < len(inst.conversation):
                     candidate_idx = len(inst.conversation) - 1 - count_to_trim
                     if msg_field(inst.conversation[candidate_idx], 'role') == USER:
@@ -614,12 +611,13 @@ class WsMessageHandler:
                         instance_name,
                         pop_count=count_to_trim,
                         sync_logger=True,
+                        preserve_system_user=False,  # Exact trim, no safety clamp
                         reason="User retry: trim trailing messages",
                     )
 
-        # Check if instance exists and has messages
+        # Early exit if no usable state exists (no instance with messages and no captured user msg)
         inst = self.agent_pool.get_instance(instance_name) if self.agent_pool else None
-        if not inst and not (inst.conversation if inst else []) and not last_user_msg:
+        if (not inst or not inst.conversation) and not last_user_msg:
             await self._broadcast()
             return
 
