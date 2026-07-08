@@ -1262,20 +1262,12 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # NOTE: These mounts are added BEFORE the main work_dir mount so Docker processes
         # the more specific paths first, avoiding overlay filesystem stacking issues where
         # writes to subdirectories don't persist back to the host disk (Fix MountStacking).
-        for folder_path in extra_rw:
-            abs_path = os.path.realpath(folder_path)
-            if not os.path.isdir(abs_path):
-                continue
-            mount_point = f'/extra_rw_{len(mounted_rw)}'
-            docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}'])
+        for entry in mounted_rw:
+            docker_run_cmd.extend(['-v', f"{entry['host']}:{entry['container']}"])
 
         # Mount extra RO work folders as /extra_ro_0, /extra_ro_1, etc. (read-only)
-        for folder_path in extra_ro:
-            abs_path = os.path.realpath(folder_path)
-            if not os.path.isdir(abs_path):
-                continue
-            mount_point = f'/extra_ro_{len(mounted_ro)}'
-            docker_run_cmd.extend(['-v', f'{abs_path}:{mount_point}:ro'])
+        for entry in mounted_ro:
+            docker_run_cmd.extend(['-v', f"{entry['host']}:{entry['container']}:ro"])
 
         # Mount main work directory AFTER extra mounts so specific subdirectory mounts take precedence.
         docker_run_cmd.extend([
