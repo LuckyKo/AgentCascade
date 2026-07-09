@@ -142,13 +142,13 @@ class InnerLoopSettings:
 
     # Activation thresholds
     default_min_chars: int = 4000          # Min chars to accumulate before full detection
-    default_batch_interval: int = 1        # Run heavy checks every N-th feed call
+    default_batch_interval: int = 6        # Run heavy checks every N-th feed call
 
     # Structural parameters (passed to InnerLoopDetector constructor)
     ngram_size: int = 64                   # Token window size for n-gram repetition
     block_size: int = 128                  # Token window size for block repetition
     entropy_window: int = 128             # Token window for Shannon entropy calculation
-    char_run_limit: int = 70              # Max consecutive identical chars before alert
+    char_run_limit: int = 128              # Max consecutive identical chars before alert
     score_threshold: int = 200            # Cumulative score to trigger loop detection
 
     # Detection thresholds (hardcoded in detection logic)

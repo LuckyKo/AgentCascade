@@ -1508,7 +1508,7 @@ body {
   flex-shrink: 0;
   order: -1; /* Ensure approval bar renders before tab panels even when many tabs exist */
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-  animation: slide-down 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  animation: slide-down 0.3s cubic-bezier(0.4, 0, 0.2, 1) both;
   /* Position relative + z-index ensures approval bar renders above tab panels */
   position: relative;
 }
@@ -1516,6 +1516,12 @@ body {
 @keyframes slide-down {
   from { transform: translateY(-10px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
+}
+
+/* Prevent animation restart on every render tick — class-based visibility approach.
+   The .visible class is applied when the bar is shown, keeping final state stable. */
+.approval-bar.visible {
+  animation-fill-mode: forwards;
 }
 
 .approval-card {

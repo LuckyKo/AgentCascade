@@ -41,9 +41,10 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] session loading sometime merges the old session with the new (mostly on server restart). should properly clean old session on load, just like it does a new session then loads.
 - [x] agent tab needs refresh when switching to it from another — FIXED: invalidate panel contentKey/lastRenderedCount cache in switchMainTab() to force re-render on tab switch
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent once it reached conclusion
-- [ ] if user unchecked auto-ask while the security agent is running the approval window pops up correctly but its stuck in a weird flashing mode and cant press any button to approve/reject
+- [x] if user unchecks auto-ask while the security agent is running the approval window pops up correctly but its stuck in a weird fast flashing mode and cant press any button to approve/reject — FIXED: snapshot-based render skipping, DOM card preservation by request_id, CSS animation fill-mode fix, reentrancy guard, duplicate ID guard
 - [ ] telemetry `Avg TPS` is wrongly calculated, `Output Tokens (est)` also most likely undercounts
 - [ ] `REJECTED BY USER: SECURITY REJECTED:` is pre-pended to rejection messages when Security rejects it. it should properly distinguish when User or Security rejected it.
+- [ ] call_agent returns `[SYSTEM ERROR: Empty LLM response]` if the agent failed a inner loop check
 
 # Errors to investigate:
 
@@ -167,4 +168,3 @@ agent_cascade.llm.base.ModelServiceError: Maximum number of retries (2) exceeded
 2026-07-07 05:51:59,520 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 31788, Available tokens: 108931
 2026-07-07 05:52:25,720 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 33429, Available tokens: 108931
 2026-07-07 05:52:43,135 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 34803, Available tokens: 108931
-[x] FIXED: Added stdout_buf/stderr_buf buffering in `_execute_code()` and `_drain_iopub()` methods in `agent_cascade/tools/code_interpreter.py`. Stream messages now append to buffers and are flushed as single consolidated blocks after processing. All 7 unit tests passed.
