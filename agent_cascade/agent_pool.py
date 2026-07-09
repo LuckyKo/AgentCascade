@@ -1375,6 +1375,8 @@ class AgentPool:
                 existing._pending_notifications = []
                 # Clear tool warnings from previous session
                 existing._tool_warnings = []
+                # Clear cache notifications from previous session (parallel to above)
+                existing._cache_notifications = []
                 # Reset state to IDLE for loaded sessions (they're not actively running)
                 from agent_cascade.agent_instance import AgentState
                 existing.state = AgentState.IDLE
