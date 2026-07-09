@@ -60,6 +60,14 @@ class SystemInfo(BaseTool):
         history = kwargs.get('messages')
         agent_obj = kwargs.get('agent_obj')
         
+        # Resolve instance early for cache pool, template access, and max_context detection
+        inst = None
+        if hasattr(self, 'agent_pool') and self.agent_pool:
+            try:
+                inst = self.agent_pool.get_instance(agent_name)
+            except Exception as e:
+                logger.debug(f"Failed to get instance '{agent_name}': {e}")
+        
         # Fallback to agent pool if messages not in kwargs
         if not history and hasattr(self, 'agent_pool') and self.agent_pool:
             history = self.agent_pool.get_conversation(agent_name)
@@ -70,18 +78,10 @@ class SystemInfo(BaseTool):
         # Max context detection
         max_context = "Unknown"
         if agent_obj:
-            # Try to get instance from pool for _get_max_tokens method
-            instance = None
-            if hasattr(self, 'agent_pool') and self.agent_pool:
-                try:
-                    instance = self.agent_pool.get_instance(agent_name)
-                except Exception as e:
-                    logger.warning(f"Failed to retrieve instance '{agent_name}' from pool: {e}")
-            
             # _get_max_tokens requires an instance argument - use defensive guards
-            if hasattr(agent_obj, '_get_max_tokens') and instance is not None:
+            if hasattr(agent_obj, '_get_max_tokens') and inst is not None:
                 try:
-                    max_context = agent_obj._get_max_tokens(instance)
+                    max_context = agent_obj._get_max_tokens(inst)
                 except Exception as e:
                     logger.warning(f"Failed to call _get_max_tokens for {agent_name}: {e}")
             elif hasattr(agent_obj, 'llm') and hasattr(agent_obj.llm, 'cfg'):
@@ -105,18 +105,12 @@ class SystemInfo(BaseTool):
 
         # Tools information — Fix #6: Use template from pool for ExecutionEngine compatibility
         tools_str = ""
+        template = None
         if agent_obj:
-            # Try to get template from pool instead of assuming agent_obj has function_map
-            # This works for both Agent instances (Path A) and ExecutionEngine (Path B)
-            template = None
-            if hasattr(self, 'agent_pool') and self.agent_pool and hasattr(self.agent_pool, 'templates'):
-                try:
-                    inst = self.agent_pool.get_instance(agent_name)
-                    if inst:
-                        agent_class = getattr(inst, 'agent_class', 'orchestrator')
-                        template = self.agent_pool.get_template(agent_class)
-                except Exception as e:
-                    logger.debug(f"Failed to get template for {agent_name}: {e}")
+            # Reuse `inst` from early lookup to get template (works for both Agent and ExecutionEngine paths)
+            if inst is not None and hasattr(self.agent_pool, 'get_template'):
+                agent_class = getattr(inst, 'agent_class', 'orchestrator')
+                template = self.agent_pool.get_template(agent_class)
             
             # Fallback to agent_obj attributes if template not available
             if template and hasattr(template, 'function_map'):
@@ -133,10 +127,25 @@ class SystemInfo(BaseTool):
             tools_str = f"Available Tools: {', '.join(all_tools)}\n"
             tools_str += f"Enabled Tools: {', '.join(active_tools)}\n"
         
-        # Resolve Model and API base
+        # Update max_context from template if still Unknown
+        if max_context == "Unknown" and template and hasattr(template, 'llm') and template.llm:
+            from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
+            cfg = template.llm.cfg
+            max_context = cfg.get('generate_cfg', {}).get('max_input_tokens') or cfg.get('max_input_tokens') or DEFAULT_MAX_INPUT_TOKENS
+
+        # Resolve Model and API base — primary source is template.llm (works for ExecutionEngine path too)
         model = "Unknown"
         api_base = "Unknown"
-        if agent_obj and hasattr(agent_obj, 'llm') and agent_obj.llm:
+        
+        # Primary: template.llm (works for both Agent and ExecutionEngine paths)
+        if template and hasattr(template, 'llm') and template.llm:
+            model = getattr(template.llm, 'model', "Unknown") or "Unknown"
+            if hasattr(template.llm, 'cfg'):
+                cfg = template.llm.cfg
+                api_base = cfg.get('api_base') or cfg.get('base_url') or cfg.get('model_server') or "Unknown"
+        
+        # Fallback: agent_obj.llm (works when agent_obj is an Agent instance)
+        if model == "Unknown" and agent_obj and hasattr(agent_obj, 'llm') and agent_obj.llm:
             model = getattr(agent_obj.llm, 'model', "Unknown")
             if hasattr(agent_obj.llm, 'cfg'):
                 cfg = agent_obj.llm.cfg
