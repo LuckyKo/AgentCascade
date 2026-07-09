@@ -21,6 +21,7 @@ import time
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 from enum import Enum, auto
 
+from agent_cascade.agent_instance import ArgumentCachePool  # Cache pool for {USE_CACHED_ENTRY_N}
 from agent_cascade.settings import (
     COMPRESSION_DEFAULT_FRACTION,
     LLM_MAX_RETRIES,
@@ -38,6 +39,8 @@ from agent_cascade.tool_utils import (
     mark_tool_call_truncated,
     clear_truncation_state,
     generate_spillover_filename,
+    resolve_cached_entry_refs,
+    apply_cached_entry_resolutions,
 )
 # Import at module level for build_stream_update_from_pool (Minor #5 from review):
 # Python caches module imports in sys.modules, so this is not a performance concern.
@@ -57,7 +60,6 @@ from .stream_publisher import StreamPublisher
 from .loop_detection import detect_loop as _canonical_detect_loop
 from .inner_loop_detect import InnerLoopDetector, save_loop_sample
 from .operation_manager import set_current_instance_name, clear_current_instance_name
-
 
 # ── SleepAction Enum (Phase 3.1) ───────────────────────────────────────────────
 class SleepAction(Enum):
@@ -2413,6 +2415,12 @@ class ExecutionEngine:
                 # Non-string tool results bypass truncation and always report truncated=False.
                 _was_truncated = False
                 if isinstance(tool_result, str):
+                    # Cache full output BEFORE truncation (if exceeds threshold)
+                    self._cache_tool_output(
+                        inst_name, tool_name, tool_result,
+                        threshold=self.pool.settings.cache_threshold_chars
+                    )
+
                     _pre_trunc_len = len(tool_result)
                     # Phase 4.3: Delegate to ToolDispatcher
                     tool_result = self.tool_dispatcher.truncate_tool_result(
@@ -3136,6 +3144,37 @@ class ExecutionEngine:
     #  Tool Execution — unified path for ALL tools including call_agent
     # ═══════════════════════════════════════════════════════════════════════
 
+    def _ensure_cache_pool(self, instance_name: str) -> None:
+        """Lazily initialize the cache pool for an instance if not yet created.
+
+        Uses double-checked locking to prevent race conditions when multiple
+        threads try to initialize the same instance's cache pool simultaneously.
+
+        Args:
+            instance_name: The agent instance name.
+        """
+        inst = self.pool.get_instance(instance_name)
+        if inst is None:
+            return
+        # First check without lock (fast path for already-initialized pools)
+        if inst.cache_pool is not None:
+            return
+        # Second check with persistent per-instance lock to prevent race condition
+        lock = getattr(inst, '_cache_init_lock', None)
+        if lock is None:
+            import threading
+            inst._cache_init_lock = lock = threading.Lock()
+        with lock:
+            if inst.cache_pool is not None:
+                return  # Another thread initialized it while we waited
+            try:
+                inst.cache_pool = ArgumentCachePool(
+                    max_size=self.pool.settings.cache_pool_size,
+                )
+                inst.cache_pool.enabled = self.pool.settings.cache_pool_enabled
+            except Exception as e:
+                logger.debug(f"Failed to initialize cache pool for '{instance_name}': {e}")
+
     def _cache_tool_args(self, instance_name: str, tool_name: str, tool_args: Any) -> None:
         """Store resolved tool arguments in the per-instance cache for __USE_PREV_ARG__ reuse.
 
@@ -3143,6 +3182,8 @@ class ExecutionEngine:
         Each argument key is stored under the instance scope so that any
         subsequent tool call can reuse it by name — regardless of which tool
         originally provided it, or whether the previous call succeeded.
+
+        Additionally writes entries to the rolling cache pool for {USE_CACHED_ENTRY_N} resolution.
 
         Args:
             instance_name: The agent instance name (scope key).
@@ -3163,9 +3204,64 @@ class ExecutionEngine:
             # Defensive: pool may not have last_tool_args in unusual setups
             logger.warning(f"Failed to cache args for tool '{tool_name}' on instance '{instance_name}': deepcopy failed")
 
+        # ── Also add to rolling cache pool ──────────────────────────────────
+        self._ensure_cache_pool(instance_name)
+        inst = self.pool.get_instance(instance_name)
+        if inst is None or inst.cache_pool is None:
+            return
+
+        cp = inst.cache_pool
+        if not cp.enabled:
+            return
+
+        threshold = self.pool.settings.cache_threshold_chars
+
+        # 1. Cache entire args dict as one entry
+        try:
+            cp.add("arg", instance_name, tool_name, copy.deepcopy(tool_args))
+        except (TypeError, AttributeError):
+            pass
+
+        # 2. Also cache individual string values > threshold separately
+        for key, val in tool_args.items():
+            if isinstance(val, str) and len(val) > threshold:
+                try:
+                    cp.add("arg", instance_name, f"{tool_name}.{key}", val)
+                except (TypeError, AttributeError):
+                    pass
+
+    def _cache_tool_output(self, instance_name: str, tool_name: str,
+                           output: str, threshold: int = 1000) -> None:
+        """Cache tool output in the rolling pool if it exceeds the threshold.
+
+        Called BEFORE truncation so the full content is preserved.
+
+        Args:
+            instance_name: Agent instance name (scope key).
+            tool_name: Name of the tool that produced this output.
+            output: The tool result string (full, pre-truncation).
+            threshold: Minimum character count to trigger caching.
+        """
+        if not isinstance(output, str) or len(output) <= threshold:
+            return
+
+        self._ensure_cache_pool(instance_name)
+        inst = self.pool.get_instance(instance_name)
+        if inst is None or inst.cache_pool is None:
+            return
+
+        cp = inst.cache_pool
+        if not cp.enabled:
+            return
+
+        try:
+            cp.add("output", instance_name, tool_name, output)
+        except (TypeError, AttributeError):
+            pass
+
     def _resolve_placeholders(self, tool_args: Any, instance_name: str,
                               tool_name: str) -> Optional[dict]:
-        """Resolve __USE_PREV_ARG__ placeholders in tool arguments.
+        """Resolve __USE_PREV_ARG__ and {USE_CACHED_ENTRY_N} placeholders in tool arguments.
 
         If *tool_args* is a JSON string it is parsed first, then resolved.
         Resolution looks up each argument name in the global cache (which
@@ -3198,17 +3294,23 @@ class ExecutionEngine:
             logger.debug("unexpected type for %s/%s: %s", instance_name, tool_name, type(tool_args).__name__)
             return None  # Unexpected type — signal error
 
-        # ── Step 2: scan for placeholders (whitespace-tolerant) ────────────────
+        # ── Step 2: scan for BOTH placeholder types ─────────────────────────
         placeholders_found = [k for k, v in parsed.items()
                               if isinstance(v, str) and v.strip() == "__USE_PREV_ARG__"]
-        if not placeholders_found:
-            return parsed  # No placeholders — nothing to do
+
+        # Scan for {USE_CACHED_ENTRY_N} patterns using shared function (avoids regex recompilation + code duplication)
+        inst = self.pool.get_instance(instance_name)
+        cache_pool = getattr(inst, 'cache_pool', None) if inst else None
+        cached_refs = resolve_cached_entry_refs(parsed, cache_pool)
+
+        # Early return only if NO placeholders of either type found
+        if not placeholders_found and not cached_refs:
+            return parsed  # Nothing to resolve
 
         resolved_args = copy.deepcopy(parsed)
 
-        # ── Step 3: look up each placeholder by arg name ────────────────────
+        # ── Step 3a: resolve __USE_PREV_ARG__ (existing logic) ──────────────
         scope_cache = getattr(self.pool, 'last_tool_args', {}).get(instance_name, {})
-
         prev_args = scope_cache.get(tool_name)           # tool-specific fallback
         global_args = scope_cache.get("__GLOBAL__", {})  # primary lookup (all tools)
 
@@ -3219,6 +3321,9 @@ class ExecutionEngine:
             elif prev_args and arg_key in prev_args:
                 resolved_args[arg_key] = copy.deepcopy(prev_args[arg_key])
             # else: leave the placeholder as-is — no error, just pass through
+
+        # ── Step 3b: resolve {USE_CACHED_ENTRY_N} using shared function ─────
+        apply_cached_entry_resolutions(resolved_args, cached_refs)
 
         return resolved_args
 

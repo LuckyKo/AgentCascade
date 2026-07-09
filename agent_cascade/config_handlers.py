@@ -199,6 +199,48 @@ for _llm_key in LLM_CONFIG_KEYS:
         _handle_llm_config(ui_cfg, agent_pool, agents)
 
 
+# ── Cache pool config handlers ──────────────────────────────────────────
+
+@register_config_handler('cache_pool_enabled')
+def _handle_cache_pool_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle cache pool on/off and propagate to all running instances."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = bool(ui_cfg['cache_pool_enabled'])
+        agent_pool.settings.cache_pool_enabled = val
+        # Propagate toggle to all existing instance cache pools (thread-safe via lock)
+        for inst in agent_pool.instance_conversations.values():
+            cp = getattr(inst, 'cache_pool', None)
+            if cp is not None:
+                with cp._lock:
+                    cp.enabled = val
+
+
+@register_config_handler('cache_pool_size')
+def _handle_cache_pool_size(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update rolling buffer size for cache pools and propagate to existing instances."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(5, int(ui_cfg['cache_pool_size']))  # Min 5 entries to prevent useless pools
+        agent_pool.settings.cache_pool_size = val
+        # Propagate size change to all existing instance cache pools (thread-safe via lock)
+        for inst in agent_pool.instance_conversations.values():
+            cp = getattr(inst, 'cache_pool', None)
+            if cp is not None:
+                with cp._lock:
+                    # deque.maxlen is immutable; replace the entire deque preserving recent entries
+                    preserved = list(cp._entries)[-val:]
+                    from collections import deque as Deque
+                    cp._entries = Deque(preserved, maxlen=val)
+                    cp.max_size = val
+
+
+@register_config_handler('cache_threshold_chars')
+def _handle_cache_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update character threshold for output and granular arg caching."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(100, int(ui_cfg['cache_threshold_chars']))  # Min 100 chars
+        agent_pool.settings.cache_threshold_chars = val
+
+
 # ── Router class ─────────────────────────────────────────────────────────
 
 class ConfigUpdateRouter:

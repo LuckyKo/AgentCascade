@@ -209,6 +209,9 @@ class SystemInfo(BaseTool):
             f"{folders_info}"
             f"\n--- Session Stats ---\n"
             f"{stats_str}\n"
+            # Cache pool state section
+            f"\n--- Cache Pool State ---"
+            f"{f'\n{inst.cache_pool.get_state_summary(max_display=10)}' if inst is not None and hasattr(inst, 'cache_pool') and inst.cache_pool is not None else '  (not initialized)'}"
             f"\n--- Tool Policy ---\n"
             f"{tools_str}"
         )

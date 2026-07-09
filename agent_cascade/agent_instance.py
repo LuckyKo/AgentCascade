@@ -8,10 +8,12 @@ created in the pool with agent_class="Orchestrator".
 See DESIGN_REWRITE.md §2.1 for design rationale.
 """
 
+import json                           # NEW: for serializing non-string values in cache preview
 import threading
+from collections import deque         # NEW: rolling buffer for cache pool
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from agent_cascade.llm.schema import Message
 from agent_cascade.settings import (
@@ -55,6 +57,106 @@ class InvalidStateTransition(Exception):
         self.current_state = current_state
         self.new_state = new_state
         super().__init__(f"Invalid transition from {current_state.name} to {new_state.name}")
+
+
+# ── Cache Pool Data Structures ────────────────────────────────────────────────
+
+@dataclass(slots=True)
+class CacheEntry:
+    """Single entry in the argument/output cache pool.
+    
+    Stores a tool argument dict or output string along with metadata
+    for display and resolution via {USE_CACHED_ENTRY_N} syntax.
+    """
+    index: int                    # Sequential N for {USE_CACHED_ENTRY_N} (monotonic, never wraps)
+    category: str                 # "arg" or "output"
+    instance_name: str            # Which agent instance produced this
+    source_tool: str              # Tool name that generated this entry
+    value: Any                    # Full cached value (for resolution via deep copy)
+    preview: str                  # Truncated display string (< 200 chars)
+    char_count: int               # Length of full string representation
+
+
+class ArgumentCachePool:
+    """Thread-safe rolling cache pool for tool arguments and outputs.
+    
+    Per-instance scope with a fixed-size deque that wraps around,
+    overwriting oldest entries when the limit is reached.
+    
+    Indices grow monotonically (never reset). An evicted entry's index
+    becomes stale — lookups return None, which signals callers to leave
+    placeholders as-is.
+    """
+    __slots__ = ('_entries', '_lock', '_next_index', 'max_size', 'enabled')
+    
+    def __init__(self, max_size: int = 50):
+        self._entries: deque[CacheEntry] = deque(maxlen=max_size)
+        self._lock = threading.Lock()
+        self._next_index = 1          # Monotonically increasing (never wraps/reset)
+        self.max_size = max_size
+        self.enabled = True           # Toggle on/off
+    
+    def add(self, category: str, instance_name: str, source_tool: str,
+            value: Any) -> int:
+        """Add entry and return its index N. Returns -1 when disabled."""
+        # Serialize to string for preview/length — with error handling
+        try:
+            val_str = json.dumps(value) if not isinstance(value, str) else value
+        except (TypeError, ValueError):
+            # Fallback for unserializable objects (e.g., custom types, cycles)
+            val_str = str(value)
+
+        preview = (val_str[:197] + '...') if len(val_str) > 200 else val_str
+
+        with self._lock:
+            # Check enabled flag inside lock to avoid race with config toggle
+            if not self.enabled:
+                return -1
+
+            entry = CacheEntry(
+                index=self._next_index,
+                category=category,
+                instance_name=instance_name,
+                source_tool=source_tool,
+                value=value,
+                preview=preview,
+                char_count=len(val_str),
+            )
+            self._entries.append(entry)  # deque maxlen handles eviction automatically
+            idx = self._next_index
+            self._next_index += 1
+            return idx
+    
+    def get(self, index: int) -> Optional['CacheEntry']:
+        """Look up entry by its N index. Returns None if evicted or not found."""
+        with self._lock:
+            for entry in reversed(self._entries):
+                if entry.index == index:
+                    return entry
+            return None  # Entry was evicted (too old) — caller should leave placeholder as-is
+    
+    def get_state_summary(self, max_display: int = 10) -> str:
+        """Return truncated state string for system_info display."""
+        with self._lock:
+            entries = list(self._entries)
+        
+        if not entries:
+            return "  Cache Pool: empty\n"
+        
+        lines = [f"  Cache Pool: {len(entries)}/{self.max_size} entries (enabled={self.enabled})\n"]
+        # Show most recent entries first, up to max_display
+        display_entries = reversed(entries[:max_display])
+        for e in display_entries:
+            marker = "ARG" if e.category == "arg" else "OUT"
+            lines.append(f"    [N={e.index:>3}] [{marker}] {e.instance_name}/{e.source_tool} "
+                        f"({e.char_count} chars): {e.preview}")
+        
+        if len(entries) > max_display:
+            older = entries[max_display:]
+            indices = ", ".join(str(e.index) for e in older[:5])
+            lines.append(f"    ... and {len(older)} older entries (oldest: N={indices}...)")
+        
+        return "\n".join(lines)
 
 
 @dataclass(slots=True)
@@ -162,6 +264,11 @@ class AgentInstance:
     # Separate from _pending_notifications (compression-specific). Used by tools
     # like path resolution to queue warnings that are drained into tool results.
     _tool_warnings: List[str] = field(default_factory=list)  # Generic warning queue for tool responses
+
+    # ── Cache Pool (Feature: USE_PREV_ARG → full caching system) ────────────
+    # Initialized lazily by execution engine on first access to avoid issues with
+    # dataclass default_factory and threading. Each instance gets its own pool.
+    cache_pool: Optional['ArgumentCachePool'] = None
 
     # ── Centralized Message Mutation API (Phase 3) ───────────────────────
     # These methods encapsulate ALL conversation mutations, keeping cached lists
@@ -461,5 +568,10 @@ class PoolSettings:
 
     # Tail sync check (design doc §5.2 compliance — D1 fix)
     tail_sync_check_enabled: bool = True      # Enable lightweight tail-length checks after writes
+
+    # Cache pool settings (Feature: USE_PREV_ARG → full caching system)
+    cache_pool_enabled: bool = True            # Toggle on/off (default: enabled)
+    cache_pool_size: int = 50                  # Rolling buffer entries per instance
+    cache_threshold_chars: int = 1000          # Min chars for output & granular arg caching
     
     
