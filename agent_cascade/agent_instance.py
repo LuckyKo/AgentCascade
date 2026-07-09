@@ -265,6 +265,11 @@ class AgentInstance:
     # like path resolution to queue warnings that are drained into tool results.
     _tool_warnings: List[str] = field(default_factory=list)  # Generic warning queue for tool responses
 
+    # ── Cache Notification Queue ──────────────────────────────────────────────
+    # Parallel to _tool_warnings but for cache pool events. Drained into tool
+    # results so the agent knows when its args/outputs were cached by the system.
+    _cache_notifications: List[str] = field(default_factory=list)
+
     # ── Cache Pool (Feature: USE_PREV_ARG → full caching system) ────────────
     # Initialized lazily by execution engine on first access to avoid issues with
     # dataclass default_factory and threading. Each instance gets its own pool.
@@ -473,6 +478,7 @@ class AgentInstance:
             self._force_compress_count = 0
             self._pending_notifications = []
             self._tool_warnings = []
+            self._cache_notifications = []
 
     def clear_working_set_cache(self) -> None:
         """Clear working set cache without touching conversation.

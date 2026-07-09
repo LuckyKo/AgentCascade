@@ -248,8 +248,37 @@ class CompressionHandler:
                 text = f"{text}\n\n[TOOL WARNINGS]\n{warning_block}"
         return text
     
+    def _drain_cache_notifications(
+        self,
+        instance: 'AgentInstance',
+        text: str,
+    ) -> str:
+        """Drain cache pool notifications into a tool result string.
+
+        Called from execution_engine before constructing the FUNCTION message.
+        If there are pending cache notifications (e.g., args/outputs cached),
+        they are appended to the result and queue cleared.
+
+        Args:
+            instance: Agent instance with _cache_notifications attribute
+            text: The raw content string (or any object convertible to str)
+        Returns:
+            text with cache notifications appended (or unchanged if no pending)
+        """
+        # Copy and clear under lock, then do string ops outside the lock
+        with instance._compression_lock:
+            notifs = list(instance._cache_notifications)
+            instance._cache_notifications = []
+
+        if notifs:
+            if not isinstance(text, str):
+                text = str(text)
+            notif_block = "\n\n".join(str(n) for n in notifs)
+            text = f"{text}\n\n[CACHE INFO]\n{notif_block}"
+        return text
+
     # ── Logger Sync Helper (unified for all compression paths) ────────────────
-    
+
     def _sync_logger_after_compression(
         self,
         instance_name: str,

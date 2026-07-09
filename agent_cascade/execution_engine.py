@@ -577,10 +577,15 @@ class ExecutionEngine:
         # Drain pending compression notifications into the first USER message (in-tool-response pattern)
         if self.compression_handler and processed_messages:
             first_msg = processed_messages[0]
-            if isinstance(first_msg.content, str):
-                first_msg.content = self.compression_handler._drain_pending_into_user_message(instance, first_msg.content)
-                # Also drain generic tool warnings into USER messages (prepended)
-                first_msg.content = self.compression_handler._drain_tool_warnings(instance, first_msg.content, prepend=True)
+            try:
+                if isinstance(first_msg.content, str):
+                    first_msg.content = self.compression_handler._drain_pending_into_user_message(instance, first_msg.content)
+                    # Also drain generic tool warnings into USER messages (prepended)
+                    first_msg.content = self.compression_handler._drain_tool_warnings(instance, first_msg.content, prepend=True)
+                    # Also drain cache notifications into USER messages (appended)
+                    first_msg.content = self.compression_handler._drain_cache_notifications(instance, first_msg.content)
+            except Exception:
+                pass  # Don't let drain failures interfere with message injection
 
         with instance._compression_lock:
             for msg in processed_messages:
@@ -2469,6 +2474,7 @@ class ExecutionEngine:
                     try:
                         tool_result = self.compression_handler._drain_pending_into_tool_result(instance, tool_result)
                         tool_result = self.compression_handler._drain_tool_warnings(instance, tool_result)
+                        tool_result = self.compression_handler._drain_cache_notifications(instance, tool_result)
                     except Exception:
                         pass  # Don't let drain failures interfere with normal flow
 
@@ -3208,7 +3214,11 @@ class ExecutionEngine:
         # 1. Cache entire args dict as one entry (reuse the existing deep copy)
         if 'cached' in locals():
             try:
-                cp.add("arg", instance_name, tool_name, cached)
+                idx = cp.add("arg", instance_name, tool_name, cached)
+                with inst._compression_lock:
+                    inst._cache_notifications.append(
+                        f'[SYSTEM INFO] Tool args for "{tool_name}" cached at position N={idx}'
+                    )
             except (TypeError, AttributeError):
                 pass
 
@@ -3216,7 +3226,11 @@ class ExecutionEngine:
         for key, val in tool_args.items():
             if isinstance(val, str) and len(val) > threshold:
                 try:
-                    cp.add("arg", instance_name, f"{tool_name}.{key}", val)
+                    idx = cp.add("arg", instance_name, f"{tool_name}.{key}", val)
+                    with inst._compression_lock:
+                        inst._cache_notifications.append(
+                            f'[SYSTEM INFO] Argument "{key}" cached at position N={idx}'
+                        )
                 except (TypeError, AttributeError):
                     pass
 
@@ -3244,8 +3258,13 @@ class ExecutionEngine:
         if not cp.enabled:
             return
 
+        char_count = len(output)
         try:
-            cp.add("output", instance_name, tool_name, output)
+            idx = cp.add("output", instance_name, tool_name, output)
+            with inst._compression_lock:
+                inst._cache_notifications.append(
+                    f'[SYSTEM INFO] Tool output for "{tool_name}" ({char_count} chars) cached at position N={idx}'
+                )
         except (TypeError, AttributeError):
             pass
 
