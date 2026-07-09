@@ -185,6 +185,7 @@ const ActivityBar = {
   queuedEl: null,    // DOM ref to .activity-queued
   lastRenderTime: 0, // Throttle timer for render()
   _lastPushTime: 0,      // Throttle timer for pushImmediate()
+  _initialized: false,   // Guard against duplicate init calls
   
   // Queue banner refs
   queueBanner: null,       // DOM ref to #queueBanner
@@ -197,6 +198,8 @@ const ActivityBar = {
   _dedupTokens: 0,
   
   init() {
+    if (this._initialized) return;
+    this._initialized = true;
     this.el = document.getElementById('globalActivityBar');
     if (!this.el) console.warn('ActivityBar.init(): #globalActivityBar not found in DOM');
     if (this.el) {

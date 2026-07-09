@@ -993,8 +993,8 @@ class AgentPool:
                         try:
                             self.message_queues[inst_name].clear()
                             queue_cleared += 1
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"Queue clear failed for {inst_name}: {e}")
                 # Drain async results buffer
                 if hasattr(self, '_async_results'):
                     try:
