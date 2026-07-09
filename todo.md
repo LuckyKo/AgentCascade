@@ -167,37 +167,4 @@ agent_cascade.llm.base.ModelServiceError: Maximum number of retries (2) exceeded
 2026-07-07 05:51:59,520 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 31788, Available tokens: 108931
 2026-07-07 05:52:25,720 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 33429, Available tokens: 108931
 2026-07-07 05:52:43,135 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 34803, Available tokens: 108931
-
-# code_interpreter output splitting - should be merged in one block
-stdout:
-
-```
-2026-07-09 07:38:41,625 - log.py - 41 - INFO - done
-
-```
-
-stdout:
-
-```
-done
-```
-
-stdout:
-
-```
-
-
-```
-
-stderr:
-
-```
-[33mWARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.[0m[33m
-[0m
-[1m[[0m[34;49mnotice[0m[1;39;49m][0m[39;49m A new release of pip is available: [0m[31;49m25.0.1[0m[39;49m -> [0m[32;49m26.1.2[0m
-[1m[[0m[34;49mnotice[0m[1;39;49m][0m[39;49m To update, run: [0m[32;49mpip install --upgrade pip[0m
-
-```
-
-
-# EOF
+[x] FIXED: Added stdout_buf/stderr_buf buffering in `_execute_code()` and `_drain_iopub()` methods in `agent_cascade/tools/code_interpreter.py`. Stream messages now append to buffers and are flushed as single consolidated blocks after processing. All 7 unit tests passed.

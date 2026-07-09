@@ -891,7 +891,9 @@ class CodeInterpreter(BaseToolWithFileAccess):
             an idle status was received, and partial_output contains collected text.
         """
         interrupted = False
-        parts: list[str] = []
+        # Buffers to consolidate stdout/stderr into single blocks (fix output splitting bug)
+        drain_stdout: list[str] = []
+        drain_stderr: list[str] = []
         start = time.time()
         msg_count = 0
 
@@ -923,22 +925,31 @@ class CodeInterpreter(BaseToolWithFileAccess):
             elif mtype in ('execute_result', 'display_data'):
                 text = content['data'].get('text/plain', '')
                 if text:
-                    parts.append(f'\n\nstdout:\n```\n{text}\n```')
+                    drain_stdout.append(text)
             elif mtype == 'stream':
                 name = content['name']
                 text = content['text']
                 if text:
-                    parts.append(f'\n\n{name}:\n```\n{text}\n```')
+                    if name == 'stderr':
+                        drain_stderr.append(text)
+                    else:
+                        drain_stdout.append(text)
             elif mtype == 'error':
                 text = _escape_ansi('\n'.join(content['traceback']))
                 if text:
-                    parts.append(f'\n\nstderr:\n```\n{text}\n```')
+                    drain_stderr.append(text)
             else:
                 logger.debug(
                     f"IOPub drain: ignoring unknown msg type '{mtype}' "
                     f"for kernel {kernel_id}"
                 )
 
+        # Consolidate stdout/stderr into single blocks (fix output splitting bug)
+        parts = []
+        if drain_stdout:
+            parts.append(f'\n\nstdout:\n```\n{"".join(drain_stdout)}\n```')
+        if drain_stderr:
+            parts.append(f'\n\nstderr:\n```\n{"".join(drain_stderr)}\n```')
         partial_output = ''.join(parts) if parts else ''
         if len(partial_output) > drain_max_output_bytes:
             kept = partial_output[:drain_max_output_bytes - 50]
@@ -1495,6 +1506,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
         result = ''
         image_idx = 0
         
+        # Buffers to consolidate stdout/stderr into single blocks (fix output splitting bug)
+        stdout_buf: list[str] = []
+        stderr_buf: list[str] = []
+        
         # OVERALL wall-clock budget: prevents runaway execution when the kernel
         # keeps producing output (e.g. rglob scanning thousands of files). Each
         # individual message still has a per-message timeout to catch kernel hangs.
@@ -1562,8 +1577,13 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     else:
                         text = msg['content']['data'].get('text/plain', '')
                 elif msg_type == 'stream':
-                    msg_type = msg['content']['name']  # stdout, stderr
-                    text = msg['content']['text']
+                    name = msg['content']['name']  # stdout, stderr
+                    stream_text = msg['content']['text']
+                    if stream_text:
+                        if name == 'stderr':
+                            stderr_buf.append(stream_text)
+                        else:
+                            stdout_buf.append(stream_text)
                 elif msg_type == 'error':
                     text = _escape_ansi('\n'.join(msg['content']['traceback']))
                     if 'M6_CODE_INTERPRETER_TIMEOUT' in text:
@@ -1596,6 +1616,15 @@ class CodeInterpreter(BaseToolWithFileAccess):
                 result += f'\n\n{image}'
             if finished:
                 break
+        
+        # Flush consolidated stdout/stderr buffers as single blocks (fix output splitting bug)
+        if stdout_buf:
+            combined_stdout = ''.join(stdout_buf)
+            result += f'\n\nstdout:\n\n```\n{combined_stdout}\n```'
+        if stderr_buf:
+            combined_stderr = ''.join(stderr_buf)
+            result += f'\n\nstderr:\n\n```\n{combined_stderr}\n```'
+        
         result = result.lstrip('\n')
         return result
 
