@@ -892,8 +892,8 @@ class CodeInterpreter(BaseToolWithFileAccess):
         """
         interrupted = False
         # Buffers to consolidate stdout/stderr into single blocks (fix output splitting bug)
-        drain_stdout: list[str] = []
-        drain_stderr: list[str] = []
+        stdout_buf: list[str] = []
+        stderr_buf: list[str] = []
         start = time.time()
         msg_count = 0
 
@@ -925,19 +925,19 @@ class CodeInterpreter(BaseToolWithFileAccess):
             elif mtype in ('execute_result', 'display_data'):
                 text = content['data'].get('text/plain', '')
                 if text:
-                    drain_stdout.append(text)
+                    stdout_buf.append(text)
             elif mtype == 'stream':
                 name = content['name']
                 text = content['text']
                 if text:
                     if name == 'stderr':
-                        drain_stderr.append(text)
+                        stderr_buf.append(text)
                     else:
-                        drain_stdout.append(text)
+                        stdout_buf.append(text)
             elif mtype == 'error':
                 text = _escape_ansi('\n'.join(content['traceback']))
                 if text:
-                    drain_stderr.append(text)
+                    stderr_buf.append(text)
             else:
                 logger.debug(
                     f"IOPub drain: ignoring unknown msg type '{mtype}' "
@@ -946,10 +946,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
 
         # Consolidate stdout/stderr into single blocks (fix output splitting bug)
         parts = []
-        if drain_stdout:
-            parts.append(f'\n\nstdout:\n```\n{"".join(drain_stdout)}\n```')
-        if drain_stderr:
-            parts.append(f'\n\nstderr:\n```\n{"".join(drain_stderr)}\n```')
+        if stdout_buf:
+            parts.append(f'\n\nstdout:\n```\n{"".join(stdout_buf)}\n```')
+        if stderr_buf:
+            parts.append(f'\n\nstderr:\n```\n{"".join(stderr_buf)}\n```')
         partial_output = ''.join(parts) if parts else ''
         if len(partial_output) > drain_max_output_bytes:
             kept = partial_output[:drain_max_output_bytes - 50]
@@ -1588,6 +1588,9 @@ class CodeInterpreter(BaseToolWithFileAccess):
                     text = _escape_ansi('\n'.join(msg['content']['traceback']))
                     if 'M6_CODE_INTERPRETER_TIMEOUT' in text:
                         text = f'Timeout: Code execution exceeded the {timeout}-second time limit.'
+                    if text:
+                        stderr_buf.append(text)
+                        text = ''  # Prevent duplicate output via direct append below
             except queue.Empty:
                 # Raised by get_iopub_msg() when the per-message timeout expires
                 raise TimeoutError({'partial_output': result, 'message': f'Code execution exceeded the {timeout}-second time limit.'})
@@ -1620,10 +1623,10 @@ class CodeInterpreter(BaseToolWithFileAccess):
         # Flush consolidated stdout/stderr buffers as single blocks (fix output splitting bug)
         if stdout_buf:
             combined_stdout = ''.join(stdout_buf)
-            result += f'\n\nstdout:\n\n```\n{combined_stdout}\n```'
+            result += f'\n\nstdout:\n```\n{combined_stdout}\n```'
         if stderr_buf:
             combined_stderr = ''.join(stderr_buf)
-            result += f'\n\nstderr:\n\n```\n{combined_stderr}\n```'
+            result += f'\n\nstderr:\n```\n{combined_stderr}\n```'
         
         result = result.lstrip('\n')
         return result
