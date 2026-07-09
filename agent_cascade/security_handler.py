@@ -554,14 +554,15 @@ class SecurityAdvisorHandler:
                 loop,
             )
 
-            # Broadcast updated approval list so stale card is removed from frontend
-            asyncio.run_coroutine_threadsafe(
-                self.send_queue.put({
+            # Broadcast updated approval list after a brief delay
+            async def _delayed_timeout_broadcast():
+                await asyncio.sleep(0.15)
+                await self.send_queue.put({
                     'type': 'approvals',
                     'approvals': self.agent_pool.operation_manager.list_pending_approvals(),
-                }),
-                loop,
-            )
+                })
+
+            asyncio.run_coroutine_threadsafe(_delayed_timeout_broadcast(), loop)
 
     def _handle_verdict(
         self, rid: str, auto_apply: bool, is_yes: bool, is_no: bool,
@@ -585,15 +586,30 @@ class SecurityAdvisorHandler:
                 )
                 self.agent_pool.operation_manager.user_reject(rid, reject_msg)
 
-            # Broadcast updated approvals list to UI after auto-apply
+            # Send security_response to clear active check tracking on frontend
             if loop:
                 asyncio.run_coroutine_threadsafe(
                     self.send_queue.put({
-                        'type': 'approvals',
-                        'approvals': self.agent_pool.operation_manager.list_pending_approvals(),
+                        'type': 'security_response',
+                        'request_id': rid,
+                        'response': parsing_response,
+                        'verdict': 'YES' if is_yes else 'NO',
+                        'reason': justification,
                     }),
                     loop,
                 )
+
+            # Broadcast updated approvals list after a brief delay to give the agent thread
+            # time to submit the next tool for approval (prevents empty broadcast)
+            async def _delayed_approvals_broadcast():
+                await asyncio.sleep(0.15)
+                await self.send_queue.put({
+                    'type': 'approvals',
+                    'approvals': self.agent_pool.operation_manager.list_pending_approvals(),
+                })
+
+            if loop:
+                asyncio.run_coroutine_threadsafe(_delayed_approvals_broadcast(), loop)
         else:
             # Auto-Ask toggled off — send to UI for manual confirmation
             if loop:
@@ -607,6 +623,16 @@ class SecurityAdvisorHandler:
                     }),
                     loop,
                 )
+
+                # Broadcast updated approvals list after a brief delay
+                async def _delayed_verdict_broadcast():
+                    await asyncio.sleep(0.15)
+                    await self.send_queue.put({
+                        'type': 'approvals',
+                        'approvals': self.agent_pool.operation_manager.list_pending_approvals(),
+                    })
+
+                asyncio.run_coroutine_threadsafe(_delayed_verdict_broadcast(), loop)
 
     def _handle_ambiguous(
         self, rid: str, auto_apply: bool, parsing_response: str, loop,
@@ -634,18 +660,38 @@ class SecurityAdvisorHandler:
                     }),
                     loop,
                 )
+
+                # Broadcast updated approvals list after a brief delay
+                async def _delayed_ambiguous_broadcast():
+                    await asyncio.sleep(0.15)
+                    await self.send_queue.put({
+                        'type': 'approvals',
+                        'approvals': self.agent_pool.operation_manager.list_pending_approvals(),
+                    })
+
+                asyncio.run_coroutine_threadsafe(_delayed_ambiguous_broadcast(), loop)
         else:
             logger.info(f"[SECURITY] Ambiguous response for {rid} in manual mode. Waiting for user decision.")
             if loop:
                 asyncio.run_coroutine_threadsafe(
-                self.send_queue.put({
-                    'type': 'security_response',
-                    'request_id': rid,
-                    'response': parsing_response,
-                    'verdict': 'AMBIGUOUS',
-                }),
-                loop,
-            )
+                    self.send_queue.put({
+                        'type': 'security_response',
+                        'request_id': rid,
+                        'response': parsing_response,
+                        'verdict': 'AMBIGUOUS',
+                    }),
+                    loop,
+                )
+
+                # Broadcast updated approvals list after a brief delay
+                async def _delayed_ambiguous_manual_broadcast():
+                    await asyncio.sleep(0.15)
+                    await self.send_queue.put({
+                        'type': 'approvals',
+                        'approvals': self.agent_pool.operation_manager.list_pending_approvals(),
+                    })
+
+                asyncio.run_coroutine_threadsafe(_delayed_ambiguous_manual_broadcast(), loop)
 
     # ── Cleanup ───────────────────────────────────────────────────────────
     def _cleanup(self, sec_state_key: Optional[str]) -> None:

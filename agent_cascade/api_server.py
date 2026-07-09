@@ -759,7 +759,7 @@ def create_app(agents, agent_pool, config=None):
         known_ids: Set[str] = set()
         while True:
             try:
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.1)
                 pending = get_approvals()
                 current_ids = {a['request_id'] for a in pending}
                 if current_ids != known_ids:

@@ -2515,7 +2515,7 @@ function renderApprovals() {
 
   // Auto-security check (Auto-Ask) takes priority
   if (state.autoSecurity) {
-    const pending = (state.approvals || []).filter(ap => !state.activeSecurityChecks.has(ap.request_id));
+    const pending = (state.approvals || []).filter(ap => !state.activeSecurityChecks.has(ap.request_id) && !state.securityResponses[ap.request_id]);
     
     // FIX 3: Only process ONE approval at a time to prevent multiple simultaneous security checks
     // After the first check completes and backend broadcasts updated approvals, 
