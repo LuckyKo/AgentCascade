@@ -457,7 +457,8 @@ class AgentLifecycleManager:
         self,
         instance: AgentInstance,
         caller: str,
-        agent_class: str
+        agent_class: str,
+        call_agent_args: dict = None,
     ) -> None:
         """Propagate settings from caller to child instance.
         
@@ -469,6 +470,8 @@ class AgentLifecycleManager:
             instance: Child instance to configure
             caller: Parent instance name
             agent_class: Child's agent class
+            call_agent_args: Optional args dict from the call_agent tool invocation.
+                           If it contains 'max_turns', that value is used (capped by caller's limit).
             
         Note:
             If target template has no LLM config, max_turns is still set but
@@ -498,7 +501,19 @@ class AgentLifecycleManager:
             caller_max_turns = getattr(caller_inst, 'max_turns', None)
             if not caller_max_turns:
                 caller_max_turns = 50  # DEFAULT_MAX_TURNS fallback
-            instance.max_turns = caller_max_turns
+
+            # Use provided max_turns from call_agent args if specified, otherwise inherit from caller.
+            # The caller's limit (UI turn limit) acts as the hard cap.
+            if call_agent_args and 'max_turns' in call_agent_args:
+                requested_max = call_agent_args['max_turns']
+                # Validate: must be a positive integer
+                if not isinstance(requested_max, int) or requested_max < 1:
+                    logger.debug(f"Invalid max_turns={requested_max} for {instance.instance_name}, using caller's limit")
+                    instance.max_turns = caller_max_turns
+                else:
+                    instance.max_turns = min(requested_max, caller_max_turns)
+            else:
+                instance.max_turns = caller_max_turns
 
             target_template = self.pool.get_template(agent_class)
             if not target_template or not getattr(target_template, 'llm', None):

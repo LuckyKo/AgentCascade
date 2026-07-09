@@ -885,12 +885,49 @@ class ExecutionEngine:
 
             # ── Cleanup: Turn limit reached ────────────────────────────────
             if turns_available <= 0:
-                msg = Message(
-                    role=ASSISTANT,
-                    content="\n\n[SYSTEM: Turn limit reached. Ask me to continue if incomplete.]",
-                )
-                self._append_and_log(instance, msg)
-                response.append(msg)  # Stream turn limit to UI
+                # Inject turn limit notice into the LAST assistant message content
+                # instead of appending a new message. This ensures extract_instance_output()
+                # (which reads messages[-1]) returns the agent's actual output with the warning.
+                turn_notice = "\n\n[Turn limit reached — results may be incomplete. Continue if needed.]"
+                notice_appended = False
+                if instance.conversation:
+                    # Find the last assistant message with text content and append the notice
+                    for msg in reversed(instance.conversation):
+                        msg_role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                        if msg_role != ASSISTANT:
+                            continue
+                        # Try to append to text content
+                        if isinstance(msg, dict):
+                            content = msg.get('content', '')
+                            if isinstance(content, list):
+                                for item in content:
+                                    if isinstance(item, dict) and item.get('type') == 'text':
+                                        item['text'] = item['text'] + turn_notice
+                                        notice_appended = True
+                                        break
+                            elif isinstance(content, str):
+                                msg['content'] = content + turn_notice
+                                notice_appended = True
+                        else:
+                            content = getattr(msg, 'content', '')
+                            if isinstance(content, list):
+                                for item in content:
+                                    if isinstance(item, dict) and item.get('type') == 'text':
+                                        item['text'] = item['text'] + turn_notice
+                                        notice_appended = True
+                                        break
+                            elif isinstance(content, str):
+                                msg.content = content + turn_notice
+                                notice_appended = True
+                        if notice_appended:
+                            break
+                    # Fallback: if no assistant message with text found, append a new one
+                    if not notice_appended:
+                        msg = Message(role=ASSISTANT, content=turn_notice)
+                        self._append_and_log(instance, msg)
+                # Also append to response so UI streams the notice
+                response_msg = Message(role=ASSISTANT, content=turn_notice)
+                response.append(response_msg)
 
             # Telemetry: record turn end (non-blocking)
             inst_name_turn = instance.instance_name
@@ -3368,7 +3405,7 @@ class ExecutionEngine:
         )
 
         # Phase 4.1: Delegate to lifecycle manager for settings propagation
-        self.lifecycle.propagate_settings(inst, caller, inst.agent_class)
+        self.lifecycle.propagate_settings(inst, caller, inst.agent_class, call_agent_args=args)
 
         # Track in active stack with depth info (thread-safe via RLock)
         with self.pool._execution._state_lock:

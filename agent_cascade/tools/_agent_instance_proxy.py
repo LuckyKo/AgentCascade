@@ -42,6 +42,11 @@ CALL_AGENT_SCHEMA = {
                 'type': 'string',
                 'description': 'Path to a JSONL log file to restore the agent session from before starting. Useful for resuming old sessions. If provided and the instance_name does not already exist in the pool, the session will be loaded from this log file.'
             },
+            'max_turns': {
+                'type': 'integer',
+                'minimum': 1,
+                'description': 'Optional: Maximum number of turns for this sub-agent. Defaults to the caller\'s turn limit if not specified. Will be capped by the UI turn limit if one is set.'
+            },
         },
         'required': ['agent_class', 'instance_name', 'task'],
     },
