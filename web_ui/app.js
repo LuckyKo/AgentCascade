@@ -619,10 +619,6 @@ function loadSession(path) {
     if (confirm('Load this session? Current unsaved state will be lost.')) {
       state.closedTabs.clear();
       localStorage.removeItem('agent-cascade-closed-tabs');
-      // Reset approval tracking state to prevent stale data from previous session
-      _lastApprovalSnapshotKey = '';
-      state.activeSecurityChecks.clear();
-      state.securityResponses = {};
       ws.send(JSON.stringify({
         type: 'load_session',
         path: path
@@ -971,23 +967,10 @@ if (autoSecurityToggle) {
     saveSettings();
     // Notify backend of toggle change and re-render approvals
     send({ type: 'set_auto_security', enabled: state.autoSecurity });
-    // Fix 4: When toggling OFF, only clear tracking for checks that are genuinely done.
-    // Keep tracking for in-flight checks until they complete to avoid race conditions.
     if (!state.autoSecurity) {
-      // Only clear security responses for checks that are no longer active
-      // (i.e., checks that finished while we weren't looking). Keep responses
-      // for currently active checks so they can still be displayed.
-      for (const rid of state.activeSecurityChecks) {
-        // Keep responses for active checks — they'll be cleared when the check completes
-      }
-      // Clear only stale responses (ones not in active checks and not in current approvals)
-      const activeIds = new Set(state.activeSecurityChecks);
-      const approvalRids = new Set((state.approvals || []).map(a => a.request_id));
-      for (const rid in state.securityResponses) {
-        if (activeIds.has(rid) || approvalRids.has(rid)) continue;
-        delete state.securityResponses[rid];
-      }
-      // Don't clear activeSecurityChecks — let in-flight checks complete normally
+      // Turning OFF: clear active checks and security responses to prevent stale data
+      state.activeSecurityChecks.clear();
+      state.securityResponses = {};
     }
     renderApprovals();
   });
@@ -1538,9 +1521,6 @@ function handleServerMessage(data) {
       const { request_id, response, verdict, reason } = data;
       state.activeSecurityChecks.delete(request_id);
       state.securityResponses[request_id] = { response, verdict, reason };
-
-      // Immediately re-render so the security response appears without waiting for next stream tick
-      renderApprovals();
 
       // QoL: Auto-fill rejection field if security advisor said NO or timed out
       // (rendered via renderApprovals() triggered by state change broadcast)
@@ -2214,24 +2194,17 @@ function renderThinkingBlock(thought, isOpen) {
         dismissBtn.onclick = () => {
           clearTimeout(autoDismissTimer); // Cancel pending auto-dismiss to avoid wasted timer
           toast.remove();
-          if (!bar.querySelector('.system-toast-item')) {
-            bar.style.display = 'none';
-            bar.classList.remove('visible');
-          }
+          if (!bar.querySelector('.system-toast-item')) bar.style.display = 'none';
         };
       }
       bar.appendChild(toast);
       bar.style.display = 'block';
-      bar.classList.add('visible'); // Class-based visibility for CSS animation guard (Fix 4)
 
       // Auto-dismiss after 15 seconds
       autoDismissTimer = setTimeout(() => {
         if (toast.parentNode) {
           toast.remove();
-          if (!bar.querySelector('.system-toast-item')) {
-            bar.style.display = 'none';
-            bar.classList.remove('visible');
-          }
+          if (!bar.querySelector('.system-toast-item')) bar.style.display = 'none';
         }
       }, 15000);
     }
@@ -2464,31 +2437,7 @@ function deleteMessage(index, instanceName = null) {
 
 // ── Approvals ────────────────────────────────────────────────────────────────
 
-// Snapshot helper: produces a stable key for comparing approval state across render calls.
-// Captures request IDs + tool_name + justification snippet, active check states, security response
-// presence, AND response content hashes to detect when card content actually changed
-// (not just when a response key appeared). Including tool_name/justification catches cases where
-// the same request_id is reused with different content.
-function _approvalSnapshotKey() {
-  const ids = (state.approvals || []).map(a => 
-    `${a.request_id}|${a.tool_name}|${(a.justification||'').slice(0,50)}`
-  );
-  const checks = [...state.activeSecurityChecks].sort();
-  const respKeys = Object.keys(state.securityResponses).sort();
-  // Include content fingerprint: hash of response text to detect content changes behind same key
-  const contentHash = Object.entries(state.securityResponses)
-    .map(([k, v]) => k + ':' + (v.response || '').slice(0, 50))
-    .join('|');
-  return JSON.stringify({ ids, checks, respKeys, contentHash });
-}
-
-let _lastApprovalSnapshotKey = ''; // Persisted across render calls to skip redundant DOM rebuilds (Fix 1)
-
 function renderApprovals() {
-  // Reentrancy guard: prevent nested calls from conflicting with each other
-  if (renderApprovals.isRendering) return;
-  renderApprovals.isRendering = true;
-
   const bar = approvalBar;
 
   // Clean up activeSecurityChecks and securityResponses for any IDs that are no longer in state.approvals
@@ -2508,14 +2457,12 @@ function renderApprovals() {
     // Approvals are empty: either (a) no pending approvals, or (b) all were auto-applied,
     // or (c) user toggled Auto-Ask off after backend already processed the response
     bar.style.display = 'none';
-    bar.classList.remove('visible');
-    renderApprovals.isRendering = false;
     return;
   }
 
   // Auto-security check (Auto-Ask) takes priority
   if (state.autoSecurity) {
-    const pending = (state.approvals || []).filter(ap => !state.activeSecurityChecks.has(ap.request_id) && !state.securityResponses[ap.request_id]);
+    const pending = (state.approvals || []).filter(ap => !state.activeSecurityChecks.has(ap.request_id));
     
     // FIX 3: Only process ONE approval at a time to prevent multiple simultaneous security checks
     // After the first check completes and backend broadcasts updated approvals, 
@@ -2530,8 +2477,6 @@ function renderApprovals() {
     // Don't clear approvals immediately - keep them in case user toggles Auto-Ask off.
     // They will be cleared by the backend when it broadcasts updated approvals after auto-applying.
     bar.style.display = 'none';
-    bar.classList.remove('visible');
-    renderApprovals.isRendering = false;
     return;
   }
 
@@ -2543,53 +2488,26 @@ function renderApprovals() {
     
     const pending = [...state.approvals];
     state.approvals = [];
-    _lastApprovalSnapshotKey = ''; // Reset snapshot so stale key doesn't block future renders
     bar.style.display = 'none';
-    bar.classList.remove('visible');
     
     pending.forEach(ap => {
       send({ type: 'reject', request_id: ap.request_id, reason: reason, automated: true });
     });
-    renderApprovals.isRendering = false;
     return;
   }
-
-  // ── Fix 1: Skip redundant renders — if approval state hasn't changed, bail out early ──
-  const currentKey = _approvalSnapshotKey();
-  if (currentKey === _lastApprovalSnapshotKey) {
-    bar.style.display = 'block';
-    bar.classList.add('visible'); // Class-based visibility for CSS animation guard (Fix 4)
-    renderApprovals.isRendering = false;
-    return;
-  }
-  _lastApprovalSnapshotKey = currentKey;
 
   bar.style.display = 'block';
-  bar.classList.add('visible'); // Class-based visibility for CSS animation guard (Fix 4)
-
-  // ── Fix 2: Preserve unchanged DOM cards — diff by request_id instead of full rebuild ──
-  const existingCards = new Map();
-  for (const child of bar.children) {
-    if (child.dataset && child.dataset.requestId) {
-      existingCards.set(child.dataset.requestId, child);
-    }
-  }
-
+  bar.innerHTML = '';
+  
   // Scroll approval bar into view if it's off-screen (happens with many agent tabs)
   requestAnimationFrame(() => {
     bar.scrollIntoView({ behavior: 'instant', block: 'start' });
   });
 
-  // Guard against duplicate request_ids in the approvals array
-  const seenIds = new Set();
-  const currentIds = new Set();
   for (const ap of state.approvals) {
-    if (seenIds.has(ap.request_id)) {
-      logger.warn(`Duplicate approval request_id: ${ap.request_id} — skipping`);
-      continue;
-    }
-    seenIds.add(ap.request_id);
-    currentIds.add(ap.request_id);
+    const card = document.createElement('div');
+    card.className = 'approval-card';
+    card.dataset.requestId = ap.request_id;
 
     let argsHtml = '';
     try {
@@ -2606,8 +2524,8 @@ function renderApprovals() {
     let securityHtml = '';
     if (secResp) {
        securityHtml = `<div class="security-response-box">
-          <strong>🛡️ Security Expert:</strong><div style="margin-top:4px;">${renderMarkdown(secResp.response)}</div>
-        </div>`;
+         <strong>🛡️ Security Expert:</strong><div style="margin-top:4px;">${renderMarkdown(secResp.response)}</div>
+       </div>`;
     }
 
     // Extract justification from the dedicated field. The fallback to tool_args is for
@@ -2635,7 +2553,7 @@ function renderApprovals() {
     };
     const toolIcon = toolIconMap[ap.tool_name] || '🛠️';
 
-    const cardContent = `
+    card.innerHTML = `
       <div class="approval-header">
         <span class="approval-icon">${toolIcon}</span>
         <strong>${escapeHtml(ap.tool_name)}</strong>
@@ -2650,28 +2568,8 @@ function renderApprovals() {
         <button class="btn btn-danger btn-sm" data-request-id="${escapeHtml(ap.request_id)}" onclick="showRejectInput(this.dataset.requestId, this)">❌ Reject</button>
       </div>
     `;
-
-    // Reuse existing card if present (Fix 2: preserve DOM nodes to avoid animation restart)
-    const existing = existingCards.get(ap.request_id);
-    if (existing) {
-      existing.innerHTML = cardContent;
-    } else {
-      const card = document.createElement('div');
-      card.className = 'approval-card';
-      card.dataset.requestId = ap.request_id;
-      card.innerHTML = cardContent;
-      bar.appendChild(card);
-    }
+    bar.appendChild(card);
   }
-
-  // Remove stale cards no longer in the approvals list
-  for (const [rid, card] of existingCards) {
-    if (!currentIds.has(rid)) {
-      bar.removeChild(card);
-    }
-  }
-
-  renderApprovals.isRendering = false; // Clear reentrancy guard
 }
 
 // Global functions for inline onclick handlers
@@ -2682,8 +2580,9 @@ window.approveRequest = function (requestId) {
 window.askSecurity = function (requestId, btn) {
   state.activeSecurityChecks.add(requestId);
   delete state.securityResponses[requestId];
-  // Trigger re-render instead of mutating DOM inline — keeps snapshot + DOM in sync
-  renderApprovals();
+  const originalHtml = btn.innerHTML;
+  btn.innerHTML = '⏳ Checking...';
+  btn.disabled = true;
   send({ type: 'ask_security', request_id: requestId, auto_apply: false });
 };
 
