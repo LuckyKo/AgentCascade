@@ -26,9 +26,6 @@ def resolve_cached_entry_refs(
 ) -> dict[str, list]:
     """Scan a tool-args dict for {USE_CACHED_ENTRY_N} placeholders and resolve them.
 
-    Shared utility used by both execution_engine._resolve_placeholders() and
-    tool_utils.resolve_prev_arg_placeholders(). Defined once to avoid code duplication.
-
     Args:
         parsed: The already-parsed tool arguments dict.
         cache_pool: An ArgumentCachePool instance (or None if not initialized).

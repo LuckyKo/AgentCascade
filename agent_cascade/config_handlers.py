@@ -8,6 +8,7 @@ Import chain: config_handlers -> tools/mcp_manager, api_server.LLM_CONFIG_KEYS
 No circular dependencies — this module imports only from existing modules.
 """
 
+from collections import deque as Deque
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -228,7 +229,6 @@ def _handle_cache_pool_size(ui_cfg: dict, agent_pool: Optional[Any], agents: lis
                 with cp._lock:
                     # deque.maxlen is immutable; replace the entire deque preserving recent entries
                     preserved = list(cp._entries)[-val:]
-                    from collections import deque as Deque
                     cp._entries = Deque(preserved, maxlen=val)
                     cp.max_size = val
 

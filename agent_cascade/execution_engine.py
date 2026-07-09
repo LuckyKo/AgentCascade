@@ -3147,33 +3147,21 @@ class ExecutionEngine:
     def _ensure_cache_pool(self, instance_name: str) -> None:
         """Lazily initialize the cache pool for an instance if not yet created.
 
-        Uses double-checked locking to prevent race conditions when multiple
-        threads try to initialize the same instance's cache pool simultaneously.
+        Instances are single-threaded in practice, so a simple check suffices.
 
         Args:
             instance_name: The agent instance name.
         """
         inst = self.pool.get_instance(instance_name)
-        if inst is None:
+        if inst is None or inst.cache_pool is not None:
             return
-        # First check without lock (fast path for already-initialized pools)
-        if inst.cache_pool is not None:
-            return
-        # Second check with persistent per-instance lock to prevent race condition
-        lock = getattr(inst, '_cache_init_lock', None)
-        if lock is None:
-            import threading
-            inst._cache_init_lock = lock = threading.Lock()
-        with lock:
-            if inst.cache_pool is not None:
-                return  # Another thread initialized it while we waited
-            try:
-                inst.cache_pool = ArgumentCachePool(
-                    max_size=self.pool.settings.cache_pool_size,
-                )
-                inst.cache_pool.enabled = self.pool.settings.cache_pool_enabled
-            except Exception as e:
-                logger.debug(f"Failed to initialize cache pool for '{instance_name}': {e}")
+        try:
+            inst.cache_pool = ArgumentCachePool(
+                max_size=self.pool.settings.cache_pool_size,
+            )
+            inst.cache_pool.enabled = self.pool.settings.cache_pool_enabled
+        except Exception as e:
+            logger.warning(f"Failed to initialize cache pool for '{instance_name}': {e}")
 
     def _cache_tool_args(self, instance_name: str, tool_name: str, tool_args: Any) -> None:
         """Store resolved tool arguments in the per-instance cache for __USE_PREV_ARG__ reuse.
@@ -3194,12 +3182,13 @@ class ExecutionEngine:
             return  # Nothing to cache for non-dict args
 
         try:
+            cached = copy.deepcopy(tool_args)  # Single deep copy, reused below
             scope = self.pool.last_tool_args.setdefault(instance_name, {})
             # Per-tool cache: most recent resolved args for this exact tool
-            scope[tool_name] = copy.deepcopy(tool_args)
+            scope[tool_name] = cached
             # Global arg cache: union of all argument keys seen in this instance
             global_cache = scope.setdefault("__GLOBAL__", {})
-            global_cache.update(copy.deepcopy(tool_args))
+            global_cache.update(cached)
         except (AttributeError, TypeError):
             # Defensive: pool may not have last_tool_args in unusual setups
             logger.warning(f"Failed to cache args for tool '{tool_name}' on instance '{instance_name}': deepcopy failed")
@@ -3216,11 +3205,12 @@ class ExecutionEngine:
 
         threshold = self.pool.settings.cache_threshold_chars
 
-        # 1. Cache entire args dict as one entry
-        try:
-            cp.add("arg", instance_name, tool_name, copy.deepcopy(tool_args))
-        except (TypeError, AttributeError):
-            pass
+        # 1. Cache entire args dict as one entry (reuse the existing deep copy)
+        if 'cached' in locals():
+            try:
+                cp.add("arg", instance_name, tool_name, cached)
+            except (TypeError, AttributeError):
+                pass
 
         # 2. Also cache individual string values > threshold separately
         for key, val in tool_args.items():
@@ -3303,11 +3293,11 @@ class ExecutionEngine:
         cache_pool = getattr(inst, 'cache_pool', None) if inst else None
         cached_refs = resolve_cached_entry_refs(parsed, cache_pool)
 
-        # Early return only if NO placeholders of either type found
-        if not placeholders_found and not cached_refs:
-            return parsed  # Nothing to resolve
-
+        # Always deep-copy for consistency (same path whether placeholders exist or not)
         resolved_args = copy.deepcopy(parsed)
+
+        if not placeholders_found and not cached_refs:
+            return resolved_args  # Nothing to resolve, but return a safe copy
 
         # ── Step 3a: resolve __USE_PREV_ARG__ (existing logic) ──────────────
         scope_cache = getattr(self.pool, 'last_tool_args', {}).get(instance_name, {})
