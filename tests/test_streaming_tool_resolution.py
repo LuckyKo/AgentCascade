@@ -36,12 +36,12 @@ def seeded_pool(mock_agent_pool):
     mock_agent_pool.instance_conversations["Maine"] = inst
 
     # Seed entries: N=1 = call_agent args, N=2 = common args
-    inst.cache_pool.add("arg", "Maine", "call_agent", {
+    inst.cache_pool.add("arg", "call_agent", {
         "agent_class": "coder",
         "instance_name": "worker1",
         "task": "Write a script",
     })
-    inst.cache_pool.add("arg", "Maine", "common", {
+    inst.cache_pool.add("arg", "common", {
         "common_arg": "shared_value",
     })
     return mock_agent_pool
@@ -118,7 +118,7 @@ class TestNonStreamingPathResolution:
 
         # Add a write_file entry at N=3
         seeded_pool.instance_conversations["Maine"].cache_pool.add(
-            "arg", "Maine", "write_file", {"file_path": "/tmp/out.txt"})
+            "arg", "write_file", {"file_path": "/tmp/out.txt"})
 
         parsed_args = {"file_path": "{USE_CACHED_ENTRY_3}"}
         resolved, err = resolve_prev_arg_placeholders(
@@ -133,7 +133,7 @@ class TestNonStreamingPathResolution:
         from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
         seeded_pool.instance_conversations["Maine"].cache_pool.add(
-            "arg", "Maine", "write_file", {"file_path": "/a/b.py"})
+            "arg", "write_file", {"file_path": "/a/b.py"})
 
         tool_args_str = '{"file_path": "{USE_CACHED_ENTRY_3}"}'
         parsed = json.loads(tool_args_str)
@@ -196,7 +196,7 @@ class TestLockProtection:
             try:
                 for i in range(50):
                     with seeded_pool._state_lock:
-                        cp.add("arg", "Maine", "call_agent", {"task": f"task_{i}"})
+                        cp.add("arg", "call_agent", {"task": f"task_{i}"})
             except Exception as e:
                 errors.append(str(e))
 
@@ -217,7 +217,7 @@ class TestLockProtection:
         cached = copy.deepcopy(original_args)
         cp = seeded_pool.instance_conversations["Maine"].cache_pool
         last_idx = len(cp._entries) + 1
-        cp.add("arg", "Maine", "test_tool", cached)
+        cp.add("arg", "test_tool", cached)
 
         # Mutate the original — cache should be unaffected
         original_args["nested"]["key"] = "mutated"
@@ -263,7 +263,7 @@ class TestSessionScopeIsolation:
 
         agent_pool.instance_conversations["root"] = _FakeInstance()
         agent_pool.instance_conversations["root"].cache_pool.add(
-            "arg", "root", "write_file", {"file_path": "/tmp"})
+            "arg", "write_file", {"file_path": "/tmp"})
 
         resolved, err = resolve_prev_arg_placeholders(
             {"file_path": "{USE_CACHED_ENTRY_1}"},
@@ -287,7 +287,7 @@ class TestFullResolutionCycle:
 
         # Step 1: First call — cache write (simulated)
         tool_args_1 = {"file_path": "/first.py", "content": "hello"}
-        idx1 = cp.add("arg", "Maine", "write_file", tool_args_1)
+        idx1 = cp.add("arg", "write_file", tool_args_1)
 
         # Step 2: Second call — resolve from cache
         tool_args_2 = {"file_path": "{USE_CACHED_ENTRY_%d}" % idx1}
@@ -300,7 +300,7 @@ class TestFullResolutionCycle:
 
         # Step 3: Write new args to cache (simulating successful execution)
         tool_args_3 = {"file_path": "/second.py", "content": "world"}
-        idx3 = cp.add("arg", "Maine", "write_file", tool_args_3)
+        idx3 = cp.add("arg", "write_file", tool_args_3)
 
         # Step 4: Third call — should resolve from the NEW cache entry
         tool_args_4 = {"file_path": "{USE_CACHED_ENTRY_%d}" % idx3}

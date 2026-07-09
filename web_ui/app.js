@@ -742,6 +742,11 @@ function saveSettings() {
   if (approvalTimeoutEnabled) s['approval-timeout-enabled'] = approvalTimeoutEnabled.checked;
   if (approvalTimeoutSeconds) s['approval-timeout-seconds'] = approvalTimeoutSeconds.value;
 
+  // Cache pool settings
+  if ($('#setting-cache-pool-enabled')) s['cache-pool-enabled'] = $('#setting-cache-pool-enabled').checked;
+  if ($('#setting-cache-pool-size')) s['cache-pool-size'] = $('#setting-cache-pool-size').value;
+  if ($('#setting-cache-threshold-chars')) s['cache-threshold-chars'] = $('#setting-cache-threshold-chars').value;
+
   localStorage.setItem('agent-cascade-settings', JSON.stringify(s));
   
   if (state.connected) {
@@ -858,6 +863,17 @@ function loadSettings() {
     }
     if (approvalTimeoutSeconds && s['approval-timeout-seconds'] !== undefined) {
       approvalTimeoutSeconds.value = s['approval-timeout-seconds'];
+    }
+
+    // Cache pool settings
+    if ($('#setting-cache-pool-enabled') && s['cache-pool-enabled'] !== undefined) {
+      $('#setting-cache-pool-enabled').checked = !!s['cache-pool-enabled'];
+    }
+    if ($('#setting-cache-pool-size') && s['cache-pool-size'] !== undefined) {
+      $('#setting-cache-pool-size').value = s['cache-pool-size'];
+    }
+    if ($('#setting-cache-threshold-chars') && s['cache-threshold-chars'] !== undefined) {
+      $('#setting-cache-threshold-chars').value = s['cache-threshold-chars'];
     }
 
     if (workAccessFoldersRW) {
@@ -3931,6 +3947,11 @@ function getGenerateCfg() {
   // Approval timeout settings
   if (approvalTimeoutSeconds && approvalTimeoutSeconds.value) cfg.approval_timeout_seconds = parseInt(approvalTimeoutSeconds.value) || 300;
   if (approvalTimeoutEnabled.length) cfg.enable_approval_timeout = approvalTimeoutEnabled.checked;
+
+  // Cache pool settings
+  if ($('#setting-cache-pool-enabled')) cfg.cache_pool_enabled = $('#setting-cache-pool-enabled').checked;
+  if ($('#setting-cache-pool-size')) cfg.cache_pool_size = parseInt($('#setting-cache-pool-size').value) || 50;
+  if ($('#setting-cache-threshold-chars')) cfg.cache_threshold_chars = parseInt($('#setting-cache-threshold-chars').value) || 1000;
 
   if ($('#setting-mcp-enabled') && !$('#setting-mcp-enabled').checked) {
     // MCP is disabled

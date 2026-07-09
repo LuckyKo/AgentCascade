@@ -20,7 +20,7 @@ class _FakeCachePool:
     def get(self, n):
         return self._entries.get(n)
 
-    def add(self, kind, name, label, value):
+    def add(self, kind, label, value, threshold=0):
         idx = len(self._entries) + 1
         entry = type('Entry', (), {'value': value})()
         self._entries[idx] = entry
@@ -54,7 +54,7 @@ def _seed_cache_pool(pool, scope, values):
         pool.instance_conversations[scope] = _FakeInstance()
     cp = pool.instance_conversations[scope].cache_pool
     for v in values:
-        cp.add("arg", scope, "test", v)
+        cp.add("arg", "test", v)
     return pool
 
 

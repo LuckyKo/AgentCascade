@@ -1082,12 +1082,17 @@ class ExecutionEngine:
                             # First injection — append to end
                             m0_content += new_block
                     
-                    # 4. Inject Argument Reuse instructions (static version for caching) — all agents
-                    if '### Advanced Feature: Argument Reuse' not in m0_content:
+                    # 4. Inject Argument Caching Pool instructions — all agents
+                    if '### Advanced Feature: Argument Caching Pool' not in m0_content:
                         m0_content += (
-                            "\n\n### Advanced Feature: Argument Reuse\n"
-                            "To reuse a LARGE argument value (like full file content or path) from any previous successful tool call in this session, "
-                            'use the exact placeholder: "{USE_CACHED_ENTRY_N}" where N is the cache index. This saves tokens and processing time.'
+                            "\n\n### Advanced Feature: Argument Caching Pool\n"
+                            "The system maintains a rolling cache of tool arguments and large outputs (>1000 chars).\n"
+                            "Each cached entry is assigned a sequential index N. You can reference any cached entry by using\n"
+                            'the placeholder "{USE_CACHED_ENTRY_N}" in place of the argument value, where N is the cache index.\n'
+                            "A single argument value can contain multiple placeholders, e.g.\n"
+                            '  content: "I found {USE_CACHED_ENTRY_12} from X and {USE_CACHED_ENTRY_23} from Y."\n'
+                            "Each placeholder is independently resolved and replaced with its cached value.\n"
+                            "Use system_info to view the current cache pool state. When entries are cached, you will see a [CACHE INFO] notification."
                         )
                     
                     # Update the message ONLY if content actually changed (preserves LLM prefix caching)
@@ -3194,20 +3199,12 @@ class ExecutionEngine:
 
         threshold = self.pool.settings.cache_threshold_chars
 
-        # 1. Cache entire args dict as one entry
-        # Collect cache indices for large individual arg values, report only those
+        # Cache individual arg values that pass the threshold
         cache_refs = {}
-        cached = copy.deepcopy(tool_args)
-        try:
-            cp.add("arg", instance_name, tool_name, cached)
-        except (TypeError, AttributeError):
-            pass
-
-        # 2. Also cache individual string values > threshold separately
         for key, val in tool_args.items():
             if isinstance(val, str) and len(val) > threshold:
                 try:
-                    idx = cp.add("arg", instance_name, f"{tool_name}.{key}", val)
+                    idx = cp.add("arg", f"{tool_name}.{key}", val, threshold=threshold)
                     cache_refs[key] = idx
                 except (TypeError, AttributeError):
                     pass
@@ -3219,7 +3216,7 @@ class ExecutionEngine:
             )
             with inst._compression_lock:
                 inst._cache_notifications.append(
-                    f'[{tool_name}] Cached: {refs_str} (reference with {{USE_CACHED_ENTRY_N}})'
+                    f'[{tool_name}] Cached: {refs_str}'
                 )
 
     def _cache_tool_output(self, instance_name: str, tool_name: str,
@@ -3248,10 +3245,10 @@ class ExecutionEngine:
 
         char_count = len(output)
         try:
-            idx = cp.add("output", instance_name, tool_name, output)
+            idx = cp.add("output", tool_name, output, threshold=threshold)
             with inst._compression_lock:
                 inst._cache_notifications.append(
-                    f'[{tool_name}] Output cached: N={idx} ({char_count} chars) (reference with {{USE_CACHED_ENTRY_N}})'
+                    f'[{tool_name}] Output cached: N={idx} ({char_count} chars)'
                 )
         except (TypeError, AttributeError):
             pass

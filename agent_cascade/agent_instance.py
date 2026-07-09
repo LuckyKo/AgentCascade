@@ -24,6 +24,7 @@ from agent_cascade.settings import (
     AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
     AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL,
     CI_EXECUTION_TIMEOUT, CI_WATCHDOG_TIMEOUT, CI_STALE_CONTAINER_TTL,
+    CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS,
 )
 
 
@@ -70,7 +71,6 @@ class CacheEntry:
     """
     index: int                    # Sequential N for {USE_CACHED_ENTRY_N} (monotonic, never wraps)
     category: str                 # "arg" or "output"
-    instance_name: str            # Which agent instance produced this
     source_tool: str              # Tool name that generated this entry
     value: Any                    # Full cached value (for resolution via deep copy)
     preview: str                  # Truncated display string (< 200 chars)
@@ -96,15 +96,26 @@ class ArgumentCachePool:
         self.max_size = max_size
         self.enabled = True           # Toggle on/off
     
-    def add(self, category: str, instance_name: str, source_tool: str,
-            value: Any) -> int:
-        """Add entry and return its index N. Returns -1 when disabled."""
+    def add(self, category: str, source_tool: str, value: Any,
+            threshold: int = 0) -> int:
+        """Add entry and return its index N. Returns -1 when disabled or below threshold.
+        
+        Args:
+            category: "arg" or "output"
+            source_tool: Tool name (e.g. "read_file", "read_file.path")
+            value: The value to cache
+            threshold: Min char count to trigger caching (0 = always cache)
+        """
         # Serialize to string for preview/length — with error handling
         try:
             val_str = json.dumps(value) if not isinstance(value, str) else value
         except (TypeError, ValueError):
             # Fallback for unserializable objects (e.g., custom types, cycles)
             val_str = str(value)
+
+        # Skip if below threshold
+        if len(val_str) <= threshold:
+            return -1
 
         preview = (val_str[:197] + '...') if len(val_str) > 200 else val_str
 
@@ -116,7 +127,6 @@ class ArgumentCachePool:
             entry = CacheEntry(
                 index=self._next_index,
                 category=category,
-                instance_name=instance_name,
                 source_tool=source_tool,
                 value=value,
                 preview=preview,
@@ -148,8 +158,14 @@ class ArgumentCachePool:
         display_entries = reversed(entries[:max_display])
         for e in display_entries:
             marker = "ARG" if e.category == "arg" else "OUT"
-            lines.append(f"    [N={e.index:>3}] [{marker}] {e.instance_name}/{e.source_tool} "
-                        f"({e.char_count} chars): {e.preview}")
+            # Mid-point truncation: show head and tail, cut the middle
+            p = e.preview
+            if len(p) > 120:
+                half = 50
+                p = p[:half] + ' ... ' + p[-half:]
+            # Format: [N= 3] [ARG] read_file/path (93 chars): ```value```
+            lines.append(f"    [N={e.index:>3}] [{marker}] {e.source_tool} "
+                        f"({e.char_count} chars): ```{p}```")
         
         if len(entries) > max_display:
             older = entries[max_display:]
@@ -575,9 +591,9 @@ class PoolSettings:
     # Tail sync check (design doc §5.2 compliance — D1 fix)
     tail_sync_check_enabled: bool = True      # Enable lightweight tail-length checks after writes
 
-    # Cache pool settings (Feature: USE_PREV_ARG → full caching system)
-    cache_pool_enabled: bool = True            # Toggle on/off (default: enabled)
-    cache_pool_size: int = 50                  # Rolling buffer entries per instance
-    cache_threshold_chars: int = 1000          # Min chars for output & granular arg caching
+    # Cache pool settings (Feature: USE_CACHED_ENTRY_N)
+    cache_pool_enabled: bool = CACHE_POOL_ENABLED      # Toggle on/off (default: enabled)
+    cache_pool_size: int = CACHE_POOL_SIZE             # Rolling buffer entries per instance
+    cache_threshold_chars: int = CACHE_THRESHOLD_CHARS  # Min chars for output & granular arg caching
     
     

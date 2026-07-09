@@ -22,7 +22,7 @@ def _seed_cache(pool, scope, entries):
         pool.instance_conversations[scope] = _FakeInstance()
     cp = pool.instance_conversations[scope].cache_pool
     for val in entries:
-        cp.add("arg", scope, "test", val)
+        cp.add("arg", "test", val)
     return cp
 
 
@@ -276,7 +276,7 @@ class TestFullResolutionCycle:
 
         # Step 1: Write args to cache (simulating _cache_tool_args)
         tool_args_1 = {"file_path": "/first.py", "content": "hello"}
-        cp.add("arg", "Maine", "write_file", tool_args_1)
+        cp.add("arg", "write_file", tool_args_1)
 
         # Step 2: Resolve from cache (N=1) — entire dict is JSON-serialized
         tool_args_2 = {"file_path": "{USE_CACHED_ENTRY_1}"}
@@ -288,7 +288,7 @@ class TestFullResolutionCycle:
 
         # Step 3: Write new args to cache
         tool_args_3 = {"file_path": "/second.py", "content": "world"}
-        cp.add("arg", "Maine", "write_file", tool_args_3)
+        cp.add("arg", "write_file", tool_args_3)
 
         # Step 4: Third call — should resolve from the NEW cache entry (N=2)
         tool_args_4 = {"file_path": "{USE_CACHED_ENTRY_2}"}

@@ -411,6 +411,25 @@
                   </label>
                 </div>
               </div>
+
+              <!-- Cache Pool -->
+              <div class="settings-section">
+                <h3 class="settings-section-title">Cache Pool</h3>
+                <div class="settings-section-body">
+                  <label class="setting-field toggle-field">
+                    <span>Enable Argument Cache</span>
+                    <input type="checkbox" id="setting-cache-pool-enabled" checked />
+                  </label>
+                  <label class="setting-field">
+                    <span>Cache Size (entries)</span>
+                    <input type="number" id="setting-cache-pool-size" min="5" max="500" step="5" value="50" />
+                  </label>
+                  <label class="setting-field">
+                    <span>Min Cache Size (chars)</span>
+                    <input type="number" id="setting-cache-threshold-chars" min="100" max="10000" step="50" value="1000" />
+                  </label>
+                </div>
+              </div>
             </div>
           </div>
 

@@ -167,3 +167,8 @@ CI_STALE_CONTAINER_TTL: int = int(os.getenv('M6_CODE_INTERPRETER_STALE_TTL', '60
 CI_MIN_EXECUTION_TIMEOUT: int = 10    # Minimum per-call execution timeout (seconds)
 CI_MIN_WATCHDOG_TIMEOUT: int = 30     # Minimum watchdog timeout (seconds)
 CI_MIN_STALE_CONTAINER_TTL: int = 30  # Minimum stale container TTL (seconds)
+
+# ── Cache pool settings (Feature: USE_CACHED_ENTRY_N) ────────────────────────
+CACHE_POOL_ENABLED: bool = True               # Toggle cache pool on/off (default: enabled)
+CACHE_POOL_SIZE: int = int(os.getenv('QWEN_AGENT_CACHE_POOL_SIZE', '64'))          # Rolling buffer entries per instance
+CACHE_THRESHOLD_CHARS: int = int(os.getenv('QWEN_AGENT_CACHE_THRESHOLD_CHARS', '1000'))  # Min chars for output & granular arg caching
