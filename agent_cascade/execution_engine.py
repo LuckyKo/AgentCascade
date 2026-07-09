@@ -3212,13 +3212,12 @@ class ExecutionEngine:
         threshold = self.pool.settings.cache_threshold_chars
 
         # 1. Cache entire args dict as one entry (reuse the existing deep copy)
+        # Collect cache indices for large individual arg values, report only those
+        cache_refs = {}
+
         if 'cached' in locals():
             try:
-                idx = cp.add("arg", instance_name, tool_name, cached)
-                with inst._compression_lock:
-                    inst._cache_notifications.append(
-                        f'[SYSTEM INFO] Tool args for "{tool_name}" cached at position N={idx}'
-                    )
+                cp.add("arg", instance_name, tool_name, cached)
             except (TypeError, AttributeError):
                 pass
 
@@ -3227,12 +3226,19 @@ class ExecutionEngine:
             if isinstance(val, str) and len(val) > threshold:
                 try:
                     idx = cp.add("arg", instance_name, f"{tool_name}.{key}", val)
-                    with inst._compression_lock:
-                        inst._cache_notifications.append(
-                            f'[SYSTEM INFO] Argument "{key}" cached at position N={idx}'
-                        )
+                    cache_refs[key] = idx
                 except (TypeError, AttributeError):
                     pass
+
+        # Build notification only if something was actually cached
+        if cache_refs:
+            refs_str = ", ".join(
+                f'"{k}" → N={n}' for k, n in cache_refs.items()
+            )
+            with inst._compression_lock:
+                inst._cache_notifications.append(
+                    f'[{tool_name}] Cached: {refs_str} (reference with {{USE_CACHED_ENTRY_N}})'
+                )
 
     def _cache_tool_output(self, instance_name: str, tool_name: str,
                            output: str, threshold: int = 1000) -> None:
@@ -3263,7 +3269,7 @@ class ExecutionEngine:
             idx = cp.add("output", instance_name, tool_name, output)
             with inst._compression_lock:
                 inst._cache_notifications.append(
-                    f'[SYSTEM INFO] Tool output for "{tool_name}" ({char_count} chars) cached at position N={idx}'
+                    f'[{tool_name}] Output cached: N={idx} ({char_count} chars) (reference with {{USE_CACHED_ENTRY_N}})'
                 )
         except (TypeError, AttributeError):
             pass

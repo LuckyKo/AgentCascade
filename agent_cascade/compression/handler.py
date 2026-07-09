@@ -213,69 +213,61 @@ class CompressionHandler:
                 instance._pending_notifications = []
         return text
 
+    def _drain_notification_queue(
+        self,
+        instance: 'AgentInstance',
+        queue_attr: str,
+        header: str,
+        text: str,
+        prepend: bool = False,
+    ) -> str:
+        """Drain a notification queue into a text string.
+
+        Generic drain for _tool_warnings, _cache_notifications, etc.
+        Reads the list under lock, clears it, joins entries, and appends/prepends.
+
+        Args:
+            instance: Agent instance with the notification queue attribute.
+            queue_attr: Name of the list attribute (e.g., '_tool_warnings').
+            header: Section header text (e.g., '[TOOL WARNINGS]').
+            text: The raw content string (or any object convertible to str).
+            prepend: If True, prepend header+block before text.
+                     If False (default), append after text.
+        Returns:
+            text with notifications added (or unchanged if queue empty).
+        """
+        with instance._compression_lock:
+            queue = getattr(instance, queue_attr, [])
+            items = list(queue)
+            setattr(instance, queue_attr, [])
+
+        if items:
+            if not isinstance(text, str):
+                text = str(text)
+            block = "\n\n".join(str(i) for i in items)
+            if prepend:
+                text = f"{header}\n{block}\n\n{text}"
+            else:
+                text = f"{text}\n\n{header}\n{block}"
+        return text
+
     def _drain_tool_warnings(
         self,
         instance: 'AgentInstance',
         text: str,
         prepend: bool = False,
     ) -> str:
-        """Drain generic tool warnings into a text string.
+        """Drain generic tool warnings into a text string."""
+        return self._drain_notification_queue(instance, '_tool_warnings', '[TOOL WARNINGS]', text, prepend)
 
-        Called from execution_engine before constructing FUNCTION or USER messages.
-        If there are pending tool warnings (e.g., path resolution from extra folders),
-        they are appended to the result and queue cleared.
-
-        Args:
-            instance: Agent instance with _tool_warnings attribute
-            text: The raw content string (or any object convertible to str)
-            prepend: If True, warnings are prepended (for USER messages).
-                     If False (default), warnings are appended (for tool results).
-        Returns:
-            text with warnings added (or unchanged if no pending)
-        """
-        # Copy and clear the warnings list under lock, then do string ops outside the lock
-        with instance._compression_lock:
-            warnings = list(instance._tool_warnings)  # Guaranteed dataclass field (default_factory=list)
-            instance._tool_warnings = []
-
-        if warnings:
-            if not isinstance(text, str):
-                text = str(text)
-            warning_block = "\n\n".join(str(w) for w in warnings)
-            if prepend:
-                text = f"[TOOL WARNINGS]\n{warning_block}\n\n{text}"
-            else:
-                text = f"{text}\n\n[TOOL WARNINGS]\n{warning_block}"
-        return text
-    
     def _drain_cache_notifications(
         self,
         instance: 'AgentInstance',
         text: str,
+        prepend: bool = False,
     ) -> str:
-        """Drain cache pool notifications into a tool result string.
-
-        Called from execution_engine before constructing the FUNCTION message.
-        If there are pending cache notifications (e.g., args/outputs cached),
-        they are appended to the result and queue cleared.
-
-        Args:
-            instance: Agent instance with _cache_notifications attribute
-            text: The raw content string (or any object convertible to str)
-        Returns:
-            text with cache notifications appended (or unchanged if no pending)
-        """
-        # Copy and clear under lock, then do string ops outside the lock
-        with instance._compression_lock:
-            notifs = list(instance._cache_notifications)
-            instance._cache_notifications = []
-
-        if notifs:
-            if not isinstance(text, str):
-                text = str(text)
-            notif_block = "\n\n".join(str(n) for n in notifs)
-            text = f"{text}\n\n[CACHE INFO]\n{notif_block}"
-        return text
+        """Drain cache pool notifications into a text string."""
+        return self._drain_notification_queue(instance, '_cache_notifications', '[CACHE INFO]', text, prepend)
 
     # ── Logger Sync Helper (unified for all compression paths) ────────────────
 
