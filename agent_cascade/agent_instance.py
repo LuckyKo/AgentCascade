@@ -152,18 +152,22 @@ class ArgumentCachePool:
     def get_state_summary(self, max_display: int = 10) -> str:
         """Return truncated state string for system_info display.
 
+        Uses _next_index as the insert head to show [idx-max_display : idx] range.
         Format (one line per entry, no code blocks):
           [N=  1] [OUT] system_info        (1247 chars)  "preview_head ... preview_tail"
         """
         with self._lock:
             entries = list(self._entries)
+            head = self._next_index  # Next index to be assigned (exclusive upper bound)
         
         if not entries:
             return "  Cache Pool: empty\n"
         
         lines = [f"  Cache Pool: {len(entries)}/{self.max_size} entries (enabled={self.enabled})\n"]
-        # Show most recent entries first (highest indices), up to max_display
-        display_entries = reversed(entries[-max_display:])
+        # Show entries in [head - max_display : head) range, newest first
+        cutoff = head - max_display
+        display_entries = [e for e in entries if e.index > cutoff]
+        display_entries.sort(key=lambda e: e.index, reverse=True)
         for e in display_entries:
             marker = "ARG" if e.category == "arg" else "OUT"
             # Escape whitespace as visible sequences (\n, \r, \t), then mid-truncate
@@ -176,8 +180,8 @@ class ArgumentCachePool:
             lines.append(f"    [N={e.index:>3}] [{marker}] {tool_label}"
                         f"({e.char_count} chars)  \"{p}\"")
         
-        if len(entries) > max_display:
-            older = entries[:-max_display]
+        older = [e for e in entries if e.index <= cutoff]
+        if older:
             indices = ", ".join(str(e.index) for e in older[:5])
             lines.append(f"    ... and {len(older)} older entries (oldest: N={indices}...)")
         
