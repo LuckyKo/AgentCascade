@@ -359,16 +359,16 @@ class TestThreadSafety:
 
 
 # ===========================================================================
-# last_tool_args initialization
+# instance_conversations initialization
 # ===========================================================================
 
-class TestLastToolArgs:
-    """Test that last_tool_args is properly initialized and accessible."""
+class TestInstanceConversations:
+    """Test that instance_conversations is properly initialized and accessible."""
 
-    def test_last_tool_args_initialized(self, agent_pool):
-        assert isinstance(agent_pool.last_tool_args, dict)
+    def test_instance_conversations_initialized(self, agent_pool):
+        assert isinstance(agent_pool.instance_conversations, dict)
 
-    def test_last_tool_args_can_be_written(self, agent_pool):
-        """The streaming path writes to this; verify it's writable."""
-        agent_pool.last_tool_args["scope1"] = {"tool1": {"arg": "val"}}
-        assert agent_pool.last_tool_args["scope1"]["tool1"]["arg"] == "val"
+    def test_instance_conversations_can_be_written(self, agent_pool):
+        """Instances can be added to the map."""
+        agent_pool.instance_conversations["scope1"] = object()
+        assert "scope1" in agent_pool.instance_conversations

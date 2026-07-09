@@ -159,9 +159,9 @@ def resolve_prev_arg_placeholders(
     agent_pool: Any,
     lock: Optional[threading.Lock] = None,
 ) -> Tuple[Any, Optional[str]]:
-    """Resolves __USE_PREV_ARG__ placeholders from the last tool call.
+    """Resolves {USE_CACHED_ENTRY_N} placeholders using the rolling cache pool.
 
-    This is a shared utility that replaces the inline resolution in agent_orchestrator.py.
+    This is a shared utility used by both execution_engine.py and ws_handlers.py.
     Works for both streaming and non-streaming tool paths.
 
     Thread-safety note: When *lock* is provided, cache reads are protected by it.
@@ -173,7 +173,7 @@ def resolve_prev_arg_placeholders(
                    Non-dict inputs pass through unchanged with no error.
         instance_scope: The instance name scope (e.g., session_name).
         tool_name: Name of the tool being called.
-        agent_pool: Reference to the AgentPool for accessing last_tool_args cache.
+        agent_pool: Reference to the AgentPool for accessing the rolling cache pool.
         lock: Optional threading.Lock to guard cache reads. Pass ``None`` if the
               caller already holds the relevant lock, or when thread-safety is not
               needed (e.g., tests).
@@ -189,9 +189,6 @@ def resolve_prev_arg_placeholders(
         # Non-dict inputs pass through unchanged (no placeholders to resolve).
         return tool_args, None
 
-    # Scan for __USE_PREV_ARG__ placeholders
-    placeholders_found = [key for key, val in tool_args.items() if val == "__USE_PREV_ARG__"]
-
     # Look up instance's cache pool via agent_pool
     inst = None
     for name, i in getattr(agent_pool, 'instance_conversations', {}).items():
@@ -203,45 +200,10 @@ def resolve_prev_arg_placeholders(
     # Scan for {USE_CACHED_ENTRY_N} patterns using shared function (avoids regex recompilation + code duplication)
     cached_refs = resolve_cached_entry_refs(tool_args, cp)
 
-    # Combine both scan results for early return check
-    if not placeholders_found and not cached_refs:
+    if not cached_refs:
         return tool_args, None
 
     resolved_args = copy.deepcopy(tool_args)
-
-    # Resolve __USE_PREV_ARG__ placeholders (existing logic)
-    if placeholders_found:
-        try:
-            if lock is not None:
-                with lock:
-                    scope_cache = agent_pool.last_tool_args.get(instance_scope, {})
-                    prev_args = scope_cache.get(tool_name)
-                    global_args = scope_cache.get("__GLOBAL__", {})
-            else:
-                scope_cache = agent_pool.last_tool_args.get(instance_scope, {})
-                prev_args = scope_cache.get(tool_name)
-                global_args = scope_cache.get("__GLOBAL__", {})
-        except AttributeError:
-            # Defensive: agent_pool may not have last_tool_args in unusual setups.
-            return tool_args, None
-
-        if not prev_args and not global_args:
-            return tool_args, (
-                f"Error: Cannot use __USE_PREV_ARG__ for '{tool_name}' because no previous "
-                f"call to this tool was recorded for instance '{instance_scope}'."
-            )
-
-        for arg_key in placeholders_found:
-            if prev_args and arg_key in prev_args:
-                resolved_args[arg_key] = copy.deepcopy(prev_args[arg_key])
-            elif arg_key in global_args:
-                resolved_args[arg_key] = copy.deepcopy(global_args[arg_key])
-            else:
-                return tool_args, (
-                    f"Error: Cannot use __USE_PREV_ARG__ for argument '{arg_key}' because "
-                    f"it was not found in previous calls (neither specific to '{tool_name}' "
-                    f"nor globally)."
-                )
 
     # Resolve {USE_CACHED_ENTRY_N} placeholders using shared function (avoids code duplication)
     apply_cached_entry_resolutions(resolved_args, cached_refs)

@@ -587,7 +587,6 @@ class WsMessageHandler:
         if self.agent_pool:
             # Clear active tools/agent stack
             self.agent_pool.active_stack_clear()
-            self.agent_pool.last_tool_args.clear()
 
         self._start_gen_thread(instance_name=instance_name)
         await self._broadcast(generating=True)

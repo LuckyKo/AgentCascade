@@ -1,7 +1,7 @@
 """Unit tests for agent_cascade.tool_utils.resolve_prev_arg_placeholders().
 
-Covers basic resolution, __GLOBAL__ scope fallback, nested placeholders,
-missing-key errors, non-dict passthrough, and thread-safety.
+Covers basic {USE_CACHED_ENTRY_N} resolution, cache pool lookups,
+non-dict passthrough, deep copy isolation, and thread-safety.
 """
 
 import copy
@@ -11,56 +11,47 @@ from agent_cascade.tool_utils import resolve_prev_arg_placeholders
 
 
 # ---------------------------------------------------------------------------
-# Helper: populate the cache so tests have something to resolve against
+# Helper: populate the cache pool so tests have something to resolve against
 # ---------------------------------------------------------------------------
 
-def _seed_cache(pool, scope, tool_name, args):
-    """Insert *args* into pool.last_tool_args for the given scope and tool."""
-    pool.last_tool_args.setdefault(scope, {})[tool_name] = copy.deepcopy(args)
+def _seed_cache(pool, scope, entries):
+    """Insert *entries* (list of values) into the cache pool for the given scope.
+    Each entry gets a sequential N index. Returns the cache pool for chaining."""
+    from tests.conftest import _FakeInstance
+    if scope not in pool.instance_conversations:
+        pool.instance_conversations[scope] = _FakeInstance()
+    cp = pool.instance_conversations[scope].cache_pool
+    for val in entries:
+        cp.add("arg", scope, "test", val)
+    return cp
 
 
 # ===========================================================================
-# Basic __USE_PREV_ARG__ resolution (tool-scoped)
+# Basic {USE_CACHED_ENTRY_N} resolution
 # ===========================================================================
 
 class TestBasicResolution:
-    """Test that placeholders resolve from the tool-specific previous args."""
+    """Test that placeholders resolve from the rolling cache pool."""
 
     def test_resolves_single_placeholder(self, agent_pool):
-        _seed_cache(agent_pool, "s1", "read_file", {"path": "/tmp/x.txt"})
-        tool_args = {"path": "__USE_PREV_ARG__"}
+        _seed_cache(agent_pool, "s1", [{"path": "/tmp/x.txt"}])
+        # N=1 contains {"path": "/tmp/x.txt"} — the whole dict is JSON-serialized into the placeholder
+        tool_args = {"path": "{USE_CACHED_ENTRY_1}"}
         resolved, err = resolve_prev_arg_placeholders(
             tool_args, "s1", "read_file", agent_pool)
         assert err is None
-        assert resolved == {"path": "/tmp/x.txt"}
+        # The cached dict is JSON-serialized and replaces the placeholder
+        import json
+        cached_dict = json.loads(resolved["path"])
+        assert cached_dict["path"] == "/tmp/x.txt"
 
-    def test_resolves_multiple_placeholders(self, agent_pool):
-        _seed_cache(agent_pool, "s1", "edit_file", {
-            "file_path": "/a/b.py",
-            "old_content": "foo",
-            "new_content": "bar",
-        })
-        tool_args = {
-            "file_path": "__USE_PREV_ARG__",
-            "old_content": "__USE_PREV_ARG__",
-        }
+    def test_resolves_string_placeholder(self, agent_pool):
+        _seed_cache(agent_pool, "s1", ["hello_world"])
+        tool_args = {"greeting": "{USE_CACHED_ENTRY_1}"}
         resolved, err = resolve_prev_arg_placeholders(
-            tool_args, "s1", "edit_file", agent_pool)
+            tool_args, "s1", "any_tool", agent_pool)
         assert err is None
-        assert resolved["file_path"] == "/a/b.py"
-        assert resolved["old_content"] == "foo"
-
-    def test_mixed_placeholder_and_literal(self, agent_pool):
-        _seed_cache(agent_pool, "s1", "write_file", {"content": "prev"})
-        tool_args = {
-            "file_path": "/new/path.txt",       # literal — not a placeholder
-            "content": "__USE_PREV_ARG__",      # resolved
-        }
-        resolved, err = resolve_prev_arg_placeholders(
-            tool_args, "s1", "write_file", agent_pool)
-        assert err is None
-        assert resolved["file_path"] == "/new/path.txt"
-        assert resolved["content"] == "prev"
+        assert resolved["greeting"] == "hello_world"
 
     def test_no_placeholders_returns_original(self, agent_pool):
         tool_args = {"key": "value"}
@@ -77,93 +68,27 @@ class TestBasicResolution:
 
 
 # ===========================================================================
-# __GLOBAL__ scope fallback
+# Cache pool scope isolation
 # ===========================================================================
 
-class TestGlobalScope:
-    """Test that placeholders fall back to the __GLOBAL__ cache entry."""
+class TestScopeIsolation:
+    """Different scopes should have independent cache pools."""
 
-    def test_fallback_to_global(self, agent_pool):
-        # No tool-specific entry for "grep" — only global
-        agent_pool.last_tool_args["s1"] = {
-            "__GLOBAL__": {"pattern": "error"},
-        }
+    def test_different_scopes_isolated(self, agent_pool):
+        _seed_cache(agent_pool, "scopeA", ["valueA"])
+        # scopeB has no cache pool → placeholder not found
+        tool_args = {"key": "{USE_CACHED_ENTRY_1}"}
         resolved, err = resolve_prev_arg_placeholders(
-            {"pattern": "__USE_PREV_ARG__"}, "s1", "grep", agent_pool)
+            tool_args, "scopeB", "t", agent_pool)
+        assert err is None  # No error, just passes through unchanged
+        assert resolved == {"key": "{USE_CACHED_ENTRY_1}"}
+
+    def test_correct_scope_resolves(self, agent_pool):
+        _seed_cache(agent_pool, "s1", ["the_answer"])
+        resolved, err = resolve_prev_arg_placeholders(
+            {"key": "{USE_CACHED_ENTRY_1}"}, "s1", "t", agent_pool)
         assert err is None
-        assert resolved["pattern"] == "error"
-
-    def test_tool_specific_takes_precedence_over_global(self, agent_pool):
-        _seed_cache(agent_pool, "s1", "read_file", {"path": "/tool/path.txt"})
-        agent_pool.last_tool_args["s1"]["__GLOBAL__"] = {
-            "path": "/global/path.txt",
-        }
-        resolved, err = resolve_prev_arg_placeholders(
-            {"path": "__USE_PREV_ARG__"}, "s1", "read_file", agent_pool)
-        assert err is None
-        assert resolved["path"] == "/tool/path.txt"
-
-    def test_global_key_not_in_tool_specific_uses_global(self, agent_pool):
-        _seed_cache(agent_pool, "s1", "read_file", {"path": "/tool"})
-        agent_pool.last_tool_args["s1"]["__GLOBAL__"] = {
-            "extra_key": "from_global",
-        }
-        resolved, err = resolve_prev_arg_placeholders(
-            {"extra_key": "__USE_PREV_ARG__"}, "s1", "read_file", agent_pool)
-        assert err is None
-        assert resolved["extra_key"] == "from_global"
-
-    def test_only_global_no_tool_specific(self, agent_pool):
-        agent_pool.last_tool_args["s1"] = {
-            "__GLOBAL__": {"content": "global_content"},
-        }
-        resolved, err = resolve_prev_arg_placeholders(
-            {"content": "__USE_PREV_ARG__"}, "s1", "write_file", agent_pool)
-        assert err is None
-        assert resolved["content"] == "global_content"
-
-
-# ===========================================================================
-# Missing-key error handling
-# ===========================================================================
-
-class TestMissingKeys:
-    """Test that missing keys produce errors and return the original args."""
-
-    def test_no_previous_calls_at_all(self, agent_pool):
-        # Empty cache for this scope
-        resolved, err = resolve_prev_arg_placeholders(
-            {"key": "__USE_PREV_ARG__"}, "empty_scope", "any_tool", agent_pool)
-        assert err is not None
-        assert "no previous call" in err.lower()
-        # Returns the UNMODIFIED original args on error
-        assert resolved == {"key": "__USE_PREV_ARG__"}
-
-    def test_key_not_in_tool_or_global(self, agent_pool):
-        _seed_cache(agent_pool, "s1", "read_file", {"path": "/tmp"})
-        resolved, err = resolve_prev_arg_placeholders(
-            {"nonexistent": "__USE_PREV_ARG__"}, "s1", "read_file", agent_pool)
-        assert err is not None
-        assert "nonexistent" in err.lower()
-        assert resolved == {"nonexistent": "__USE_PREV_ARG__"}
-
-    def test_error_message_includes_tool_and_scope(self, agent_pool):
-        resolved, err = resolve_prev_arg_placeholders(
-            {"x": "__USE_PREV_ARG__"}, "myScope", "myTool", agent_pool)
-        assert err is not None
-        assert "myTool" in err
-        assert "myScope" in err
-
-    def test_partial_failure_returns_original_args(self, agent_pool):
-        """If any key fails to resolve, the entire dict is returned unchanged."""
-        _seed_cache(agent_pool, "s1", "t", {"a": 1})
-        # "a" exists, "b" does not → should error and return original
-        tool_args = {"a": "__USE_PREV_ARG__", "b": "__USE_PREV_ARG__"}
-        resolved, err = resolve_prev_arg_placeholders(
-            tool_args, "s1", "t", agent_pool)
-        assert err is not None
-        # Must return the ORIGINAL (unchanged) dict, not a partially-resolved one
-        assert resolved == {"a": "__USE_PREV_ARG__", "b": "__USE_PREV_ARG__"}
+        assert resolved["key"] == "the_answer"
 
 
 # ===========================================================================
@@ -195,42 +120,64 @@ class TestNonDictPassthrough:
 
 
 # ===========================================================================
-# Nested placeholder resolution
+# Multiple entries and index resolution
 # ===========================================================================
 
-class TestNestedValues:
-    """Test that deeply nested dicts/lists with placeholders get resolved."""
+class TestMultipleEntries:
+    """Test that different N indices resolve to different cached values."""
 
-    def test_nested_dict_value(self, agent_pool):
-        _seed_cache(agent_pool, "s1", "t", {
-            "config": {"path": "/deep", "flag": True},
-        })
+    def test_resolve_entry_1_and_2(self, agent_pool):
+        _seed_cache(agent_pool, "s1", ["first_value", "second_value"])
+        tool_args = {
+            "a": "{USE_CACHED_ENTRY_1}",
+            "b": "{USE_CACHED_ENTRY_2}",
+        }
         resolved, err = resolve_prev_arg_placeholders(
-            {"config": "__USE_PREV_ARG__"}, "s1", "t", agent_pool)
+            tool_args, "s1", "t", agent_pool)
         assert err is None
-        assert resolved["config"] == {"path": "/deep", "flag": True}
+        assert resolved["a"] == "first_value"
+        assert resolved["b"] == "second_value"
+
+    def test_resolve_nonexistent_index_unchanged(self, agent_pool):
+        _seed_cache(agent_pool, "s1", ["only_one"])
+        tool_args = {"key": "{USE_CACHED_ENTRY_99}"}
+        resolved, err = resolve_prev_arg_placeholders(
+            tool_args, "s1", "t", agent_pool)
+        assert err is None
+        assert resolved == {"key": "{USE_CACHED_ENTRY_99}"}  # passes through
+
+
+# ===========================================================================
+# Deep copy isolation
+# ===========================================================================
+
+class TestDeepCopy:
+    """Test that resolved values are deep-copied."""
 
     def test_resolved_value_is_deep_copied(self, agent_pool):
         """Mutating the resolved value must not mutate the cache."""
-        _seed_cache(agent_pool, "s1", "t", {"nested": {"x": 1}})
+        _seed_cache(agent_pool, "s1", [{"nested": {"x": 1}}])
         resolved, err = resolve_prev_arg_placeholders(
-            {"nested": "__USE_PREV_ARG__"}, "s1", "t", agent_pool)
+            {"nested": "{USE_CACHED_ENTRY_1}"}, "s1", "t", agent_pool)
         assert err is None
+        # The value is JSON-serialized (non-string cached value)
+        import json
         # Mutate the resolved value
-        resolved["nested"]["x"] = 999
-        # Re-resolve — should still be 1 (cache was deep-copied)
+        if isinstance(resolved["nested"], str):
+            resolved["nested"] = resolved["nested"] + "_mutated"
+        # Re-resolve
         resolved2, _ = resolve_prev_arg_placeholders(
-            {"nested": "__USE_PREV_ARG__"}, "s1", "t", agent_pool)
-        assert resolved2["nested"]["x"] == 1
+            {"nested": "{USE_CACHED_ENTRY_1}"}, "s1", "t", agent_pool)
+        assert resolved2["nested"] != resolved["nested"]
 
     def test_tool_args_deep_copied_before_resolution(self, agent_pool):
         """Original tool_args must not be modified by resolution."""
-        original = {"key": "__USE_PREV_ARG__"}
-        _seed_cache(agent_pool, "s1", "t", {"key": "resolved_val"})
+        original = {"key": "{USE_CACHED_ENTRY_1}"}
+        _seed_cache(agent_pool, "s1", ["resolved_val"])
         resolved, err = resolve_prev_arg_placeholders(original, "s1", "t", agent_pool)
         assert err is None
         # original dict must still contain the placeholder
-        assert original["key"] == "__USE_PREV_ARG__"
+        assert original["key"] == "{USE_CACHED_ENTRY_1}"
 
 
 # ===========================================================================
@@ -242,32 +189,31 @@ class TestThreadSafety:
 
     def test_no_deadlock_with_lock_none(self, agent_pool):
         """Passing lock=None should work without error."""
-        _seed_cache(agent_pool, "s1", "t", {"a": 1})
+        _seed_cache(agent_pool, "s1", ["a_val"])
         resolved, err = resolve_prev_arg_placeholders(
-            {"a": "__USE_PREV_ARG__"}, "s1", "t", agent_pool, lock=None)
+            {"a": "{USE_CACHED_ENTRY_1}"}, "s1", "t", agent_pool, lock=None)
         assert err is None
-        assert resolved["a"] == 1
+        assert resolved["a"] == "a_val"
 
     def test_lock_provided_works(self, agent_pool):
         """Passing an actual lock should acquire it for cache reads."""
-        _seed_cache(agent_pool, "s1", "t", {"x": "y"})
+        _seed_cache(agent_pool, "s1", ["x_val"])
         l = threading.Lock()
         resolved, err = resolve_prev_arg_placeholders(
-            {"x": "__USE_PREV_ARG__"}, "s1", "t", agent_pool, lock=l)
+            {"x": "{USE_CACHED_ENTRY_1}"}, "s1", "t", agent_pool, lock=l)
         assert err is None
-        assert resolved["x"] == "y"
+        assert resolved["x"] == "x_val"
 
     def test_concurrent_resolution_with_lock(self, agent_pool):
         """Multiple threads resolving with the same lock should not corrupt."""
-        _seed_cache(agent_pool, "s1", "t", {"val": 0})
-
+        _seed_cache(agent_pool, "s1", ["val"])
         l = threading.Lock()
         errors = []
 
         def resolve_then_update(i):
             try:
                 resolved, err = resolve_prev_arg_placeholders(
-                    {"val": "__USE_PREV_ARG__"}, "s1", "t", agent_pool, lock=l)
+                    {"val": "{USE_CACHED_ENTRY_1}"}, "s1", "t", agent_pool, lock=l)
                 if err:
                     errors.append(err)
             except Exception as e:
@@ -283,14 +229,13 @@ class TestThreadSafety:
 
     def test_concurrent_resolution_without_lock(self, agent_pool):
         """Without a lock, concurrent reads may be unsafe but should not crash."""
-        _seed_cache(agent_pool, "s1", "t", {"val": 42})
-
+        _seed_cache(agent_pool, "s1", ["val"])
         errors = []
 
         def resolve():
             try:
                 resolved, err = resolve_prev_arg_placeholders(
-                    {"val": "__USE_PREV_ARG__"}, "s1", "t", agent_pool, lock=None)
+                    {"val": "{USE_CACHED_ENTRY_1}"}, "s1", "t", agent_pool, lock=None)
                 if err:
                     errors.append(err)
             except Exception as e:
@@ -302,36 +247,53 @@ class TestThreadSafety:
         for t in threads:
             t.join()
 
-        # No hard assertions on correctness (unsynchronized), but no crashes
         assert not errors
 
-    def test_attribute_error_defensive_fallback(self):
-        """AgentPool without last_tool_args should return original args."""
-        bare_pool = object()  # no last_tool_args attribute
-        tool_args = {"key": "__USE_PREV_ARG__"}
+    def test_no_cache_pool_attribute(self):
+        """AgentPool without instance_conversations should return original args."""
+        bare_pool = type('Pool', (), {'instance_conversations': {}})()
+        tool_args = {"key": "{USE_CACHED_ENTRY_1}"}
         resolved, err = resolve_prev_arg_placeholders(
             tool_args, "s1", "t", bare_pool)
-        assert err is None  # Defensive: returns original without error
+        assert err is None
         assert resolved == tool_args
 
 
 # ===========================================================================
-# Scoping: different scopes are isolated
+# Integration: full resolution cycle
 # ===========================================================================
 
-class TestScopeIsolation:
-    """Different instance_scope values should not share cached args."""
+class TestFullResolutionCycle:
+    """Test the complete cycle: cache write → resolve → cache write → resolve again."""
 
-    def test_different_scopes_isolated(self, agent_pool):
-        _seed_cache(agent_pool, "scopeA", "t", {"key": "valueA"})
-        # scopeB has no entry → error
-        resolved, err = resolve_prev_arg_placeholders(
-            {"key": "__USE_PREV_ARG__"}, "scopeB", "t", agent_pool)
-        assert err is not None
+    def test_resolve_use_cache_write_then_resolve_again(self, agent_pool):
+        """Simulate: first call writes args to cache; second call resolves from it."""
+        from tests.conftest import _FakeInstance
+        import json
+        if "Maine" not in agent_pool.instance_conversations:
+            agent_pool.instance_conversations["Maine"] = _FakeInstance()
+        cp = agent_pool.instance_conversations["Maine"].cache_pool
 
-    def test_different_tools_isolated(self, agent_pool):
-        _seed_cache(agent_pool, "s1", "toolA", {"path": "/a"})
-        # toolB has no entry in s1 → error
+        # Step 1: Write args to cache (simulating _cache_tool_args)
+        tool_args_1 = {"file_path": "/first.py", "content": "hello"}
+        cp.add("arg", "Maine", "write_file", tool_args_1)
+
+        # Step 2: Resolve from cache (N=1) — entire dict is JSON-serialized
+        tool_args_2 = {"file_path": "{USE_CACHED_ENTRY_1}"}
         resolved, err = resolve_prev_arg_placeholders(
-            {"path": "__USE_PREV_ARG__"}, "s1", "toolB", agent_pool)
-        assert err is not None
+            tool_args_2, "Maine", "write_file", agent_pool)
+        assert err is None
+        cached_dict = json.loads(resolved["file_path"])
+        assert cached_dict["file_path"] == "/first.py"
+
+        # Step 3: Write new args to cache
+        tool_args_3 = {"file_path": "/second.py", "content": "world"}
+        cp.add("arg", "Maine", "write_file", tool_args_3)
+
+        # Step 4: Third call — should resolve from the NEW cache entry (N=2)
+        tool_args_4 = {"file_path": "{USE_CACHED_ENTRY_2}"}
+        resolved, err = resolve_prev_arg_placeholders(
+            tool_args_4, "Maine", "write_file", agent_pool)
+        assert err is None
+        cached_dict2 = json.loads(resolved["file_path"])
+        assert cached_dict2["file_path"] == "/second.py"

@@ -1087,7 +1087,7 @@ class ExecutionEngine:
                         m0_content += (
                             "\n\n### Advanced Feature: Argument Reuse\n"
                             "To reuse a LARGE argument value (like full file content or path) from any previous successful tool call in this session, "
-                            'use the exact placeholder: "__USE_PREV_ARG__". This saves tokens and processing time.'
+                            'use the exact placeholder: "{USE_CACHED_ENTRY_N}" where N is the cache index. This saves tokens and processing time.'
                         )
                     
                     # Update the message ONLY if content actually changed (preserves LLM prefix caching)
@@ -3170,14 +3170,9 @@ class ExecutionEngine:
             logger.warning(f"Failed to initialize cache pool for '{instance_name}': {e}")
 
     def _cache_tool_args(self, instance_name: str, tool_name: str, tool_args: Any) -> None:
-        """Store resolved tool arguments in the per-instance cache for __USE_PREV_ARG__ reuse.
+        """Store resolved tool arguments in the rolling cache pool for {USE_CACHED_ENTRY_N} reuse.
 
         Args are deep-copied to prevent later mutation of cached values.
-        Each argument key is stored under the instance scope so that any
-        subsequent tool call can reuse it by name — regardless of which tool
-        originally provided it, or whether the previous call succeeded.
-
-        Additionally writes entries to the rolling cache pool for {USE_CACHED_ENTRY_N} resolution.
 
         Args:
             instance_name: The agent instance name (scope key).
@@ -3187,19 +3182,7 @@ class ExecutionEngine:
         if not isinstance(tool_args, dict):
             return  # Nothing to cache for non-dict args
 
-        try:
-            cached = copy.deepcopy(tool_args)  # Single deep copy, reused below
-            scope = self.pool.last_tool_args.setdefault(instance_name, {})
-            # Per-tool cache: most recent resolved args for this exact tool
-            scope[tool_name] = cached
-            # Global arg cache: union of all argument keys seen in this instance
-            global_cache = scope.setdefault("__GLOBAL__", {})
-            global_cache.update(cached)
-        except (AttributeError, TypeError):
-            # Defensive: pool may not have last_tool_args in unusual setups
-            logger.warning(f"Failed to cache args for tool '{tool_name}' on instance '{instance_name}': deepcopy failed")
-
-        # ── Also add to rolling cache pool ──────────────────────────────────
+        # ── Add to rolling cache pool ───────────────────────────────────────
         self._ensure_cache_pool(instance_name)
         inst = self.pool.get_instance(instance_name)
         if inst is None or inst.cache_pool is None:
@@ -3211,15 +3194,14 @@ class ExecutionEngine:
 
         threshold = self.pool.settings.cache_threshold_chars
 
-        # 1. Cache entire args dict as one entry (reuse the existing deep copy)
+        # 1. Cache entire args dict as one entry
         # Collect cache indices for large individual arg values, report only those
         cache_refs = {}
-
-        if 'cached' in locals():
-            try:
-                cp.add("arg", instance_name, tool_name, cached)
-            except (TypeError, AttributeError):
-                pass
+        cached = copy.deepcopy(tool_args)
+        try:
+            cp.add("arg", instance_name, tool_name, cached)
+        except (TypeError, AttributeError):
+            pass
 
         # 2. Also cache individual string values > threshold separately
         for key, val in tool_args.items():
@@ -3276,11 +3258,10 @@ class ExecutionEngine:
 
     def _resolve_placeholders(self, tool_args: Any, instance_name: str,
                               tool_name: str) -> Optional[dict]:
-        """Resolve __USE_PREV_ARG__ and {USE_CACHED_ENTRY_N} placeholders in tool arguments.
+        """Resolve {USE_CACHED_ENTRY_N} placeholders in tool arguments.
 
         If *tool_args* is a JSON string it is parsed first, then resolved.
-        Resolution looks up each argument name in the global cache (which
-        aggregates args from all previous tool calls in this instance).
+        Resolution looks up cached entries from the rolling cache pool.
         Unresolvable placeholders are left as-is — no error is raised so
         that regular tool use is unaffected.
 
@@ -3309,10 +3290,6 @@ class ExecutionEngine:
             logger.debug("unexpected type for %s/%s: %s", instance_name, tool_name, type(tool_args).__name__)
             return None  # Unexpected type — signal error
 
-        # ── Step 2: scan for BOTH placeholder types ─────────────────────────
-        placeholders_found = [k for k, v in parsed.items()
-                              if isinstance(v, str) and v.strip() == "__USE_PREV_ARG__"]
-
         # Scan for {USE_CACHED_ENTRY_N} patterns using shared function (avoids regex recompilation + code duplication)
         inst = self.pool.get_instance(instance_name)
         cache_pool = getattr(inst, 'cache_pool', None) if inst else None
@@ -3321,23 +3298,10 @@ class ExecutionEngine:
         # Always deep-copy for consistency (same path whether placeholders exist or not)
         resolved_args = copy.deepcopy(parsed)
 
-        if not placeholders_found and not cached_refs:
+        if not cached_refs:
             return resolved_args  # Nothing to resolve, but return a safe copy
 
-        # ── Step 3a: resolve __USE_PREV_ARG__ (existing logic) ──────────────
-        scope_cache = getattr(self.pool, 'last_tool_args', {}).get(instance_name, {})
-        prev_args = scope_cache.get(tool_name)           # tool-specific fallback
-        global_args = scope_cache.get("__GLOBAL__", {})  # primary lookup (all tools)
-
-        for arg_key in placeholders_found:
-            # Try global cache first (any previous tool), then tool-specific
-            if arg_key in global_args:
-                resolved_args[arg_key] = copy.deepcopy(global_args[arg_key])
-            elif prev_args and arg_key in prev_args:
-                resolved_args[arg_key] = copy.deepcopy(prev_args[arg_key])
-            # else: leave the placeholder as-is — no error, just pass through
-
-        # ── Step 3b: resolve {USE_CACHED_ENTRY_N} using shared function ─────
+        # ── Resolve {USE_CACHED_ENTRY_N} using shared function ──────────────
         apply_cached_entry_resolutions(resolved_args, cached_refs)
 
         return resolved_args

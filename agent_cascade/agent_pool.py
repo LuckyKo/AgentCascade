@@ -284,7 +284,6 @@ class AgentPool:
 
         # ── Attributes required by api_server.py and agent_invoker.py ──
         # These bridge the new unified model with existing call patterns.
-        self.last_tool_args: Dict[str, Dict[str, Dict[str, Any]]] = {}  # tool arg cache for __USE_PREV_ARG__
         self.instance_summaries: Dict[str, str] = {}         # per-instance compression summaries
         self._ws_loop = None                                 # asyncio event loop ref (set by api_server at runtime)
 
@@ -806,7 +805,6 @@ class AgentPool:
         # Keep unified's active_stack_clear() — temp removed it but unified still needs it
         if hasattr(self, 'active_stack_clear'):
             self.active_stack_clear()
-        self.last_tool_args.clear()
         self.instance_state.clear()
         self.instance_summaries.clear()
 
