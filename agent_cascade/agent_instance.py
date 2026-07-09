@@ -117,7 +117,11 @@ class ArgumentCachePool:
         if len(val_str) <= threshold:
             return -1
 
-        preview = (val_str[:197] + '...') if len(val_str) > 200 else val_str
+        # Store head + tail for meaningful mid-truncation display (start ... end)
+        if len(val_str) > 200:
+            preview = val_str[:100] + val_str[-100:]
+        else:
+            preview = val_str
 
         with self._lock:
             # Check enabled flag inside lock to avoid race with config toggle
@@ -158,8 +162,8 @@ class ArgumentCachePool:
             return "  Cache Pool: empty\n"
         
         lines = [f"  Cache Pool: {len(entries)}/{self.max_size} entries (enabled={self.enabled})\n"]
-        # Show most recent entries first, up to max_display
-        display_entries = reversed(entries[:max_display])
+        # Show most recent entries first (highest indices), up to max_display
+        display_entries = reversed(entries[-max_display:])
         for e in display_entries:
             marker = "ARG" if e.category == "arg" else "OUT"
             # Escape whitespace as visible sequences (\n, \r, \t), then mid-truncate
@@ -173,7 +177,7 @@ class ArgumentCachePool:
                         f"({e.char_count} chars)  \"{p}\"")
         
         if len(entries) > max_display:
-            older = entries[max_display:]
+            older = entries[:-max_display]
             indices = ", ".join(str(e.index) for e in older[:5])
             lines.append(f"    ... and {len(older)} older entries (oldest: N={indices}...)")
         
