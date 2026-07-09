@@ -146,7 +146,11 @@ class ArgumentCachePool:
             return None  # Entry was evicted (too old) — caller should leave placeholder as-is
     
     def get_state_summary(self, max_display: int = 10) -> str:
-        """Return truncated state string for system_info display."""
+        """Return truncated state string for system_info display.
+
+        Format (one line per entry, no code blocks):
+          [N=  1] [OUT] system_info        (1247 chars)  "preview_head ... preview_tail"
+        """
         with self._lock:
             entries = list(self._entries)
         
@@ -158,14 +162,15 @@ class ArgumentCachePool:
         display_entries = reversed(entries[:max_display])
         for e in display_entries:
             marker = "ARG" if e.category == "arg" else "OUT"
-            # Mid-point truncation: show head and tail, cut the middle
-            p = e.preview
+            # Escape whitespace as visible sequences (\n, \r, \t), then mid-truncate
+            p = e.preview.replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
             if len(p) > 120:
                 half = 50
                 p = p[:half] + ' ... ' + p[-half:]
-            # Format: [N= 3] [ARG] read_file/path (93 chars): ```value```
-            lines.append(f"    [N={e.index:>3}] [{marker}] {e.source_tool} "
-                        f"({e.char_count} chars): ```{p}```")
+            # Pad source_tool to 24 chars for column alignment; wrap preview in quotes
+            tool_label = f"{e.source_tool:<24}"
+            lines.append(f"    [N={e.index:>3}] [{marker}] {tool_label}"
+                        f"({e.char_count} chars)  \"{p}\"")
         
         if len(entries) > max_display:
             older = entries[max_display:]
