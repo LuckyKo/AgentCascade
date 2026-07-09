@@ -17,31 +17,16 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] Add skills (custom agent loading)
 [ ] Add an Overseer agent that periodically checks on the health of the system, reads logs and telemetry, check if running agents got stuck in undetectable loops or migrated goals towards something that the user never asked for, suggests fixes and improvements into a suggestion box. Main agent will pull from the suggestion box during idle times when user is AFK to self improve the agents or the framework during our daily operation - do the whole DNA A/B testing thing. Overseer agent will always get its full working queue compressed when it finishes and save it into the suggestion box (no chat messages) - should be persistent across sessions. We'll set the interval at which it activates, it will silently interrupt running agents when it activates and resume them like it never happens when its done (unless it decides to kill an agent), or work in parallel using a different API endpoint. - big task, will do it after we stabilize the framework
 [ ] need a memory consolidation task ran periodically - takes all summaries in log and arranges them in a neat continuous package like long term memory -> replaces last summary
-[ ] warn agents about message limit at 90%
+[x] warn agents about turn limit at 90%, and a final warning one when it has only 1 turn left to wrap it up. — FIXED: added turn limit warnings in execution_engine.py using `_append_system_notification` with guard prefix dedup; warns at 90% (turns_available == 10% of max_turns) and on the final remaining turn, appending to both `messages` and `llm_messages` lists
+[ ] implement async shell_cmd launch (immediate tool response that it was launched, runs in background while agent is running and return final output as user message when done)
 [ ] make cmd_shell pop open a console window in the back so the user can inspect or interact with it if needed.
 [x] improve list_dir tool — FIXED (3ec490c): added recursive listing, glob filtering (include/exclude), sorting (name/size/date/type), human-readable sizes, timestamps, summary stats, max_entries cap, symlink cycle detection
 [x] add a banner above the user chat entry that shows queued messages (with an X to dismiss each one individually) — FIXED: backend exposes queued_messages list in state payload, new dismiss_queue_message() method with thread-safe _queue_lock, WebSocket handler for individual/clear-all dismiss, frontend banner with live rendering and per-message ✕ buttons
 [x] change USE_PREV_ARG system to an argument and (certain) tool output caching system — FIXED: new ArgumentCachePool class with rolling deque buffer, CacheEntry dataclass, per-instance scope, thread-safe operations, all tool args cached + outputs > 1000 chars cached, {USE_CACHED_ENTRY_N} resolution via shared resolve_cached_entry_refs() function, system_info displays cache pool state, toggle on/off via PoolSettings (cache_pool_enabled/cache_pool_size/cache_threshold_chars), config handlers for live updates, backward compatible with __USE_PREV_ARG__
+[ ] document cache system info in SYSTEM_DOCS.md
 [x] add `delete_and_insert` match_mode to edit_file tool: the `old_content` argument takes a python range `start:end` (but start with 1) that will be deleted before the new content is inserted at position `start`. leaving `new_content` empty will just delete that line range, providing just `start` in range will be pure insert of `new_content`. range can go negative, a start of -1 will insert at tail-1, 0 will append at the end, 1 will insert at start.
 [x] add `shift` mode to re_indet tool, a mode where we just add or remove indent units from the start of the line. (the old `shit` mode will be renamed to `min`)
-[x] refactor tool assignment to work in real time: added live _ui_disabled_tools cache to AgentPool with thread-safe access; modified _get_active_functions_from_template and _build_resources_block to read fresh pool config each turn; updated handle_update_config to push changes immediately to all instances; fixed sub-agent propagation in lifecycle_manager.
  
-# Message stack update rules:
-
-- add message/tool response/user msg (append): agent_pool - add; logs - add; UI - add
-- user history edit (edit): agent_pool - in place; logs - in place; UI - rebuild
-- user history delete (edit): agent_pool - in place; logs - in place; UI - rebuild
-- compression (regen): agent_pool - rebuild; logs - rebuild; UI - rebuild
-- rollback (edit): agent_pool - trim tail; logs - trim tail; UI - rebuild
-- retry (edit): agent_pool - trim tail; logs - trim tail; UI - rebuild
-- continue (resend): agent_pool - no; logs - no; UI - no
-- call_agent (new): agent_pool - new; logs - new; UI - new
-- call_agent (existing): agent_pool - add; logs - add; UI - add
-- call_agent return (append): agent_pool - add; logs - add; UI - add
-- new session (reset): agent_pool - new; logs - new; UI - new
-- session load (replace from json): agent_pool - rebuild; logs - rebuild; UI - rebuild
-- server startup (load last root agent json log): : agent_pool - rebuild; logs - rebuild; UI - rebuild
-
 # BUGS:
 
 - [ ] Activity banner still doesn't change when tools are written
@@ -54,6 +39,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] agent tab needs refresh when switching to it from another — FIXED: invalidate panel contentKey/lastRenderedCount cache in switchMainTab() to force re-render on tab switch
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent once it reached conclusion
 - [ ] if user unchecked auto-ask while the security agent is running the approval window pops up correctly but its stuck in a weird flashing mode and cant press any button to approve/reject
+- [ ] telemetry `Avg TPS` is wrongly calculated, `Output Tokens (est)` also most likely undercounts
 
 # Errors to investigate:
 
