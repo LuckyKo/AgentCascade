@@ -62,6 +62,11 @@ class InnerLoopDetector:
         self.blocks = Counter()
         self.sentences = Counter()
 
+        # Track which items have already been scored (one-time scoring per threshold crossing).
+        self._scored_sentences = set()
+        self._scored_ngrams = set()
+        self._scored_blocks = set()
+
         self.last_char = None
         self.char_run = 0
 
@@ -81,6 +86,9 @@ class InnerLoopDetector:
         self.score = 0
         self.last_char = None
         self.char_run = 0
+        self._scored_sentences.clear()
+        self._scored_ngrams.clear()
+        self._scored_blocks.clear()
         self._chars_fed = 0
         self._feed_count = 0
 
@@ -199,8 +207,9 @@ class InnerLoopDetector:
         # Sentence repetition — always runs after min_chars (cheap, no batching)
         ##################################################
 
-        for norm_count in self.sentences.items():
-            if norm_count[1] >= self._settings.sentence_repetition_threshold:
+        for norm, count in self.sentences.items():
+            if count >= self._settings.sentence_repetition_threshold and norm not in self._scored_sentences:
+                self._scored_sentences.add(norm)
                 ev = self.add_score(80, "repeated sentence")
                 if ev:
                     return ev
@@ -221,7 +230,8 @@ class InnerLoopDetector:
         if len(self.tokens) >= self.ngram_size:
             ng = tuple(self.tokens)[-self.ngram_size:]  # O(k) where k=ngram_size, not O(N)
             self.ngrams[ng] += 1
-            if self.ngrams[ng] >= self._settings.ngram_repetition_threshold:
+            if self.ngrams[ng] >= self._settings.ngram_repetition_threshold and ng not in self._scored_ngrams:
+                self._scored_ngrams.add(ng)
                 ev = self.add_score(60, "repeated ngram")
                 if ev:
                     return ev
@@ -236,7 +246,8 @@ class InnerLoopDetector:
         if len(self.tokens) >= self.block_size:
             block = tuple(self.tokens)[-self.block_size:]  # O(k) where k=block_size, not O(N)
             self.blocks[block] += 1
-            if self.blocks[block] >= self._settings.block_repetition_threshold:
+            if self.blocks[block] >= self._settings.block_repetition_threshold and block not in self._scored_blocks:
+                self._scored_blocks.add(block)
                 ev = self.add_score(70, "repeated block")
                 if ev:
                     return ev

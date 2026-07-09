@@ -180,18 +180,20 @@ class TestCharacterRunDetection:
 
     def test_single_char_run(self):
         # Unique filler sentences (no repetition that could trigger sentence detection first)
+        # char_run_limit defaults to 128, so we need > 128 consecutive identical chars.
+        # With chunk_size=256 some chars are consumed per chunk, so use 200 to be safe.
         base = self._FILLER
-        text = base + "a" * 120
+        text = base + "a" * 200
         result = feed_chunks(text)
-        assert result is not None, f"Should detect a run of 120 'a' chars; text had {len(text)} chars"
+        assert result is not None, f"Should detect a run of 200 'a' chars; text had {len(text)} chars"
         assert "character run" in result["reason"].lower()
 
     def test_space_run(self):
         """Consecutive spaces (code indentation / ASCII art)."""
         base = self._FILLER
-        text = base + " " * 80
+        text = base + " " * 200
         result = feed_chunks(text)
-        assert result is not None, f"Should detect a run of 80 spaces; text had {len(text)} chars"
+        assert result is not None, f"Should detect a run of 200 spaces; text had {len(text)} chars"
 
 
 class TestSentenceRepetition:
@@ -206,21 +208,30 @@ class TestSentenceRepetition:
     def test_exact_sentence_repeat(self):
         """Feed the same sentence enough times to trigger detection.
 
-        Use 8 repetitions (not 7) because chunk_size=256 can split one
-        repetition across a boundary, reducing effective count by 1.
+        With one-time scoring each sentence only scores +80 once when first
+        crossing the threshold (7 reps). Three distinct repeated sentences
+        give 3 × 80 = 240, enough to cross score_threshold=200.
+        Use 10 reps because chunk_size=256 can split some across boundaries.
         """
         base = self._FILLER
-        sent = "The function takes three parameters for input processing."
-        text = base + f" {sent}. " * 8 + " More checking needed. " * 20
+        sent1 = "The function takes three parameters for input processing."
+        sent2 = "The output is validated against expected results each time."
+        sent3 = "Every module requires thorough testing before deployment."
+        text = base + f" {sent1}. " * 10 + f" {sent2}. " * 10 + f" {sent3}. " * 10
         result = feed_chunks(text)
         assert result is not None, "Should detect repeated sentence"
         assert "repeated sentence" in result["reason"].lower()
 
     def test_reasoning_style_repeat(self):
-        """Simulate a reviewer restating the same observation."""
+        """Simulate a reviewer restating the same observation.
+
+        Three distinct repeated observations, each 10×, give 3 × 80 = 240 score.
+        """
         base = self._FILLER
-        obs = "The code looks correct here."
-        text = base + f" {obs}. " * 8 + " Moving on to the next part. " * 15
+        obs1 = "The code looks correct here."
+        obs2 = "The logic follows the expected pattern throughout."
+        obs3 = "No obvious issues were found in the implementation."
+        text = base + f" {obs1}. " * 10 + f" {obs2}. " * 10 + f" {obs3}. " * 10
         result = feed_chunks(text)
         assert result is not None, "Should detect repeated analysis sentence"
 
@@ -231,31 +242,31 @@ class TestTokenLevelRepetition:
     def test_ngram_loop_128_tokens(self):
         """A repeating phrase pattern that creates identical n-grams.
 
-        The detector uses a 128-token sliding window. If the same 128-token
-        sequence appears 5+ times, the n-gram counter fires.
+        The detector uses a 64-token n-gram window. With one-time scoring,
+        each detected pattern scores only once. Three distinct repeated
+        sentences each score +80, giving 240 > 200 threshold.
         """
-        # Build unique filler to pass min_chars (2500) without triggering sentence repeat
+        # Build unique filler to pass min_chars without triggering sentence repeat
         base = " ".join(
             f"Analyzing module {i} for potential issues in the implementation layer."
             for i in range(1, 60)
         ) + "."
 
-        # Repeat a 30-token phrase enough times that the same 128-token window
-        # appears at least 3 times (each overlap shifts by ~30 tokens).
-        phrase = "the quick brown fox jumps over the lazy dog near the river bank"
-        text = base + (" " + phrase) * 50
+        # Three distinct repeating sentences, each 10×. Each scores +80 once
+        # when crossing sentence_repetition_threshold (7 reps).
+        s1 = "the quick brown fox jumps over the lazy dog near the river bank today."
+        s2 = "every module requires careful review before integration testing begins."
+        s3 = "the analysis confirms the pattern repeats across all components found."
+        text = base + f" {s1}. " * 10 + f" {s2}. " * 10 + f" {s3}. " * 10
 
         result = feed_chunks(text)
         assert result is not None, (
-            f"Should detect n-gram repetition at ~128 tokens; "
+            f"Should detect repetition at ~64 tokens; "
             f"text had {len(text)} chars"
         )
 
     def test_block_loop_256_tokens(self):
         """A paragraph that repeats — should trigger block detection.
-
-        Uses a large enough repeated section (500 unique words × 3) so the
-        same sliding window overlaps across batch_interval gaps.
 
         With chunking, sentence repetition is the most reliable signal since
         the same sentences appear multiple times in each block copy.
@@ -266,11 +277,13 @@ class TestTokenLevelRepetition:
             for i in range(1, 60)
         ) + "."
 
-        # Repeated phrase that creates both n-gram and block repetition signals.
-        # Each phrase is ~30 tokens; repeating it 20 times ensures the same
-        # sentence appears >= 7 times across chunk boundaries (chunk_size=256).
-        phrase = "the quick brown fox jumps over the lazy dog near the river bank."
-        text = prefix + (" " + phrase) * 20
+        # Three distinct repeated sentences, each 10×.
+        # Each scores +80 once when crossing threshold (7 reps).
+        # 3 × 80 = 240 > 200 threshold.
+        s1 = "the quick brown fox jumps over the lazy dog near the river bank."
+        s2 = "every module requires careful review before integration testing."
+        s3 = "the analysis confirms the pattern repeats across all components."
+        text = prefix + f" {s1}. " * 10 + f" {s2}. " * 10 + f" {s3}. " * 10
         assert len(text) >= 4000, (
             f"Text too short ({len(text)} chars), min_chars gate will skip heavy checks"
         )
@@ -287,8 +300,8 @@ class TestLongReasoningLoop:
     def test_long_reasoning_loop_512_tokens(self):
         """Simulate an agent stuck in a long reasoning loop.
 
-        A repeated phrase pattern that creates both sentence repetition and
-        n-gram signals across chunk boundaries (chunk_size=256).
+        With one-time scoring, multiple distinct repeated sentences each
+        score +80 once. Three distinct sentences × 80 = 240 > 200 threshold.
         """
         # Unique prefix to pass min_chars gate (4000 chars)
         prefix = " ".join(
@@ -296,11 +309,11 @@ class TestLongReasoningLoop:
             for i in range(1, 60)
         ) + "."
 
-        # Repeated phrase that creates strong repetition signals.
-        # Each phrase is ~30 tokens; repeating it 25 times ensures sentence
-        # repetition fires even with chunk_size=256 splitting across boundaries.
-        phrase = "the analysis shows the same pattern repeats consistently across modules."
-        text = prefix + (" " + phrase) * 25
+        # Three distinct repeated sentences, each appearing 10+ times.
+        s1 = "the analysis shows the same pattern repeats consistently across modules."
+        s2 = "each component exhibits identical behavior under the current configuration."
+        s3 = "the evidence points to a systematic loop in the processing pipeline."
+        text = prefix + f" {s1}. " * 10 + f" {s2}. " * 10 + f" {s3}. " * 10
 
         result = feed_chunks(text)
         assert result is not None, (
