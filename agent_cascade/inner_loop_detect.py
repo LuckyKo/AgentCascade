@@ -162,13 +162,7 @@ class InnerLoopDetector:
                 # Accumulate sentence counts (checked later, gated by min_chars).
                 self.sentences[norm] += 1
 
-        trimmed = last_end
         self.text = self.text[last_end:]
-
-        # Keep _chars_fed bounded: subtract chars that were tokenized and discarded.
-        # This prevents unbounded growth over long generation streams.
-        if trimmed > 0:
-            self._chars_fed = max(0, self._chars_fed - trimmed)
 
         ##################################################
         # Character repetition (per-char scan — always runs to maintain state)
