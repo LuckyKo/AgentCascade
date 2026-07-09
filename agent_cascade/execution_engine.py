@@ -1142,8 +1142,8 @@ class ExecutionEngine:
                         m0_content += (
                             "\n\n### Advanced Feature: Argument Caching Pool\n"
                             "The system maintains a rolling cache of tool arguments and large outputs (>1000 chars).\n"
-                            "Each cached entry is assigned a sequential index N. You can reference any cached entry by using\n"
-                            'the placeholder "{USE_CACHED_ENTRY_N}" in place of the argument value, where N is the cache index.\n'
+                            "Each cached entry is assigned a sequential index N. You can insert any cached entry by using\n"
+                            'the placeholder "{USE_CACHED_ENTRY_N}" inside any tool argument value, where N is the cache index.\n'
                             "A single argument value can contain multiple placeholders, e.g.\n"
                             '  content: "I found {USE_CACHED_ENTRY_12} from X and {USE_CACHED_ENTRY_23} from Y."\n'
                             "Each placeholder is independently resolved and replaced with its cached value.\n"

@@ -427,6 +427,15 @@ class SimpleDocParser(BaseTool):
         params = self._verify_json_format_args(params)
         path = params['url']
         
+        # Add http:// protocol prefix to URLs missing it (e.g., "www.example.com/..." or "arxiv.org/...")
+        if not is_http_url(path):
+            normalized = path.replace('\\', '/')
+            segments = normalized.split('/')
+            first_segment = segments[0] if segments else ''
+            # Only convert if: first segment contains a dot (domain-like), has path components, and is not a relative path marker (./ or ../)
+            if not first_segment.startswith('.') and '.' in first_segment and len(segments) > 1:
+                path = 'http://' + path
+        
         # Resolve relative local paths against work_dir
         if not is_http_url(path) and not os.path.isabs(path):
             path = os.path.join(self.work_dir, path)
