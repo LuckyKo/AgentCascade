@@ -1927,10 +1927,38 @@ class ExecutionEngine:
                 
                 if last_output is not None:
                     # Telemetry: record LLM call end for successful completion (non-blocking)
+                    # Bug #45 fix: prefer actual API-reported completion_tokens over char-based estimate
                     _output_tokens_est = 0
+                    _found_usage = False
+                    
+                    # Try to get actual completion_tokens from first message with usage data
+                    # (multiple messages in same chunk share usage, so assign not sum)
                     for m in last_output:
-                        c = getattr(m, 'content', '') or ''
-                        _output_tokens_est += len(c) // TOKEN_ESTIMATE_CHAR_DIVISOR
+                        extra = getattr(m, 'extra', None) or {}
+                        usage = extra.get('usage') if isinstance(extra, dict) else None
+                        if usage and isinstance(usage, dict) and 'completion_tokens' in usage:
+                            ct = usage['completion_tokens']
+                            if isinstance(ct, (int, float)) and ct > 0:
+                                _output_tokens_est = int(ct)
+                                _found_usage = True
+                            break  # Only need first valid usage entry
+                    
+                    if not _found_usage:
+                        # Fallback: char-based estimate including reasoning_content
+                        for m in last_output:
+                            c = getattr(m, 'content', '') or ''
+                            rc = getattr(m, 'reasoning_content', '') or ''
+                            # Normalize list content to string (multimodal messages)
+                            if isinstance(c, list):
+                                c = ' '.join(str(x) for x in c if isinstance(x, str))
+                            else:
+                                c = str(c)
+                            if isinstance(rc, list):
+                                rc = ' '.join(str(x) for x in rc if isinstance(x, str))
+                            else:
+                                rc = str(rc)
+                            _output_tokens_est += (len(c) + len(rc)) // TOKEN_ESTIMATE_CHAR_DIVISOR
+                    
                     if (tel := self._telemetry()) is not None:
                         try:
                             tel.record_llm_call_end(inst_name, output_tokens_est=_output_tokens_est)
