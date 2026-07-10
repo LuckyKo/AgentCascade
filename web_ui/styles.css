@@ -1518,6 +1518,11 @@ body {
   to { transform: translateY(0); opacity: 1; }
 }
 
+/* Prevent animation replay on content updates — keeps final state */
+.approval-bar {
+  animation-fill-mode: both;
+}
+
 .approval-card {
   background: var(--bg-elevated);
   border: 1px solid var(--approval-border);

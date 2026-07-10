@@ -2435,11 +2435,12 @@ function deleteMessage(index, instanceName = null) {
 }
 
 
-// ── Approvals ────────────────────────────────────────────────────────────────
+// ── Approvals ────────────────────────────────────────────────────────
 
 function renderApprovals() {
   const bar = approvalBar;
 
+  // ── Always clean up first (before any early returns) ──
   // Clean up activeSecurityChecks and securityResponses for any IDs that are no longer in state.approvals
   const approvalIds = new Set((state.approvals || []).map(ap => ap.request_id));
   for (const rid of state.activeSecurityChecks) {
@@ -2457,10 +2458,25 @@ function renderApprovals() {
     // Approvals are empty: either (a) no pending approvals, or (b) all were auto-applied,
     // or (c) user toggled Auto-Ask off after backend already processed the response
     bar.style.display = 'none';
+    bar.innerHTML = ''; // Clean up orphaned cards to prevent DOM bloat
+    bar._approvalSnapshotKey = ''; // Reset snapshot so next non-empty render rebuilds
     return;
   }
 
-  // Auto-security check (Auto-Ask) takes priority
+  // Snapshot helper: produces a stable key for comparing approval state across render calls.
+  function approvalSnapshotKey() {
+    const ids = (state.approvals || []).map(a => a.request_id);
+    const checks = [...state.activeSecurityChecks].sort();
+    const respKeys = Object.keys(state.securityResponses).sort();
+    // Include response content snippet to detect text updates behind the same key
+    let respHash = '';
+    for (const rid of respKeys) {
+      try { respHash += rid + ':' + (state.securityResponses[rid]?.response || '').slice(0, 30); } catch(e) {}
+    }
+    return JSON.stringify({ ids, checks, respKeys, respHash });
+  }
+
+  // Auto-security check (Auto-Ask) takes priority — always check before skipping render
   if (state.autoSecurity) {
     const pending = (state.approvals || []).filter(ap => !state.activeSecurityChecks.has(ap.request_id));
     
@@ -2494,6 +2510,15 @@ function renderApprovals() {
       send({ type: 'reject', request_id: ap.request_id, reason: reason, automated: true });
     });
     return;
+  }
+
+  // Snapshot-based render skipping: prevent redundant DOM rebuilds that cause flashing.
+  if (bar.children.length > 0) {
+    const key = approvalSnapshotKey();
+    if (key === bar._approvalSnapshotKey) {
+      bar.style.display = 'block';
+      return;
+    }
   }
 
   bar.style.display = 'block';
@@ -2570,6 +2595,9 @@ function renderApprovals() {
     `;
     bar.appendChild(card);
   }
+
+  // Update snapshot so next renderApprovals() call can detect if state actually changed.
+  bar._approvalSnapshotKey = approvalSnapshotKey();
 }
 
 // Global functions for inline onclick handlers
