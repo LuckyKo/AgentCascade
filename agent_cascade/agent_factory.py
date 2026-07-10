@@ -37,9 +37,7 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
         agent_pool: The AgentPool instance (for file ops and approvals).
         agent_name: The role name (e.g. 'orchestrator', 'coder').
     """
-    from agent_cascade.tools._agent_instance_proxy import (
-        _AgentInstanceFunctionProxy, CALL_AGENT_SCHEMA, DISMISS_AGENT_SCHEMA,
-    )
+    from agent_cascade.tools._agent_instance_proxy import _AgentInstanceFunctionProxy
     from agent_cascade.prompts.dna import AVAILABLE_TOOLS
 
     # ── Tool factory: maps tool name → (instance, needs_pool, needs_name) ──────
@@ -49,11 +47,11 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
 
     for tool_name in AVAILABLE_TOOLS:
         if tool_name == 'call_agent':
-            tools_to_register[tool_name] = (_AgentInstanceFunctionProxy(CALL_AGENT_SCHEMA), False, False)
+            tools_to_register[tool_name] = (_AgentInstanceFunctionProxy(tool_name), False, False)
         elif tool_name == 'list_agents':
             tools_to_register[tool_name] = (ListAgents(agent_pool=agent_pool), False, False)
         elif tool_name == 'dismiss_agent':
-            tools_to_register[tool_name] = (_AgentInstanceFunctionProxy(DISMISS_AGENT_SCHEMA), False, False)
+            tools_to_register[tool_name] = (_AgentInstanceFunctionProxy(tool_name), False, False)
         elif tool_name == 'read_file':
             t = ReadFile()
             tools_to_register[tool_name] = (t, True, False)

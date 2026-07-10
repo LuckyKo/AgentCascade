@@ -1,78 +1,45 @@
 """
-Agent instance function proxy and schema.
+Agent instance function proxy.
 
-These are NOT called via _call_tool; ExecutionEngine intercepts them as
+These tools are NOT called via _call_tool; ExecutionEngine intercepts them as
 streaming generators. They exist only so the LLM sees them in the function list.
+
+Schema is built from TOOL_METADATA (dna.py) — the single source of truth for all tool definitions.
 """
 
 from agent_cascade.tools.base import BaseTool
 
 
-# ─── Agent instance function schemas ────────────────────────────────────────────────
+def _build_schema_from_metadata(tool_name: str, metadata_entry: dict) -> dict:
+    """Convert a TOOL_METADATA entry into a JSON Schema parameters block.
 
-CALL_AGENT_SCHEMA = {
-    'name': 'call_agent',
-    'description': (
-        'Delegate a task to a specialized agent instance. '
-        'If the instance_name already exists, the session continues with the existing context. '
-        'Otherwise, a new session is started using the specified agent_class.\n\n'
-        'Example usage:\n'
-        '{"name": "call_agent", "arguments": {"agent_class": "coder", "instance_name": "worker1", "task": "Write a script"}}'
-    ),
-    'parameters': {
-        'type': 'object',
-        'properties': {
-            'agent_class': {
-                'type': 'string',
-                'description': 'The class of agent to call (e.g. "coder", "researcher"). Only required when starting a NEW instance.'
-            },
-            'instance_name': {
-                'type': 'string',
-                'description': 'A unique name for this agent instance. If this name exists, the existing session is continued regardless of agent_class.'
-            },
-            'task': {
-                'type': 'string',
-                'description': 'The task or question to delegate'
-            },
-            'context': {
-                'type': 'string',
-                'description': 'Optional background context for the agent instance'
-            },
-            'log_file': {
-                'type': 'string',
-                'description': 'Path to a JSONL log file to restore the agent session from before starting. Useful for resuming old sessions. If provided and the instance_name does not already exist in the pool, the session will be loaded from this log file.'
-            },
-            'max_turns': {
-                'type': 'integer',
-                'minimum': 1,
-                'description': 'Optional: Maximum number of turns for this sub-agent. Defaults to the caller\'s turn limit if not specified. Will be capped by the UI turn limit if one is set.'
-            },
-        },
-        'required': ['agent_class', 'instance_name', 'task'],
-    },
-}
+    Handles two formats found in TOOL_METADATA:
+      1. Structured params (dict with 'type', 'description', ... keys) — used by call_agent/dismiss_agent
+      2. Simple string params ('param_name': 'description') — used by most other tools
 
-DISMISS_AGENT_SCHEMA = {
-    'name': 'dismiss_agent',
-    'description': (
-        "End a sub-agent instance's current task and clear its conversation context. "
-        "Use when you're done with a sub-agent and don't need its context anymore."
-    ),
-    'parameters': {
-        'type': 'object',
-        'properties': {
-            'instance_name': {
-                'type': 'string',
-                'description': 'Name of the sub-agent instance to dismiss (optional if all_idle is true)'
-            },
-            'all_idle': {
-                'type': 'boolean',
-                'description': 'If true, dismiss all sub-agents that are currently IDLE. Default is false.'
-            },
+    For structured params, the full dict is used as-is.
+    For simple string params, a default type of 'string' is inferred.
+    """
+    raw_params = metadata_entry.get('parameters', {})
+
+    properties = {}
+    for key, value in raw_params.items():
+        if isinstance(value, dict):
+            # Structured: already has 'type', 'description', etc.
+            properties[key] = value
+        else:
+            # Simple string description — infer type as string
+            properties[key] = {'type': 'string', 'description': value}
+
+    return {
+        'name': tool_name,
+        'description': metadata_entry['description'],
+        'parameters': {
+            'type': 'object',
+            'properties': properties,
+            'required': metadata_entry.get('required', list(properties.keys())),
         },
-        'required': [],  # lenient: both params optional (all_idle=true works alone)
-    },
-}
+    }
 
 
 class _AgentInstanceFunctionProxy(BaseTool):
@@ -82,9 +49,28 @@ class _AgentInstanceFunctionProxy(BaseTool):
     (via self.function_map[].function). Actual execution is handled by
     ExecutionEngine, which intercepts them before they reach this proxy.
 
+    The schema is constructed from TOOL_METADATA at import time.
+
     The .call() method should never be invoked at runtime — if it is, something is wrong.
     """
-    def __init__(self, schema: dict):
+
+    # Class-level cache: built once at first access to avoid repeated lookups
+    _schema_cache: dict = {}
+
+    def __init__(self, tool_name: str):
+        from agent_cascade.prompts.dna import TOOL_METADATA
+
+        # Build or retrieve cached schema from TOOL_METADATA
+        if tool_name not in self._schema_cache:
+            meta_entry = TOOL_METADATA.get(tool_name)
+            if meta_entry is None:
+                raise ValueError(
+                    f"Tool '{tool_name}' not found in TOOL_METADATA. "
+                    f"Add it to agent_cascade/prompts/dna.py."
+                )
+            self._schema_cache[tool_name] = _build_schema_from_metadata(tool_name, meta_entry)
+
+        schema = self._schema_cache[tool_name]
         self.name = schema['name']
         self.description = schema['description']
         self.parameters = schema['parameters']

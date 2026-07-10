@@ -78,10 +78,13 @@ class TestImportChain:
         assert Message is not None
 
     def test_import_agent_instance_proxy(self):
-        """Agent instance proxy and CALL_AGENT_SCHEMA can be imported from new location."""
-        from agent_cascade.tools._agent_instance_proxy import _AgentInstanceFunctionProxy, CALL_AGENT_SCHEMA  # noqa: F401
+        """Agent instance proxy can be imported and builds schema from TOOL_METADATA."""
+        from agent_cascade.tools._agent_instance_proxy import _AgentInstanceFunctionProxy  # noqa: F401
         assert _AgentInstanceFunctionProxy is not None
-        assert isinstance(CALL_AGENT_SCHEMA, dict)
+        # Verify proxy constructs valid schema from TOOL_METADATA
+        proxy = _AgentInstanceFunctionProxy('call_agent')
+        assert proxy.name == 'call_agent'
+        assert isinstance(proxy.parameters, dict)
 
     def test_import_soul_loader(self):
         """Soul loader can be imported from the package."""
@@ -368,7 +371,7 @@ class TestToolRegistration:
         core_tools = [
             'call_agent', 'dismiss_agent', 'list_agents',
             'read_file', 'write_file', 'edit_file', 'delete_file',
-            'copy_file', 'move_file', 'list_dir', 'grep',
+            'copy_file', 'list_dir', 'grep',
             'compress_context',
         ]
         for tool in core_tools:

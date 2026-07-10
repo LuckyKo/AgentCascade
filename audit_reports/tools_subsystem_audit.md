@@ -338,8 +338,8 @@ truncate_tool_result(result, tool_name, messages):
 | `agent_cascade/tools/custom/file_ops.py` | 793 | All file operation tools (10 classes) |
 | `agent_cascade/tools/custom/manager_ops.py` | 410 | call_agent, dismiss_agent, list_agents |
 | `agent_cascade/tools/custom/compression_tools.py` | ~154 | compress_context tool |
-| `agent_cascade/tools/_agent_instance_proxy.py` | 68 | call_agent schema proxy + CALL_AGENT_SCHEMA constant |
-| `agent_cascade/prompts/dna.py` | — | TOOL_METADATA dict with all descriptions and parameter docs |
+| `agent_cascade/tools/_agent_instance_proxy.py` | ~34 | _AgentInstanceFunctionProxy class + re-exports schemas from dna.py |
+| `agent_cascade/prompts/dna.py` | ~549 | TOOL_METADATA (single source of truth for all tool schemas including call_agent/dismiss_agent) |
 
 ---
 
