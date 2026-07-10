@@ -10,6 +10,7 @@ See DESIGN_REWRITE.md §2.2 for design rationale.
 """
 
 import hashlib
+import json
 import time
 import threading
 import copy
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent_cascade.agents import Assistant
-from agent_cascade.llm.schema import Message, USER
+from agent_cascade.llm.schema import Message, ROLE, SYSTEM, USER
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.settings import DEFAULT_WORKSPACE
@@ -1138,17 +1139,50 @@ class AgentPool:
                 reason=f"Snapshot rollback: {reason}" if reason else "Snapshot rollback",
             )
 
+    @staticmethod
+    def _extract_last_session(messages: List[dict]) -> List[dict]:
+        """Extract only the messages from the last session in a merged log.
+
+        When server restarts and loads the same orchestrator, multiple sessions'
+        messages can accumulate in a single log file. Each session starts with
+        a system message. This method finds all system messages and returns
+        only messages from the last session (after the last system message).
+
+        If zero or one system message exists, returns all messages unchanged.
+
+        Args:
+            messages: List of message dicts (may contain messages from multiple sessions)
+
+        Returns:
+            List of message dicts from the last session only
+        """
+        # Find indices of all system messages (ROLE/SYSTEM imported at module level)
+        sys_indices = [i for i, msg in enumerate(messages)
+                       if msg.get(ROLE) == SYSTEM]
+
+        if len(sys_indices) <= 1:
+            # Normal case: single session, return all messages
+            return messages
+
+        # Multiple sessions detected: keep only messages from the last session
+        last_sys_idx = sys_indices[-1]
+        logger.debug(f"Session boundary detected: {len(sys_indices)} system messages found, "
+                     f"keeping only last session (discarding {last_sys_idx} messages before index {last_sys_idx})")
+        return messages[last_sys_idx:]
+
     def _parse_json_input(self, log_input: str) -> Tuple[List[dict], dict]:
         """Parse log input as file path, multi-line JSONL, or single JSON block.
 
         Tries each strategy in order and returns the first successful parse.
         Filters to only dict items (BOOL_LEAK guard). Extracts metadata entries.
 
+        Session boundary detection: If multiple system messages are found
+        (indicating merged sessions from server restarts), only messages from
+        the LAST session (after the last system message) are returned.
+
         Returns:
             Tuple of (messages_list, metadata_dict)
         """
-        import json
-
         messages = []
         metadata = {}
 
@@ -1166,6 +1200,8 @@ class AgentPool:
                         item = self._parse_json_line(line.strip())
                         messages.extend(item["messages"])
                         metadata.update(item["metadata"])
+                # Session boundary detection: keep only last session's messages
+                messages = self._extract_last_session(messages)
                 return messages, metadata
             except Exception as e:
                 logger.debug(f"Error reading log file '{potential_path.name}': {e}")
@@ -1178,6 +1214,8 @@ class AgentPool:
             item = self._parse_json_line(line)
             parse_messages.extend(item["messages"])
             parse_metadata.update(item["metadata"])
+        # Session boundary detection: keep only last session's messages
+        parse_messages = self._extract_last_session(parse_messages)
         if parse_messages or parse_metadata:
             return parse_messages, parse_metadata
 
@@ -1190,7 +1228,8 @@ class AgentPool:
                 filtered = [msg for msg in item if isinstance(msg, dict)]
                 if len(filtered) != len(item):
                     logger.debug(f"_parse_json_input: filtered {len(item)-len(filtered)} non-dict items from JSON block")
-                return filtered, {}
+                # Session boundary detection: keep only last session's messages
+                return self._extract_last_session(filtered), {}
             elif isinstance(item, dict):
                 if "history" in item:
                     history = item["history"]
@@ -1199,7 +1238,8 @@ class AgentPool:
                         meta = {}
                         if "metadata" in item:
                             meta.update(item["metadata"])
-                        return filtered, meta
+                        # Session boundary detection: keep only last session's messages
+                        return self._extract_last_session(filtered), meta
                     elif isinstance(history, dict):
                         return [history], {}
                 else:
@@ -1219,7 +1259,6 @@ class AgentPool:
         Handles plain dicts, metadata wrappers, and inline lists.
         Filters to only dict items (BOOL_LEAK guard).
         """
-        import json
         result = {"messages": [], "metadata": {}}
         if not line:
             return result
@@ -1248,156 +1287,122 @@ class AgentPool:
         return result
 
     def load_session_from_log(
-        self, 
-        log_input: str, 
+        self,
+        log_input: str,
         target_instance: Optional[str] = None,
-        clear_sub_agents_before_load: bool = True
+        clear_sub_agents_before_load: bool = True,
     ) -> str:
-        """Load session history from a log file path or JSON string.
+        """Load session history from a JSONL log file.
 
-        Reads JSONL log, restores conversation into self.instances[name].conversation,
-        and sets up the logger for the restored session.
+        Simplified flow: clear sub-agents → read JSONL → extract last session boundary
+        → filter valid messages → delete old instance → create fresh one → set up logger.
+
         Returns a status message string.
-        
-        Args:
-            log_input: Path to log file or JSON string containing session history.
-            target_instance: Name of the instance to load into (default: from metadata or 'RecoveredSession').
-            clear_sub_agents_before_load: If True, clears sub-agents before loading to prevent
-                stale agents from previous sessions appearing in UI. Defaults to True so that
-                loaded sessions start clean without merged state from prior runs.
-        
-        Example:
-            >>> # Load session and automatically clear stale sub-agents
-            >>> status = pool.load_session_from_log(path, target_instance='Maine', clear_sub_agents_before_load=True)
-        """
-        from agent_cascade.llm.schema import ASSISTANT, CONTENT, FUNCTION, ROLE, SYSTEM, USER
 
-        # Issue 1 fix: Clear sub-agents at the very start if requested
+        Args:
+            log_input: Path to the JSONL log file (or JSON string).
+            target_instance: Name for the instance (default: from metadata or 'RecoveredSession').
+            clear_sub_agents_before_load: If True, dismiss stale sub-agents first.
+        """
+        # --- 1. Clear sub-agents --------------------------------------------
         if clear_sub_agents_before_load:
             self.clear_sub_agents()
-        
+
         log_input = log_input.strip()
         if not log_input:
             return "Error: Empty log input."
 
-        # Delegate all parsing to the centralized helper (eliminates triple-duplication)
+        # --- 2. Parse JSONL (_parse_json_input already applies _extract_last_session) --
         messages, metadata = self._parse_json_input(log_input)
-        if not messages and not metadata:
-            return "Error: Input is neither a valid file path nor a valid JSON."
-
         if not messages:
             return "Error: No valid messages found in log input."
 
-        # Determine instance and class
+        # --- 3. Filter to valid conversation messages (skip events/metadata) --
+        from agent_cascade.llm.schema import CONTENT as MSG_CONTENT
+        cleaned = [
+            msg for msg in messages
+            if isinstance(msg, dict) and "event" not in msg
+               and ROLE in msg and MSG_CONTENT in msg
+        ]
+        if not cleaned:
+            return "Error: No valid conversation messages found."
+
+        # --- 4b. Determine instance name and agent class (needed for summaries) -
         instance_name = target_instance or metadata.get("instance_name") or "RecoveredSession"
         agent_class = (metadata.get("agent_class") or "Orchestrator").strip().lower()
 
-        # Filter out event markers and ensure role/content exist
-        cleaned_messages = []
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            if "event" in msg:  # Skip COMPRESSION markers
-                continue
-            if ROLE in msg and CONTENT in msg:
-                cleaned_messages.append(msg)
-
-        if not cleaned_messages:
-            return "Error: No valid conversation messages found."
-
-        # ── Design spec §2.6: Build working set from JSONL ────────────────
-        # Forward pass — find all compression markers
-        def _is_compression_marker(msg: dict) -> bool:
-            content = msg.get(CONTENT, '') if isinstance(msg.get(CONTENT), str) else ''
-            return msg.get(ROLE) == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER)
+        # --- 5. Build working set per design spec §5.2: [SYS][U0][COMP...][tail] -
+        # Forward pass — find compression markers and extract summaries
+        def _is_marker(msg):
+            content = msg.get(MSG_CONTENT, '')
+            return (msg.get(ROLE) == USER and isinstance(content, str)
+                    and content.startswith(COMPRESSION_MARKER))
 
         markers = []
         last_marker_index = -1
-        for i, msg in enumerate(cleaned_messages):
-            if _is_compression_marker(msg):
+        for i, msg in enumerate(cleaned):
+            if _is_marker(msg):
                 markers.append(msg)
                 last_marker_index = i
 
-        # Extract summaries from ALL markers (not just the last one)
-        for marker_msg in markers:
-            summary_text = marker_msg.get(CONTENT, '')
+        # Store latest summary in instance_summaries (for UI display) — only need last marker
+        if markers:
+            text = markers[-1].get(MSG_CONTENT, '')
             start_tag = '<context_summary>'
-            end_tag = '</context_summary>'
-            start = summary_text.find(start_tag) + len(start_tag)
-            end = summary_text.find(end_tag, start)
-            if start > len(start_tag) - 1 and end > start:
-                self.instance_summaries[instance_name] = summary_text[start:end].strip()  # Latest wins
+            end_tag   = '</context_summary>'
+            s = text.find(start_tag) + len(start_tag)
+            e = text.find(end_tag, s)
+            if s > len(start_tag) - 1 and e > s:
+                self.instance_summaries[instance_name] = text[s:e].strip()
 
-        # Build working set per design spec §5.2 line 427: [SYS][U0(first user message)][COMP1...][tail]
-        if last_marker_index >= 0:
-            # Extract SYSTEM message (first in list)
-            system_msg = None
-            if cleaned_messages and cleaned_messages[0].get(ROLE) == SYSTEM:
-                system_msg = cleaned_messages[0]
-            
-            # Per design doc §5.2 line 427: always preserve first USER message (U0)
-            first_user_msg = None
-            for msg in cleaned_messages:
-                if msg.get(ROLE) == USER and not _is_compression_marker(msg):
-                    first_user_msg = msg
-                    break
-            
-            tail = cleaned_messages[last_marker_index + 1:]
-            working_set = ([system_msg] if system_msg else []) + ([first_user_msg] if first_user_msg else []) + markers + tail
+        # Construct working set: [SYS][U0 first user msg][all markers][tail after last marker]
+        system_msg = cleaned[0] if cleaned and cleaned[0].get(ROLE) == SYSTEM else None
+        first_user = next((m for m in cleaned if m.get(ROLE) == USER and not _is_marker(m)), None)
+
+        if markers:
+            # Tail = messages after the last marker; markers are stacked in full
+            tail = cleaned[last_marker_index + 1:]
+            working_set = (
+                ([system_msg] if system_msg else [])
+                + ([first_user] if first_user else [])
+                + markers          # all compression markers, including the last one
+                + tail             # recent messages after the last marker
+            )
         else:
             # No compression — full history is the working set
-            working_set = cleaned_messages
+            working_set = cleaned
 
-        # Restore to pool — convert raw dicts from JSONL into Message objects
-        restored_messages = []
+        # --- 6. Convert dicts -> Message objects (skip bad entries gracefully) -
+        msg_objects = []
         for msg_dict in working_set:
             try:
-                restored_messages.append(Message(**msg_dict))
+                msg_objects.append(Message(**msg_dict))
             except Exception as e:
-                logger.warning(f"Failed to convert loaded message to Message object: {e}")
+                logger.warning(f"Skipping malformed message on load: {e}")
 
-        # Create or update the instance with the restored conversation
-        existing = self.instances.get(instance_name)
-        if existing:
-            # FIX 3: Wrap ALL shared state modifications under _compression_lock (reentrant RLock)
-            with existing._compression_lock:
-                # PR3 migration: Use centralized API for conversation replacement during session load
-                existing.rebuild_conversation(restored_messages)  # Handles conversation + cache sync
-                
-                # Reset state fields under lock to prevent races
-                existing.agent_class = agent_class
-                # Clear streaming responses to prevent old session's partial messages from appearing
-                # (Bug: when loading a new session, _streaming_responses from previous session persists)
-                existing._streaming_responses = []
-                # Reset cached working sets config version to force rebuild with new conversation
-                existing._last_config_version = -1
-                # Clear per-instance LLM config overrides from previous session
-                existing._generate_cfg_override = None
-                # Clear compression cooldown tracking (prevents stale timers affecting new session)
-                existing._last_force_compress_time = 0.0
-                existing._force_compress_count = 0
-                # Clear slot release callback to prevent stale callbacks firing
-                existing._slot_release = None
-                # Reset loop detection suppression flag (one-turn cooldown shouldn't persist)
-                existing._suppress_loop_detection_next_turn = False
-                # Clear pending notifications from previous session
-                existing._pending_notifications = []
-                # Clear tool warnings from previous session
-                existing._tool_warnings = []
-                # Clear cache notifications from previous session (parallel to above)
-                existing._cache_notifications = []
-                # Reset state to IDLE for loaded sessions (they're not actively running)
-                from agent_cascade.agent_instance import AgentState
-                existing.state = AgentState.IDLE
-            
-            # FIX 2: Increment version so instance_conversations mapping stays in sync
-            self._instances_version += 1
-        else:
+        # --- 7. Delete old instance, create a fresh one --------------------
+        normalized_agent_class = agent_class.strip().lower()
+        key = (instance_name, normalized_agent_class)
+
+        # Remove stale logger so the new one doesn't conflict
+        with self._logger._lock:
+            if key in self._logger._loggers:
+                try:
+                    self._logger._loggers[key].close()
+                except Exception as e:
+                    logger.warning(f"Logger close during load (non-critical): {e}")
+            self._logger._loggers.pop(key, None)
+
+        # Swap instance under state lock to prevent races with concurrent callers
+        # (lifecycle_manager.py and ws_handlers.py can call this at runtime)
+        with self._execution._state_lock:
+            self.instances.pop(instance_name, None)
+
             now = time.monotonic()
             new_inst = AgentInstance(
                 instance_name=instance_name,
                 agent_class=agent_class,
-                conversation=restored_messages,
+                conversation=msg_objects,
                 max_turns=None,
                 parent_instance=None,
                 created_at=now,
@@ -1408,68 +1413,40 @@ class AgentPool:
             self.instances[instance_name] = new_inst
             self._instances_version += 1
 
-        # Set up logger for the restored session
-        # CRITICAL: Must replace the logger entirely to avoid writing to the wrong file.
-        # get_logger() returns the cached logger from the previous session (same instance_name),
-        # whose log_path still points to the old session's JSONL file. Using update_history()
-        # would append new messages to the old file, corrupting it.
-        
-        # Normalize agent class once (Fix #5 - deduplicate computation)
-        normalized_agent_class = (agent_class or '').strip().lower()
-        key = (instance_name, normalized_agent_class)
-
-        logger_setup_ok = True  # Track success of logger setup operations
+        # --- 8. Set up logger pointing to the log file ---------------------
         try:
-            # 1. Close the old logger's file handle (release the old file)
-            with self._logger._lock:
-                if key in self._logger._loggers:
-                    try:
-                        self._logger._loggers[key].close()
-                    except Exception as e:
-                        logger.warning(f"Logger close during session load failed for {instance_name} (non-critical): {e}")
-                # Remove from cache so we can add the new one below (safe pop avoids KeyError)
-                self._logger._loggers.pop(key, None)
-
-            # 2. Copy original session file to new timestamped path and create logger pointing to the copy
             from agent_cascade.logger.agent_instance_logger import AgentInstanceLogger
+
             original_log_path = metadata.get("current_log_path")
-            
             if original_log_path and Path(original_log_path).exists():
-                # Copy to preserve original, work on a fresh timestamped file with new session context
                 new_log_path = AgentInstanceLogger.copy_session_file(
                     source_path=original_log_path,
                     log_dir=str(self._logger.log_dir),
                     agent_class=normalized_agent_class,
-                    instance_name=instance_name
+                    instance_name=instance_name,
                 )
             else:
-                # No original file - let logger create fresh timestamped file
                 new_log_path = None
-            
-            # Create logger pointing to the copy with updated metadata for this working session
+
             log_inst = AgentInstanceLogger(
                 agent_class=agent_class,
                 instance_name=instance_name,
                 log_dir=str(self._logger.log_dir),
                 base_metadata=metadata if metadata else None,
-                log_path=new_log_path,  # Point to the copy (or None for fresh)
+                log_path=new_log_path,
             )
+            # Rewrite log with cleaned (full history), not working_set.
+            # Design §5.2: "Agent memory and JSONL are NOT in full sync — the logs retain
+            # the full conversation history at all times." Only in-memory gets [SYS][U0][COMP][tail].
+            log_inst.rewrite_log_with_history(cleaned)
 
-            # 3. Rewrite the copy with restored messages (rewrite_log_with_history handles truncation and new metadata)
-            # BUG FIX: Pass cleaned_messages (full history from JSONL) instead of restored_messages (partial working set).
-            # This ensures rewrite_log_with_history has complete marker context for accurate insert_pos calculation,
-            # preventing permanent loss of pre-marker history when copy fails or file is inaccessible.
-            log_inst.rewrite_log_with_history(cleaned_messages)
-            
-            # Cache the new logger instance
             with self._logger._lock:
                 self._logger._loggers[key] = log_inst
         except Exception as e:
-            logger.warning(f"Logger setup after log load failed for {instance_name} (non-critical): {e}")
-            logger_setup_ok = False
+            logger.warning(f"Logger setup after load (non-critical): {e}")
 
         log_source = "file" if Path(log_input).exists() else "JSON input"
-        return f"Successfully loaded {len(restored_messages)} messages for instance '{instance_name}' ({agent_class}) from {log_source}."
+        return f"Loaded {len(msg_objects)} messages for '{instance_name}' ({agent_class}) from {log_source}."
 
     def _compute_template_hash(self, template_name: str) -> Optional[str]:
         """Compute a hash of the template's system message for change detection.
