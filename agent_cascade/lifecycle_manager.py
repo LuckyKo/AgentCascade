@@ -248,6 +248,12 @@ class AgentLifecycleManager:
         task_text = args.get('task', '')
         context_text = args.get('context', '')
         
+        # Task 1: Include max_turns info in context when call_agent was called with a custom turn budget
+        # This lets the sub-agent know its allocated turn limit upfront
+        max_turns_info = ''
+        if 'max_turns' in args and isinstance(args['max_turns'], int) and args['max_turns'] > 0:
+            max_turns_info = f"\n\nYour turn budget for this task: {args['max_turns']} turns."
+        
         # Match main AC branch formatting behavior
         caller_prefix = f"This is a message from {caller}."
         if context_text:
@@ -255,7 +261,7 @@ class AgentLifecycleManager:
         else:
             context_text = caller_prefix
         
-        task_text = f'Context: {context_text}\n\nTask: {task_text}\n\nPlease help with this task.'
+        task_text = f'Context: {context_text}{max_turns_info}\n\nTask: {task_text}\n\nPlease help with this task.'
 
         # Item 9: Multimodal image propagation — scan caller's conversation for images
         # referenced in the task text and include them as multimodal content

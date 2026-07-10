@@ -781,7 +781,8 @@ class ExecutionEngine:
             max_turns = instance.max_turns or 50
             turns_available = max_turns
             inst_name = instance.instance_name
-            turns_90pct = max(2, int(max_turns * 0.1))  # 90% threshold, min 2 to avoid collision with final turn
+            turns_90pct = max(2, int(max_turns * 0.1))     # 90% threshold, min 2 to avoid collision with final turn
+            turns_50pct = max(3, int(max_turns * 0.5))    # 50% mid-point warning, min 3 to avoid overlap with 90%/final
 
             while turns_available > 0:
                 # ── SLEEPING STATE GUARD ────────────────────────────────────
@@ -808,9 +809,16 @@ class ExecutionEngine:
                     yield response
                     continue
 
-                # Turn limit warnings (90% and final turn) - one-time only via guard prefix dedup
+                # Turn limit warnings (50%, 90%, and final turn) - one-time only via guard prefix dedup
                 # Checked BEFORE decrement so that max_turns=1 agents still get the final turn warning
                 # Injected into llm_messages only (same pattern as _inject_compression_warning)
+                if turns_available == turns_50pct:
+                    warn_msg = (
+                        f"[SYSTEM WARNING: Halfway through your turn budget. "
+                        f"You have {turns_available} turn(s) remaining out of {max_turns} total. "
+                        f"Assess your progress and plan remaining steps.]"
+                    )
+                    self._append_system_notification(llm_messages, "[SYSTEM WARNING: Halfway", warn_msg)
                 if turns_available == turns_90pct:
                     warn_msg = (
                         f"[SYSTEM WARNING: Turn limit approaching. "
@@ -819,11 +827,14 @@ class ExecutionEngine:
                     )
                     self._append_system_notification(llm_messages, "[SYSTEM WARNING: Turn limit approaching", warn_msg)
                 if turns_available == 1:
-                    warn_msg = (
+                    # Final turn warning: insert as a separate user message (not inline)
+                    # so it's treated as a distinct conversational turn, not appended to the last message
+                    final_msg = self._make_user_message(
                         f"[SYSTEM WARNING: Final turn. You have 1 turn left to complete your task. "
                         f"Wrap up and deliver your results now.]"
                     )
-                    self._append_system_notification(llm_messages, "[SYSTEM WARNING: Final turn", warn_msg)
+                    self._append_and_log(instance, final_msg)
+                    llm_messages.append(final_msg)
 
                 turns_available -= 1
 

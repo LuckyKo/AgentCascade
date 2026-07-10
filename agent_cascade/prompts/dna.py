@@ -382,7 +382,8 @@ TOOL_METADATA = {
             'instance_name': 'A unique name for this agent instance. Use this to continue the session later.',
             'task': 'The task or question to delegate',
             'context': 'Any relevant context or background information the sub-agent needs',
-            'log_file': 'Path to a JSONL log file to restore the session from before starting. Useful for resuming old sessions.'
+            'log_file': 'Path to a JSONL log file to restore the session from before starting. Useful for resuming old sessions.',
+            'max_turns': 'Optional turn limit for sub-agent execution. If omitted, defaults to caller\'s limit. Useful for short tasks requiring strict budget control. The sub-agent will be informed of its turn budget via context.'
         }
     },
     'dismiss_agent': {
