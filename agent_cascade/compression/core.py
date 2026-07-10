@@ -2,6 +2,7 @@
 import logging
 from agent_cascade.compression.result import CompressResult
 from agent_cascade.compression.helpers import (
+    _refine_tool_call_boundary,
     compute_discard_count,
     build_marker_message,
     get_message_role,
@@ -13,8 +14,6 @@ from agent_cascade.llm.schema import FUNCTION, Message
 from agent_cascade.settings import (
     CHARS_PER_TOKEN_ESTIMATE,
     COMPRESSION_DEFAULT_FRACTION,
-    CONTEXT_RESERVATION_RATIO,
-    MESSAGE_TOKEN_ESTIMATE,
 )
 from agent_cascade.prompts.dna import COMPRESSION_PROMPT
 
@@ -129,11 +128,7 @@ def compress_context(
             mode=mode,
         )
 
-    # ── 3b. Cap discard count so compression agent can actually process the messages ──
-    # If the compression agent has a known context window, don't feed it more than it can handle.
-    # Estimate ~500 tokens per message; reserve 90% of the agent's context for input messages (10% for system prompt,
-    # summary output, and overhead).
-    max_tokens = None
+    # ── 3b. Determine compressor context window limit (for overfeeding check later) ──
     available_for_messages = None
     try:
         comp_agent = agent_pool.get_agent('Compressor')
@@ -142,14 +137,35 @@ def compress_context(
                 max_tokens = comp_agent.llm.generate_cfg.get('max_input_tokens')
             elif hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'cfg'):
                 max_tokens = comp_agent.llm.cfg.get('max_input_tokens')
+            else:
+                max_tokens = None
 
             if max_tokens:
-                # Reserve ~90% of compression agent's context for input messages (10% for summary output)
-                available_for_messages = int(max_tokens * CONTEXT_RESERVATION_RATIO)
-                max_discardable = available_for_messages // MESSAGE_TOKEN_ESTIMATE
+                available_for_messages = int(max_tokens * 0.9)  # Reserve ~90% for input messages
+
+            # Cap discard count so compressor can handle the messages (~500 tokens/msg estimate)
+            if available_for_messages is not None:
+                max_discardable = available_for_messages // 500
                 target_discard_count = min(target_discard_count, max_discardable)
     except Exception:
         pass  # If we can't determine the limit, proceed with original count
+
+    # Re-check boundary after capping (the cap can push us back to a dirty position)
+    if target_discard_count < len(active_set):
+        tail_keep = 2
+        max_discard = len(active_set) - tail_keep
+        refined = _refine_tool_call_boundary(active_set, target_discard_count, max_discard)
+        if refined > max_discard:
+            return CompressResult(
+                success=False,
+                summary_text=None,
+                marker_message=None,
+                messages_discarded=0,
+                tail_count=len(active_set),
+                error="Compression not possible at this ratio — tool-call chains extend past the keep zone",
+                mode=mode,
+            )
+        target_discard_count = refined
 
     # ── 4a. Guard: Active set too small for safe compression (any mode) ──
     # Always keep at least 3 messages in active set so compression leaves ≥2 tail messages.
