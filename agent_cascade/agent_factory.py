@@ -37,10 +37,10 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
         agent_pool: The AgentPool instance (for file ops and approvals).
         agent_name: The role name (e.g. 'orchestrator', 'coder').
     """
-    from agent_cascade.prompts.dna import (
-        AVAILABLE_TOOLS, CALL_AGENT_SCHEMA, DISMISS_AGENT_SCHEMA,
+    from agent_cascade.tools._agent_instance_proxy import (
+        _AgentInstanceFunctionProxy, CALL_AGENT_SCHEMA, DISMISS_AGENT_SCHEMA,
     )
-    from agent_cascade.tools._agent_instance_proxy import _AgentInstanceFunctionProxy
+    from agent_cascade.prompts.dna import AVAILABLE_TOOLS
 
     # ── Tool factory: maps tool name → (instance, needs_pool, needs_name) ──────
     # needs_pool  = set agent_pool attribute on the tool instance

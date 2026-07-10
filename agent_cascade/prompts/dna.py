@@ -143,75 +143,6 @@ KNOWLEDGE_SNIPPET_EN = """## The content from {source}:
 
 KNOWLEDGE_SNIPPET = {'zh': KNOWLEDGE_SNIPPET_ZH, 'en': KNOWLEDGE_SNIPPET_EN}
 
-# ─── Agent instance function schemas (JSON Schema format) ──────────────────────
-# Full JSON Schema definitions used by _AgentInstanceFunctionProxy and agent_factory.
-# These are the single source of truth for call_agent / dismiss_agent tool schemas.
-
-CALL_AGENT_SCHEMA = {
-    'name': 'call_agent',
-    'description': (
-        'Delegate a task to a specialized agent instance. '
-        'If the instance_name already exists, the session continues with the existing context. '
-        'Otherwise, a new session is started using the specified agent_class.\n\n'
-        'Example usage:\n'
-        '{"name": "call_agent", "arguments": {"agent_class": "coder", "instance_name": "worker1", "task": "Write a script"}}'
-    ),
-    'parameters': {
-        'type': 'object',
-        'properties': {
-            'agent_class': {
-                'type': 'string',
-                'description': 'The class of agent to call (e.g. "coder", "researcher"). Only required when starting a NEW instance.'
-            },
-            'instance_name': {
-                'type': 'string',
-                'description': 'A unique name for this agent instance. If this name exists, the existing session is continued regardless of agent_class.'
-            },
-            'task': {
-                'type': 'string',
-                'description': 'The task or question to delegate'
-            },
-            'context': {
-                'type': 'string',
-                'description': 'Optional background context for the agent instance'
-            },
-            'log_file': {
-                'type': 'string',
-                'description': 'Path to a JSONL log file to restore the agent session from before starting. Useful for resuming old sessions. If provided and the instance_name does not already exist in the pool, the session will be loaded from this log file.'
-            },
-            'max_turns': {
-                'type': 'integer',
-                'minimum': 1,
-                'description': 'Optional: Maximum number of turns for this sub-agent. Defaults to the caller\'s turn limit if not specified. Will be capped by the UI turn limit if one is set.'
-            },
-        },
-        'required': ['agent_class', 'instance_name', 'task'],
-    },
-}
-
-DISMISS_AGENT_SCHEMA = {
-    'name': 'dismiss_agent',
-    'description': (
-        "End a sub-agent instance's current task and clear its conversation context. "
-        "Use when you're done with a sub-agent and don't need its context anymore."
-    ),
-    'parameters': {
-        'type': 'object',
-        'properties': {
-            'instance_name': {
-                'type': 'string',
-                'description': 'Name of the sub-agent instance to dismiss (optional if all_idle is true)'
-            },
-            'all_idle': {
-                'type': 'boolean',
-                'description': 'If true, dismiss all sub-agents that are currently IDLE. Default is false.'
-            },
-        },
-        'required': [],  # lenient: both params optional (all_idle=true works alone)
-    },
-}
-
-
 # --- Tool Descriptions & Metadata ---
 TOOL_METADATA = {
     'read_file': {
@@ -434,6 +365,33 @@ TOOL_METADATA = {
         'parameters': {
             'query': 'The query keywords for matching relevant document segments. Use comma-separated keywords for better matching.',
             'files': 'A list of file paths (local) or URLs (http/https) to be parsed and searched.'
+        }
+    },
+    'call_agent': {
+        'description': (
+            'Delegate a task to a specialized sub-agent. '
+            'If the instance_name already exists, the session continues. '
+            'Otherwise, a new session is started using the specified agent_class.\n\n'
+            'Example: {"agent_class": "coder", "instance_name": "worker1", "task": "Write a script"}\n\n'
+            'To resume an old session from a JSONL log file, provide the log_file parameter.'
+        ),
+        'parameters': {
+            'agent_class': 'The class of agent to call (e.g., "researcher", "coder", "writer")',
+            'instance_name': 'A unique name for this agent instance. Use this to continue the session later.',
+            'task': 'The task or question to delegate',
+            'context': 'Any relevant context or background information the sub-agent needs',
+            'log_file': 'Path to a JSONL log file to restore the session from before starting. Useful for resuming old sessions.',
+            'max_turns': 'Optional turn limit for sub-agent execution. If omitted, defaults to caller\'s limit. Useful for short tasks requiring strict budget control. The sub-agent will be informed of its turn budget via context.'
+        }
+    },
+    'dismiss_agent': {
+        'description': (
+            "End a sub-agent instance's current task and clear its conversation context. "
+            "Use when you're done with a sub-agent and don't need its context anymore."
+        ),
+        'parameters': {
+            'instance_name': 'Name of the sub-agent instance to dismiss (optional if all_idle is true)',
+            'all_idle': 'If true, dismiss all sub-agents that are currently IDLE. Default is false.'
         }
     },
     'list_agents': {
