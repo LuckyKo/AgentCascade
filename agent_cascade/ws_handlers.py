@@ -730,6 +730,8 @@ class WsMessageHandler:
         enabled = data.get('enabled', False)
         # Store on app object so SecurityAdvisorHandler can read it via _get_auto_security_enabled()
         self.app.current_auto_security = enabled
+        # Broadcast updated state to all clients immediately, preventing stale overrides from pending messages
+        await self._broadcast()
 
     async def handle_edit_message(self, data: dict) -> None:
         """Handle 'edit_message' — edit a message in conversation history."""

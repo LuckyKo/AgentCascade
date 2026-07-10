@@ -51,6 +51,8 @@ const THROTTLE = Object.freeze({
   CONTROLS_MS: 1000,           // controls update throttle (~1Hz)
   TELEMETRY_MS: 2000,          // telemetry panel update throttle (~2s)
   RENDER_DIAG_THRESHOLD_MS: 100, // render duration diagnostic warning threshold
+  AUTO_SECURITY_SYNC_DEBOUNCE: 100, // Debounce window for server→client auto-security state sync (ms)
+  AUTO_SECURITY_TOGGLE_GUARD: 150,  // Guard window blocking toggle clicks during incoming server sync (ms)
 });
 
 // Pre-compiled regexes for thinking blocks (consistent with backend)
@@ -96,6 +98,9 @@ const state = {
   autoSecurity: false,
   activeSecurityChecks: new Set(),
   securityResponses: {},
+  // Race-condition guards for Auto-Ask toggle sync (see .agent_lessons/auto_ask_toggle_fixes.md)
+  lastServerSyncTime: 0,       // Timestamp of the most recent server state broadcast
+  autoSecuritySyncTimeout: null, // Debounce timer for incoming state syncs
   summary: "", // Active compression summary
   lastMemoryEditTime: 0, // Timestamp of last manual memory edit to prevent race condition reverts
   _lastIsGenerating: undefined, // For change detection in updateControls()
@@ -108,6 +113,14 @@ let reconnectTimer = null;
 
 // Modern browsers optimize painting for hidden tabs automatically — no explicit check needed.
 // The early-return check in stream_update was also removed to avoid render delays when switching back.
+
+/** Clear auto-security debounce timer to prevent stale UI updates after disconnect or page unload */
+function clearAutoSecurityTimers() {
+  if (state.autoSecuritySyncTimeout) {
+    clearTimeout(state.autoSecuritySyncTimeout);
+    state.autoSecuritySyncTimeout = null;
+  }
+}
 
 // Per-panel scroll lock state for ALL panels including root (managed via subAgentScrollLocks)
 const subAgentScrollLocks = {};
@@ -963,6 +976,10 @@ if (settingAfkMessage) {
 
 if (autoSecurityToggle) {
   autoSecurityToggle.addEventListener('change', () => {
+    // Skip if a server sync arrived within the guard window to avoid fighting incoming broadcasts
+    const now = Date.now();
+    if (now - state.lastServerSyncTime < THROTTLE.AUTO_SECURITY_TOGGLE_GUARD) return;
+
     state.autoSecurity = autoSecurityToggle.checked;
     saveSettings();
     // Notify backend of toggle change and re-render approvals
@@ -1002,6 +1019,7 @@ function connect() {
 
   ws.onclose = () => {
     state.connected = false;
+    clearAutoSecurityTimers();
     connectionDot.classList.remove('connected');
     connectionDot.title = 'Disconnected';
     if (statusSave) statusSave.textContent = 'Disconnected';
@@ -1011,6 +1029,7 @@ function connect() {
 
   ws.onerror = () => {
     state.connected = false;
+    clearAutoSecurityTimers();
     connectionDot.classList.remove('connected');
   };
 
@@ -1157,11 +1176,19 @@ function handleServerMessage(data) {
 
       // Sync auto-security mode from server state (set via --auto_security CLI flag or WS toggle)
       if ('auto-security' in data && autoSecurityToggle) {
-        const newMode = Boolean(data['auto-security']);
-        if (state.autoSecurity !== newMode) {
-          state.autoSecurity = newMode;
-          autoSecurityToggle.checked = newMode;
-        }
+        // Debounce: The user clicks the toggle → sends 'set_auto_security' to backend → backend broadcasts new state back.
+        // Without debouncing, rapid state messages could overwrite the UI before the user's click registers, causing
+        // the toggle to appear to "fight" itself (flipping back and forth). The debounce delays applying the server
+        // value until after a quiet period; setting lastServerSyncTime immediately signals the toggle handler to ignore clicks during this window.
+        if (state.autoSecuritySyncTimeout) clearTimeout(state.autoSecuritySyncTimeout);
+        state.lastServerSyncTime = Date.now();
+        state.autoSecuritySyncTimeout = setTimeout(() => {
+          const newMode = Boolean(data['auto-security']);
+          if (state.autoSecurity !== newMode) {
+            state.autoSecurity = newMode;
+            autoSecurityToggle.checked = newMode;
+          }
+        }, THROTTLE.AUTO_SECURITY_SYNC_DEBOUNCE);
       }
   
       // Telemetry: update panel with session telemetry from server
@@ -4764,3 +4791,8 @@ if (btnAddEndpoint) {
     sendApiRouterUpdate();
   });
 }
+
+// ── Page unload: clear debounce timers to prevent memory leaks ──
+window.addEventListener('beforeunload', () => {
+  clearAutoSecurityTimers();
+});
