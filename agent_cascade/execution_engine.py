@@ -807,6 +807,9 @@ class ExecutionEngine:
                 if self._pre_llm_checks(instance, messages, llm_messages, response, turns_available):
                     logger.debug(f"[PRE_LLM_CHECK] Condition met, continuing loop")
                     yield response
+                    # ── Fix TODO #41 Root Cause 3: Break on stop/halt instead of continue ──
+                    if self._check_stop_conditions(instance):
+                        break
                     continue
 
                 # Turn limit warnings (50%, 90%, and final turn) - one-time only via guard prefix dedup
@@ -881,7 +884,7 @@ class ExecutionEngine:
                     logger.debug("halted/stopped/superseded - %s", instance.instance_name)
                     time.sleep(0.1)
                     yield response
-                    continue
+                    break  # ── Fix TODO #41: Break immediately instead of continuing loop ──
 
                 # logger.debug(f"[LLM_DONE] {inst_name} got {len(turn_output)} messages from LLM")
                 # ── Phase 4: Response Processing and Tool Execution ─────────
@@ -962,6 +965,19 @@ class ExecutionEngine:
 
         finally:
             # C4 fix: Always clean up — transition to IDLE regardless of how we exit
+            
+            # ── Fix TODO #41: Cancel async tasks and drain results on ALL exit paths (normal, exception, early return) ──
+            if hasattr(self.pool, '_async_registry'):
+                try:
+                    self.pool._async_registry.clear_pending(instance.instance_name)
+                except Exception:
+                    pass  # Non-critical cleanup
+            # Also drain the async results buffer to prevent memory leak from stale results
+            if hasattr(self.pool, '_async_results'):
+                try:
+                    self.pool._async_results.drain(instance.instance_name)
+                except Exception:
+                    pass  # Non-critical cleanup
             
             # FIX Critical #2: Clear any pending continue merge state on exception/early exit
             with instance._compression_lock:
@@ -1890,6 +1906,12 @@ class ExecutionEngine:
                                 pass
                         with instance._compression_lock:
                             instance._streaming_responses = []
+                        # ── Fix TODO #41 Root Cause 2: Clean up async tasks during streaming stop ──
+                        if hasattr(self.pool, '_async_registry'):
+                            try:
+                                self.pool._async_registry.clear_pending(inst_name)
+                            except Exception:
+                                pass  # Non-critical cleanup
                         try:
                             gen.close()  # Explicitly close generator → triggers finally blocks → releases HTTP connection + semaphore immediately
                         except RuntimeError:
@@ -1915,6 +1937,12 @@ class ExecutionEngine:
                                 pass
                         with instance._compression_lock:
                             instance._streaming_responses = []
+                        # ── Fix TODO #41 Root Cause 2: Clean up async tasks during streaming stop ──
+                        if hasattr(self.pool, '_async_registry'):
+                            try:
+                                self.pool._async_registry.clear_pending(inst_name)
+                            except Exception:
+                                pass  # Non-critical cleanup
                         try:
                             gen.close()  # Explicitly close generator → triggers finally blocks → releases HTTP connection + semaphore immediately
                         except RuntimeError:

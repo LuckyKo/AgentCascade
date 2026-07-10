@@ -639,6 +639,17 @@ class AgentPool:
             with inst._state_lock:
                 inst._transition(AgentState.TERMINATED)
 
+        # ── Fix TODO #41 Root Cause 1: Cancel pending async tool tasks ────────
+        # Remove and cancel running background tools BEFORE draining results,
+        # so no new results are produced for the terminated instance.
+        if hasattr(self, '_async_registry'):
+            try:
+                cancelled = self._async_registry.clear_pending(instance_name)
+                if cancelled:
+                    logger.debug(f"Cancelled {cancelled} pending async tool(s) for {instance_name}")
+            except Exception as e:
+                logger.debug(f"Cancelling async tools for {instance_name} failed (non-critical): {e}")
+
         # Drain async results buffer to prevent memory leaks and stale messages
         if hasattr(self, '_async_results'):
             try:

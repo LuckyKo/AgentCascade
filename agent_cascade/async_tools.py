@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import time
 import threading
 from typing import Callable, Optional, Dict, List
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 
 @dataclass
@@ -33,6 +33,8 @@ class BackgroundToolEntry:
         completed: Whether the tool has finished executing
         function_id: The LLM's tool_call_id (function_id) for this async tool call.
                      Used to match results back to original tool calls in the LLM API.
+        future: ThreadPoolExecutor Future for cancellation support (Fix TODO #41).
+                Set after registration via entry.future = future.
     """
     tool_call: Callable[[], str]
     agent_instance_name: str
@@ -42,6 +44,7 @@ class BackgroundToolEntry:
     error: Optional[str] = None
     completed: bool = False
     function_id: Optional[str] = None
+    future: Optional[Future] = None  # Set after registration, allows cancellation (Fix TODO #41)
 
 
 class AsyncToolRegistry:
@@ -96,7 +99,9 @@ class AsyncToolRegistry:
             )
             self._pending.setdefault(instance_name, []).append(entry)
             # Submit to executor outside lock to avoid holding lock during execution
-            self._executor.submit(self._execute, entry)
+            future = self._executor.submit(self._execute, entry)
+            # Store the future on the entry so it can be cancelled later (Fix TODO #41)
+            entry.future = future
             return entry
     
     def _execute(self, entry: BackgroundToolEntry):
@@ -165,6 +170,35 @@ class AsyncToolRegistry:
                 del self._pending[instance_name]
             
             return has_pending_tools
+    
+    def clear_pending(self, instance_name: str) -> int:
+        """Remove and cancel all pending async tools for an instance (Fix TODO #41).
+        
+        Cancels futures via their ThreadPoolExecutor Future objects. Note: cancel() only
+        works for tasks not yet started — already-running threads will complete normally
+        but results are discarded when the pending list is removed. Returns the count of
+        cleared entries.
+        
+        Args:
+            instance_name: The agent instance to clear.
+            
+        Returns:
+            Number of pending (uncompleted) entries that were removed and cancelled.
+        """
+        with self._lock:
+            entries = self._pending.get(instance_name, [])
+            # Cancel futures for uncompleted entries (only works if not yet started; running threads complete normally but results are discarded)
+            cancelled = 0
+            for entry in entries:
+                if not entry.completed and entry.future is not None:
+                    try:
+                        entry.future.cancel()
+                        cancelled += 1
+                    except Exception:
+                        pass  # Future cancel is best-effort
+            # Remove the instance's pending list entirely
+            self._pending.pop(instance_name, None)
+            return cancelled
     
     def shutdown(self, wait: bool = True):
         """Shutdown the executor.
