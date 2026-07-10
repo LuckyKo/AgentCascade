@@ -43,7 +43,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] agent tab needs refresh when switching to it from another — FIXED: invalidate panel contentKey/lastRenderedCount cache in switchMainTab() to force re-render on tab switch
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent once it reached conclusion
 - [ ] telemetry `Avg TPS` is wrongly calculated, `Output Tokens (est)` also most likely undercounts
-- [ ] `REJECTED BY USER: SECURITY REJECTED:` is pre-pended to rejection messages when Security rejects it. it should properly distinguish when User or Security rejected it.
+- [x] `REJECTED BY USER: SECURITY REJECTED:` is pre-pended to rejection messages when Security rejects it. it should properly distinguish when User or Security rejected it. — FIXED: simplified rejection prefix to just `REJECTED:` and removed Security handler's self-prefixing (security_handler.py, file_operations.py, shell.py)
 - [ ] call_agent returns `[SYSTEM ERROR: Empty LLM response]` if the agent failed a inner loop check
 - [ ] losing connection drops sub-agent back to caller instead of retrying connection or fallback to other API endpoints
 - [ ] if call_agent was initiated with custom max_turns argument, append that info to the context field in the request to the called agent. also, add a 50% turn limit warning (similar to the 90% one) and change the last final turn warning from an in-message insertion to a separate user message insert

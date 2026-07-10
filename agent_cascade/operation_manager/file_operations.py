@@ -483,7 +483,7 @@ class FileOpsMixin:
                 description=description,
             )
             if not approved:
-                return f"REJECTED BY USER: {reason}"
+                return f"REJECTED: {reason}"
             justification = reason
         else:
             justification = ""
@@ -999,7 +999,7 @@ class FileOpsMixin:
                 description=description,
             )
             if not approved:
-                return f"REJECTED BY USER: {reason}"
+                return f"REJECTED: {reason}"
             justification = reason
         else:
             justification = ""
@@ -1313,7 +1313,7 @@ class FileOpsMixin:
                 description=description,
             )
             if not approved:
-                return f"REJECTED BY USER: {reason}"
+                return f"REJECTED: {reason}"
             justification = reason
         else:
             justification = ""
@@ -1393,7 +1393,7 @@ class FileOpsMixin:
                 description=description,
             )
             if not approved:
-                return f"REJECTED BY USER: {reason}"
+                return f"REJECTED: {reason}"
             justification = reason
         else:
             justification = ""
@@ -1471,7 +1471,7 @@ class FileOpsMixin:
                 description=description,
             )
             if not approved:
-                return f"REJECTED BY USER: {reason}"
+                return f"REJECTED: {reason}"
             justification = reason
         else:
             justification = ""
@@ -1551,7 +1551,7 @@ class FileOpsMixin:
                 description=description,
             )
             if not approved:
-                return f"REJECTED BY USER: {reason}"
+                return f"REJECTED: {reason}"
             justification = reason
         else:
             justification = ""

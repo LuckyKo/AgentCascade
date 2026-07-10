@@ -271,7 +271,7 @@ class ShellMixin:
             )
 
             if not approved:
-                return f"REJECTED BY USER: {reason}"
+                return f"REJECTED: {reason}"
             justification_text = reason
 
         try:

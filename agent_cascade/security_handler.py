@@ -579,10 +579,7 @@ class SecurityAdvisorHandler:
                 self.agent_pool.operation_manager.user_approve(rid, reason=justification)
             else:
                 logger.info(f"[SECURITY] Automatic Rejection for {rid} with reason: {justification[:50]}...")
-                reject_msg = (
-                    f"SECURITY REJECTED: {justification}" if justification
-                    else "SECURITY REJECTED: The security advisor flagged this operation as unsafe."
-                )
+                reject_msg = justification or "The security advisor flagged this operation as unsafe."
                 self.agent_pool.operation_manager.user_reject(rid, reject_msg)
 
             # Broadcast updated approvals list to UI after auto-apply
@@ -618,9 +615,8 @@ class SecurityAdvisorHandler:
             # Strict enforcement: Invalid format = Automatic NO
             logger.info(f"[SECURITY] Automatic Rejection for {rid} (Ambiguous/Invalid Format)")
             reject_msg = (
-                "SECURITY VERIFICATION FAILED: The security advisor provided an ambiguous response "
-                "without a clear [YES] or [NO] verdict. For safety, the operation has been automatically "
-                "rejected. Please try a different method or provide a clearer justification."
+                "The security advisor provided an ambiguous response "
+                "without a clear [YES] or [NO] verdict. Please try a different method or provide a clearer justification."
             )
             self.agent_pool.operation_manager.user_reject(rid, reject_msg)
 

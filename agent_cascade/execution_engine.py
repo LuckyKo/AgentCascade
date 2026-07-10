@@ -2517,7 +2517,7 @@ class ExecutionEngine:
                             first_line = stripped.lower()
                             break
                     error_indicators = [
-                        'error:', 'rejected by user:', 'failed:', 'invalid:',
+                        'error:', 'rejected by user:', 'rejected:', 'failed:', 'invalid:',
                         'permission denied:', 'an error occurred', 'does not exist'
                     ]
                     if any(first_line.startswith(ind) for ind in error_indicators) or 'failed to' in first_line:
