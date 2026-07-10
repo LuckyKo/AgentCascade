@@ -7,6 +7,12 @@ WebSocket/REST API server instead of Gradio.
 Usage:
     python start_api_server.py
     Open http://127.0.0.1:8765 in your browser.
+
+CLI Flags:
+    --auto_security   Start with Auto-Ask Security mode enabled. The security advisor
+                      will auto-check all tool calls before execution (same as toggling
+                      "Auto-Ask Security" on in the UI). By default, security checks run
+                      only when triggered by agent prompts.
 """
 
 import os
@@ -62,6 +68,10 @@ def initialize_agents():
 if __name__ == '__main__':
     import sys
 
+    # ── CLI argument parsing (shared) ────────────────────────────────────────
+    from agent_cascade.shared_init import parse_cli_args
+    args = parse_cli_args(description='AgentCascade Multi-Agent API Server')
+
     try:
         all_agents, agent_pool, chatbot_config = initialize_agents()
     except SystemExit:
@@ -90,8 +100,13 @@ if __name__ == '__main__':
         from agent_cascade.api_server import create_app
         import uvicorn
 
-        app = create_app(all_agents, agent_pool, chatbot_config)
+        app = create_app(
+            all_agents, agent_pool, chatbot_config,
+            auto_security=args.auto_security,
+        )
         logger.debug("FastAPI app created successfully")
+        if args.auto_security:
+            logger.info("[OK] Auto-Ask Security mode ENABLED (all tool calls will be security-checked)")
     except Exception as e:
         logger.error("[FATAL] Failed to create API server app: %s", e)
         raise SystemExit(1)

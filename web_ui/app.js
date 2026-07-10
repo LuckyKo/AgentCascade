@@ -1155,6 +1155,15 @@ function handleServerMessage(data) {
       if (data.summary !== undefined) state.summary = data.summary;
       if (data.instance_halted !== undefined) { state.instance_halted = data.instance_halted; state._serverHaltConfirmed = true; }
 
+      // Sync auto-security mode from server state (set via --auto_security CLI flag or WS toggle)
+      if ('auto-security' in data && autoSecurityToggle) {
+        const newMode = Boolean(data['auto-security']);
+        if (state.autoSecurity !== newMode) {
+          state.autoSecurity = newMode;
+          autoSecurityToggle.checked = newMode;
+        }
+      }
+  
       // Telemetry: update panel with session telemetry from server
       if (data.telemetry) {
         updateTelemetryPanel(data.telemetry);

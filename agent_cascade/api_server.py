@@ -205,14 +205,16 @@ def _set_generating_true(session: dict) -> None:
         session['generating'] = True
 
 
-def create_app(agents, agent_pool, config=None):
+def create_app(agents, agent_pool, config=None, auto_security=False):
     """
     Create the FastAPI application.
 
     Args:
-        agents:     List of Agent objects (orchestrator first, then agent instances)
-        agent_pool: The AgentPool instance
-        config:     Optional chatbot config dict
+        agents:         List of Agent objects (orchestrator first, then agent instances)
+        agent_pool:     The AgentPool instance
+        config:         Optional chatbot config dict
+        auto_security:  Whether to start with Auto-Ask Security mode enabled.
+                        Defaults to False (opt-in via --auto_security flag).
     """
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, File, UploadFile, Request
     from fastapi.responses import FileResponse, JSONResponse
@@ -226,6 +228,10 @@ def create_app(agents, agent_pool, config=None):
     # to limit concurrent Security agent invocations to 1, preventing unlimited parallelism
     if not hasattr(app, 'security_check_semaphore'):
         app.security_check_semaphore = threading.Semaphore(1)
+
+    # Initialize Auto-Ask Security mode state
+    # Read by _get_auto_security_enabled() in security_handler.py via getattr(app, ...)
+    app.current_auto_security = auto_security
 
     app.add_middleware(
         CORSMiddleware,
@@ -500,7 +506,12 @@ def create_app(agents, agent_pool, config=None):
             responses=responses,
             generating=gen,
         )
-        
+
+        # Inject current auto-security mode into the state so frontend can sync on connect.
+        # The value is stored on app.current_auto_security and toggled via WS handler.
+        if result is not None:
+            result['auto-security'] = getattr(app, 'current_auto_security', True)
+
         # If unified build returned None (instance not yet created), return minimal state
         if result is None:
             agents_list = _build_agents_list(agent_pool) if agent_pool else []
@@ -542,6 +553,7 @@ def create_app(agents, agent_pool, config=None):
                 'generating': gen,
                 'session_name': instance_name,
                 'instance_name': instance_name,
+                'auto-security': getattr(app, 'current_auto_security', True),
                 'agent_index': session.get('agent_index', 0),
                 'total_tokens': 0,
                 'total_words': 0,

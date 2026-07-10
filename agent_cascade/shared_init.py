@@ -235,3 +235,30 @@ def setup_signal_handler(agent_pool, server=None):
     _signal_mod.signal(_signal_mod.SIGINT, handle_shutdown)
     if os.name != 'nt':
         _signal_mod.signal(_signal_mod.SIGTERM, handle_shutdown)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  7. Shared CLI argument parsing
+# ──────────────────────────────────────────────────────────────────────────────
+
+def parse_cli_args(argv=None, description='AgentCascade'):
+    """Parse common CLI arguments shared across launch scripts.
+
+    Returns a namespace with at least:
+        auto_security (bool): Whether to start with Auto-Ask Security mode enabled.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument(
+        '--auto_security',
+        action='store_true',
+        default=False,
+        help=(
+            'Start with Auto-Ask Security mode enabled. The security advisor will '
+            'auto-check all tool calls before execution (same as toggling "Auto-Ask '
+            'Security" on in the UI). By default, security checks run only when '
+            'triggered by agent prompts.'
+        ),
+    )
+    return parser.parse_args(argv)
