@@ -1240,7 +1240,7 @@ class AgentPool:
         self, 
         log_input: str, 
         target_instance: Optional[str] = None,
-        clear_sub_agents_before_load: bool = False
+        clear_sub_agents_before_load: bool = True
     ) -> str:
         """Load session history from a log file path or JSON string.
 
@@ -1252,8 +1252,8 @@ class AgentPool:
             log_input: Path to log file or JSON string containing session history.
             target_instance: Name of the instance to load into (default: from metadata or 'RecoveredSession').
             clear_sub_agents_before_load: If True, clears sub-agents before loading to prevent
-                stale agents from previous sessions appearing in UI. Defaults to False for
-                backward compatibility.
+                stale agents from previous sessions appearing in UI. Defaults to True so that
+                loaded sessions start clean without merged state from prior runs.
         
         Example:
             >>> # Load session and automatically clear stale sub-agents
