@@ -1863,6 +1863,9 @@ class ExecutionEngine:
                                     raise Exception(f"max_tokens: ~{_est_tokens} tokens")
                     except Exception as e:
                         logger.debug(f"[INNER_LOOP] Detection error for {inst_name}: {e}")
+                        # Re-raise if this is an explicit inner-loop or max-tokens detection exception
+                        if str(e).startswith('inner_loop:') or str(e).startswith('max_tokens:'):
+                            raise
 
                     # Telemetry: record Time To First Token (TTFT) on the first streaming chunk
                     if not _first_token_received and (tel := self._telemetry()) is not None:
