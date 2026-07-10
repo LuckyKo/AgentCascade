@@ -185,6 +185,8 @@ class AgentLifecycleManager:
             if status.startswith("Error"):
                 logger.warning(f"[LOG_FILE_LOAD] Failed to load session for '{instance_name}': {status}")
             else:
+                # load_session_from_log creates a new instance in the pool, update our reference
+                inst = self.pool.instances.get(instance_name) or inst
                 logger.info(f"[LOG_FILE_LOAD] Loaded session for '{instance_name}': {status}")
                 session_was_loaded = True
 

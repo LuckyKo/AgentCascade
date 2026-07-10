@@ -844,25 +844,53 @@ class WsMessageHandler:
     async def handle_load_session(self, data: dict) -> None:
         """Handle 'load_session' — load conversation from a log file."""
         path = data.get('path')
-        if path and self.agent_pool:
-            with self._session_lock:
-                status = self.agent_pool.load_session_from_log(
-                    path,
-                    target_instance=self.session.get('session_name'),
-                    clear_sub_agents_before_load=True
-                )
-            if status.startswith("Error"):
-                await self.broadcast_fn({'type': 'error', 'message': status})
-            else:
-                instance_name = self.session.get('session_name', 'Maine')
-                inst = self.agent_pool.get_instance(instance_name)
-                if inst is not None:
-                    self._stop_generation()
-                    self._signal_stop()
-                    if self.agent_pool:
-                        self.agent_pool.stopped = False
-                    _clear_caches_safely()
-                    await self._broadcast()
+        if not path or not self.agent_pool:
+            return
+
+        # Extract instance_name from log file metadata BEFORE loading.
+        # This avoids fragile regex parsing of status strings and lets the
+        # loaded session's own metadata determine its identity.
+        instance_name = 'Maine'
+        try:
+            with open(path, 'r') as f:
+                first_line = f.readline().strip()
+                if first_line:
+                    first_data = json.loads(first_line)
+                    if isinstance(first_data, dict):
+                        meta = first_data.get("metadata", {})
+                        extracted = meta.get("instance_name") if isinstance(meta, dict) else None
+                        if extracted:
+                            instance_name = str(extracted)
+        except (OSError, json.JSONDecodeError, KeyError) as e:
+            from agent_cascade.log import logger
+            logger.debug(f"Failed to read metadata from {path}: {e}, using default instance name")
+
+        with self._session_lock:
+            status = self.agent_pool.load_session_from_log(
+                str(path),
+                target_instance=instance_name,
+                clear_sub_agents_before_load=True
+            )
+        if status.startswith("Error"):
+            await self.broadcast_fn({'type': 'error', 'message': status})
+            return
+
+        # Update session to reflect the loaded instance name
+        self.session['session_name'] = instance_name
+        inst = self.agent_pool.get_instance(instance_name)
+        if inst is None:
+            await self.broadcast_fn({
+                'type': 'warning',
+                'message': f"Instance '{instance_name}' not found in pool after load — session may be empty."
+            })
+            return
+
+        self._stop_generation()
+        self._signal_stop()
+        if self.agent_pool:
+            self.agent_pool.stopped = False
+        _clear_caches_safely()
+        await self._broadcast()
 
     async def handle_inject(self, data: dict) -> None:
         """Handle 'inject' — enqueue a message into an agent's queue."""
