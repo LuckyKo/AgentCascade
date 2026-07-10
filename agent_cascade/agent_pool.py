@@ -1328,7 +1328,7 @@ class AgentPool:
             return "Error: No valid conversation messages found."
 
         # --- 4b. Determine instance name and agent class (needed for summaries) -
-        instance_name = target_instance or metadata.get("instance_name") or "RecoveredSession"
+        instance_name = target_instance if target_instance is not None else metadata.get("instance_name") or "RecoveredSession"
         agent_class = (metadata.get("agent_class") or "Orchestrator").strip().lower()
 
         # --- 5. Build working set per design spec §5.2: [SYS][U0][COMP...][tail] -
@@ -1428,11 +1428,17 @@ class AgentPool:
             else:
                 new_log_path = None
 
+            # Update metadata for the new session context
+            updated_metadata = dict(metadata) if metadata else {}
+            updated_metadata["current_log_path"] = new_log_path or original_log_path
+            if new_log_path:
+                updated_metadata["original_log_path"] = str(Path(original_log_path or "").name)
+
             log_inst = AgentInstanceLogger(
                 agent_class=agent_class,
                 instance_name=instance_name,
                 log_dir=str(self._logger.log_dir),
-                base_metadata=metadata if metadata else None,
+                base_metadata=updated_metadata if updated_metadata else None,
                 log_path=new_log_path,
             )
             # Rewrite log with cleaned (full history), not working_set.
