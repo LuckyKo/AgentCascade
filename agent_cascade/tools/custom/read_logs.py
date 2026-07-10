@@ -1,4 +1,3 @@
-import os
 import json
 from pathlib import Path
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -21,17 +20,9 @@ class ReadLogs(BaseTool):
                 'type': 'integer',
                 'description': TOOL_METADATA['read_logs']['parameters']['max_chars_per_message']
             },
-            'last_n_messages': {
-                'type': 'integer',
-                'description': TOOL_METADATA['read_logs']['parameters']['last_n_messages']
-            },
-            'start_index': {
-                'type': 'integer',
-                'description': TOOL_METADATA['read_logs']['parameters']['start_index']
-            },
-            'nr_of_entries': {
-                'type': 'integer',
-                'description': TOOL_METADATA['read_logs']['parameters']['nr_of_entries']
+            'range': {
+                'type': 'string',
+                'description': TOOL_METADATA['read_logs']['parameters']['range']
             }
         },
         'required': ['log_file'],
@@ -44,24 +35,79 @@ class ReadLogs(BaseTool):
             super().__init__()
         self.agent_pool = kwargs.get('agent_pool')
 
-    def call(self, params: str, **kwargs) -> str:
-        from agent_cascade.utils.utils import json_loads
-        try:
-            if isinstance(params, str):
-                p = json_loads(params)
-                params = json.dumps(p)
-        except Exception:
-            pass
+    @staticmethod
+    def _parse_range(range_str: str, total_entries: int) -> tuple:
+        """Parse a range string into 0-based Python slice indices.
 
+        Format matches edit_file / re_indent style (1-indexed, inclusive):
+            '3:7'   -> entries 3 through 7
+            '5:'    -> entries 5 through end
+            ':20'   -> first 20 entries
+            '5'     -> single entry at position 5
+            '-1'    -> last entry (single index)
+            '5:-1'  -> entries 5 through second-to-last (-1 as an end bound is exclusive-like)
+
+        Returns (start_idx, end_idx) as a half-open slice [start, end).
+        """
+        if total_entries == 0:
+            return 0, 0  # Guard against empty logs
+        range_str = range_str.strip()
+        if not range_str:
+            return 0, total_entries  # Empty means "all"
+
+        if ':' in range_str:
+            parts = range_str.split(':')
+            if len(parts) != 2:
+                raise ValueError(f"Range must have exactly one ':'. Got '{range_str}'")
+
+            start_part, end_part = parts[0].strip(), parts[1].strip()
+
+            # Parse start (empty means from the beginning, i.e., entry 1)
+            if start_part == '':
+                start = 1
+            else:
+                start = int(start_part)
+                if start < 0:
+                    start = total_entries + 1 + start  # -1 = last entry
+
+            # Parse end (empty means to the end of the log)
+            if end_part == '':
+                end = total_entries
+            else:
+                end = int(end_part)
+                if end < 0:
+                    end = total_entries + end  # -1 = one before last
+
+            # Clamp to valid bounds [1, total_entries]
+            start = max(1, min(start, total_entries))
+            end = max(1, min(end, total_entries))
+
+            if start > end:
+                raise ValueError(
+                    f"Range start ({start}) must be <= end ({end}) "
+                    f"(total entries: {total_entries})"
+                )
+
+            # Convert 1-based inclusive to 0-based half-open slice
+            return start - 1, end
+
+        else:
+            # Single number = read just that one entry
+            idx = int(range_str)
+            if idx < 0:
+                idx = total_entries + 1 + idx
+            idx = max(1, min(idx, total_entries))
+            return idx - 1, idx
+
+    def call(self, params: str, **kwargs) -> str:
         params = self._verify_json_format_args(params)
         log_file = params['log_file']
         max_chars = params.get('max_chars_per_message', 1000)
         if max_chars <= 0:
             return "Error: max_chars_per_message must be a positive integer."
-        last_n = params.get('last_n_messages', None)
-        start_index = params.get('start_index', None)
-        nr_of_entries = params.get('nr_of_entries', 20)
+        range_str = params.get('range', None)
 
+        # Resolve file path via agent_pool or fallback
         if self.agent_pool and hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
             try:
                 file_path = self.agent_pool.operation_manager._resolve_path(log_file, mode="ro")
@@ -128,23 +174,22 @@ class ReadLogs(BaseTool):
             return isinstance(entry, dict) and "metadata" in entry
 
         # --- Pagination / slicing ---
-        if start_index is not None or 'nr_of_entries' in params:
-            metadata_lines = [l for l in parsed_lines if _is_metadata(l)]
-            other_lines = [l for l in parsed_lines if not _is_metadata(l)]
+        # Split into metadata lines (always included) and regular log entries (sliced)
+        metadata_lines = [l for l in parsed_lines if _is_metadata(l)]
+        other_lines = [l for l in parsed_lines if not _is_metadata(l)]
 
-            start = start_index if start_index is not None else 0
-            end = len(other_lines) if nr_of_entries == -1 else start + nr_of_entries
+        try:
+            if range_str is not None:
+                # Unified range parameter (1-indexed, inclusive like re_indent / edit_file)
+                start_idx, end_idx = self._parse_range(range_str, len(other_lines))
+                selected = other_lines[start_idx:end_idx]
+            else:
+                # Default fallback — last 20 non-metadata entries
+                selected = other_lines[-20:]
+        except (ValueError, IndexError) as e:
+            return f"Error parsing range '{range_str}': {e}"
 
-            parsed_lines = metadata_lines + other_lines[start:end]
-        elif last_n is not None and last_n > 0:
-            metadata_lines = [l for l in parsed_lines if _is_metadata(l)]
-            other_lines = [l for l in parsed_lines if not _is_metadata(l)]
-            parsed_lines = metadata_lines + other_lines[-last_n:]
-        else:
-            # Default fallback — last 20 non-metadata entries
-            metadata_lines = [l for l in parsed_lines if _is_metadata(l)]
-            other_lines = [l for l in parsed_lines if not _is_metadata(l)]
-            parsed_lines = metadata_lines + other_lines[-20:]
+        parsed_lines = metadata_lines + selected
 
         # --- Helper: truncate a string from the middle ---
         def _truncate_middle(s, limit):

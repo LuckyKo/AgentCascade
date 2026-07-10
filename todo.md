@@ -29,6 +29,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] add `shift` mode to re_indet tool, a mode where we just add or remove indent units from the start of the line. (the old `shit` mode will be renamed to `min`)
 [ ] add auto-rollback feature on edit_file fail
 [ ] store all agent instance IDs called by current agent so when dismissed, dismiss all the agents it called too. (it should result in a tree of dismissals recursively dismissing the whole branch)
+[x] change read_logs argument to use `range` in the same indexing style as other tools like edit_file — FIXED: replaced start_index/nr_of_entries/last_n_messages with unified `range` string parameter (1-indexed, inclusive, e.g. "1:10", "5:", ":20", negative indices). Added _parse_range() static method. Updated dna.py metadata and audit documentation.
  
 # BUGS:
 
@@ -41,9 +42,12 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] session loading sometime merges the old session with the new (mostly on server restart). should properly clean old session on load, just like it does a new session then loads.
 - [x] agent tab needs refresh when switching to it from another — FIXED: invalidate panel contentKey/lastRenderedCount cache in switchMainTab() to force re-render on tab switch
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent once it reached conclusion
-- [ ] if user unchecked auto-ask while the security agent is running the approval window pops up correctly but its stuck in a weird flashing mode and cant press any button to approve/reject
 - [ ] telemetry `Avg TPS` is wrongly calculated, `Output Tokens (est)` also most likely undercounts
 - [ ] `REJECTED BY USER: SECURITY REJECTED:` is pre-pended to rejection messages when Security rejects it. it should properly distinguish when User or Security rejected it.
+- [ ] call_agent returns `[SYSTEM ERROR: Empty LLM response]` if the agent failed a inner loop check
+- [ ] losing connection drops sub-agent back to caller instead of retrying connection or fallback to other API endpoints
+- [ ] if call_agent was initiated with custom max_turns argument, append that info to the context field in the request to the called agent. also, add a 50% turn limit warning (similar to the 90% one) and change the last final turn warning from an in-message insertion to a separate user message insert
+- [ ] weird UI issue with Auto-Ask toggle, seems to reset when i click it so i need multiple clicks to get it to what i want.
 
 # Errors to investigate:
 
@@ -167,4 +171,54 @@ agent_cascade.llm.base.ModelServiceError: Maximum number of retries (2) exceeded
 2026-07-07 05:51:59,520 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 31788, Available tokens: 108931
 2026-07-07 05:52:25,720 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 33429, Available tokens: 108931
 2026-07-07 05:52:43,135 - base.py - 953 - INFO - Agent [Coder] - ALL tokens: 34803, Available tokens: 108931
-[x] FIXED: Added stdout_buf/stderr_buf buffering in `_execute_code()` and `_drain_iopub()` methods in `agent_cascade/tools/code_interpreter.py`. Stream messages now append to buffers and are flushed as single consolidated blocks after processing. All 7 unit tests passed.
+
+# Agents terminated without final result on turn limit reach
+[Agent 'RegressionTester' Completed]:
+WARNING: Sub-agent RegressionTester terminated with a tool result (no final text output). Check log for details: RegressionTester.log
+
+
+
+# compression error - stack desync again?
+2026-07-10 06:19:34,043 - agent_pool.py - 538 - DEBUG - Instance conversation cleanup key missing (expected): 'Security_op_dddc5d10'
+2026-07-10 06:19:34,047 - agent_pool.py - 2376 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_dddc5d10
+2026-07-10 06:19:37,208 - execution_engine.py - 1004 - DEBUG - EXIT - Compressor_2 RUNNING→IDLE
+2026-07-10 06:19:37,426 - handler.py - 843 - INFO - /compress applied for Maine: ERROR: Compression marker would be inserted before a FUNCTION response at position 228 — pool/active-set desync detected. Discard count=225, active_start_idx=3, history_len=457
+2026-07-10 06:19:37,426 - handler.py - 311 - DEBUG - Logger sync after /compress command for 'Maine': pool_len=457, using reset_history() for full sync
+2026-07-10 06:19:37,452 - agent_instance_logger.py - 677 - INFO - Synced compression marker in n:\work\WD\AgentWorkspace\logs\orchestrator_Maine_20260710_043633.jsonl (539 messages).
+2026-07-10 06:19:37,478 - execution_engine.py - 1557 - DEBUG - Rebuilt working sets for Maine: messages=457, llm_messages=456
+2026-07-10 06:19:37,574 - execution_engine.py - 1369 - DEBUG - [PRE_LLM] Compress command handled for Maine
+2026-07-10 06:19:37,575 - execution_engine.py - 807 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
+2026-07-10 06:19:37,847 - base.py - 953 - INFO - Agent [Orchestrator] - ALL tokens: 92233, Available tokens: 108209
+2026-07-10 06:21:24,537 - code_interpreter.py - 217 - WARNING - Code interpreter watchdog: Kernel ci_Maine_775997_5748 inactive for 300s. Killing container.
+2026-07-10 06:23:37,765 - base.py - 953 - INFO - Agent [Orchestrator] - ALL tokens: 92631, Available tokens: 108209
+...
+2026-07-10 06:29:29,371 - lifecycle_manager.py - 176 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for Compressor_3
+2026-07-10 06:29:29,404 - execution_engine.py - 645 - DEBUG - engine.run() ENTRY - instance=Compressor_3
+2026-07-10 06:29:29,405 - execution_engine.py - 706 - DEBUG - [TURN_START] Calling _setup_turn for Compressor_3
+2026-07-10 06:29:29,405 - execution_engine.py - 1076 - INFO - [CACHE_REBUILD] Rebuilding working set for Compressor_3 (conv_len=2)
+2026-07-10 06:29:29,406 - execution_engine.py - 1159 - DEBUG - [CACHE_REBUILD] System prompt content CHANGED for Compressor_3
+2026-07-10 06:29:29,410 - agent_instance_logger.py - 458 - INFO - Rewrote agent log n:\work\WD\AgentWorkspace\logs\compressor_Compressor_3_20260710_062929.jsonl with 2 messages.
+2026-07-10 06:29:29,412 - execution_engine.py - 741 - DEBUG - [TURN_DONE] Got messages=2, llm_messages=2
+2026-07-10 06:29:29,463 - base.py - 953 - INFO - Agent [Compressor] - ALL tokens: 59934, Available tokens: 124493
+2026-07-10 06:30:29,956 - execution_engine.py - 1004 - DEBUG - EXIT - Compressor_3 RUNNING→IDLE
+2026-07-10 06:30:30,212 - handler.py - 843 - INFO - /compress applied for Maine: ERROR: Compression marker would be inserted before a FUNCTION response at position 228 — pool/active-set desync detected. Discard count=225, active_start_idx=3, history_len=493
+2026-07-10 06:30:30,213 - handler.py - 311 - DEBUG - Logger sync after /compress command for 'Maine': pool_len=493, using reset_history() for full sync
+2026-07-10 06:30:30,246 - agent_instance_logger.py - 677 - INFO - Synced compression marker in n:\work\WD\AgentWorkspace\logs\orchestrator_Maine_20260710_043633.jsonl (575 messages).
+2026-07-10 06:30:30,282 - execution_engine.py - 1557 - DEBUG - Rebuilt working sets for Maine: messages=493, llm_messages=492
+2026-07-10 06:30:30,405 - execution_engine.py - 1369 - DEBUG - [PRE_LLM] Compress command handled for Maine
+2026-07-10 06:30:30,405 - execution_engine.py - 807 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
+2026-07-10 06:30:30,556 - handler.py - 463 - INFO - Context usage at 97.1% for Maine — forcing compression (attempt #1).
+2026-07-10 06:30:30,779 - lifecycle_manager.py - 176 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for Compressor_4
+2026-07-10 06:30:30,804 - execution_engine.py - 645 - DEBUG - engine.run() ENTRY - instance=Compressor_4
+2026-07-10 06:30:30,804 - execution_engine.py - 706 - DEBUG - [TURN_START] Calling _setup_turn for Compressor_4
+2026-07-10 06:30:30,805 - execution_engine.py - 1076 - INFO - [CACHE_REBUILD] Rebuilding working set for Compressor_4 (conv_len=2)
+2026-07-10 06:30:30,806 - execution_engine.py - 1159 - DEBUG - [CACHE_REBUILD] System prompt content CHANGED for Compressor_4
+2026-07-10 06:30:30,822 - agent_instance_logger.py - 458 - INFO - Rewrote agent log n:\work\WD\AgentWorkspace\logs\compressor_Compressor_4_20260710_063030.jsonl with 2 messages.
+2026-07-10 06:30:30,823 - execution_engine.py - 741 - DEBUG - [TURN_DONE] Got messages=2, llm_messages=2
+2026-07-10 06:30:30,873 - base.py - 953 - INFO - Agent [Compressor] - ALL tokens: 59934, Available tokens: 124493
+2026-07-10 06:31:22,721 - execution_engine.py - 1004 - DEBUG - EXIT - Compressor_4 RUNNING→IDLE
+2026-07-10 06:31:23,318 - handler.py - 530 - ERROR - Forced compression failed for Maine: Compression marker would be inserted before a FUNCTION response at position 228 — pool/active-set desync detected. Discard count=225, active_start_idx=3, history_len=494
+2026-07-10 06:31:23,320 - handler.py - 157 - INFO - Compression notification queued for injection into 'Maine'
+2026-07-10 06:31:23,376 - base.py - 953 - INFO - Agent [Orchestrator] - ALL tokens: 104937, Available tokens: 108209
+
+

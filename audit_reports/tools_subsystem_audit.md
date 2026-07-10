@@ -163,7 +163,7 @@ TOOL_REGISTRY (global dict)          agent_factory.register_standard_tools()
 |---|-----------|-------|------|-----------------|-----------------|-------------|
 | 18 | `system_info` | `SystemInfo` | `tools/custom/system_info.py:15` | — | — | OS, time/date, working dirs with Docker mount paths, Python version, session stats. |
 | 19 | `shell_cmd` | `ShellCmd` | `tools/custom/shell_cmd.py:5` | `command` (str), `justification` (str) | `cwd` (str), `timeout` (int, default 30) | Execute shell commands. Auto-approved for read-only commands. |
-| 20 | `read_logs` | `ReadLogs` | `tools/custom/read_logs.py:7` | `log_file` (str) | `max_chars_per_message` (int, default 1000), `last_n_messages` (int), `start_index` (int), `nr_of_entries` (int, default 20) | Read agent JSONL log files with middle-point truncation. |
+| 20 | `read_logs` | `ReadLogs` | `tools/custom/read_logs.py:7` | `log_file` (str) | `max_chars_per_message` (int, default 1000), `range` (str, e.g. "1:10", "5:", ":20"; negative indices supported; omit to default to last 20 entries) | Read agent JSONL log files with middle-point truncation. |
 | 21 | `calculate` | `Calculate` | `tools/custom/calculation.py:23` | `expression` (str) | — | Evaluate math expressions. Supports arithmetic, trig, logs, random functions. Restricted eval (no imports). |
 
 ### Category F: Web & Data (2 tools)

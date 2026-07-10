@@ -312,15 +312,13 @@ TOOL_METADATA = {
         'description': (
             'Read a JSON/JSONL log file (agent logs, JSON arrays, single objects, or files with mixed/malformed lines). '
             'Large message contents are truncated in the middle to prevent context overflow while '
-            'retaining the beginning and end of each message. Handles reasoning_content, function_call arguments, '
-            'and nested extra fields.'
+            'retaining the beginning and end of each message. Handles other types of text files as well with the same middle truncation applied for each line, '
+            'and nested extra fields. Use the `range` parameter to select specific entries (e.g., "1:10", "5:", ":20").'
         ),
         'parameters': {
             'log_file': 'The path to the log file, absolute or relative to workspace root (e.g., "logs/orchestrator_main.jsonl"). Works with JSON arrays, single objects, and JSONL files.',
             'max_chars_per_message': 'Maximum characters to keep for each string value in messages. Defaults to 1000.',
-            'last_n_messages': 'Only read the last N messages. Can be used instead of start_index/nr_of_entries.',
-            'start_index': 'The starting index of the log entries to read (0-indexed).',
-            'nr_of_entries': 'The number of entries to read starting from start_index. Defaults to 20.'
+            'range': 'Entry range to read, 1-based inclusive (e.g., "1:10", "5:", ":20"). Supports negative indices (e.g., "-1" for the last entry; in ranges like "5:-1", -1 refers to the second-to-last). Omit to default to the last 20 entries.'
         }
     },
     'image_gen': {
