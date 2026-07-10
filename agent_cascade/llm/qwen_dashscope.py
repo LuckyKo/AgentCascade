@@ -22,6 +22,7 @@ import dashscope
 
 from agent_cascade.llm.base import ModelServiceError, register_llm
 from agent_cascade.llm.function_calling import BaseFnCallModel
+from agent_cascade.llm.oai import _extract_usage
 from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
 from agent_cascade.log import logger
 
@@ -74,11 +75,12 @@ class QwenChatAtDS(BaseFnCallModel):
             stream=False,
             **generate_cfg)
         if response.status_code == HTTPStatus.OK:
+            # Extract usage info from DashScope response (includes completion_tokens_details if available)
             return [
                 Message(role=ASSISTANT,
                         content=response.output.choices[0].message.content,
                         reasoning_content=response.output.choices[0].message.get('reasoning_content', ''),
-                        extra={'model_service_info': response})
+                        extra={'model_service_info': response, 'usage': _extract_usage(getattr(response, 'usage', None))})
             ]
         else:
             raise ModelServiceError(code=response.code,
@@ -95,13 +97,21 @@ class QwenChatAtDS(BaseFnCallModel):
 
     @staticmethod
     def _delta_stream_output(response) -> Iterator[List[Message]]:
+        last_usage = {}  # Track usage across chunks; last chunk typically has final count
         for chunk in response:
             if chunk.status_code == HTTPStatus.OK:
+                # Extract usage from each chunk (last chunk has the complete count)
+                extracted = _extract_usage(getattr(chunk, 'usage', None))
+                if extracted:
+                    last_usage = extracted
+                extra = {'model_service_info': chunk}
+                if last_usage:
+                    extra['usage'] = last_usage
                 yield [
                     Message(role=ASSISTANT,
                             content=chunk.output.choices[0].message.content,
                             reasoning_content=chunk.output.choices[0].message.reasoning_content,
-                            extra={'model_service_info': chunk})
+                            extra=extra)
                 ]
             else:
                 raise ModelServiceError(code=chunk.code, message=chunk.message, extra={'model_service_info': chunk})
@@ -111,8 +121,14 @@ class QwenChatAtDS(BaseFnCallModel):
         full_content = ''
         full_reasoning_content = ''
         full_tool_calls = []
+        # Extract usage info from DashScope streaming response (last chunk has it)
+        last_usage = {}
         for chunk in response:
             if chunk.status_code == HTTPStatus.OK:
+                # Capture usage from each chunk; last chunk typically has the final count
+                extracted = _extract_usage(getattr(chunk, 'usage', None))
+                if extracted:
+                    last_usage = extracted
                 if chunk.output.choices[0].message.get('reasoning_content', ''):
                     full_reasoning_content += chunk.output.choices[0].message.reasoning_content
                 if chunk.output.choices[0].message.content:
@@ -138,20 +154,22 @@ class QwenChatAtDS(BaseFnCallModel):
                                         }))
                 res = []
                 if full_reasoning_content:
+                    msg_extra = {'model_service_info': json.loads(str(chunk))}
+                    if last_usage:
+                        msg_extra['usage'] = last_usage
                     res.append(
                         Message(role=ASSISTANT,
                                 content='',
                                 reasoning_content=full_reasoning_content,
-                                extra={
-                                    'model_service_info': json.loads(str(chunk)),
-                                }))
+                                extra=msg_extra))
                 if full_content:
+                    msg_extra = {'model_service_info': json.loads(str(chunk))}
+                    if last_usage:
+                        msg_extra['usage'] = last_usage
                     res.append(
                         Message(role=ASSISTANT,
                                 content=full_content,
-                                extra={
-                                    'model_service_info': json.loads(str(chunk)),
-                                }))
+                                extra=msg_extra))
                 if full_tool_calls:
                     res += full_tool_calls
                 yield res

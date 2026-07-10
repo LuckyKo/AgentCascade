@@ -104,6 +104,82 @@ ALLOWED_LLM_PARAMS = {
 }
 
 
+def _extract_usage(usage_obj):
+    """Extract usage data from an OpenAI/DashScope usage object, including completion_tokens_details.
+
+    Handles both OpenAI-style (completion_tokens_details) and DashScope-style
+    (output_tokens_details with reason_tokens/thought_tokens) attribute names.
+    Returns empty dict if usage_obj is None/empty.
+    """
+    if not usage_obj:
+        return {}
+    usage_dict = {}
+
+    # Basic token counts — support both OpenAI and DashScope naming
+    if hasattr(usage_obj, 'prompt_tokens') and usage_obj.prompt_tokens is not None:
+        usage_dict['prompt_tokens'] = usage_obj.prompt_tokens
+    elif hasattr(usage_obj, 'input_tokens') and usage_obj.input_tokens is not None:
+        usage_dict['prompt_tokens'] = usage_obj.input_tokens
+
+    if hasattr(usage_obj, 'completion_tokens') and usage_obj.completion_tokens is not None:
+        usage_dict['completion_tokens'] = usage_obj.completion_tokens
+    elif hasattr(usage_obj, 'output_tokens') and usage_obj.output_tokens is not None:
+        usage_dict['completion_tokens'] = usage_obj.output_tokens
+
+    if hasattr(usage_obj, 'total_tokens') and usage_obj.total_tokens is not None:
+        usage_dict['total_tokens'] = usage_obj.total_tokens
+
+    # Capture completion_tokens_details (OpenAI naming)
+    details_obj = None
+    if hasattr(usage_obj, 'completion_tokens_details') and usage_obj.completion_tokens_details:
+        details_obj = usage_obj.completion_tokens_details
+    elif hasattr(usage_obj, 'output_tokens_details') and usage_obj.output_tokens_details:
+        # DashScope naming for output token breakdown
+        details_obj = usage_obj.output_tokens_details
+
+    if details_obj is not None:
+        details = {}
+        # Extract reasoning tokens (OpenAI or DashScope naming)
+        if hasattr(details_obj, 'reasoning_tokens') and details_obj.reasoning_tokens is not None:
+            details['reasoning_tokens'] = details_obj.reasoning_tokens
+        elif hasattr(details_obj, 'reason_tokens') and details_obj.reason_tokens is not None:
+            details['reasoning_tokens'] = details_obj.reason_tokens
+
+        # Add thought tokens to reasoning (DashScope specific)
+        if hasattr(details_obj, 'thought_tokens') and details_obj.thought_tokens is not None:
+            current_reasoning = details.get('reasoning_tokens', 0) or 0
+            details['reasoning_tokens'] = current_reasoning + details_obj.thought_tokens
+
+        # Other token details (safe extraction with None checks)
+        if hasattr(details_obj, 'tool_calls_tokens') and details_obj.tool_calls_tokens is not None:
+            details['tool_calls_tokens'] = details_obj.tool_calls_tokens
+        if hasattr(details_obj, 'accepted_prediction_tokens') and details_obj.accepted_prediction_tokens is not None:
+            details['accepted_prediction_tokens'] = details_obj.accepted_prediction_tokens
+        if hasattr(details_obj, 'audio_tokens') and details_obj.audio_tokens is not None:
+            details['audio_tokens'] = details_obj.audio_tokens
+
+        if details:
+            usage_dict['completion_tokens_details'] = details
+
+    # Capture prompt_tokens_details (caching info from newer OpenAI APIs)
+    pdetails_obj = None
+    if hasattr(usage_obj, 'prompt_tokens_details') and usage_obj.prompt_tokens_details:
+        pdetails_obj = usage_obj.prompt_tokens_details
+    elif hasattr(usage_obj, 'input_tokens_details') and usage_obj.input_tokens_details:
+        pdetails_obj = usage_obj.input_tokens_details
+
+    if pdetails_obj is not None:
+        pdetails = {}
+        if hasattr(pdetails_obj, 'cached_tokens') and pdetails_obj.cached_tokens is not None:
+            pdetails['cached_tokens'] = pdetails_obj.cached_tokens
+        if hasattr(pdetails_obj, 'audio_tokens') and pdetails_obj.audio_tokens is not None:
+            pdetails['audio_tokens'] = pdetails_obj.audio_tokens
+        if pdetails:
+            usage_dict['prompt_tokens_details'] = pdetails
+
+    return usage_dict
+
+
 @register_llm('oai')
 class TextChatAtOAI(BaseFnCallModel):
 
@@ -432,14 +508,7 @@ class TextChatAtOAI(BaseFnCallModel):
                         
                         # Feature 006: Capture usage info from OpenAI streaming response (last chunk)
                         if hasattr(chunk, 'usage') and chunk.usage:
-                            usage_dict = {}
-                            if hasattr(chunk.usage, 'prompt_tokens'):
-                                usage_dict['prompt_tokens'] = chunk.usage.prompt_tokens
-                            if hasattr(chunk.usage, 'completion_tokens'):
-                                usage_dict['completion_tokens'] = chunk.usage.completion_tokens
-                            if hasattr(chunk.usage, 'total_tokens'):
-                                usage_dict['total_tokens'] = chunk.usage.total_tokens
-                            extra['usage'] = usage_dict
+                            extra['usage'] = _extract_usage(chunk.usage)
                         
                         if full_reasoning_content or full_response:
                             res.append(Message(
@@ -534,14 +603,7 @@ class TextChatAtOAI(BaseFnCallModel):
             
             # Feature 006: Capture usage info from OpenAI non-streaming response
             if hasattr(response, 'usage') and response.usage:
-                usage_dict = {}
-                if hasattr(response.usage, 'prompt_tokens'):
-                    usage_dict['prompt_tokens'] = response.usage.prompt_tokens
-                if hasattr(response.usage, 'completion_tokens'):
-                    usage_dict['completion_tokens'] = response.usage.completion_tokens
-                if hasattr(response.usage, 'total_tokens'):
-                    usage_dict['total_tokens'] = response.usage.total_tokens
-                extra['usage'] = usage_dict
+                extra['usage'] = _extract_usage(response.usage)
 
             msg = response.choices[0].message
             result = []

@@ -24,6 +24,7 @@ import dashscope
 
 from agent_cascade.llm.base import ModelServiceError, register_llm
 from agent_cascade.llm.function_calling import BaseFnCallModel
+from agent_cascade.llm.oai import _extract_usage
 from agent_cascade.llm.qwen_dashscope import initialize_dashscope
 from agent_cascade.llm.schema import ASSISTANT, ContentItem, FunctionCall, Message
 from agent_cascade.log import logger
@@ -72,9 +73,15 @@ class QwenVLChatAtDS(BaseFnCallModel):
         full_reasoning_content = ''
         full_tool_calls = []
         res = []
+        # Extract usage info from DashScope streaming response (last chunk has it)
+        last_usage = {}
         for chunk in response:
             # print(chunk)
             if chunk.status_code == HTTPStatus.OK:
+                # Capture usage from each chunk; last chunk typically has the final count
+                extracted = _extract_usage(getattr(chunk, 'usage', None))
+                if extracted:
+                    last_usage = extracted
                 if chunk.output.choices:
                     if 'reasoning_content' in chunk.output.choices[0].message and chunk.output.choices[
                             0].message.reasoning_content:
@@ -115,23 +122,25 @@ class QwenVLChatAtDS(BaseFnCallModel):
                                             }))
                     res = []
                     if full_reasoning_content:
+                        msg_extra = {'model_service_info': json.loads(str(chunk)),
+                                    'model': self.model}
+                        if last_usage:
+                            msg_extra['usage'] = last_usage
                         res.append(
                             Message(role=ASSISTANT,
                                     content=[],
                                     reasoning_content=full_reasoning_content,
-                                    extra={
-                                        'model_service_info': json.loads(str(chunk)),
-                                        'model': self.model
-                                    }))
+                                    extra=msg_extra))
                     if full_content:
+                        msg_extra = {'model_service_info': json.loads(str(chunk)),
+                                    'model': self.model}
+                        if last_usage:
+                            msg_extra['usage'] = last_usage
                         res.append(
                             Message(role=ASSISTANT,
                                     content=full_content,
                                     reasoning_content='',
-                                    extra={
-                                        'model_service_info': json.loads(str(chunk)),
-                                        'model': self.model
-                                    }))
+                                    extra=msg_extra))
                     if full_tool_calls:
                         res += full_tool_calls
                     yield res
@@ -146,14 +155,15 @@ class QwenVLChatAtDS(BaseFnCallModel):
             # Only return audio at the end
             res = []
             if full_reasoning_content:
+                msg_extra = {'model_service_info': json.loads(str(chunk)),
+                            'model': self.model}
+                if last_usage:
+                    msg_extra['usage'] = last_usage
                 res.append(
                     Message(role=ASSISTANT,
                             content=[],
                             reasoning_content=full_reasoning_content,
-                            extra={
-                                'model_service_info': json.loads(str(chunk)),
-                                'model': self.model
-                            }))
+                            extra=msg_extra))
 
             if os.getenv('QWEN_AGENT_OMNI_RESPONSE_SAVE_AUDIO', 'false').lower() == 'true':
                 work_dir = os.path.join(DEFAULT_WORKSPACE, 'llms')
@@ -166,14 +176,15 @@ class QwenVLChatAtDS(BaseFnCallModel):
                 audio_content = f'data:audio/wav;base64,{full_audio}'
             full_content.append(ContentItem(audio=audio_content))
             if full_content:
+                msg_extra = {'model_service_info': json.loads(str(chunk)),
+                            'model': self.model}
+                if last_usage:
+                    msg_extra['usage'] = last_usage
                 res.append(
                     Message(role=ASSISTANT,
                             content=full_content,
                             reasoning_content='',
-                            extra={
-                                'model_service_info': json.loads(str(chunk)),
-                                'model': self.model
-                            }))
+                            extra=msg_extra))
             if full_tool_calls:
                 res += full_tool_calls
             yield res
@@ -198,20 +209,25 @@ class QwenVLChatAtDS(BaseFnCallModel):
                                                          stream=False,
                                                          **generate_cfg)
         if response.status_code == HTTPStatus.OK:
+            # Extract usage info from DashScope VL response (includes completion_tokens_details if available)
+            resp_usage = _extract_usage(getattr(response, 'usage', None))
             full_content = response.output.choices[0].message.content[0]['text']
+            msg_extra = {'model_service_info': response}
+            if resp_usage:
+                msg_extra['usage'] = resp_usage
             if 'reasoning_content' in response.output.choices[0].message:
                 full_reasoning_content = response.output.choices[0].message.reasoning_content
                 return [
                     Message(role=ASSISTANT,
                             content=[ContentItem(text=full_content)],
                             reasoning_content=full_reasoning_content,
-                            extra={'model_service_info': response})
+                            extra=msg_extra)
                 ]
             else:
                 return [
                     Message(role=ASSISTANT,
                             content=[ContentItem(text=full_content)],
-                            extra={'model_service_info': response})
+                            extra=msg_extra)
                 ]
         else:
             raise ModelServiceError(code=response.code,

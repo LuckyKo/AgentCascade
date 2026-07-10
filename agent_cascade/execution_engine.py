@@ -1943,11 +1943,30 @@ class ExecutionEngine:
                                 _found_usage = True
                             break  # Only need first valid usage entry
                     
+                    # Try completion_tokens_details as alternative if completion_tokens not available
                     if not _found_usage:
-                        # Fallback: char-based estimate including reasoning_content
+                        for m in last_output:
+                            extra = getattr(m, 'extra', None) or {}
+                            usage = extra.get('usage') if isinstance(extra, dict) else None
+                            if usage and isinstance(usage, dict):
+                                details = usage.get('completion_tokens_details', {})
+                                if details:
+                                    reasoning_t = details.get('reasoning_tokens', 0) or 0
+                                    tool_t = details.get('tool_calls_tokens', 0) or 0
+                                    accepted_pred_t = details.get('accepted_prediction_tokens', 0) or 0
+                                    audio_t = details.get('audio_tokens', 0) or 0
+                                    total_from_details = reasoning_t + tool_t + accepted_pred_t + audio_t
+                                    if total_from_details > 0:
+                                        _output_tokens_est = total_from_details
+                                        _found_usage = True
+                                        break
+                    
+                    if not _found_usage:
+                        # Fallback: char-based estimate including reasoning_content and function_call arguments
                         for m in last_output:
                             c = getattr(m, 'content', '') or ''
                             rc = getattr(m, 'reasoning_content', '') or ''
+                            fc = getattr(m, 'function_call', None)
                             # Normalize list content to string (multimodal messages)
                             if isinstance(c, list):
                                 c = ' '.join(str(x) for x in c if isinstance(x, str))
@@ -1957,7 +1976,14 @@ class ExecutionEngine:
                                 rc = ' '.join(str(x) for x in rc if isinstance(x, str))
                             else:
                                 rc = str(rc)
-                            _output_tokens_est += (len(c) + len(rc)) // TOKEN_ESTIMATE_CHAR_DIVISOR
+                            # Include function call arguments in token estimate
+                            fc_str = ''
+                            if fc:
+                                if isinstance(fc, dict):
+                                    fc_str = str(fc.get('name', '')) + str(fc.get('arguments', ''))
+                                elif hasattr(fc, 'name'):
+                                    fc_str = str(getattr(fc, 'name', '')) + str(getattr(fc, 'arguments', ''))
+                            _output_tokens_est += (len(c) + len(rc) + len(fc_str)) // TOKEN_ESTIMATE_CHAR_DIVISOR
                     
                     if (tel := self._telemetry()) is not None:
                         try:
