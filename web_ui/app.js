@@ -1574,6 +1574,9 @@ function handleServerMessage(data) {
                       : 'Security advisor timed out after 180s. Please resubmit with clearer justification.';
               }
           }
+      } else if (verdict === 'YES') {
+          // For YES verdicts, trigger UI update to display security response box
+          renderApprovals();
       }
       break;
     }
