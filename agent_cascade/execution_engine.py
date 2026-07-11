@@ -2133,6 +2133,12 @@ class ExecutionEngine:
         # Delegate to extracted method - Phase 3.6
         yield from self._execute_llm_call_with_retry(instance, llm_messages, template, active_functions)
 
+    SAMPLING_KEYS = frozenset({
+        'temperature', 'top_p', 'top_k', 'min_p',
+        'repeat_penalty', 'repetition_penalty', 'repeatPenalty',
+        'presence_penalty', 'frequency_penalty', 'max_tokens',
+    })
+
     @staticmethod
     def _build_merged_cfg(llm, instance, endpoint_cfg: dict = None) -> dict:
         """Merge config layers: template defaults → user override → endpoint sampler override.
@@ -2140,6 +2146,10 @@ class ExecutionEngine:
         When an endpoint has custom sampling enabled (use_custom_sampling=True), its
         sampler parameters take final precedence over the global UI settings so that
         per-endpoint sampling values are not silently overwritten.
+
+        When custom sampling is DISABLED for the used endpoint, stale sampling params
+        from lower layers (template defaults / UI overrides) are stripped out to prevent
+        them from leaking into the LLM call.
         """
         merged = {}
         if getattr(llm, 'generate_cfg', None):
@@ -2147,8 +2157,16 @@ class ExecutionEngine:
         override = getattr(instance, '_generate_cfg_override', None)
         if override is not None:
             merged.update(override)                       # Layer 2: user override
+
         if endpoint_cfg:
+            # Check if custom sampling is disabled for this endpoint.
+            # When disabled, strip stale sampling params from lower layers so they
+            # don't leak through the merge into the LLM call.
+            use_custom = endpoint_cfg.get('_use_custom_sampling', True)
+            if not use_custom:
+                merged = {k: v for k, v in merged.items() if k not in ExecutionEngine.SAMPLING_KEYS}
             merged.update(endpoint_cfg)                   # Layer 3: endpoint config (sampler params win)
+
         return merged
 
     @staticmethod

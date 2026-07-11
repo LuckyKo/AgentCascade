@@ -95,6 +95,11 @@ class APIEndpoint:
             'vision_enabled': self.vision_enabled,  # Vision capability flag for routing decisions
         }
 
+        # Signal to _build_merged_cfg whether custom sampling is enabled for this endpoint.
+        # When disabled, the merge should strip stale sampling params from lower layers
+        # (template defaults / UI overrides) so they don't leak into the LLM call.
+        cfg['_use_custom_sampling'] = self.use_custom_sampling
+
         if self.use_custom_sampling:
             # Only include non-zero sampler params (zero = "use default")
             # Using != 0 consistently so negative values are also captured where valid

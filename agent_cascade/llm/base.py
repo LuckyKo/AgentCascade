@@ -277,7 +277,8 @@ class BaseChatModel(ABC):
             'disabled_tools', 'max_turns', 'auto_continue', 'auto_rollback_on_loop',
             'read_file_limit', 'mcpServers', 'work_access_folders',
             'grep_char_limit', 'shell_char_limit', 'code_char_limit', 'seed',
-            '_on_token_count'  # Safety net: also pop here in case it wasn't extracted above
+            '_on_token_count',  # Safety net: also pop here in case it wasn't extracted above
+            '_use_custom_sampling',  # Internal routing flag — not an LLM parameter
         ]
         for setting in agent_settings:
             generate_cfg.pop(setting, None)
