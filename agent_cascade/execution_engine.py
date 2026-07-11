@@ -61,6 +61,13 @@ from .loop_detection import detect_loop as _canonical_detect_loop
 from .inner_loop_detect import InnerLoopDetector, save_loop_sample
 from .operation_manager import set_current_instance_name, clear_current_instance_name
 
+# Sampling & limit parameters to strip when custom sampling is disabled for an endpoint.
+SAMPLING_AND_LIMIT_KEYS = frozenset({
+    'temperature', 'top_p', 'top_k', 'min_p',
+    'repeat_penalty', 'repetition_penalty', 'repeatPenalty',
+    'presence_penalty', 'frequency_penalty', 'max_tokens',
+})
+
 # ── SleepAction Enum (Phase 3.1) ───────────────────────────────────────────────
 class SleepAction(Enum):
     """Actions returned by _handle_sleeping_state() to control the main loop."""
@@ -2133,12 +2140,6 @@ class ExecutionEngine:
         # Delegate to extracted method - Phase 3.6
         yield from self._execute_llm_call_with_retry(instance, llm_messages, template, active_functions)
 
-    SAMPLING_KEYS = frozenset({
-        'temperature', 'top_p', 'top_k', 'min_p',
-        'repeat_penalty', 'repetition_penalty', 'repeatPenalty',
-        'presence_penalty', 'frequency_penalty', 'max_tokens',
-    })
-
     @staticmethod
     def _build_merged_cfg(llm, instance, endpoint_cfg: dict = None) -> dict:
         """Merge config layers: template defaults → user override → endpoint sampler override.
@@ -2159,12 +2160,10 @@ class ExecutionEngine:
             merged.update(override)                       # Layer 2: user override
 
         if endpoint_cfg:
-            # Check if custom sampling is disabled for this endpoint.
-            # When disabled, strip stale sampling params from lower layers so they
-            # don't leak through the merge into the LLM call.
+            # Strip stale params when custom sampling disabled
             use_custom = endpoint_cfg.get('_use_custom_sampling', True)
             if not use_custom:
-                merged = {k: v for k, v in merged.items() if k not in ExecutionEngine.SAMPLING_KEYS}
+                merged = {k: v for k, v in merged.items() if k not in SAMPLING_AND_LIMIT_KEYS}
             merged.update(endpoint_cfg)                   # Layer 3: endpoint config (sampler params win)
 
         return merged
