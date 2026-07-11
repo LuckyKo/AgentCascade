@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from agent_cascade.agents.doc_qa import ParallelDocQA
-from agent_cascade.gui import WebUI
 
 
 def test():

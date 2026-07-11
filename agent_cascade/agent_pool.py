@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent_cascade.agents import Assistant
-from agent_cascade.llm.schema import Message, ROLE, SYSTEM, USER
+from agent_cascade.llm.schema import FUNCTION, Message, ROLE, SYSTEM, USER
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.settings import DEFAULT_WORKSPACE
@@ -1679,9 +1679,8 @@ class AgentPool:
             # Skip system message at index 0 AND first user message (U0) to protect it from compression.
             # U0 contains the initial prompt/context and should always be preserved per SYSTEM_DOCS §5.2.
             # When no system message, we still skip past the first message (U0).
-            from agent_cascade.llm.schema import SYSTEM as SYS_ROLE
-            first_role = conv[0].get('role') if isinstance(conv[0], dict) else getattr(conv[0], 'role', '')
-            active_start_idx = 2 if first_role == SYS_ROLE else 1
+            first_role = self._msg_field(conv[0], 'role')
+            active_start_idx = 2 if first_role == SYSTEM else 1
 
         active_set = conv[active_start_idx:]
         return active_start_idx, active_set, latest_marker
@@ -1699,9 +1698,8 @@ class AgentPool:
         if latest_marker >= 0:
             active_start_idx = latest_marker + 1
         else:
-            from agent_cascade.llm.schema import SYSTEM as SYS_ROLE
-            first_role = conv[0].get('role') if isinstance(conv[0], dict) else getattr(conv[0], 'role', '')
-            active_start_idx = 2 if first_role == SYS_ROLE else 1
+            first_role = self._msg_field(conv[0], 'role')
+            active_start_idx = 2 if first_role == SYSTEM else 1
 
         active_set = conv[active_start_idx:]
         return active_start_idx, active_set, latest_marker
@@ -1718,46 +1716,66 @@ class AgentPool:
             return []
 
         # Find ALL marker indices to detect stacking vs unculled gaps
-        marker_indices = []
-        for i in range(len(history)):
-            content = (
-                history[i].get('content', '')
-                if isinstance(history[i], dict)
-                else getattr(history[i], 'content', '')
-            )
-            if isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                marker_indices.append(i)
+        marker_indices = [
+            i for i in range(len(history))
+            if isinstance(self._msg_field(history[i], 'content'), str)
+               and self._msg_field(history[i], 'content').startswith(COMPRESSION_MARKER)
+        ]
 
         if not marker_indices:
             return list(history)  # No markers — nothing to slice
 
-        # Check if markers are already stacked (consecutive near the start)
-        # If they're consecutive starting from index 1 (after system), culling already happened
-        from agent_cascade.llm.schema import SYSTEM as SYS_ROLE
-        first_role = history[0].get('role') if isinstance(history[0], dict) else getattr(history[0], 'role', '')
-        expected_start = 1 if first_role == SYS_ROLE else 0
+        # Determine where content starts (after system message, if present)
+        first_role = self._msg_field(history[0], 'role')
+        has_system = (first_role == SYSTEM)
+        expected_start = 1 if has_system else 0
 
-        # Redundant len() check removed: early return at line 1484 guarantees marker_indices is non-empty
+        # Per design §5.2: stacked form is [SYS][U0][COMP1][COMP2]...
+        # First marker can be at index 1 (no U0) or index 2 (U0 present after SYS)
+        first_marker_pos = marker_indices[0]
+        last_marker_idx = marker_indices[-1]
+
+        # Check if markers are already stacked (consecutive near the start)
         markers_stacked = (
-            marker_indices[0] == expected_start and
-            marker_indices[-1] == expected_start + len(marker_indices) - 1
+            first_marker_pos <= expected_start + 1
+            and last_marker_idx == first_marker_pos + len(marker_indices) - 1
         )
+
+        # If first marker is at index expected_start+1, verify intervening msg is U0 (non-marker user)
+        if markers_stacked and first_marker_pos == expected_start + 1:
+            intervening = history[expected_start]
+            int_role = self._msg_field(intervening, 'role')
+            int_content = self._msg_field(intervening, 'content')
+            if int_role != 'user' or (isinstance(int_content, str) and int_content.startswith(COMPRESSION_MARKER)):
+                markers_stacked = False
 
         if markers_stacked:
             # Already culled at load time — return a copy
             return list(history)
 
-        # Unculled data still present — apply culling now (same logic as Fix 1)
-        last_marker_idx = marker_indices[-1]
+        # Unculled data still present — apply culling now per design §5.2: [SYS][U0][COMP...][tail]
         tail = list(history[last_marker_idx + 1:])
-
-        # Collect all marker messages
         marker_msgs = [history[i] for i in marker_indices]
 
-        # Include system message at top if present — check history[0], not tail[0]
-        if first_role == SYS_ROLE:
-            return [history[0]] + marker_msgs + tail
-        return marker_msgs + tail
+        # Find U0: first non-marker user message before the last marker
+        u0 = None
+        for msg in history[:last_marker_idx]:
+            msg_role = self._msg_field(msg, 'role')
+            msg_content = self._msg_field(msg, 'content')
+            if msg_role == 'user' and not (isinstance(msg_content, str) and msg_content.startswith(COMPRESSION_MARKER)):
+                u0 = msg
+                break
+
+        # Build result: [SYS][U0][markers][tail]
+        result = []
+        if has_system:
+            result.append(history[0])
+        if u0:
+            result.append(u0)
+        result.extend(marker_msgs)
+        result.extend(tail)
+
+        return result
 
     # ── Message queue operations ───────────────────────────────────────────
 
@@ -2047,12 +2065,17 @@ class AgentPool:
         """
         for i in range(len(history) - 1, -1, -1):
             msg = history[i]
-            role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-            content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+            role = AgentPool._msg_field(msg, 'role')
+            content = AgentPool._msg_field(msg, 'content')
             # Only consider USER messages (compression markers are always user role)
             if role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
                 return i
         return -1
+
+    @staticmethod
+    def _msg_field(msg, field, default=''):
+        """Extract a field from a message (dict or Message object)."""
+        return msg.get(field, default) if isinstance(msg, dict) else getattr(msg, field, default)
 
     def _rollback_instance(
         self,
@@ -2091,7 +2114,6 @@ class AgentPool:
             1. Never removes SYSTEM message or first USER message (when preserve_system_user=True)
             2. Refines pop_count to avoid leaving dangling tool calls (when refine_function_boundary=True)
         """
-        from agent_cascade.llm.schema import FUNCTION, SYSTEM
 
         # Resolve effective pop_count from target_length if provided
         if target_length >= 0 and pop_count == 0:
@@ -2122,15 +2144,15 @@ class AgentPool:
             # Safety: determine minimum messages to preserve (SYSTEM + first USER)
             keep_at_least = 0
             if preserve_system_user:
-                if len(conv) > 0 and getattr(conv[0], 'role', '') == SYSTEM:
+                if len(conv) > 0 and self._msg_field(conv[0], 'role') == SYSTEM:
                     keep_at_least = 1
-                    if len(conv) > 1 and getattr(conv[1], 'role', '') == USER:
+                    if len(conv) > 1 and self._msg_field(conv[1], 'role') == USER:
                         keep_at_least = 2
 
             # Refine: avoid leaving dangling FUNCTION messages at the cut boundary
             start_idx = current_len - pop_count
             if refine_function_boundary and start_idx >= keep_at_least:
-                if getattr(conv[start_idx], 'role', '') == FUNCTION:
+                if self._msg_field(conv[start_idx], 'role') == FUNCTION:
                     pop_count += 1
 
             new_len = max(keep_at_least, current_len - pop_count)

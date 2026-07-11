@@ -24,7 +24,7 @@ def test_edit_file_modes():
             new_content="line 2 modified\n",
             match_mode="exact"
         )
-        assert "APPROVED" in res
+        assert "OK:" in res
         assert file_path.read_text(encoding='utf-8') == "line 1\nline 2 modified\nline 3\n"
         
         # Exact match with whitespace differences should fail
@@ -46,7 +46,7 @@ def test_edit_file_modes():
             new_content="line 2 heuristic ok",  # no trailing newline
             match_mode="heuristic"
         )
-        assert "APPROVED" in res
+        assert "OK:" in res
         # It should preserve the trailing newline since the matched block had one
         assert file_path.read_text(encoding='utf-8') == "line 1\nline 2 heuristic ok\nline 3\n"
         
@@ -60,7 +60,7 @@ def test_edit_file_modes():
             new_content="second modified", # no trailing newline
             match_mode="heuristic"
         )
-        assert "APPROVED" in res
+        assert "OK:" in res
         # Should preserve CRLF ending of the matched block on Windows / LF on Unix
         expected_bytes = b"first\r\nsecond modified\r\nthird\r\n" if os.name == 'nt' else b"first\nsecond modified\nthird\n"
         assert file_path.read_bytes() == expected_bytes
@@ -122,7 +122,7 @@ def test_large_file_performance():
         end_time = time.perf_counter()
         elapsed_ms = (end_time - start_time) * 1000
         
-        assert "APPROVED" in res
+        assert "OK:" in res
         assert elapsed_ms < 120.0, f"Performance test failed: elapsed time was {elapsed_ms:.2f}ms (expected < 120ms)"
         print(f"\nLarge file search on 50,000 lines took {elapsed_ms:.2f}ms")
 
@@ -152,7 +152,7 @@ def test_heuristic_indentation_alignment():
             new_content=new_content,
             match_mode="heuristic"
         )
-        assert "APPROVED" in res
+        assert "OK:" in res
         expected = (
             "class MyClass:\n"
             "    def my_func():\n"
@@ -176,7 +176,7 @@ def test_heuristic_indentation_alignment():
             new_content="x = 2",
             match_mode="heuristic"
         )
-        assert "APPROVED" in res
+        assert "OK:" in res
         assert file_path_single.read_text(encoding='utf-8') == "            x = 2\n"
 
         # Case 3: Tabs indentation conversion and adjustment
@@ -196,7 +196,7 @@ def test_heuristic_indentation_alignment():
             new_content="x = 2",
             match_mode="heuristic"
         )
-        assert "APPROVED" in res
+        assert "OK:" in res
         assert file_path_tabs.read_text(encoding='utf-8') == "class Foo:\n\tdef bar(self):\n\t\tx = 2\n"
 
 
@@ -216,7 +216,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="3:5", new_content="X\nY\n", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 1 failed: {res}"
+        assert "OK:" in res, f"Test 1 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         assert content == "line1\nline2\nX\nY\nline6\nline7\nline8\n", f"Test 1 assertion: got [{content}]"
 
@@ -226,7 +226,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="2:4", new_content="", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 2 failed: {res}"
+        assert "OK:" in res, f"Test 2 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         assert content == "a\ne\nf\n", f"Test 2 assertion: got [{content}]"
 
@@ -236,7 +236,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="3", new_content="inserted\n", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 3 failed: {res}"
+        assert "OK:" in res, f"Test 3 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         assert content == "l1\nl2\ninserted\nl3\nl4\nl5\n", f"Test 3 assertion: got [{content}]"
 
@@ -246,7 +246,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="0", new_content="footer\n", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 4 failed: {res}"
+        assert "OK:" in res, f"Test 4 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         assert content == "a\nb\nc\nd\ne\nfooter\n", f"Test 4 assertion: got [{content}]"
 
@@ -256,7 +256,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="1", new_content="header\n", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 5 failed: {res}"
+        assert "OK:" in res, f"Test 5 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         assert content == "header\nl1\nl2\nl3\nl4\nl5\n", f"Test 5 assertion: got [{content}]"
 
@@ -266,7 +266,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="-1", new_content="near_end\n", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 6 failed: {res}"
+        assert "OK:" in res, f"Test 6 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         # -1 means insert before last line (between 7 and 8)
         assert content == "l1\nl2\nl3\nl4\nl5\nl6\nl7\nnear_end\nl8\n", f"Test 6 assertion: got [{content}]"
@@ -277,7 +277,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="-3:-1", new_content="replaced\n", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 7 failed: {res}"
+        assert "OK:" in res, f"Test 7 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         # -3=line 8, -1=line 10 → delete lines 8-9 (exclusive of 10), insert at line 8
         assert content == "l1\nl2\nl3\nl4\nl5\nl6\nl7\nreplaced\nl10\n", f"Test 7 assertion: got [{content}]"
@@ -289,7 +289,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="1:10", new_content="", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 8 failed: {res}"
+        assert "OK:" in res, f"Test 8 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         assert content == "", f"Test 8 assertion: got [{content}]"
 
@@ -299,7 +299,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="5:20", new_content="end\n", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 9 failed: {res}"
+        assert "OK:" in res, f"Test 9 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         # Lines 1-4 preserved, lines 5-10 deleted, "end" inserted at pos 5
         assert content == "line1\nline2\nline3\nline4\nend\n", f"Test 9 assertion: got [{content}]"
@@ -310,7 +310,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="4:4", new_content="new_line\n", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 10 failed: {res}"
+        assert "OK:" in res, f"Test 10 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         assert content == "line1\nline2\nline3\nnew_line\nline5\nline6\nline7\nline8\n", f"Test 10 assertion: got [{content}]"
 
@@ -320,7 +320,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="3:3", new_content="mid", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 11 failed: {res}"
+        assert "OK:" in res, f"Test 11 failed: {res}"
         content = file_path.read_bytes()
         # Inserted line should get CRLF ending to match surrounding context
         assert b"l1\r\nl2\r\nmid\r\nl4\r\nl5\r\nl6\r\n" == content, f"Test 11 assertion: got [{content}]"
@@ -331,7 +331,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="5", new_content="x\ny\nz\n", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 12 failed: {res}"
+        assert "OK:" in res, f"Test 12 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         # Line 5 is past end → clamped to append at end
         assert content == "a\nb\nc\nd\nx\ny\nz\n", f"Test 12 assertion: got [{content}]"
@@ -350,7 +350,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content=":5", new_content="", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 13b failed: {res}"
+        assert "OK:" in res, f"Test 13b failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         # Delete lines 1-5 → only f\ng remain
         assert content == "f\ng\n", f"Test 13b assertion: got [{content}]"
@@ -361,7 +361,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="3:", new_content="", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 13c failed: {res}"
+        assert "OK:" in res, f"Test 13c failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         # Delete from line 3 onward → only a\nb remain
         assert content == "a\nb\n", f"Test 13c assertion: got [{content}]"
@@ -372,7 +372,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="-100", new_content="start\n", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 14 failed: {res}"
+        assert "OK:" in res, f"Test 14 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         # -100 clamped to beginning → insert at start
         assert content == "start\na\nb\nc\nd\ne\n", f"Test 14 assertion: got [{content}]"
@@ -383,7 +383,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="3:3", new_content="X\nY", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 15 failed: {res}"
+        assert "OK:" in res, f"Test 15 failed: {res}"
         content = file_path.read_bytes()
         # Both X and Y should get \r\n to match surrounding CRLF context
         assert b"l1\r\nl2\r\nX\r\nY\r\nl4\r\nl5\r\n" == content, f"Test 15 assertion: got [{content}]"
@@ -394,7 +394,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="1:4", new_content="", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 16 failed: {res}"
+        assert "OK:" in res, f"Test 16 failed: {res}"
         content = file_path.read_bytes()
         # Only "last\r\n" should remain — ending preserved from after[0]
         assert b"last\r\n" == content, f"Test 16 assertion: got [{content}]"
@@ -413,7 +413,7 @@ def test_delete_and_insert_mode():
             path="test_file.txt", agent_name="test_agent",
             old_content="0", new_content="appended\n", match_mode="delete_and_insert"
         )
-        assert "APPROVED" in res, f"Test 18 failed: {res}"
+        assert "OK:" in res, f"Test 18 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         assert content == "appended\n", f"Test 18 assertion: got [{content}]"
 
@@ -447,7 +447,7 @@ def test_re_indent_shift_mode():
             path="shift_test.py", agent_name="test_agent",
             lines="1:3", indent=2, indent_type="space", mode="shift"
         )
-        assert "APPROVED" in res, f"Test 1 failed: {res}"
+        assert "OK:" in res, f"Test 1 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         # Each line's ws stripped → prefix "  " prepended to bare content
         expected = (
@@ -469,7 +469,7 @@ def test_re_indent_shift_mode():
             path="shift_test.py", agent_name="test_agent",
             lines="1:3", indent=-4, indent_type="space", mode="shift"
         )
-        assert "APPROVED" in res, f"Test 2 failed: {res}"
+        assert "OK:" in res, f"Test 2 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         # Remove min(4, ws_count) leading chars from each line
         expected = (
@@ -490,7 +490,7 @@ def test_re_indent_shift_mode():
             path="shift_test.py", agent_name="test_agent",
             lines="1:2", indent=-5, indent_type="space", mode="shift"
         )
-        assert "APPROVED" in res, f"Test 3 failed: {res}"
+        assert "OK:" in res, f"Test 3 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         # All leading whitespace removed (min(5,2)=2 and min(5,4)=4)
         expected = (
@@ -510,7 +510,7 @@ def test_re_indent_shift_mode():
             path="shift_test.py", agent_name="test_agent",
             lines="1:2", indent=2, indent_type="space", mode="shift"
         )
-        assert "APPROVED" in res, f"Test 4 failed: {res}"
+        assert "OK:" in res, f"Test 4 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         # Positive shift strips ws then prepends → tabs replaced by spaces
         expected = (
@@ -531,7 +531,7 @@ def test_re_indent_shift_mode():
             path="shift_test.py", agent_name="test_agent",
             lines="1:3", indent=3, indent_type="space", mode="shift"
         )
-        assert "APPROVED" in res, f"Test 5 failed: {res}"
+        assert "OK:" in res, f"Test 5 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         expected = (
             "   def foo():\n"    # stripped + 3 spaces
@@ -551,7 +551,7 @@ def test_re_indent_shift_mode():
             path="shift_test.py", agent_name="test_agent",
             lines="1:2", indent=0, indent_type="space", mode="shift"
         )
-        assert "APPROVED" in res, f"Test 6 failed: {res}"
+        assert "OK:" in res, f"Test 6 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         expected = (
             "    def foo():\n"   # unchanged
@@ -570,7 +570,7 @@ def test_re_indent_shift_mode():
             path="shift_test.py", agent_name="test_agent",
             lines="1:2", indent=2, indent_type="tab", mode="shift"
         )
-        assert "APPROVED" in res, f"Test 7 failed: {res}"
+        assert "OK:" in res, f"Test 7 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
         expected = (
             "\t\tdef foo():\n"   # 2 tabs prepended + stripped content

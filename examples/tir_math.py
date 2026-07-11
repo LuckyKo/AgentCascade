@@ -21,7 +21,6 @@ import os
 from pprint import pprint
 
 from agent_cascade.agents import TIRMathAgent
-from agent_cascade.gui import WebUI
 
 ROOT_RESOURCE = os.path.join(os.path.dirname(__file__), 'resource')
 

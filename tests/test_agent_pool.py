@@ -194,9 +194,9 @@ class TestHaltLifecycle:
 
     def test_halt_and_resume(self, agent_pool):
         agent_pool.halt_instance("w1")
-        assert agent_pool.is_halted("w1") is True
+        assert agent_pool.is_instance_halted("w1") is True
         agent_pool.resume_instance("w1")
-        assert agent_pool.is_halted("w1") is False
+        assert agent_pool.is_instance_halted("w1") is False
 
     def test_halt_all_except_one(self, agent_pool):
         """halt_all_instances halts all instances except the one specified."""
@@ -219,9 +219,9 @@ class TestHaltLifecycle:
         # "c" is excluded — just needs to not be in self.instances
         agent_pool.active_stack_append("c", 0)
         agent_pool.halt_all_instances(except_instance="c")
-        assert agent_pool.is_halted("a") is True
-        assert agent_pool.is_halted("b") is True
-        assert agent_pool.is_halted("c") is False
+        assert agent_pool.is_instance_halted("a") is True
+        assert agent_pool.is_instance_halted("b") is True
+        assert agent_pool.is_instance_halted("c") is False
 
     def test_resume_all_only_compression_halted(self, agent_pool):
         """resume_all_instances should only clear compression-halted instances."""
@@ -246,8 +246,8 @@ class TestHaltLifecycle:
         agent_pool.halt_all_instances(except_instance="c_nonexistent")
         # Now resume all — only "b" should be resumed (was compression-halted)
         agent_pool.resume_all_instances()
-        assert agent_pool.is_halted("a") is True   # still halted (manual)
-        assert agent_pool.is_halted("b") is False  # resumed
+        assert agent_pool.is_instance_halted("a") is True   # still halted (manual)
+        assert agent_pool.is_instance_halted("b") is False  # resumed
 
     def test_state_lock_protection(self, agent_pool):
         """State mutations should be lock-guarded via _state_lock."""

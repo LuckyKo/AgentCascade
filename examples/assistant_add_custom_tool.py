@@ -21,7 +21,6 @@ import urllib.parse
 import json5
 
 from agent_cascade.agents import Assistant
-from agent_cascade.gui import WebUI
 from agent_cascade.tools.base import BaseTool, register_tool
 
 ROOT_RESOURCE = os.path.join(os.path.dirname(__file__), 'resource')

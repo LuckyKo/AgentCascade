@@ -18,7 +18,6 @@ import os
 from typing import Optional
 
 from agent_cascade.agents import Assistant, ReActChat, Router
-from agent_cascade.gui import WebUI
 
 ROOT_RESOURCE = os.path.join(os.path.dirname(__file__), 'resource')
 

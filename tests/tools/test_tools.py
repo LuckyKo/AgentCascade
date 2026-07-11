@@ -16,10 +16,10 @@ import json
 
 import pytest
 
-from agent_cascade.tools import AmapWeather, CodeInterpreter, ImageGen, Retrieval, Storage
+from agent_cascade.tools import AmapWeather, CodeInterpreter, ImageGen, Retrieval, WebSearch
 
 
-# [NOTE] 不带“市”会出错
+# [NOTE] 不带"市"会出错
 @pytest.mark.parametrize('params', [json.dumps({'location': '北京市'}), {'location': '杭州市'}])
 def test_amap_weather(params):
     tool = AmapWeather()
@@ -45,25 +45,6 @@ def test_retrieval():
     })
 
 
-@pytest.mark.parametrize('operate', ['put'])
-def test_storage_put(operate):
-    tool = Storage()
-    tool.call({'operate': operate, 'key': '345/456/11', 'value': 'hello'})
-
-    tool.call({'operate': operate, 'key': '/345/456/12', 'value': 'hello'})
-
-
-@pytest.mark.parametrize('operate', ['scan'])
-def test_storage_scan(operate):
-    tool = Storage()
-    tool.call({'operate': operate, 'key': '345/456/'})
-
-    tool.call({'operate': operate, 'key': '/345/456'})
-
-
-@pytest.mark.parametrize('operate', ['get', 'delete'])
-def test_storage_get_delete(operate):
-    tool = Storage()
-    tool.call({'operate': operate, 'key': '345/456/11'})
-
-    tool.call({'operate': operate, 'key': '/345/456/12'})
+def test_web_search():
+    tool = WebSearch()
+    tool.call({'query': 'AgentCascade'})

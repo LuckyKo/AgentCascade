@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from agent_cascade.agents import DialogueRetrievalAgent
-from agent_cascade.gui import WebUI
 
 
 def test():

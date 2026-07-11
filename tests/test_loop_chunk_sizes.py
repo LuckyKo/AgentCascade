@@ -23,7 +23,7 @@ _spec.loader.exec_module(_mod)
 InnerLoopDetector = _mod.InnerLoopDetector
 
 # Load all samples from the JSONL file
-SAMPLE_FILE = CASCADE_ROOT / "workspace" / "logs" / "loop_samples" / "samples_2026-07-07.jsonl"
+SAMPLE_FILE = Path(r"N:\work\WD\AgentWorkspace\logs\loop_samples\samples_2026-07-07.jsonl")
 
 samples = []
 with open(SAMPLE_FILE, "r", encoding="utf-8") as f:
@@ -84,4 +84,5 @@ if failures:
 else:
     print("\n✅ All samples clear — no false positives at any chunk size.")
 
-sys.exit(1 if failures else 0)
+# Don't sys.exit() during pytest collection — just assert instead
+assert not failures, f"{len(failures)} sample(s) triggered false positives"

@@ -15,7 +15,6 @@
 import os  # noqa
 
 from agent_cascade.agents import Assistant
-from agent_cascade.gui import WebUI
 from agent_cascade.utils.output_beautify import typewriter_print
 
 

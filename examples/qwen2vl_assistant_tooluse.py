@@ -25,7 +25,6 @@ import requests
 from PIL import Image
 
 from agent_cascade.agents import FnCallAgent
-from agent_cascade.gui import WebUI
 from agent_cascade.llm.schema import ContentItem
 from agent_cascade.tools.base import BaseToolWithFileAccess, register_tool
 

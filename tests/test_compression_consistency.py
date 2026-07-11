@@ -127,6 +127,22 @@ class MockAgentPool:
         active_start = latest_marker + 1 if latest_marker >= 0 else start_idx
         return active_start, history[active_start:], latest_marker
 
+    def get_compression_target_set_from_conversation(self, instance_name: str, conv):
+        """Same logic as AgentPool.get_compression_target_set_from_conversation.
+
+        Accepts a pre-fetched conversation snapshot instead of fetching from pool."""
+        if not conv:
+            return 0, [], -1
+        latest_marker = self.find_last_marker(conv)
+        if latest_marker >= 0:
+            active_start_idx = latest_marker + 1
+        else:
+            first_role = (conv[0].get('role') if isinstance(conv[0], dict)
+                          else getattr(conv[0], 'role', ''))
+            active_start_idx = 2 if first_role == SYSTEM else 1
+        active_set = conv[active_start_idx:]
+        return active_start_idx, active_set, latest_marker
+
     def get_agent(self, name: str):
         """Return a mock Compressor agent (needed by compress_context)."""
         if name == 'Compressor':

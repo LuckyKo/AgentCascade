@@ -16,7 +16,6 @@
 
 from agent_cascade.agents import Assistant, ReActChat
 from agent_cascade.agents.doc_qa import BasicDocQA
-from agent_cascade.gui import WebUI
 
 
 def init_agent_service():

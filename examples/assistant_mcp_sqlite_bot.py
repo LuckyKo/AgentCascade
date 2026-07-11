@@ -19,7 +19,6 @@ import asyncio
 from typing import Optional
 
 from agent_cascade.agents import Assistant
-from agent_cascade.gui import WebUI
 
 ROOT_RESOURCE = os.path.join(os.path.dirname(__file__), 'resource')
 

@@ -18,7 +18,6 @@ from typing import Dict, Iterator, List, Optional, Union
 
 from agent_cascade import Agent
 from agent_cascade.agents import Assistant
-from agent_cascade.gui import WebUI
 from agent_cascade.llm import BaseChatModel
 from agent_cascade.llm.schema import ContentItem, Message
 from agent_cascade.tools import BaseTool

@@ -15,7 +15,6 @@
 """A chess play game implemented by group chat"""
 
 from agent_cascade.agents import GroupChat
-from agent_cascade.gui import WebUI
 from agent_cascade.llm.schema import Message
 
 # Define a configuration file for a multi-agent:

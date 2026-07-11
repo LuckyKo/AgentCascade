@@ -17,7 +17,6 @@
 import os
 
 from agent_cascade.agents import VirtualMemoryAgent
-from agent_cascade.gui import WebUI
 
 ROOT_RESOURCE = os.path.join(os.path.dirname(__file__), 'resource')
 

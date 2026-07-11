@@ -17,9 +17,10 @@ import json
 
 import json5
 
+import gradio as gr
+
 from agent_cascade.agents import GroupChat, GroupChatCreator
 from agent_cascade.agents.user_agent import PENDING_USER_INPUT
-from agent_cascade.gui.gradio_dep import gr, mgr, ms
 from agent_cascade.llm.schema import ContentItem, Message
 
 
@@ -274,10 +275,10 @@ with gr.Blocks(theme='soft') as demo:
         'Current GroupChat: (If editing, please maintain this JSON format)',
         value=json.dumps(CFGS, indent=4, ensure_ascii=False),
         interactive=True)
-    with ms.Application():
+    with gr.Blocks():
         with gr.Tab('Chat', elem_id='chat-tab'):
             with gr.Column():
-                chatbot = mgr.Chatbot(elem_id='chatbot', height=750, show_copy_button=True, flushing=False)
+                chatbot = gr.Chatbot(elem_id='chatbot', height=750, )
                 with gr.Row():
                     with gr.Column(scale=3, min_width=0):
                         auto_speak_button = gr.Button('Randomly select an agent to speak first')
@@ -300,7 +301,7 @@ with gr.Blocks(theme='soft') as demo:
 
         with gr.Tab('Create', elem_id='chat-tab'):
             with gr.Column(scale=9, min_width=0):
-                chatbot = mgr.Chatbot(elem_id='chatbot0', height=750, show_copy_button=True, flushing=False)
+                chatbot = gr.Chatbot(elem_id='chatbot0', height=750, )
                 with gr.Row():
                     with gr.Column(scale=13):
                         chat_txt = gr.Textbox(
