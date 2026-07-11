@@ -758,6 +758,7 @@ function saveSettings() {
   // Loop detection tuning settings
   if ($('#setting-loop-min-chars')) s['loop-min-chars'] = $('#setting-loop-min-chars').value;
   if ($('#setting-loop-score-threshold')) s['loop-score-threshold'] = $('#setting-loop-score-threshold').value;
+  if ($('#setting-loop-max-retries')) s['loop-max-retries'] = $('#setting-loop-max-retries').value;
   if ($('#setting-loop-char-run')) s['loop-char-run-enabled'] = $('#setting-loop-char-run').checked;
   if ($('#setting-loop-sentence-rep')) s['loop-sentence-rep-enabled'] = $('#setting-loop-sentence-rep').checked;
   if ($('#setting-loop-ngram-rep')) s['loop-ngram-rep-enabled'] = $('#setting-loop-ngram-rep').checked;
@@ -853,6 +854,7 @@ function loadSettings() {
     // Loop detection tuning settings restore
     if (s['loop-min-chars'] !== undefined) $('#setting-loop-min-chars').value = s['loop-min-chars'];
     if (s['loop-score-threshold'] !== undefined) $('#setting-loop-score-threshold').value = s['loop-score-threshold'];
+    if (s['loop-max-retries'] !== undefined) $('#setting-loop-max-retries').value = s['loop-max-retries'];
     if (s['loop-char-run-enabled'] !== undefined) $('#setting-loop-char-run').checked = s['loop-char-run-enabled'];
     if (s['loop-sentence-rep-enabled'] !== undefined) $('#setting-loop-sentence-rep').checked = s['loop-sentence-rep-enabled'];
     if (s['loop-ngram-rep-enabled'] !== undefined) $('#setting-loop-ngram-rep').checked = s['loop-ngram-rep-enabled'];
@@ -4022,6 +4024,7 @@ function getGenerateCfg() {
   // Loop detection tuning settings
   if ($('#setting-loop-min-chars')) cfg.loop_min_chars = parseInt($('#setting-loop-min-chars').value) || 4000;
   if ($('#setting-loop-score-threshold')) cfg.loop_score_threshold = parseInt($('#setting-loop-score-threshold').value) || 200;
+  if ($('#setting-loop-max-retries')) cfg.loop_max_retries = parseInt($('#setting-loop-max-retries').value) || 2;
   if ($('#setting-loop-char-run')) cfg.loop_char_run_enabled = $('#setting-loop-char-run').checked;
   if ($('#setting-loop-sentence-rep')) cfg.loop_sentence_rep_enabled = $('#setting-loop-sentence-rep').checked;
   if ($('#setting-loop-ngram-rep')) cfg.loop_ngram_rep_enabled = $('#setting-loop-ngram-rep').checked;

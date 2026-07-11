@@ -607,6 +607,9 @@ class PoolSettings:
     loop_block_rep_enabled: bool = True       # Block repetition detection
     loop_entropy_enabled: bool = True         # Entropy collapse detection
 
+    # Loop retry limit (dedicated budget for inner-loop retries, separate from LLM_MAX_RETRIES)
+    loop_max_retries: int = 2                # Max retries after inner-loop detection before giving up
+
     # Code interpreter settings (Feature: CI session sharing)
     ci_execution_timeout: int = CI_EXECUTION_TIMEOUT      # Per-call code execution timeout (seconds)
     ci_watchdog_timeout: int = CI_WATCHDOG_TIMEOUT         # Kernel inactivity watchdog timeout (seconds)

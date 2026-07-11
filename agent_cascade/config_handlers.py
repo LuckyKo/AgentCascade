@@ -212,6 +212,13 @@ def _handle_loop_entropy(ui_cfg: dict, agent_pool: Optional[Any], agents: list) 
             ui_cfg.get('loop_entropy_enabled', True))
 
 
+@register_config_handler('loop_max_retries')
+def _handle_loop_max_retries(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update max retries after inner-loop detection (dedicated budget)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_max_retries = max(0, int(ui_cfg.get('loop_max_retries', 2)))
+
+
 @register_config_handler('ci_execution_timeout')
 def _handle_ci_execution_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update code interpreter execution timeout."""

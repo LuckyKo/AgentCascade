@@ -1763,6 +1763,7 @@ class ExecutionEngine:
         inst_name = instance.instance_name
         last_output = None
         retry_count = 0
+        loop_retry_count = 0       # Dedicated counter for inner-loop retries (gated by pool.settings.loop_max_retries)
         error_already_yielded = False
         
         # Estimate input tokens for telemetry (rough char-based estimate)
@@ -1860,7 +1861,9 @@ class ExecutionEngine:
                                 nonlocal last_output, retry_count
                                 last_output = None
                                 retry_count += 1
-
+                                
+                                _loop_max = getattr(self.pool.settings, 'loop_max_retries', 2)
+                                
                             if _delta_text:
                                 # Inner-loop detection (gated by pool settings toggle)
                                 if getattr(self.pool.settings, 'inner_loop_detect_enabled', False):
@@ -1874,8 +1877,15 @@ class ExecutionEngine:
                                         yield from _abort_stream(
                                             f"Detected generation loop: {_ev['reason']} (score={_ev['score']})"
                                         )
+                                        loop_retry_count += 1  # Only inner-loop retries consume this budget
                                         if _sample_path:
                                             logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
+                                        # Check dedicated loop retry budget before consuming LLM_MAX_RETRIES
+                                        if loop_retry_count >= _loop_max:
+                                            raise Exception(
+                                                f"inner_loop_exhausted: retried {_loop_max} times, "
+                                                f"giving up — last reason: {_ev['reason']}"
+                                            )
                                         raise Exception(f"inner_loop: {_ev['reason']}")
 
                             # Max-output-token guard: safety net — if LLM exceeds token budget it's likely looping
@@ -1897,9 +1907,10 @@ class ExecutionEngine:
                     except Exception as e:
                         logger.debug(f"[INNER_LOOP] Detection error for {inst_name}: {e}")
                         # Re-raise if this is an explicit inner-loop or max-tokens detection exception
-                        if str(e).startswith('inner_loop:') or str(e).startswith('max_tokens:'):
+                        err_str = str(e)
+                        if (err_str.startswith('inner_loop:') or err_str.startswith('max_tokens:')):
                             raise
-
+                    
                     # Telemetry: record Time To First Token (TTFT) on the first streaming chunk
                     if not _first_token_received and (tel := self._telemetry()) is not None:
                         try:
@@ -2057,7 +2068,9 @@ class ExecutionEngine:
                             pass
                     error_msg = str(e).split('\n')[0] if e else "Unknown error"
                     # Give clearer message for loop detection failures
-                    if 'inner_loop' in error_msg:
+                    if 'inner_loop_exhausted' in error_msg:
+                        display_msg = f"LLM generation loop detected (exceeded {_loop_max} loop retries)"
+                    elif 'inner_loop' in error_msg:
                         display_msg = f"LLM generation loop detected (tried {LLM_MAX_RETRIES} times)"
                     elif 'max_tokens' in error_msg:
                         display_msg = f"LLM exceeded token limit (tried {LLM_MAX_RETRIES} times)"
@@ -2078,8 +2091,16 @@ class ExecutionEngine:
                     # We know _abort_stream incremented if error message contains our markers.
                     if 'inner_loop' not in str(e) and 'max_tokens' not in str(e):
                         retry_count += 1
-                backoff = min(LLM_RETRY_BASE_DELAY * (2 ** (retry_count - 1)), LLM_RETRY_MAX_BACKOFF)
                 
+# Check dedicated loop retry budget — fail fast before consuming LLM_MAX_RETRIES
+                    _loop_max = getattr(self.pool.settings, 'loop_max_retries', 2)
+                    error_str = str(e)
+                    if ('inner_loop' in error_str) and loop_retry_count >= _loop_max:
+                        raise Exception(
+                            f"inner_loop_exhausted: retried {_loop_max} times, "
+                            f"giving up — last reason: {error_str.split(':')[-1].strip()}"
+                        )
+
                 # Classify error type
                 error_type = self._classify_llm_error(e)
                 
