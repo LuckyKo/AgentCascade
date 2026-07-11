@@ -5,7 +5,9 @@ import math
 import os
 import re
 
-from agent_cascade.settings import InnerLoopSettings, DEFAULT_WORKSPACE
+from agent_cascade.settings import (
+    InnerLoopSettings, TOKEN_ESTIMATE_CHAR_DIVISOR, DEFAULT_WORKSPACE,
+)
 
 # Precompiled regex patterns (avoid recompilation on every feed call).
 _SENTENCE_RE = re.compile(r'([^.?!]+[.?!]|[^.?!]+$)')
@@ -118,7 +120,8 @@ class InnerLoopDetector:
         """
         if self._chars_fed >= self.min_chars:
             return 1.0
-        return min(1.0, self._chars_fed / max(self.min_chars, 1))
+        # Guaranteed < 1.0 here (the >= case returns above)
+        return self._chars_fed / max(self.min_chars, 1)
 
     # ── Scoring helpers ─────────────────────────────────────────────────
 
@@ -219,12 +222,12 @@ class InnerLoopDetector:
             if norm:
                 toks = _WORD_RE.findall(norm)
                 self.tokens.extend(toks)
-                # Accumulate sentence counts (checked later, gated by min_chars).
+                # Accumulate sentence counts (checked below via activation factor).
                 self.sentences[norm] += 1
                 self._sentence_decay_counter += 1
 
-        # Apply periodic halving once per feed() call to avoid over-decay when
-        # a single chunk contains many sentences.
+        # Apply periodic halving: counter increments per-sentence (line 224),
+        # but the halving check fires at most once per feed() call.
         if self._sentence_decay_counter >= 50:
             self._sentence_decay_counter = 0
             for key in self.sentences:
@@ -235,7 +238,6 @@ class InnerLoopDetector:
 
         ##################################################
         # Character repetition (per-char scan — always runs to maintain state)
-        # Detection gated by min_chars so we don't fire on tiny text.
         ##################################################
 
         for ch in chunk:
@@ -254,7 +256,7 @@ class InnerLoopDetector:
                 }
 
         ##################################################
-        # All detection checks — gated by min_chars
+        # All detection checks — thresholds scale with activation factor.
         # Light checks (sentence) run every time once active.
         # Heavy checks (n-grams, blocks, entropy) also respect batch_interval.
         ##################################################
@@ -429,7 +431,7 @@ def save_loop_sample(text, reason, instance_name="", filepath=None):
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "instance_name": instance_name,
         "reason": reason,
-        "token_estimate": max(1, len(text) // 5),  # Consistent with project TOKEN_ESTIMATE_CHAR_DIVISOR (5.0)
+        "token_estimate": max(1, len(text) // int(TOKEN_ESTIMATE_CHAR_DIVISOR)),
         "text": text[:8000],  # Cap at ~2K tokens to keep files manageable
     }
 
