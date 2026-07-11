@@ -40,7 +40,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] session loading sometime merges the old session with the new (mostly on server restart). should properly clean old session on load, just like it does a new session then loads.
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent info once it reached conclusion, only happens on [YES]
 - [ ] telemetry `Output Tokens (est)` severely undercounts
-- [ ] read_logs needs line numbers same as read_file
+- [x] read_logs needs line numbers same as read_file — FIXED: added "{line_num}: {content}" prefix to each log entry output, matching read_file format in file_ops.py
 - [x] call_agent returns `[SYSTEM ERROR: Empty LLM response]` if the agent failed a inner loop check — FIXED: inner-loop and max-tokens detection exceptions were suppressed by inner except block, added re-raise for inner_loop: and max_tokens: prefixes so outer retry handler shows proper error messages (execution_engine.py)
 - [x] inner loop detector severely missfires — FIXED: analyzed 48 false positive samples across 5 days, added UI controls for min_chars, score_threshold, per-mode toggles (char_run, sentence_rep, ngram_rep, block_rep, entropy), and dedicated loop_max_retries budget in Loop Detection Tuning panel. Toggles gate detection signals in inner_loop_detect.py, applied via pool settings from WebUI in real time
 - [x] add turn info (x / y available) to system_info — FIXED: added _current_turn field to AgentInstance, tracked in execution_engine.py loop, displayed in system_info tool output as "Current Turn: X / Y", centralized DEFAULT_MAX_TURNS constant in settings.py, reset on instance reuse

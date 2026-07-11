@@ -259,12 +259,14 @@ class ReadLogs(BaseTool):
                 # Handle non-dict / non-string entries (arrays, numbers, etc.)
                 truncated_lines.append(_truncate_strings(item, max_chars))
 
-        # Serialize back to JSON string (one line per entry)
+        # Serialize back to JSON string (one line per entry) with line number prefixes.
+        # Format matches read_file style: "{line_num}: {content}"
         result = []
-        for item in truncated_lines:
+        for i, item in enumerate(truncated_lines):
             if isinstance(item, str):
-                result.append(item)
+                line_text = item
             else:
-                result.append(json.dumps(item, ensure_ascii=False))
+                line_text = json.dumps(item, ensure_ascii=False)
+            result.append(f"{i + 1}: {line_text}")
 
         return "\n".join(result)
