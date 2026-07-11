@@ -150,7 +150,7 @@ class InnerLoopSettings:
     block_size: int = 128                  # Token window size for block repetition
     entropy_window: int = 128             # Token window for Shannon entropy calculation
     char_run_limit: int = 70              # Max consecutive identical chars before alert
-    score_threshold: int = 200            # Cumulative score to trigger loop detection
+    score_threshold: int = 300            # Cumulative score to trigger loop detection (raised from 200 to reduce false positives — entropy gate + higher threshold prevents unbounded accumulation)
 
     # Detection thresholds (hardcoded in detection logic)
     sentence_repetition_threshold: int = 7   # Sentence count to flag repetition
@@ -160,6 +160,7 @@ class InnerLoopSettings:
 
     # Scoring
     score_decay_rate: float = 0.97         # Multiplicative decay per feed cycle
+    max_score: int = 500                   # Hard cap to prevent unbounded score growth (defensive safety net)
 
     # Per-mode toggles — disable individual detection modes via env vars
     char_run_enabled: bool = os.getenv('QWEN_AGENT_LOOP_CHAR_RUN', '1') != '0'

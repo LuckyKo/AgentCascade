@@ -67,6 +67,10 @@ class InnerLoopDetector:
         self._scored_ngrams = set()
         self._scored_blocks = set()
 
+        # One-time entropy gate: prevents +30 from firing every cycle while entropy stays low.
+        # Resets to False when entropy recovers above threshold, allowing re-scoring if it drops again.
+        self._entropy_scored = False
+
         self.last_char = None
         self.char_run = 0
 
@@ -89,6 +93,7 @@ class InnerLoopDetector:
         self._scored_sentences.clear()
         self._scored_ngrams.clear()
         self._scored_blocks.clear()
+        self._entropy_scored = False
         self._chars_fed = 0
         self._feed_count = 0
 
@@ -101,6 +106,8 @@ class InnerLoopDetector:
     def add_score(self, amount, reason):
         """Add to the loop score; return an event dict if threshold is crossed."""
         self.score += amount
+        # Hard cap prevents unbounded growth from scoring bugs or edge cases.
+        self.score = min(self.score, self._settings.max_score)
         if self.score >= self.threshold:
             return {
                 "loop": True,
@@ -281,9 +288,16 @@ class InnerLoopDetector:
                 entropy -= p * math.log2(p)
 
             if entropy < self._settings.entropy_threshold:
-                ev = self.add_score(30, f"low entropy ({entropy:.2f})")
-                if ev:
-                    return ev
+                # One-time gate: only score once per low-entropy period.
+                # Resets when entropy recovers, allowing re-scoring on new dips.
+                if not self._entropy_scored:
+                    self._entropy_scored = True
+                    ev = self.add_score(30, f"low entropy ({entropy:.2f})")
+                    if ev:
+                        return ev
+            else:
+                # Reset gate when entropy recovers — allows re-scoring next time it drops.
+                self._entropy_scored = False
 
         # Gradual score decay prevents transient spikes from sticking forever.
         self.decay()

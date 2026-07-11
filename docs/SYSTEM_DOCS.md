@@ -556,9 +556,9 @@ Monitors each streaming chunk as it arrives from the LLM and analyzes the text f
 | Sentence Repetition | Normalized sentence counter | +80 | Any sentence appears >=7 times |
 | N-gram Repetition | 64-token sliding window counter | +60 | Same n-gram repeats >=5 times |
 | Block Repetition | 128-token sliding window counter | +70 | Same block repeats >=4 times |
-| Entropy Collapse | Shannon entropy of token distribution | +30 | Entropy drops below 2.0 bits |
+| Entropy Collapse | Shannon entropy of token distribution | +30 (one-time) | Entropy drops below 2.0 bits, scores only once per low-entropy period; resets when entropy recovers |
 
-Signals accumulate toward a cumulative score threshold (default: 200 points). Score decays by 3% per feed cycle to prevent transient repetitions from triggering false positives.
+Signals accumulate toward a cumulative score threshold (default: 300 points). Score decays by 3% per feed cycle to prevent transient repetitions from triggering false positives. A hard cap of 500 prevents unbounded growth from edge cases.
 
 **How It Works:**
 
@@ -579,7 +579,7 @@ LLM Streaming Chunk Arrives
          │
          ▼
 ┌─────────────────────┐
-│ Score >= Threshold? │ ← Default: 200 points
+│ Score >= Threshold? │ ← Default: 300 points (cap: 500)
 └───────┬─────────────┘
         │ Yes
         ▼
