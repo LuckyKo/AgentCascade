@@ -873,12 +873,6 @@ class ExecutionEngine:
                     else:
                         logger.warning(f"[MSG_VALIDATION] Skipping non-Message in LLM response for {instance.instance_name}: type={type(msg).__name__}, value={str(msg)[:100]}")
 
-                # Cooperatively wait if paused — don't break execution flow, just wait
-                if self.pool.is_paused():
-                    self.pool.wait_if_paused(timeout=1.0)
-                    logger.debug(f"[UNPAUSE] {inst_name} resumed after pause")
-                    # Fall through to stop check and Phase 4 after unpause
-                
                 # Check generation change (old run superseded by newer one) alongside stop
                 if self._is_stopped(instance.instance_name):
                     logger.debug("halted/stopped/superseded - %s", instance.instance_name)
@@ -2479,7 +2473,7 @@ class ExecutionEngine:
                 continue
 
             # Cooperatively wait if paused — don't skip tool execution, just wait
-            if self.pool.is_paused():
+            while self.pool.is_paused():
                 self.pool.wait_if_paused(timeout=1.0)
             
             # Stop/halt check BEFORE tool execution (check before setting used_any_tool)
