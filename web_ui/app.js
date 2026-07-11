@@ -4023,7 +4023,7 @@ function getGenerateCfg() {
   if ($('#setting-inner-loop-detect')) cfg.inner_loop_detect_enabled = $('#setting-inner-loop-detect').checked;
   // Loop detection tuning settings
   if ($('#setting-loop-min-chars')) cfg.loop_min_chars = parseInt($('#setting-loop-min-chars').value) || 4000;
-  if ($('#setting-loop-score-threshold')) cfg.loop_score_threshold = parseInt($('#setting-loop-score-threshold').value) || 200;
+  if ($('#setting-loop-score-threshold')) cfg.loop_score_threshold = parseInt($('#setting-loop-score-threshold').value) || 300;
   if ($('#setting-loop-max-retries')) cfg.loop_max_retries = parseInt($('#setting-loop-max-retries').value) || 2;
   if ($('#setting-loop-char-run')) cfg.loop_char_run_enabled = $('#setting-loop-char-run').checked;
   if ($('#setting-loop-sentence-rep')) cfg.loop_sentence_rep_enabled = $('#setting-loop-sentence-rep').checked;

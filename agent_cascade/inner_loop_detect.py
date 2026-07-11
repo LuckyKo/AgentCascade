@@ -78,6 +78,15 @@ class InnerLoopDetector:
         self._chars_fed = 0
         self._feed_count = 0
 
+        # Sentence decay: tracks unique sentences added since last halving.
+        # When it reaches a threshold, all sentence counts are halved to prevent
+        # old entries from permanently dominating the counter.
+        self._sentence_decay_counter = 0
+
+        # Track token count at last heavy-check scan so we only slide windows
+        # over newly-added tokens, avoiding O(N²) rescanning of old n-grams/blocks.
+        self._last_scan_token_count = 0
+
     # ── State management ────────────────────────────────────────────────
 
     def reset(self):
@@ -96,6 +105,20 @@ class InnerLoopDetector:
         self._entropy_scored = False
         self._chars_fed = 0
         self._feed_count = 0
+        self._sentence_decay_counter = 0
+        self._last_scan_token_count = 0
+
+    def _activation_factor(self) -> float:
+        """Return 0.0-1.0 indicating how 'active' detection should be.
+
+        At 0 chars fed → 0.0 (detection dormant).
+        At min_chars   → 1.0 (full detection strength).
+        Linear ramp between the two extremes so that short loops can still
+        trigger early when enough repetition accumulates quickly.
+        """
+        if self._chars_fed >= self.min_chars:
+            return 1.0
+        return min(1.0, self._chars_fed / max(self.min_chars, 1))
 
     # ── Scoring helpers ─────────────────────────────────────────────────
 
@@ -118,11 +141,25 @@ class InnerLoopDetector:
 
     # ── Counter maintenance (prune oldest entries when over budget) ─────
 
-    def _trim_counter(self, counter: Counter, max_entries: int | None = None) -> None:
-        """Remove the least-representative keys when a Counter grows too large.
+    def _trim_counter(
+        self,
+        counter: Counter,
+        max_entries: int | None = None,
+        decay: bool = True,
+        scored_set: set | None = None,
+    ) -> None:
+        """Remove least frequent entries when a Counter exceeds capacity.
 
-        Keeps the top-N by count, then fills remaining slots from the rest.
+        Keeps only the top-N by count, optionally halving their values so that
+        old entries gradually fade rather than persisting at full strength.
         This is O(k log k) where k = len(counter), called only when over budget.
+
+        Args:
+            counter: The Counter to trim.
+            max_entries: Maximum entries to keep (defaults to settings).
+            decay: If True, halve all remaining counts during pruning.
+            scored_set: Optional set of already-scored items; cleared alongside
+                the counter when trimming occurs so items can be re-scored.
         """
         if max_entries is None:
             max_entries = self._settings.max_counter_entries
@@ -131,8 +168,16 @@ class InnerLoopDetector:
         # Sort by count descending; keep the most frequent entries first.
         sorted_items = sorted(counter.items(), key=lambda kv: kv[1], reverse=True)
         counter.clear()
-        # Build a dict from (key, value) pairs so Counter.update restores counts correctly.
-        counter.update(dict(sorted_items[:max_entries]))
+        if decay:
+            # Halve counts during pruning so old entries don't permanently dominate.
+            trimmed = {k: max(1, v // 2) for k, v in sorted_items[:max_entries]}
+            counter.update(trimmed)
+        else:
+            # Build a dict from (key, value) pairs so Counter.update restores counts correctly.
+            counter.update(dict(sorted_items[:max_entries]))
+        # Clear scored set so items can be re-scored after decay/trimming.
+        if scored_set is not None:
+            scored_set.clear()
 
     # ── Main feed method (API unchanged: returns None or loop-event dict) ─
 
@@ -176,6 +221,15 @@ class InnerLoopDetector:
                 self.tokens.extend(toks)
                 # Accumulate sentence counts (checked later, gated by min_chars).
                 self.sentences[norm] += 1
+                self._sentence_decay_counter += 1
+
+        # Apply periodic halving once per feed() call to avoid over-decay when
+        # a single chunk contains many sentences.
+        if self._sentence_decay_counter >= 50:
+            self._sentence_decay_counter = 0
+            for key in self.sentences:
+                self.sentences[key] = max(1, self.sentences[key] // 2)
+            self._scored_sentences.clear()
 
         self.text = self.text[last_end:]
 
@@ -205,68 +259,108 @@ class InnerLoopDetector:
         # Heavy checks (n-grams, blocks, entropy) also respect batch_interval.
         ##################################################
 
-        # Skip until enough text has accumulated to be meaningful.
-        if self._chars_fed < self.min_chars:
-            self.decay()
-            return None
+        # Compute gradual activation factor (0.0–1.0). At 0 chars fed, detection is
+        # dormant — but empty chunks are already filtered above, so factor > 0 here.
+        factor = self._activation_factor()
+
+        # Apply decay once per cycle before any scoring. All paths get exactly
+        # one decay — early returns from detection blocks don't need a second call.
+        self.decay()
 
         ##################################################
         # Sentence repetition — always runs after min_chars (cheap, no batching)
         ##################################################
 
         if self._settings.sentence_rep_enabled:
+            # Effective sentence threshold scales with activation factor —
+            # early on (low factor) detection is MORE sensitive to catch small loops.
+            _eff_sent_threshold = max(1, round(self._settings.sentence_repetition_threshold * factor))
             for norm, count in self.sentences.items():
-                if count >= self._settings.sentence_repetition_threshold and norm not in self._scored_sentences:
+                if count >= _eff_sent_threshold and norm not in self._scored_sentences:
                     self._scored_sentences.add(norm)
-                    ev = self.add_score(80, "repeated sentence")
+                    ev = self.add_score(100, "repeated sentence")
                     if ev:
                         return ev
 
         ##################################################
         # Heavy checks — also respect batch_interval to save CPU per chunk
+        # Effective interval scales DOWN with activation so heavy checks run
+        # more frequently when text is scarce (catching small loops early).
         ##################################################
 
-        if self._feed_count % self.batch_interval != 0:
-            self.decay()
+        _effective_interval = max(1, int(self.batch_interval * factor))
+        if self._feed_count % _effective_interval != 0:
+            # Decay already applied above at line ~271 — no double decay needed.
             return None
 
         ##################################################
-        # n-gram detection (tuple of strings as Counter key — no hashing needed)
-        # Deque supports direct iteration; tuple(deque)[-n:] avoids O(n) list copy.
+        # n-gram detection — true sliding window across all tokens
+        #
+        # Instead of only checking the last ngram_size tokens (which misses
+        # alternating loops like A B C | D E F | A B C | D E F), we slide a
+        # window of size ngram_size over every position in the token buffer.
+        # To avoid O(N²) rescanning, we only process windows that include at
+        # least one newly-added token since the last heavy-check scan.
         ##################################################
 
         if self._settings.ngram_rep_enabled and len(self.tokens) >= self.ngram_size:
-            ng = tuple(self.tokens)[-self.ngram_size:]  # O(k) where k=ngram_size, not O(N)
-            self.ngrams[ng] += 1
-            if self.ngrams[ng] >= self._settings.ngram_repetition_threshold and ng not in self._scored_ngrams:
-                self._scored_ngrams.add(ng)
-                ev = self.add_score(60, "repeated ngram")
-                if ev:
-                    return ev
+            tokens_list = list(self.tokens)  # snapshot for indexed slicing
+            total = len(tokens_list)
 
-        # Prune n-gram counter.
-        self._trim_counter(self.ngrams)
+            # When deque is full (len == maxlen), old tokens were evicted, so we must
+            # rescan the entire window to catch n-grams formed by new content.
+            if self._last_scan_token_count >= total:
+                start_idx = 0
+            else:
+                start_idx = max(0, self._last_scan_token_count - self.ngram_size + 1)
+
+            for end in range(start_idx + self.ngram_size - 1, total):
+                ng = tuple(tokens_list[end - self.ngram_size + 1:end + 1])
+                self.ngrams[ng] += 1
+                if (self.ngrams[ng] >= self._settings.ngram_repetition_threshold
+                        and ng not in self._scored_ngrams):
+                    self._scored_ngrams.add(ng)
+                    ev = self.add_score(90, "repeated ngram")
+                    if ev:
+                        return ev
+
+        # Prune n-gram counter, clearing scored set so items can be re-scored.
+        self._trim_counter(self.ngrams, scored_set=self._scored_ngrams)
 
         ##################################################
-        # Block repetition (tuple of strings as Counter key)
+        # Block repetition — true sliding window across all tokens
+        # Same incremental approach as n-grams but with the larger block_size.
         ##################################################
 
         if self._settings.block_rep_enabled and len(self.tokens) >= self.block_size:
-            block = tuple(self.tokens)[-self.block_size:]  # O(k) where k=block_size, not O(N)
-            self.blocks[block] += 1
-            if self.blocks[block] >= self._settings.block_repetition_threshold and block not in self._scored_blocks:
-                self._scored_blocks.add(block)
-                ev = self.add_score(70, "repeated block")
-                if ev:
-                    return ev
+            tokens_list = list(self.tokens)  # reuse same snapshot from above scope
+            total = len(tokens_list)
 
-        # Prune block counter.
-        self._trim_counter(self.blocks)
+            if self._last_scan_token_count >= total:
+                start_idx = 0
+            else:
+                start_idx = max(0, self._last_scan_token_count - self.block_size + 1)
+
+            for end in range(start_idx + self.block_size - 1, total):
+                blk = tuple(tokens_list[end - self.block_size + 1:end + 1])
+                self.blocks[blk] += 1
+                if (self.blocks[blk] >= self._settings.block_repetition_threshold
+                        and blk not in self._scored_blocks):
+                    self._scored_blocks.add(blk)
+                    ev = self.add_score(100, "repeated block")
+                    if ev:
+                        return ev
+
+        # Prune block counter, clearing scored set so items can be re-scored.
+        self._trim_counter(self.blocks, scored_set=self._scored_blocks)
+
+        # Advance scan pointer so next cycle only processes newly-added tokens.
+        self._last_scan_token_count = len(self.tokens)
 
         ##################################################
         # Sentence counter prune (done alongside heavy checks)
         ##################################################
-        self._trim_counter(self.sentences)
+        self._trim_counter(self.sentences, scored_set=self._scored_sentences)
 
         ##################################################
         # Entropy collapse
@@ -292,16 +386,14 @@ class InnerLoopDetector:
                 # Resets when entropy recovers, allowing re-scoring on new dips.
                 if not self._entropy_scored:
                     self._entropy_scored = True
-                    ev = self.add_score(30, f"low entropy ({entropy:.2f})")
+                    ev = self.add_score(50, f"low entropy ({entropy:.2f})")
                     if ev:
                         return ev
             else:
                 # Reset gate when entropy recovers — allows re-scoring next time it drops.
                 self._entropy_scored = False
 
-        # Gradual score decay prevents transient spikes from sticking forever.
-        self.decay()
-
+        # Decay already applied before scoring at line ~271 — no double decay needed.
         return None
 
 

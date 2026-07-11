@@ -598,7 +598,7 @@ class PoolSettings:
     # Inner-loop detection toggle (off by default until sensitivity is fixed)
     inner_loop_detect_enabled: bool = False   # Enable in-message loop detection during streaming
     loop_min_chars: int = 4000                # Min chars before activating heavy checks
-    loop_score_threshold: int = 200           # Cumulative score to trigger detection
+    loop_score_threshold: int = 300           # Cumulative score to trigger detection (aligned with InnerLoopSettings default)
 
     # Per-mode toggles for inner-loop detector (individual detection modes)
     loop_char_run_enabled: bool = True        # Character run detection

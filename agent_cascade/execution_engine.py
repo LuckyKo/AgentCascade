@@ -1796,7 +1796,7 @@ class ExecutionEngine:
                 _ps = self.pool.settings
                 _inner_settings = _InnerLoopSettings(
                     default_min_chars=getattr(_ps, 'loop_min_chars', 4000),
-                    score_threshold=getattr(_ps, 'loop_score_threshold', 200),
+                    score_threshold=getattr(_ps, 'loop_score_threshold', 300),
                     char_run_enabled=getattr(_ps, 'loop_char_run_enabled', True),
                     sentence_rep_enabled=getattr(_ps, 'loop_sentence_rep_enabled', True),
                     ngram_rep_enabled=getattr(_ps, 'loop_ngram_rep_enabled', True),
@@ -1825,6 +1825,37 @@ class ExecutionEngine:
 
                 gen = self._execute_llm_call(instance, template, llm_messages, active_functions)
                 _first_token_received = False  # Flag to ensure TTFT is recorded only once per call
+
+                # --- Interrupt helper (shared by inner-loop and max-token guards) ---
+                # Defined ONCE per retry attempt before the loop to avoid recreating on every iteration.
+                # Counter increments happen BEFORE yield so they update even if consumer drops the iterator.
+                def _abort_stream(reason_msg):
+                    with instance._compression_lock:
+                        instance._streaming_responses = []
+                    # Clean up async tasks (same as stop condition handler)
+                    if hasattr(self.pool, '_async_registry'):
+                        try:
+                            self.pool._async_registry.clear_pending(inst_name)
+                        except Exception:
+                            pass
+                    # Record telemetry end for aborted call
+                    if (tel := self._telemetry()) is not None:
+                        try:
+                            tel.record_llm_call_end(inst_name, output_tokens_est=0)
+                        except Exception:
+                            pass
+                    try:
+                        gen.close()
+                    except RuntimeError:
+                        pass  # Already closed/exhausted
+                    logger.debug(f"[STREAM_GUARD] {reason_msg} for {inst_name}. Retrying…")
+                    # Increment counters BEFORE yield — ensures update even if consumer drops iterator mid-yield
+                    nonlocal last_output, retry_count, loop_retry_count
+                    last_output = None
+                    retry_count += 1
+                    loop_retry_count += 1
+                    yield None  # Signal UI
+
                 for output in gen:
                     last_output = output
 
@@ -1848,32 +1879,6 @@ class ExecutionEngine:
                             _delta_text = _total_text[_prev_text_len:]
                             _prev_text_len = len(_total_text)
 
-                            # --- Interrupt helper (shared by inner-loop and max-token guards) ---
-                            def _abort_stream(reason_msg):
-                                with instance._compression_lock:
-                                    instance._streaming_responses = []
-                                # Clean up async tasks (same as stop condition handler)
-                                if hasattr(self.pool, '_async_registry'):
-                                    try:
-                                        self.pool._async_registry.clear_pending(inst_name)
-                                    except Exception:
-                                        pass
-                                # Record telemetry end for aborted call
-                                if (tel := self._telemetry()) is not None:
-                                    try:
-                                        tel.record_llm_call_end(inst_name, output_tokens_est=0)
-                                    except Exception:
-                                        pass
-                                try:
-                                    gen.close()
-                                except RuntimeError:
-                                    pass  # Already closed/exhausted
-                                yield None  # Signal UI
-                                logger.debug(f"[STREAM_GUARD] {reason_msg} for {inst_name}. Retrying…")
-                                nonlocal last_output, retry_count
-                                last_output = None
-                                retry_count += 1
-
                             if _delta_text:
                                 # Inner-loop detection (gated by pool settings toggle)
                                 if getattr(self.pool.settings, 'inner_loop_detect_enabled', False):
@@ -1887,7 +1892,6 @@ class ExecutionEngine:
                                         yield from _abort_stream(
                                             f"Detected generation loop: {_ev['reason']} (score={_ev['score']})"
                                         )
-                                        loop_retry_count += 1  # Only inner-loop retries consume this budget
                                         if _sample_path:
                                             logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
                                         # Check dedicated loop retry budget before consuming LLM_MAX_RETRIES

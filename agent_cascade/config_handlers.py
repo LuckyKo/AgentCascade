@@ -169,7 +169,7 @@ def _handle_loop_min_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list
 def _handle_loop_score_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update cumulative score threshold for loop detection."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.loop_score_threshold = max(50, int(ui_cfg.get('loop_score_threshold', 200)))
+        agent_pool.settings.loop_score_threshold = max(50, int(ui_cfg.get('loop_score_threshold', 300)))
 
 
 @register_config_handler('loop_char_run_enabled')
