@@ -1765,7 +1765,7 @@ class ExecutionEngine:
         retry_count = 0
         loop_retry_count = 0       # Dedicated counter for inner-loop retries (gated by pool.settings.loop_max_retries)
         error_already_yielded = False
-        _loop_max = getattr(self.pool.settings, 'loop_max_retries', 2)  # Max loop retries before failing fast
+        _loop_max = max(1, getattr(self.pool.settings, 'loop_max_retries', 2))  # At least 1 retry to avoid instant failure
         
         # Estimate input tokens for telemetry (rough char-based estimate)
         _input_tokens_est = sum(len(m.content or '') for m in llm_messages) // TOKEN_ESTIMATE_CHAR_DIVISOR
@@ -1821,7 +1821,6 @@ class ExecutionEngine:
                     if isinstance(_mt, int) and _mt > 0:
                         _max_output_tokens = _mt
 
-                _accumulated_chars = 0  # Running char count for token estimation
                 _token_guard_triggered = False  # Prevent double-trigger within same iteration
 
                 gen = self._execute_llm_call(instance, template, llm_messages, active_functions)
@@ -1853,6 +1852,18 @@ class ExecutionEngine:
                             def _abort_stream(reason_msg):
                                 with instance._compression_lock:
                                     instance._streaming_responses = []
+                                # Clean up async tasks (same as stop condition handler)
+                                if hasattr(self.pool, '_async_registry'):
+                                    try:
+                                        self.pool._async_registry.clear_pending(inst_name)
+                                    except Exception:
+                                        pass
+                                # Record telemetry end for aborted call
+                                if (tel := self._telemetry()) is not None:
+                                    try:
+                                        tel.record_llm_call_end(inst_name, output_tokens_est=0)
+                                    except Exception:
+                                        pass
                                 try:
                                     gen.close()
                                 except RuntimeError:
