@@ -23,6 +23,7 @@ DEFAULT_MAX_INPUT_TOKENS: int = int(os.getenv(
 
 # Settings for agents
 MAX_LLM_CALL_PER_RUN: int = int(os.getenv('QWEN_AGENT_MAX_LLM_CALL_PER_RUN', 250))
+DEFAULT_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_DEFAULT_MAX_TURNS', 50))  # Default turn limit per agent execution
 
 # Settings for tools
 DEFAULT_WORKSPACE: str = os.path.abspath(os.getenv('QWEN_AGENT_DEFAULT_WORKSPACE', 'workspace/'))

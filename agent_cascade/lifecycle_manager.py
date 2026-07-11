@@ -13,6 +13,7 @@ import time
 from typing import Tuple, Optional, TYPE_CHECKING
 
 from agent_cascade.agent_instance import AgentInstance, AgentState
+from agent_cascade.settings import DEFAULT_MAX_TURNS
 from agent_cascade.llm.schema import Message, SYSTEM, USER, IMAGE
 from agent_cascade.log import logger
 from agent_cascade.utils.utils import get_basename_from_url, msg_field
@@ -373,6 +374,7 @@ class AgentLifecycleManager:
                 instance.latest_marker_index = -1
                 instance._generate_cfg_override = None
                 instance.max_turns = None
+                instance._current_turn = 0
                 
                 # FIX #4: Clear is_terminated flag
                 instance.is_terminated = False
@@ -506,9 +508,7 @@ class AgentLifecycleManager:
             # Propagate max_turns from caller's instance directly.
             # Do NOT read from llm_cfg — it was stripped out of _generate_cfg_override
             # because 'max_turns' is in NON_LLM_KEYS and must not leak to the LLM API.
-            caller_max_turns = getattr(caller_inst, 'max_turns', None)
-            if not caller_max_turns:
-                caller_max_turns = 50  # DEFAULT_MAX_TURNS fallback
+            caller_max_turns = getattr(caller_inst, 'max_turns', None) or DEFAULT_MAX_TURNS
 
             # Use provided max_turns from call_agent args if specified, otherwise inherit from caller.
             # The caller's limit (UI turn limit) acts as the hard cap.

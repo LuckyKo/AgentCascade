@@ -233,6 +233,7 @@ class AgentInstance:
     # ── Remaining Fields with defaults ──────────────────────────────────
     is_terminated: bool = False          # Set when terminate_instance() is called on this instance (Fix Bug41)
     max_turns: Optional[int] = None      # Per-instance turn limit (None = use default 50)
+    _current_turn: int = field(default=0)  # Current turn number during execution (for system_info display)
     parent_instance: Optional[str] = None  # Who called this agent (None for root/main)
     compression_summary: Optional[str] = None  # Current cumulative summary (if any)
     _compression_lock: threading.RLock = field(default_factory=threading.RLock)  # RLock: recovery paths may re-acquire via instance_conversations.__setitem__
@@ -505,6 +506,7 @@ class AgentInstance:
             self._last_actual_token_count = 0
             self._last_force_compress_time = 0.0
             self._force_compress_count = 0
+            self._current_turn = 0
             self._pending_notifications = []
             self._tool_warnings = []
             self._cache_notifications = []

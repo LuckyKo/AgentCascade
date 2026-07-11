@@ -43,7 +43,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] read_logs needs line numbers same as read_file
 - [x] call_agent returns `[SYSTEM ERROR: Empty LLM response]` if the agent failed a inner loop check — FIXED: inner-loop and max-tokens detection exceptions were suppressed by inner except block, added re-raise for inner_loop: and max_tokens: prefixes so outer retry handler shows proper error messages (execution_engine.py)
 - [ ] inner loop detector severely missfires - check recorded samples; add control settings in UI (nr retries, min chars, toggle on/off for each detect mode)
-- [ ] add turn info (x / y available) to system_info
+- [x] add turn info (x / y available) to system_info — FIXED: added _current_turn field to AgentInstance, tracked in execution_engine.py loop, displayed in system_info tool output as "Current Turn: X / Y", centralized DEFAULT_MAX_TURNS constant in settings.py, reset on instance reuse
 - [x] we are sending custom sampling info when its disabled for the used API — FIXED: added _use_custom_sampling flag in api_router.py to_llm_cfg(), _build_merged_cfg() in execution_engine.py now strips stale sampling params from lower layers (template/UI) when endpoint has custom sampling disabled, SAMPLING_KEYS frozenset covers all 10 param variants, base.py agent_settings cleanup pops the internal flag
 
 # Errors to investigate:

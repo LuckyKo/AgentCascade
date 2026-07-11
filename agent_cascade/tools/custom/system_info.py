@@ -4,7 +4,7 @@ import platform
 import datetime
 import logging
 from typing import Dict, Any
-from agent_cascade.settings import DEFAULT_WORKSPACE
+from agent_cascade.settings import DEFAULT_WORKSPACE, DEFAULT_MAX_TURNS
 from agent_cascade.utils.utils import get_history_stats
 
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -100,6 +100,11 @@ class SystemInfo(BaseTool):
             
         if hasattr(self, 'agent_pool') and self.agent_pool:
             stats_str = f"Number of running sessions: {len(self.agent_pool.instance_conversations)}\n" + stats_str
+
+            # Turn info — show current turn / max turns from instance state
+            if inst is not None:
+                effective_max = getattr(inst, 'max_turns', None) or DEFAULT_MAX_TURNS
+                stats_str += f"\nCurrent Turn: {inst._current_turn} / {effective_max}"
         else:
             stats_str = "Agent Pool not connected.\n" + stats_str
 

@@ -24,6 +24,7 @@ from enum import Enum, auto
 from agent_cascade.agent_instance import ArgumentCachePool  # Cache pool for {USE_CACHED_ENTRY_N}
 from agent_cascade.settings import (
     COMPRESSION_DEFAULT_FRACTION,
+    DEFAULT_MAX_TURNS,
     LLM_MAX_RETRIES,
     LLM_RETRY_BASE_DELAY,
     LLM_RETRY_MAX_BACKOFF,
@@ -785,13 +786,16 @@ class ExecutionEngine:
                         pass
                 return  # Manual command handled or error
 
-            max_turns = instance.max_turns or 50
+            max_turns = instance.max_turns or DEFAULT_MAX_TURNS
             turns_available = max_turns
             inst_name = instance.instance_name
             turns_90pct = max(2, int(max_turns * 0.1))     # 90% threshold, min 2 to avoid collision with final turn
             turns_50pct = max(3, int(max_turns * 0.5))    # 50% mid-point warning, min 3 to avoid overlap with 90%/final
 
             while turns_available > 0:
+                # Track current turn on instance for system_info tool access
+                instance._current_turn = max_turns - turns_available + 1
+
                 # ── SLEEPING STATE GUARD ────────────────────────────────────
                 # Agents wake ONLY for async tool results, NOT user messages alone.
                 # User messages accumulate in queue and are drained alongside async results.
