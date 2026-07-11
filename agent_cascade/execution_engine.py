@@ -1765,6 +1765,7 @@ class ExecutionEngine:
         retry_count = 0
         loop_retry_count = 0       # Dedicated counter for inner-loop retries (gated by pool.settings.loop_max_retries)
         error_already_yielded = False
+        _loop_max = getattr(self.pool.settings, 'loop_max_retries', 2)  # Max loop retries before failing fast
         
         # Estimate input tokens for telemetry (rough char-based estimate)
         _input_tokens_est = sum(len(m.content or '') for m in llm_messages) // TOKEN_ESTIMATE_CHAR_DIVISOR
@@ -1861,9 +1862,7 @@ class ExecutionEngine:
                                 nonlocal last_output, retry_count
                                 last_output = None
                                 retry_count += 1
-                                
-                                _loop_max = getattr(self.pool.settings, 'loop_max_retries', 2)
-                                
+
                             if _delta_text:
                                 # Inner-loop detection (gated by pool settings toggle)
                                 if getattr(self.pool.settings, 'inner_loop_detect_enabled', False):
@@ -2093,7 +2092,6 @@ class ExecutionEngine:
                         retry_count += 1
                 
    # Check dedicated loop retry budget — fail fast before consuming LLM_MAX_RETRIES
-                    _loop_max = getattr(self.pool.settings, 'loop_max_retries', 2)
                     error_str = str(e)
                     if ('inner_loop' in error_str) and loop_retry_count >= _loop_max:
                         raise Exception(
