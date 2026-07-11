@@ -913,6 +913,69 @@ class AgentPool:
             # Restore dismissal callbacks
             self._on_dismissed_callbacks = _callbacks
 
+    def _dismiss_all_instances(self):
+        """Dismiss ALL instances from the pool, including root orchestrator(s).
+
+        Unlike clear_sub_agents() which preserves roots, this wipes everything clean.
+        Used internally by load_session_from_log() to prevent duplicate root tabs when
+        loading a non-orchestrator session (the loaded agent is created as a root too).
+
+        Mirrors the bulk dismissal pattern used in clear_sub_agents() and reset(),
+        dismissing every instance via dismiss_instance() followed by full state dict clearing.
+          1. Suppress dismissal callbacks (prevents premature broadcasts)
+          2. Dismiss every instance via dismiss_instance() (handles cascade + logger close)
+          3. Clear per-instance state dicts (instance_state, terminated_instances, children,
+             halted_instances, compression_halted, instance_conversations)
+          4. Increment _instances_version to signal the change
+          5. Restore dismissal callbacks
+
+        Does NOT reset async infrastructure or performance caches — those are left alone
+        so that the loaded session can reuse existing executors and idle checkers.
+        """
+        # Suppress callbacks during bulk cleanup (same pattern as clear_sub_agents)
+        _callbacks = self._on_dismissed_callbacks.copy()
+        self._on_dismissed_callbacks = []
+
+        try:
+            for name in list(self.instances.keys()):
+                inst = self.instances.get(name)
+                if inst is None:
+                    continue
+                # Double-dismiss guard: instance may have been cascade-dismissed by child
+                if name not in self.instances:
+                    continue
+                self.dismiss_instance(name)
+
+            # Clean up per-instance state dicts to prevent stale entries
+            self.instance_state.clear()
+            self.terminated_instances.clear()
+            self.children.clear()
+            self.instance_summaries.clear()
+            self._halted_instances.clear()
+            self._compression_halted.clear()
+            if hasattr(self, '_instance_conversations'):
+                self._instance_conversations.clear()
+
+            # Clear pending approvals to unblock threads waiting for user input.
+            # Mirrors the pattern in reset() / stop_session().
+            if self.operation_manager:
+                try:
+                    with self.operation_manager._lock:
+                        for approval in self.operation_manager.pending.values():
+                            if not approval.event.is_set():
+                                approval.approved = False
+                                approval.outcome_reason = "All instances dismissed"
+                                approval.event.set()
+                        self.operation_manager.pending.clear()
+                except Exception as e:
+                    logger.warning(
+                        f"clear_pending failed during _dismiss_all_instances (threads may hang): {e}"
+                    )
+
+            self._instances_version += 1
+        finally:
+            self._on_dismissed_callbacks = _callbacks
+
     def stop_session(self, release_slots: bool = True):
         """Minimal interrupt for "Stop" action — halts execution but preserves sessions.
         
@@ -1304,9 +1367,11 @@ class AgentPool:
             target_instance: Name for the instance (default: from metadata or 'RecoveredSession').
             clear_sub_agents_before_load: If True, dismiss stale sub-agents first.
         """
-        # --- 1. Clear sub-agents --------------------------------------------
+        # --- 1. Dismiss ALL instances (sub-agents + roots) -------------------
         if clear_sub_agents_before_load:
-            self.clear_sub_agents()
+            # _dismiss_all_instances handles everything: dismisses every instance
+            # via dismiss_instance(), then clears all per-instance state dicts.
+            self._dismiss_all_instances()
 
         log_input = log_input.strip()
         if not log_input:
