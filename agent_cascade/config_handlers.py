@@ -158,6 +158,60 @@ def _handle_inner_loop_detect(ui_cfg: dict, agent_pool: Optional[Any], agents: l
         agent_pool.settings.inner_loop_detect_enabled = bool(ui_cfg['inner_loop_detect_enabled'])
 
 
+@register_config_handler('loop_min_chars')
+def _handle_loop_min_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update minimum characters before activating heavy loop detection."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_min_chars = max(500, int(ui_cfg.get('loop_min_chars', 4000)))
+
+
+@register_config_handler('loop_score_threshold')
+def _handle_loop_score_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update cumulative score threshold for loop detection."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_score_threshold = max(50, int(ui_cfg.get('loop_score_threshold', 200)))
+
+
+@register_config_handler('loop_char_run_enabled')
+def _handle_loop_char_run(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle character run detection mode."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_char_run_enabled = bool(
+            ui_cfg.get('loop_char_run_enabled', True))
+
+
+@register_config_handler('loop_sentence_rep_enabled')
+def _handle_loop_sentence_rep(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle sentence repetition detection mode."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_sentence_rep_enabled = bool(
+            ui_cfg.get('loop_sentence_rep_enabled', True))
+
+
+@register_config_handler('loop_ngram_rep_enabled')
+def _handle_loop_ngram_rep(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle n-gram repetition detection mode."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_ngram_rep_enabled = bool(
+            ui_cfg.get('loop_ngram_rep_enabled', True))
+
+
+@register_config_handler('loop_block_rep_enabled')
+def _handle_loop_block_rep(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle block repetition detection mode."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_block_rep_enabled = bool(
+            ui_cfg.get('loop_block_rep_enabled', True))
+
+
+@register_config_handler('loop_entropy_enabled')
+def _handle_loop_entropy(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle entropy collapse detection mode."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_entropy_enabled = bool(
+            ui_cfg.get('loop_entropy_enabled', True))
+
+
 @register_config_handler('ci_execution_timeout')
 def _handle_ci_execution_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update code interpreter execution timeout."""

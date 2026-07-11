@@ -597,6 +597,15 @@ class PoolSettings:
     
     # Inner-loop detection toggle (off by default until sensitivity is fixed)
     inner_loop_detect_enabled: bool = False   # Enable in-message loop detection during streaming
+    loop_min_chars: int = 4000                # Min chars before activating heavy checks
+    loop_score_threshold: int = 200           # Cumulative score to trigger detection
+
+    # Per-mode toggles for inner-loop detector (individual detection modes)
+    loop_char_run_enabled: bool = True        # Character run detection
+    loop_sentence_rep_enabled: bool = True    # Sentence repetition detection
+    loop_ngram_rep_enabled: bool = True       # N-gram repetition detection
+    loop_block_rep_enabled: bool = True       # Block repetition detection
+    loop_entropy_enabled: bool = True         # Entropy collapse detection
 
     # Code interpreter settings (Feature: CI session sharing)
     ci_execution_timeout: int = CI_EXECUTION_TIMEOUT      # Per-call code execution timeout (seconds)

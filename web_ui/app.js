@@ -755,6 +755,15 @@ function saveSettings() {
   if (approvalTimeoutEnabled) s['approval-timeout-enabled'] = approvalTimeoutEnabled.checked;
   if (approvalTimeoutSeconds) s['approval-timeout-seconds'] = approvalTimeoutSeconds.value;
 
+  // Loop detection tuning settings
+  if ($('#setting-loop-min-chars')) s['loop-min-chars'] = $('#setting-loop-min-chars').value;
+  if ($('#setting-loop-score-threshold')) s['loop-score-threshold'] = $('#setting-loop-score-threshold').value;
+  if ($('#setting-loop-char-run')) s['loop-char-run-enabled'] = $('#setting-loop-char-run').checked;
+  if ($('#setting-loop-sentence-rep')) s['loop-sentence-rep-enabled'] = $('#setting-loop-sentence-rep').checked;
+  if ($('#setting-loop-ngram-rep')) s['loop-ngram-rep-enabled'] = $('#setting-loop-ngram-rep').checked;
+  if ($('#setting-loop-block-rep')) s['loop-block-rep-enabled'] = $('#setting-loop-block-rep').checked;
+  if ($('#setting-loop-entropy')) s['loop-entropy-enabled'] = $('#setting-loop-entropy').checked;
+
   // Cache pool settings
   if ($('#setting-cache-pool-enabled')) s['cache-pool-enabled'] = $('#setting-cache-pool-enabled').checked;
   if ($('#setting-cache-pool-size')) s['cache-pool-size'] = $('#setting-cache-pool-size').value;
@@ -841,6 +850,14 @@ function loadSettings() {
     if (s['max-turns'] !== undefined) $('#setting-max-turns').value = s['max-turns'];
     if (s['auto-continue'] !== undefined) $('#setting-auto-continue').checked = s['auto-continue'];
     if (s['inner-loop-detect'] !== undefined) $('#setting-inner-loop-detect').checked = s['inner-loop-detect'];
+    // Loop detection tuning settings restore
+    if (s['loop-min-chars'] !== undefined) $('#setting-loop-min-chars').value = s['loop-min-chars'];
+    if (s['loop-score-threshold'] !== undefined) $('#setting-loop-score-threshold').value = s['loop-score-threshold'];
+    if (s['loop-char-run-enabled'] !== undefined) $('#setting-loop-char-run').checked = s['loop-char-run-enabled'];
+    if (s['loop-sentence-rep-enabled'] !== undefined) $('#setting-loop-sentence-rep').checked = s['loop-sentence-rep-enabled'];
+    if (s['loop-ngram-rep-enabled'] !== undefined) $('#setting-loop-ngram-rep').checked = s['loop-ngram-rep-enabled'];
+    if (s['loop-block-rep-enabled'] !== undefined) $('#setting-loop-block-rep').checked = s['loop-block-rep-enabled'];
+    if (s['loop-entropy-enabled'] !== undefined) $('#setting-loop-entropy').checked = s['loop-entropy-enabled'];
     if (s['tool-result-max-chars'] !== undefined) {
       $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
       $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
@@ -4002,6 +4019,14 @@ function getGenerateCfg() {
   if ($('#setting-auto-continue')) cfg.auto_continue = $('#setting-auto-continue').checked;
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;
   if ($('#setting-inner-loop-detect')) cfg.inner_loop_detect_enabled = $('#setting-inner-loop-detect').checked;
+  // Loop detection tuning settings
+  if ($('#setting-loop-min-chars')) cfg.loop_min_chars = parseInt($('#setting-loop-min-chars').value) || 4000;
+  if ($('#setting-loop-score-threshold')) cfg.loop_score_threshold = parseInt($('#setting-loop-score-threshold').value) || 200;
+  if ($('#setting-loop-char-run')) cfg.loop_char_run_enabled = $('#setting-loop-char-run').checked;
+  if ($('#setting-loop-sentence-rep')) cfg.loop_sentence_rep_enabled = $('#setting-loop-sentence-rep').checked;
+  if ($('#setting-loop-ngram-rep')) cfg.loop_ngram_rep_enabled = $('#setting-loop-ngram-rep').checked;
+  if ($('#setting-loop-block-rep')) cfg.loop_block_rep_enabled = $('#setting-loop-block-rep').checked;
+  if ($('#setting-loop-entropy')) cfg.loop_entropy_enabled = $('#setting-loop-entropy').checked;
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
   if ($('#setting-max-rollbacks')) cfg.max_auto_rollbacks = parseInt($('#setting-max-rollbacks').value);
   if ($('#setting-idle-timeout')) cfg.idle_timeout_seconds = parseFloat($('#setting-idle-timeout').value);

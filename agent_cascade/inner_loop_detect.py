@@ -55,7 +55,7 @@ class InnerLoopDetector:
         self.score = 0
         self.threshold = score_threshold if score_threshold is not None else settings.score_threshold
 
-        # Cached reference to settings for thresholds used in detection logic.
+        # Cached reference to settings for thresholds and toggle flags used in detection logic.
         self._settings = settings
 
         self.ngrams = Counter()
@@ -184,7 +184,7 @@ class InnerLoopDetector:
                 self.last_char = ch
                 self.char_run = 1
 
-            if self.char_run > self.char_run_limit:
+            if self._settings.char_run_enabled and self.char_run > self.char_run_limit:
                 # Char runs are a strong signal — return immediately regardless of threshold.
                 return {
                     "loop": True,
@@ -207,12 +207,13 @@ class InnerLoopDetector:
         # Sentence repetition — always runs after min_chars (cheap, no batching)
         ##################################################
 
-        for norm, count in self.sentences.items():
-            if count >= self._settings.sentence_repetition_threshold and norm not in self._scored_sentences:
-                self._scored_sentences.add(norm)
-                ev = self.add_score(80, "repeated sentence")
-                if ev:
-                    return ev
+        if self._settings.sentence_rep_enabled:
+            for norm, count in self.sentences.items():
+                if count >= self._settings.sentence_repetition_threshold and norm not in self._scored_sentences:
+                    self._scored_sentences.add(norm)
+                    ev = self.add_score(80, "repeated sentence")
+                    if ev:
+                        return ev
 
         ##################################################
         # Heavy checks — also respect batch_interval to save CPU per chunk
@@ -227,7 +228,7 @@ class InnerLoopDetector:
         # Deque supports direct iteration; tuple(deque)[-n:] avoids O(n) list copy.
         ##################################################
 
-        if len(self.tokens) >= self.ngram_size:
+        if self._settings.ngram_rep_enabled and len(self.tokens) >= self.ngram_size:
             ng = tuple(self.tokens)[-self.ngram_size:]  # O(k) where k=ngram_size, not O(N)
             self.ngrams[ng] += 1
             if self.ngrams[ng] >= self._settings.ngram_repetition_threshold and ng not in self._scored_ngrams:
@@ -243,7 +244,7 @@ class InnerLoopDetector:
         # Block repetition (tuple of strings as Counter key)
         ##################################################
 
-        if len(self.tokens) >= self.block_size:
+        if self._settings.block_rep_enabled and len(self.tokens) >= self.block_size:
             block = tuple(self.tokens)[-self.block_size:]  # O(k) where k=block_size, not O(N)
             self.blocks[block] += 1
             if self.blocks[block] >= self._settings.block_repetition_threshold and block not in self._scored_blocks:
@@ -270,7 +271,7 @@ class InnerLoopDetector:
         # degenerate generation ("the the the" or repeating phrases).
         ##################################################
 
-        if len(self.tokens) >= self.entropy_window:
+        if self._settings.entropy_collapse_enabled and len(self.tokens) >= self.entropy_window:
             window = tuple(self.tokens)[-self.entropy_window:]  # O(k) not O(N)
             counts = Counter(window)
 

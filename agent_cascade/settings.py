@@ -161,6 +161,13 @@ class InnerLoopSettings:
     # Scoring
     score_decay_rate: float = 0.97         # Multiplicative decay per feed cycle
 
+    # Per-mode toggles — disable individual detection modes via env vars
+    char_run_enabled: bool = os.getenv('QWEN_AGENT_LOOP_CHAR_RUN', '1') != '0'
+    sentence_rep_enabled: bool = os.getenv('QWEN_AGENT_LOOP_SENTENCE_REP', '1') != '0'
+    ngram_rep_enabled: bool = os.getenv('QWEN_AGENT_LOOP_NGRAM_REP', '1') != '0'
+    block_rep_enabled: bool = os.getenv('QWEN_AGENT_LOOP_BLOCK_REP', '1') != '0'
+    entropy_collapse_enabled: bool = os.getenv('QWEN_AGENT_LOOP_ENTROPY', '1') != '0'
+
 # ── Code interpreter settings (Feature: CI session sharing) ────────────────
 CI_EXECUTION_TIMEOUT: int = int(os.getenv('M6_CODE_INTERPRETER_EXEC_TIMEOUT', '120'))   # Per-call execution timeout (seconds)
 CI_WATCHDOG_TIMEOUT: int = int(os.getenv('M6_CODE_INTERPRETER_WATCHDOG_TIMEOUT', '300'))  # Kernel inactivity watchdog timeout (seconds)

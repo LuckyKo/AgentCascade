@@ -60,6 +60,7 @@ from .tool_dispatcher import ToolDispatcher
 from .stream_publisher import StreamPublisher
 from .loop_detection import detect_loop as _canonical_detect_loop
 from .inner_loop_detect import InnerLoopDetector, save_loop_sample
+from .settings import InnerLoopSettings as _InnerLoopSettings
 from .operation_manager import set_current_instance_name, clear_current_instance_name
 
 # Sampling & limit parameters to strip when custom sampling is disabled for an endpoint.
@@ -1789,7 +1790,18 @@ class ExecutionEngine:
                 last_streaming_update_time = time.monotonic()
 
                 # Inner-loop detector: fresh instance per retry attempt to catch generation loops mid-stream
-                _inner_detector = InnerLoopDetector()
+                # Build settings from pool (UI-overridable) so per-mode toggles apply in real time
+                _ps = self.pool.settings
+                _inner_settings = _InnerLoopSettings(
+                    default_min_chars=getattr(_ps, 'loop_min_chars', 4000),
+                    score_threshold=getattr(_ps, 'loop_score_threshold', 200),
+                    char_run_enabled=getattr(_ps, 'loop_char_run_enabled', True),
+                    sentence_rep_enabled=getattr(_ps, 'loop_sentence_rep_enabled', True),
+                    ngram_rep_enabled=getattr(_ps, 'loop_ngram_rep_enabled', True),
+                    block_rep_enabled=getattr(_ps, 'loop_block_rep_enabled', True),
+                    entropy_collapse_enabled=getattr(_ps, 'loop_entropy_enabled', True),
+                )
+                _inner_detector = InnerLoopDetector(settings=_inner_settings)
                 _prev_text_len = 0  # Tracks accumulated text length for delta extraction (delta_stream=False)
 
                 # Max-output-token guard: safety net against LLMs exceeding their token budget

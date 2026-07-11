@@ -504,6 +504,39 @@
                       <span title="Detect LLM generation loops mid-stream (can cause false positives)">Inner Loop Detection</span>
                       <input type="checkbox" id="setting-inner-loop-detect" />
                     </label>
+                    <!-- Inner Loop Tuning Controls -->
+                    <div class="settings-section-body" style="margin: 4px 0 8px 12px; padding: 8px; border-left: 2px solid #555; background: rgba(255,255,255,0.03);">
+                      <div class="setting-field" style="font-size:11px; color:#aaa; margin-bottom:6px;">Loop Detection Tuning</div>
+                      <label class="setting-field">
+                        <span title="Minimum characters before heavy checks activate">Min Chars</span>
+                        <input type="number" id="setting-loop-min-chars" min="500" max="20000" step="500" value="4000" />
+                      </label>
+                      <label class="setting-field">
+                        <span title="Cumulative score to trigger loop detection">Score Threshold</span>
+                        <input type="number" id="setting-loop-score-threshold" min="50" max="500" step="10" value="200" />
+                      </label>
+                      <label class="setting-field toggle-field">
+                        <span title="Detect consecutive identical characters">Char Run</span>
+                        <input type="checkbox" id="setting-loop-char-run" checked />
+                      </label>
+                      <label class="setting-field toggle-field">
+                        <span title="Detect repeated sentences in output">Sentence Rep</span>
+                        <input type="checkbox" id="setting-loop-sentence-rep" checked />
+                      </label>
+                      <label class="setting-field toggle-field">
+                        <span title="Detect repeated n-gram token patterns">N-Gram Rep</span>
+                        <input type="checkbox" id="setting-loop-ngram-rep" checked />
+                      </label>
+                      <label class="setting-field toggle-field">
+                        <span title="Detect repeated block patterns in output">Block Rep</span>
+                        <input type="checkbox" id="setting-loop-block-rep" checked />
+                      </label>
+                      <label class="setting-field toggle-field">
+                        <span title="Detect low Shannon entropy (degenerate generation)">Entropy Collapse</span>
+                        <input type="checkbox" id="setting-loop-entropy" checked />
+                      </label>
+                    </div>
+                    <!-- End Loop Tuning -->
                     <label class="setting-field toggle-field">
                       <span>Log API POST Dump</span>
                       <input type="checkbox" id="setting-log-api-post" />
