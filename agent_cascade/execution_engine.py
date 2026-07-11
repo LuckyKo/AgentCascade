@@ -2092,7 +2092,7 @@ class ExecutionEngine:
                     if 'inner_loop' not in str(e) and 'max_tokens' not in str(e):
                         retry_count += 1
                 
-# Check dedicated loop retry budget — fail fast before consuming LLM_MAX_RETRIES
+   # Check dedicated loop retry budget — fail fast before consuming LLM_MAX_RETRIES
                     _loop_max = getattr(self.pool.settings, 'loop_max_retries', 2)
                     error_str = str(e)
                     if ('inner_loop' in error_str) and loop_retry_count >= _loop_max:
