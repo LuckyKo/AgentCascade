@@ -15,6 +15,7 @@ See DESIGN_REWRITE.md §5 for design rationale.
 
 from typing import Any, Dict, Iterator, List, Optional
 
+import sys
 import threading
 
 from agent_cascade.llm.schema import (
@@ -421,20 +422,18 @@ def run_agent_in_pool_with_recovery(
     """
     from agent_cascade.loop_detection import LoopDetectedError
 
-    retry_limit = 999_999 if max_auto_retries == -1 else max_auto_retries
+    retry_limit = sys.maxsize if max_auto_retries == -1 else max_auto_retries
 
     for attempt in range(retry_limit + 1):
         try:
             yield from run_agent_in_pool(pool, instance_name)
             return
         except LoopDetectedError as e:
-            # Resolve target agent name (use detected agent or fall back to instance_name)
             target = e.agent_name or instance_name
 
             if auto_rollback_enabled:
                 inst = pool.get_instance(target) or pool.get_instance(instance_name)
                 if inst is not None:
-                    # Inject hint message before retrying
                     hint = Message(
                         role=USER,
                         content=(
@@ -444,11 +443,10 @@ def run_agent_in_pool_with_recovery(
                     )
                     inst.append_message(hint)
 
-                # Perform surgical rollback on the detected agent
                 pool.surgical_rollback(target, e.pop_count)
 
-                # Check if target was evicted after rollback — yield error immediately
                 if attempt < retry_limit:
+                    # Re-check instance after rollback (it may have been evicted)
                     check = pool.get_instance(target) or pool.get_instance(instance_name)
                     if check is None:
                         last_msgs = [Message(role=USER, content=f"[SYSTEM]: Loop detected — rollback performed but loop recovery failed for {target}: {e.reason}")]

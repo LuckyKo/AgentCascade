@@ -295,8 +295,7 @@ class InnerLoopDetector:
 
         if self._settings.sentence_rep_enabled:
             # Effective sentence threshold scales with activation factor —
-            # higher at full activation (8) to require genuine repetition,
-            # floored at 7 early on to prevent false positives from chunked fragments.
+            # floor at 7 to prevent false positives from chunked fragments.
             _eff_sent_threshold = max(7, round(self._settings.sentence_repetition_threshold * factor))
             for norm, count in self.sentences.items():
                 if count >= _eff_sent_threshold and norm not in self._scored_sentences:

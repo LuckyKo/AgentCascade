@@ -415,7 +415,10 @@ def repair_invalid_json(text: str) -> str:
 
 
 def json_loads(text: str) -> Union[dict, str]:
+    import logging
     import json5
+
+    _logger = logging.getLogger(__name__)
     original_text = text.strip()
     
     # 0. Strip thinking blocks first to avoid them interfering with parsing
@@ -443,7 +446,7 @@ def json_loads(text: str) -> Union[dict, str]:
     try:
         return json5.loads(original_text)
     except Exception:
-        pass
+        _logger.debug("JSON parse attempt 1 failed (direct)")
 
     # 2. Try stripping markdown code blocks (handles cases where the whole response is wrapped)
     text = original_text
@@ -457,14 +460,14 @@ def json_loads(text: str) -> Union[dict, str]:
     try:
         return json5.loads(text)
     except Exception:
-        pass
+        _logger.debug("JSON parse attempt 2 failed (markdown strip)")
 
     # 3. Try repairing common mistakes (triple quotes, literal newlines)
     try:
         repaired = repair_invalid_json(original_text)
         return json5.loads(repaired)
     except Exception:
-        pass
+        _logger.debug("JSON parse attempt 3 failed (repair)")
 
     # 4. Try extracting just the JSON object between the first { and last }
     try:
@@ -479,14 +482,14 @@ def json_loads(text: str) -> Union[dict, str]:
             except Exception:
                 return json5.loads(repaired)
     except Exception:
-        pass
+        _logger.debug("Failed to parse JSON from extracted block")
 
     # 5. Try repairing the STRIPPED text as a last resort
     try:
         repaired = repair_invalid_json(text)
         return json5.loads(repaired)
     except Exception:
-        pass
+        _logger.debug("Failed to parse JSON after repair")
 
     # 6. Return stripped original text as string fallback (for non-JSON input)
     return text.strip()
