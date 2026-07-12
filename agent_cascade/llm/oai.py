@@ -474,31 +474,38 @@ class TextChatAtOAI(BaseFnCallModel):
                                 
                                 # Find existing tool call to append to (by ID or index)
                                 matched = None
+                                matched_idx = -1  # Track the index of the matched entry
                                 if tc_id:
                                     # New tool call with an ID — skip already-matched positions in this chunk
                                     for idx, existing in enumerate(full_tool_calls):
                                         if existing.extra.get('function_id') == tc_id and idx not in _chunk_matched:
                                             matched = existing
+                                            matched_idx = idx
                                             break
                                 elif tc_index is not None:
                                     # Continuation chunk — match by index, skip already-matched positions
                                     for idx, existing in enumerate(full_tool_calls):
                                         if existing.extra.get('tool_index') == tc_index and idx not in _chunk_matched:
                                             matched = existing
+                                            matched_idx = idx
                                             break
                                 elif full_tool_calls:
-                                    # No ID or index — append to last unmatched entry
+                                    # No ID or index — find last unmatched entry
                                     for idx in range(len(full_tool_calls) - 1, -1, -1):
                                         if idx not in _chunk_matched:
                                             matched = full_tool_calls[idx]
+                                            matched_idx = idx
                                             break
-                                    if matched is None:
+                                    # All entries already matched this chunk: only fall back to the
+                                    # last entry if the delta carries actual content (likely a continuation).
+                                    # Otherwise it's probably a new parallel tool call starting fresh.
+                                    if matched is None and (tc_name or tc_args):
                                         matched = full_tool_calls[-1]
+                                        matched_idx = len(full_tool_calls) - 1
                                 
                                 # Mark the matched position so next tool call in this chunk won't reuse it
                                 if matched is not None:
-                                    _idx = full_tool_calls.index(matched)
-                                    _chunk_matched.add(_idx)
+                                    _chunk_matched.add(matched_idx)
                                 
                                 if matched:
                                     if tc_name:
@@ -506,13 +513,17 @@ class TextChatAtOAI(BaseFnCallModel):
                                     if tc_args:
                                         matched.function_call.arguments = (matched.function_call.arguments or '') + tc_args
                                 else:
+                                    new_idx = len(full_tool_calls)
                                     full_tool_calls.append(
                                         Message(role=ASSISTANT,
                                                 content='',
                                                 function_call=FunctionCall(name=tc_name,
                                                                            arguments=tc_args),
-                                                extra={'function_id': tc_id or f'call_{len(full_tool_calls)}',
-                                                       'tool_index': tc_index if tc_index is not None else len(full_tool_calls)}))
+                                                extra={'function_id': tc_id or f'call_{new_idx}',
+                                                       'tool_index': tc_index if tc_index is not None else new_idx}))
+                                    # Mark the newly created entry so subsequent deltas in this chunk
+                                    # won't merge into it (parallel tool calls should stay separate)
+                                    _chunk_matched.add(new_idx)
 
                         res = []
                         finish_reason = getattr(chunk.choices[0], 'finish_reason', None)

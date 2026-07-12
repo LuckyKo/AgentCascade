@@ -406,20 +406,71 @@ def run_agent_in_pool_with_recovery(
 ) -> Iterator[List[Message]]:
     """Run an agent with automatic loop detection recovery.
 
-    Loop recovery is now handled inline inside engine.run().
-    This wrapper is kept for backward compatibility.
+    On loop detection the wrapper performs a surgical rollback of the detected
+    agent's conversation and injects a hint message before retrying. After
+    exhausting retries (or on non-loop errors), it yields an error message.
 
     Args:
         pool: The AgentPool managing all instances.
         instance_name: Name of the instance to execute.
-        max_auto_retries: Kept for backward compatibility (no longer used).
-        auto_rollback_enabled: Kept for backward compatibility (no longer used).
+        max_auto_retries: Max retry attempts (default 3). -1 for unlimited.
+        auto_rollback_enabled: If True, perform surgical rollback on loop detection.
 
     Yields:
         List[Message]: Current conversation state after each execution phase.
     """
-    # Execute through unified engine (loop recovery is now inline inside engine.run())
-    yield from run_agent_in_pool(pool, instance_name)
+    from agent_cascade.loop_detection import LoopDetectedError
+
+    retry_limit = 999_999 if max_auto_retries == -1 else max_auto_retries
+
+    for attempt in range(retry_limit + 1):
+        try:
+            yield from run_agent_in_pool(pool, instance_name)
+            return
+        except LoopDetectedError as e:
+            # Resolve target agent name (use detected agent or fall back to instance_name)
+            target = e.agent_name or instance_name
+
+            if auto_rollback_enabled:
+                inst = pool.get_instance(target) or pool.get_instance(instance_name)
+                if inst is not None:
+                    # Inject hint message before retrying
+                    hint = Message(
+                        role=USER,
+                        content=(
+                            f"[SYSTEM]: You appear to be stuck in a loop ({e.reason}). "
+                            f"Try a different approach."
+                        ),
+                    )
+                    inst.append_message(hint)
+
+                # Perform surgical rollback on the detected agent
+                pool.surgical_rollback(target, e.pop_count)
+
+                # Check if target was evicted after rollback — yield error immediately
+                if attempt < retry_limit:
+                    check = pool.get_instance(target) or pool.get_instance(instance_name)
+                    if check is None:
+                        last_msgs = [Message(role=USER, content=f"[SYSTEM]: Loop detected — rollback performed but loop recovery failed for {target}: {e.reason}")]
+                        yield last_msgs
+                        return
+
+            if attempt < retry_limit:
+                continue
+
+            # Exhausted retries — yield error message (single list of Messages)
+            last_msgs = [Message(role=USER, content=f"[SYSTEM]: Loop detected — rollback performed but loop recovery failed for {target}: {e.reason}")]
+            yield last_msgs
+            return
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:
+            # Non-loop error — yield message and stop (single list of Messages)
+            yield [Message(role=USER, content=f"[SYSTEM ERROR]: Rollback performed but loop recovery failed ({e})")]
+            return
+
+    # Fallback: should not reach here but guard against infinite loops
+    yield [Message(role=USER, content="[SYSTEM]: Loop recovery exhausted")]
 
 
 # ═══════════════════════════════════════════════════════════════════════

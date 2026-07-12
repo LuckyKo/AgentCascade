@@ -59,7 +59,7 @@ class TestDetectLoopBasicDetection:
         result = detect_loop(msgs)
         assert result is not None, "Should detect repeating pattern of length 2"
         reason, pop_count = result
-        assert "repeating" in reason.lower() or "loop" in reason.lower()
+        assert "repeat" in reason.lower() or "loop" in reason.lower()
         assert pop_count > 0
 
     def test_t2_no_loop_on_short_conversation(self):

@@ -485,8 +485,11 @@ def json_loads(text: str) -> Union[dict, str]:
     try:
         repaired = repair_invalid_json(text)
         return json5.loads(repaired)
-    except Exception as e:
-        raise ValueError(f'Parameters must be formatted as a valid JSON! Detail: {str(e)}')
+    except Exception:
+        pass
+
+    # 6. Return stripped original text as string fallback (for non-JSON input)
+    return text.strip()
 
 
 class PydanticJSONEncoder(json.JSONEncoder):

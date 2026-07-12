@@ -14,10 +14,12 @@ _SENTENCE_RE = re.compile(r'([^.?!]+[.?!]|[^.?!]+$)')
 _NON_WORD_RE = re.compile(r'\W+')
 _WORD_RE = re.compile(r'\b\w+\b')
 # Common file extensions whose dots should not trigger sentence splits.
+# Word boundary \b at the end prevents matching mid-word (e.g., ". H" in "Hello world. HELLO...").
+# Single-letter extensions 'c' and 'h' removed — too short, they overlap with common words.
 _FILE_EXT_RE = re.compile(
     r'\.\s*(py|js|ts|jsx|tsx|mjs|cjs|css|scss|less|html|htm|json|yaml|yml|'
-    r'toml|xml|md|rst|txt|csv|tsv|rb|go|rs|java|kt|kts|c|cpp|h|hpp|cc|cxx|'
-    r'sh|bash|zsh|ps1|r|R|ipynb|pdf|png|jpg|jpeg|gif|svg|webp|php|swift|scala)',
+    r'toml|xml|md|rst|txt|csv|tsv|rb|go|rs|java|kt|kts|cpp|hpp|cc|cxx|'
+    r'sh|bash|zsh|ps1|r|R|ipynb|pdf|png|jpg|jpeg|gif|svg|webp|php|swift|scala)\b',
     re.IGNORECASE,
 )
 
@@ -237,13 +239,20 @@ class InnerLoopDetector:
                 self.sentences[norm] += 1
                 self._sentence_decay_counter += 1
 
-        # Apply periodic halving: counter increments per-sentence (line 224),
+        # Apply periodic halving: counter increments per-sentence (line 240),
         # but the halving check fires at most once per feed() call.
-        if self._sentence_decay_counter >= 50:
+        if self._sentence_decay_counter >= 30:
             self._sentence_decay_counter = 0
-            for key in self.sentences:
-                self.sentences[key] = max(1, self.sentences[key] // 2)
-            self._scored_sentences.clear()
+            # Efficient in-place halving via Counter.update (avoids for-loop overhead)
+            self.sentences.update({k: max(1, v // 2) for k, v in self.sentences.items()})
+            # Clear scored set only for sentences that dropped below threshold.
+            thresh = self._settings.sentence_repetition_threshold
+            to_remove = {s for s in self._scored_sentences if self.sentences[s] < thresh}
+            self._scored_sentences -= to_remove
+
+        # Prune sentence counter early to prevent fragment accumulation (cheap check).
+        if len(self.sentences) > self._settings.max_counter_entries:
+            self._trim_counter(self.sentences, scored_set=self._scored_sentences)
 
         self.text = self.text[last_end:]
 
@@ -286,9 +295,9 @@ class InnerLoopDetector:
 
         if self._settings.sentence_rep_enabled:
             # Effective sentence threshold scales with activation factor —
-            # higher at full activation (7) to require genuine repetition,
-            # floored at 5 early on to prevent false positives from unique sentences.
-            _eff_sent_threshold = max(5, round(self._settings.sentence_repetition_threshold * factor))
+            # higher at full activation (8) to require genuine repetition,
+            # floored at 7 early on to prevent false positives from chunked fragments.
+            _eff_sent_threshold = max(7, round(self._settings.sentence_repetition_threshold * factor))
             for norm, count in self.sentences.items():
                 if count >= _eff_sent_threshold and norm not in self._scored_sentences:
                     self._scored_sentences.add(norm)
@@ -317,8 +326,14 @@ class InnerLoopDetector:
         # least one newly-added token since the last heavy-check scan.
         ##################################################
 
+        # Compute tokens_list once per cycle — reused by both n-gram and block checks.
+        # Avoids creating two separate list copies of the deque on every feed call.
+        if self._settings.ngram_rep_enabled or self._settings.block_rep_enabled:
+            tokens_list = list(self.tokens)
+        else:
+            tokens_list = None
+
         if self._settings.ngram_rep_enabled and len(self.tokens) >= self.ngram_size:
-            tokens_list = list(self.tokens)  # snapshot for indexed slicing
             total = len(tokens_list)
 
             # When deque is full (len == maxlen), old tokens were evicted, so we must
@@ -328,18 +343,23 @@ class InnerLoopDetector:
             else:
                 start_idx = max(0, self._last_scan_token_count - self.ngram_size + 1)
 
+            # Build n-grams using tuple slicing (fast for small windows).
+            ng_threshold = self._settings.ngram_repetition_threshold
+            ng_counter = self.ngrams
+            scored_ng = self._scored_ngrams
             for end in range(start_idx + self.ngram_size - 1, total):
                 ng = tuple(tokens_list[end - self.ngram_size + 1:end + 1])
-                self.ngrams[ng] += 1
-                if (self.ngrams[ng] >= self._settings.ngram_repetition_threshold
-                        and ng not in self._scored_ngrams):
-                    self._scored_ngrams.add(ng)
+                new_count = ng_counter[ng] + 1
+                ng_counter[ng] = new_count
+                if new_count >= ng_threshold and ng not in scored_ng:
+                    scored_ng.add(ng)
                     ev = self.add_score(90, "repeated ngram")
                     if ev:
                         return ev
 
         # Prune n-gram counter, clearing scored set so items can be re-scored.
-        self._trim_counter(self.ngrams, scored_set=self._scored_ngrams)
+        if len(self.ngrams) > self._settings.max_counter_entries:
+            self._trim_counter(self.ngrams, scored_set=self._scored_ngrams)
 
         ##################################################
         # Block repetition — true sliding window across all tokens
@@ -347,7 +367,7 @@ class InnerLoopDetector:
         ##################################################
 
         if self._settings.block_rep_enabled and len(self.tokens) >= self.block_size:
-            tokens_list = list(self.tokens)  # reuse same snapshot from above scope
+            # Reuse the shared tokens_list computed above (single deque→list conversion per cycle)
             total = len(tokens_list)
 
             if self._last_scan_token_count >= total:
@@ -355,26 +375,27 @@ class InnerLoopDetector:
             else:
                 start_idx = max(0, self._last_scan_token_count - self.block_size + 1)
 
+            blk_threshold = self._settings.block_repetition_threshold
+            blk_counter = self.blocks
+            scored_blk = self._scored_blocks
             for end in range(start_idx + self.block_size - 1, total):
                 blk = tuple(tokens_list[end - self.block_size + 1:end + 1])
-                self.blocks[blk] += 1
-                if (self.blocks[blk] >= self._settings.block_repetition_threshold
-                        and blk not in self._scored_blocks):
-                    self._scored_blocks.add(blk)
+                new_count = blk_counter[blk] + 1
+                blk_counter[blk] = new_count
+                if new_count >= blk_threshold and blk not in scored_blk:
+                    scored_blk.add(blk)
                     ev = self.add_score(100, "repeated block")
                     if ev:
                         return ev
 
         # Prune block counter, clearing scored set so items can be re-scored.
-        self._trim_counter(self.blocks, scored_set=self._scored_blocks)
+        if len(self.blocks) > self._settings.max_counter_entries:
+            self._trim_counter(self.blocks, scored_set=self._scored_blocks)
 
         # Advance scan pointer so next cycle only processes newly-added tokens.
         self._last_scan_token_count = len(self.tokens)
 
-        ##################################################
-        # Sentence counter prune (done alongside heavy checks)
-        ##################################################
-        self._trim_counter(self.sentences, scored_set=self._scored_sentences)
+        
 
         ##################################################
         # Entropy collapse

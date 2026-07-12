@@ -16,6 +16,7 @@ class _DummyLLM(BaseChatModel):
     def __init__(self, cfg: dict | None = None):
         self.cfg = cfg or {}
         self.generate_cfg: dict = {}
+        self._preprocess_cache: dict = {}  # required by BaseChatModel.chat()
         self.cache = None  # skip cache lookup
         self.use_raw_api = False
 
