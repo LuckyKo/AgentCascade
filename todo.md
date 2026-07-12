@@ -116,3 +116,26 @@ agent_cascade.llm.base.ModelServiceError: Error code: 400 - {'message': 'user in
 2026-07-13 00:53:40,698 - oai.py - 391 - INFO - LLM infrastructure changed. Re-detecting context for: http://localhost:1234/v1
 2026-07-13 00:53:42,762 - oai.py - 333 - DEBUG - Missing context metadata in list. Trying specific endpoint: http://localhost:1234/v1/models/agents-a1-35b-mtp
 2026-07-13 00:53:44,799 - oai.py - 354 - INFO - Model agents-a1-35b-mtp found, but could not detect context length via API.
+
+# Web_extract error
+
+2026-07-13 01:34:39,985 - base.py - 990 - INFO - Agent [Researcher] - ALL tokens: 11745, Available tokens: 124134
+2026-07-13 01:34:43,966 - simple_doc_parser.py - 450 - INFO - Start parsing https://dl.acm.org/doi/10.1016/j.cosrev.2026.100902...
+2026-07-13 01:34:43,989 - utils.py - 274 - INFO - Downloading https://dl.acm.org/doi/10.1016/j.cosrev.2026.100902 to n:\work\WD\AgentWorkspace\tools\simple_doc_parser\b941e841623e0e8c8ff8e9d12d620d8f79636b86082b8642cebaca02070bb5ae\j.cosrev.2026.100902...
+2026-07-13 01:34:44,011 - agent.py - 260 - WARNING - An error occurred when calling tool `web_extractor`:
+ValueError: Can not download this file. Please check your network or the file link.
+Traceback:
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\agent.py", line 248, in _call_tool
+    tool_result = tool.call(tool_args, **kwargs)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\tools\web_extractor.py", line 44, in call
+    parsed_web = self.simple_doc_parser.call({'url': url})
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\tools\simple_doc_parser.py", line 466, in call
+    path = save_url_to_local_work_dir(path, tmp_file_root)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\utils\utils.py", line 289, in save_url_to_local_work_dir
+    raise ValueError('Can not download this file. Please check your network or the file link.')
+
+2026-07-13 01:34:44,027 - simple_doc_parser.py - 450 - INFO - Start parsing https://www.deloitte.com/us/en/insights/industry/technology/technology-media-and-telecom-predictions/2026/ai-agent-orchestration.html...
+2

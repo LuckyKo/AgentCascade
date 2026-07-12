@@ -13,6 +13,7 @@ import time
 from typing import Tuple, Optional, TYPE_CHECKING
 
 from agent_cascade.agent_instance import AgentInstance, AgentState
+from agent_cascade.constants import NON_LLM_KEYS
 from agent_cascade.settings import DEFAULT_MAX_TURNS
 from agent_cascade.llm.schema import Message, SYSTEM, USER, IMAGE
 from agent_cascade.log import logger
@@ -549,9 +550,19 @@ class AgentLifecycleManager:
             # FIX #1 (reviewer): Use pool's public _state_lock property instead of accessing _execution directly
             with self.pool._state_lock:
                 # Propagate max_input_tokens from caller's config (context window limit) — store on instance, NOT template
-                if propagated_max:
+                if propagated_max is not None or llm_cfg:
                     cfg = (target_template.llm.generate_cfg or {}).copy()
-                    cfg['max_input_tokens'] = propagated_max
+
+                    if propagated_max is not None:
+                        cfg['max_input_tokens'] = propagated_max
+
+                    # Merge UI-level settings from caller's config that should propagate to children.
+                    # Keys in NON_LLM_KEYS are excluded so each agent uses its own model config.
+                    if llm_cfg:
+                        for k, v in llm_cfg.items():
+                            if k not in NON_LLM_KEYS and v is not None:
+                                cfg[k] = v
+
                     instance._generate_cfg_override = cfg
 
                 # Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
