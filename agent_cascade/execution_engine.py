@@ -1767,7 +1767,7 @@ class ExecutionEngine:
         loop_retry_count = 0       # Dedicated counter for inner-loop retries (gated by pool.settings.loop_max_retries)
         error_already_yielded = False
         _loop_max = max(1, getattr(self.pool.settings, 'loop_max_retries', 2))  # At least 1 retry to avoid instant failure
-        
+
         # Estimate input tokens for telemetry (rough char-based estimate)
         _input_tokens_est = sum(len(m.content or '') for m in llm_messages) // TOKEN_ESTIMATE_CHAR_DIVISOR
 
@@ -1777,7 +1777,7 @@ class ExecutionEngine:
         if self._has_images(llm_messages):
             llm_messages = self._ensure_image_captions(llm_messages)
 
-        while retry_count <= LLM_MAX_RETRIES:
+        while retry_count <= _loop_max:
             try:
                 # Telemetry: record LLM call start (non-blocking)
                 if (tel := self._telemetry()) is not None:
@@ -1895,7 +1895,7 @@ class ExecutionEngine:
                                         )
                                         if _sample_path:
                                             logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
-                                        # Check dedicated loop retry budget before consuming LLM_MAX_RETRIES
+                                        # Check dedicated loop retry budget (gated by _loop_max from UI setting)
                                         if loop_retry_count >= _loop_max:
                                             raise Exception(
                                                 f"inner_loop_exhausted: retried {_loop_max} times, "
@@ -2074,7 +2074,7 @@ class ExecutionEngine:
                 with instance._compression_lock:
                     instance._streaming_responses = []
                 
-                if retry_count > LLM_MAX_RETRIES:
+                if retry_count > _loop_max:
                     # Telemetry: record LLM call end for exhausted retries (non-blocking)
                     if (tel := self._telemetry()) is not None:
                         try:
@@ -2086,12 +2086,12 @@ class ExecutionEngine:
                     if 'inner_loop_exhausted' in error_msg:
                         display_msg = f"LLM generation loop detected (exceeded {_loop_max} loop retries)"
                     elif 'inner_loop' in error_msg:
-                        display_msg = f"LLM generation loop detected (tried {LLM_MAX_RETRIES} times)"
+                        display_msg = f"LLM generation loop detected (tried {_loop_max} times)"
                     elif 'max_tokens' in error_msg:
-                        display_msg = f"LLM exceeded token limit (tried {LLM_MAX_RETRIES} times)"
+                        display_msg = f"LLM exceeded token limit (tried {_loop_max} times)"
                     else:
-                        display_msg = f"LLM call failed after {LLM_MAX_RETRIES} retries — {error_msg}"
-                    logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {LLM_MAX_RETRIES} retries: {e}")
+                        display_msg = f"LLM call failed after {_loop_max} retries — {error_msg}"
+                    logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {_loop_max} retries: {e}")
                     yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {display_msg}]")
                     error_already_yielded = True
                     break
@@ -2107,7 +2107,7 @@ class ExecutionEngine:
                     if 'inner_loop' not in str(e) and 'max_tokens' not in str(e):
                         retry_count += 1
                     
-                    # Check dedicated loop retry budget — fail fast before consuming LLM_MAX_RETRIES
+                    # Check dedicated loop retry budget — fail fast if exhausted (_loop_max from UI setting)
                     error_str = str(e)
                     if ('inner_loop' in error_str) and loop_retry_count >= _loop_max:
                         raise Exception(
@@ -2145,12 +2145,12 @@ class ExecutionEngine:
                 backoff = min(raw_backoff + jitter, LLM_RETRY_MAX_BACKOFF)
                 
                 logger.warning(
-                    f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{LLM_MAX_RETRIES}. "
+                    f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{_loop_max}. "
                     f"Retrying in {backoff:.1f}s with new endpoint... Error: {e}"
                 )
                 
                 # Signal retry to UI before blocking on sleep
-                yield self._make_retrying_message(instance, retry_count, LLM_MAX_RETRIES, backoff)
+                yield self._make_retrying_message(instance, retry_count, _loop_max, backoff)
                 time.sleep(backoff)
                 yield None
         
