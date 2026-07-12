@@ -463,6 +463,8 @@ class TextChatAtOAI(BaseFnCallModel):
                         if hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
                             full_response += chunk.choices[0].delta.content
                         if hasattr(chunk.choices[0].delta, 'tool_calls') and chunk.choices[0].delta.tool_calls:
+                            # Track which positions were matched in this chunk to handle parallel tool calls sharing same index
+                            _chunk_matched = set()
                             for tc in chunk.choices[0].delta.tool_calls:
                                 tc_index = getattr(tc, 'index', None)
                                 tc_id = getattr(tc, 'id', None)
@@ -473,20 +475,30 @@ class TextChatAtOAI(BaseFnCallModel):
                                 # Find existing tool call to append to (by ID or index)
                                 matched = None
                                 if tc_id:
-                                    # New tool call with an ID
-                                    for existing in full_tool_calls:
-                                        if existing.extra.get('function_id') == tc_id:
+                                    # New tool call with an ID — skip already-matched positions in this chunk
+                                    for idx, existing in enumerate(full_tool_calls):
+                                        if existing.extra.get('function_id') == tc_id and idx not in _chunk_matched:
                                             matched = existing
                                             break
                                 elif tc_index is not None:
-                                    # Continuation chunk — match by index
-                                    for existing in full_tool_calls:
-                                        if existing.extra.get('tool_index') == tc_index:
+                                    # Continuation chunk — match by index, skip already-matched positions
+                                    for idx, existing in enumerate(full_tool_calls):
+                                        if existing.extra.get('tool_index') == tc_index and idx not in _chunk_matched:
                                             matched = existing
                                             break
                                 elif full_tool_calls:
-                                    # No ID or index — append to last
-                                    matched = full_tool_calls[-1]
+                                    # No ID or index — append to last unmatched entry
+                                    for idx in range(len(full_tool_calls) - 1, -1, -1):
+                                        if idx not in _chunk_matched:
+                                            matched = full_tool_calls[idx]
+                                            break
+                                    if matched is None:
+                                        matched = full_tool_calls[-1]
+                                
+                                # Mark the matched position so next tool call in this chunk won't reuse it
+                                if matched is not None:
+                                    _idx = full_tool_calls.index(matched)
+                                    _chunk_matched.add(_idx)
                                 
                                 if matched:
                                     if tc_name:
