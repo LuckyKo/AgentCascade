@@ -17,6 +17,7 @@ import copy
 import json
 import os
 import re
+import random
 import time
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 from enum import Enum, auto
@@ -2137,6 +2138,11 @@ class ExecutionEngine:
                     yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {error_msg}]")
                     error_already_yielded = True
                     break
+                
+                # Calculate exponential backoff delay with jitter (applied before cap)
+                raw_backoff = LLM_RETRY_BASE_DELAY * (2 ** (retry_count - 1))
+                jitter = random.uniform(0, 0.1 * raw_backoff)
+                backoff = min(raw_backoff + jitter, LLM_RETRY_MAX_BACKOFF)
                 
                 logger.warning(
                     f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{LLM_MAX_RETRIES}. "

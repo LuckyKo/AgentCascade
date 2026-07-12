@@ -13,6 +13,13 @@ from agent_cascade.settings import (
 _SENTENCE_RE = re.compile(r'([^.?!]+[.?!]|[^.?!]+$)')
 _NON_WORD_RE = re.compile(r'\W+')
 _WORD_RE = re.compile(r'\b\w+\b')
+# Common file extensions whose dots should not trigger sentence splits.
+_FILE_EXT_RE = re.compile(
+    r'\.\s*(py|js|ts|jsx|tsx|mjs|cjs|css|scss|less|html|htm|json|yaml|yml|'
+    r'toml|xml|md|rst|txt|csv|tsv|rb|go|rs|java|kt|kts|c|cpp|h|hpp|cc|cxx|'
+    r'sh|bash|zsh|ps1|r|R|ipynb|pdf|png|jpg|jpeg|gif|svg|webp|php|swift|scala)',
+    re.IGNORECASE,
+)
 
 
 class InnerLoopDetector:
@@ -206,13 +213,17 @@ class InnerLoopDetector:
         self._chars_fed += len(chunk)
         self._feed_count += 1
 
+        # Normalize file extension dots before sentence splitting to avoid
+        # "execution_engine.py" being split into separate fragments.
+        normalized_text = _FILE_EXT_RE.sub('', self.text)
+
         # Split accumulated text into sentence chunks in one pass.
         # Track the last match end position; if no sentences are found,
         # the entire buffer is preserved (handles code, poetry, etc.).
         # The regex also captures trailing text without terminal punctuation
         # so that sentences ending mid-stream are still tokenized.
         last_end = 0
-        for sent_match in _SENTENCE_RE.finditer(self.text):
+        for sent_match in _SENTENCE_RE.finditer(normalized_text):
             sent = sent_match.group(1)
             last_end = sent_match.end()
 
@@ -275,8 +286,9 @@ class InnerLoopDetector:
 
         if self._settings.sentence_rep_enabled:
             # Effective sentence threshold scales with activation factor —
-            # early on (low factor) detection is MORE sensitive to catch small loops.
-            _eff_sent_threshold = max(1, round(self._settings.sentence_repetition_threshold * factor))
+            # higher at full activation (7) to require genuine repetition,
+            # floored at 5 early on to prevent false positives from unique sentences.
+            _eff_sent_threshold = max(5, round(self._settings.sentence_repetition_threshold * factor))
             for norm, count in self.sentences.items():
                 if count >= _eff_sent_threshold and norm not in self._scored_sentences:
                     self._scored_sentences.add(norm)
@@ -292,7 +304,7 @@ class InnerLoopDetector:
 
         _effective_interval = max(1, int(self.batch_interval * factor))
         if self._feed_count % _effective_interval != 0:
-            # Decay already applied above at line ~271 — no double decay needed.
+            # Decay already applied above at line ~280 — no double decay needed.
             return None
 
         ##################################################
