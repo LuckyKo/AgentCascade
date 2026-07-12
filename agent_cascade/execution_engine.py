@@ -798,6 +798,9 @@ class ExecutionEngine:
                 # Track current turn on instance for system_info tool access
                 instance._current_turn = max_turns - turns_available + 1
 
+                # Flag to track if we disabled tools this iteration (for safe cleanup)
+                final_turn_tools_disabled = False
+
                 # ── SLEEPING STATE GUARD ────────────────────────────────────
                 # Agents wake ONLY for async tool results, NOT user messages alone.
                 # User messages accumulate in queue and are drained alongside async results.
@@ -852,6 +855,16 @@ class ExecutionEngine:
                     self._append_and_log(instance, final_msg)
                     llm_messages.append(final_msg)
 
+                    # Disable ALL tools on the last turn so agent is forced to return a final answer
+                    template = self.pool.get_template(instance.agent_class)
+                    if template and hasattr(template, 'function_map'):
+                        all_tools = list(template.function_map.keys())
+                        if all_tools:
+                            if not hasattr(instance, '_generate_cfg_override') or instance._generate_cfg_override is None:
+                                instance._generate_cfg_override = {}
+                            instance._generate_cfg_override['disabled_tools'] = all_tools
+                            final_turn_tools_disabled = True
+
                 turns_available -= 1
 
                 # ── Phase 3: LLM Call with Injection Points ────────────────
@@ -892,6 +905,11 @@ class ExecutionEngine:
                     time.sleep(0.1)
                     yield response
                     break  # ── Fix TODO #41: Break immediately instead of continuing loop ──
+
+                # Clean up last-turn tool disabling only if we set it this iteration
+                if final_turn_tools_disabled:
+                    if hasattr(instance, '_generate_cfg_override') and isinstance(instance._generate_cfg_override, dict):
+                        instance._generate_cfg_override.pop('disabled_tools', None)
 
                 # logger.debug(f"[LLM_DONE] {inst_name} got {len(turn_output)} messages from LLM")
                 # ── Phase 4: Response Processing and Tool Execution ─────────
