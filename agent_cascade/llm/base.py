@@ -605,8 +605,12 @@ class BaseChatModel(ABC):
             if msg['role'] == ASSISTANT:
                 if not new_messages or new_messages[-1]['role'] != ASSISTANT:
                     new_messages.append({'role': ASSISTANT})
-                if msg.get('content'):
-                    new_messages[-1]['content'] = msg['content']
+                content = msg.get('content')
+                if content:
+                    new_messages[-1]['content'] = content
+                elif 'content' not in new_messages[-1]:
+                    # Ensure assistant messages always have a 'content' field (Grok/OpenAI require it)
+                    new_messages[-1]['content'] = ''
                 if msg.get('reasoning_content'):
                     new_messages[-1]['reasoning_content'] = msg['reasoning_content']
                 if msg.get('function_call'):
@@ -642,6 +646,11 @@ class BaseChatModel(ABC):
                     'content': content or '',
                 })
             else:
+                # System/user messages — ensure they always have a 'content' field
+                if isinstance(msg, dict):
+                    msg = dict(msg)  # shallow copy to avoid mutating input
+                    if 'content' not in msg:
+                        msg['content'] = ''
                 new_messages.append(msg)
         return new_messages
 
