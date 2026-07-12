@@ -1639,6 +1639,11 @@ def _apply_ui_config(
     if 'auto_continue' in ui_cfg and hasattr(pool, 'settings'):
         pool.settings.auto_continue = bool(ui_cfg['auto_continue'])
 
+    # Apply enable_agent_budgeting to pool settings (extracted from NON_LLM_KEYS, applied separately)
+    # This makes the setting available to lifecycle_manager.py for max_turns propagation logic
+    if 'enable_agent_budgeting' in ui_cfg and hasattr(pool, 'settings'):
+        pool.settings.enable_agent_budgeting = bool(ui_cfg['enable_agent_budgeting'])
+
     # Update agent_pool.llm_cfg under thread-safe lock
     # (pool is passed as a parameter to this function — no need to look it up)
     if hasattr(pool, 'llm_cfg'):

@@ -4017,6 +4017,7 @@ function getGenerateCfg() {
   if ($('#setting-max-context')) cfg.max_input_tokens = parseInt($('#setting-max-context').value) || 32768;
 
   if ($('#setting-max-turns')) cfg.max_turns = parseInt($('#setting-max-turns').value) || 50;
+  if ($('#setting-agent-budgeting')) cfg.enable_agent_budgeting = $('#setting-agent-budgeting').checked;
   if ($('#setting-max-parallel')) cfg.max_parallel_agents = parseInt($('#setting-max-parallel').value) || 3;
   if ($('#setting-auto-continue')) cfg.auto_continue = $('#setting-auto-continue').checked;
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;

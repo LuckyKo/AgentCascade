@@ -63,6 +63,7 @@ NON_LLM_KEYS: tuple[str, ...] = (
     'auto_rollback_on_loop',
     'auto_continue',
     'max_turns',
+    'enable_agent_budgeting',
     'max_parallel_agents',
     'max_input_tokens',  # Execution control (input truncation threshold) — not an LLM API parameter
     

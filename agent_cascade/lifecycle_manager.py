@@ -511,9 +511,13 @@ class AgentLifecycleManager:
             # because 'max_turns' is in NON_LLM_KEYS and must not leak to the LLM API.
             caller_max_turns = getattr(caller_inst, 'max_turns', None) or DEFAULT_MAX_TURNS
 
+            # If agent budgeting is enabled, allow per-agent max_turns overrides via call_agent args.
+            # Otherwise, all agents use the caller's max_turns limit regardless of call_agent args.
+            enable_agent_budgeting = getattr(self.pool.settings, 'enable_agent_budgeting', True) if hasattr(self.pool, 'settings') else True
+
             # Use provided max_turns from call_agent args if specified, otherwise inherit from caller.
             # The caller's limit (UI turn limit) acts as the hard cap.
-            if call_agent_args and 'max_turns' in call_agent_args:
+            if call_agent_args and 'max_turns' in call_agent_args and enable_agent_budgeting:
                 requested_max = call_agent_args['max_turns']
                 # Validate: must be a positive integer
                 if not isinstance(requested_max, int) or requested_max < 1:
