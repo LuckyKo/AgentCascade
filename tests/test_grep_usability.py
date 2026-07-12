@@ -2,7 +2,9 @@
 import os, sys, tempfile, re
 from pathlib import Path
 
-sys.path.insert(0, r"N:\work\WD\AgentCascade")
+# Resolve project root relative to this test file (tests/ → project_root)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 def test_compile_grep_pattern_flags():
     """Test that _compile_grep_pattern accepts flags parameter."""

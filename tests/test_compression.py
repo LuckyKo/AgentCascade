@@ -23,129 +23,13 @@ from agent_cascade.compression.helpers import (
 )
 from agent_cascade.compression.core import compress_context
 
+# Shared mock pool from conftest — no need to redefine locally
+from tests.conftest import MockAgentPool
 
-# ──────────────────────────────────────────────
-# Test Fixtures — Lightweight Mock Pool
-# ──────────────────────────────────────────────
 
 def _make_msg(role, content):
     """Create a Message object for testing."""
     return Message(role=role, content=content)
-
-
-class MockInstance:
-    """Mock AgentInstance for testing Phase 3 changes."""
-    
-    class _FakeLock:
-        """A no-op context manager that mimics threading.RLock behavior."""
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-    
-    _compression_lock = _FakeLock()
-
-    def __init__(self, history):
-        self.conversation = list(history)
-        self._last_token_count_conversation_length = -1
-    
-    def rebuild_conversation(self, new_history: list) -> None:
-        """Replace conversation with new history (mimics AgentInstance.rebuild_conversation)."""
-        self.conversation = list(new_history)
-        self._last_token_count_conversation_length = -1  # Reset cache like production does
-
-
-class _MockInstanceConversationMapping(dict):
-    """Custom dict that syncs writes to instance_conversations with instances[name].conversation.
-
-    This mimics the behavior of agent_cascade.agent_pool._InstanceConversationMapping,
-    ensuring that when compress_context does `pool.instance_conversations[name] = new_history`,
-    the underlying MockInstance.conversation is also updated via rebuild_conversation().
-    """
-
-    def __init__(self, pool: 'MockAgentPool'):
-        super().__init__()
-        self._pool = pool
-
-    def __getitem__(self, key: str) -> list:
-        """Read from instances[name].conversation."""
-        inst = self._pool.instances.get(key)
-        if inst is not None:
-            return list(inst.conversation)
-        # Fallback to dict storage for entries without instances
-        try:
-            return super().__getitem__(key)
-        except KeyError:
-            raise KeyError(key)
-
-    def __setitem__(self, key: str, value: list) -> None:
-        """Write propagates to both instances[name].conversation AND dict storage."""
-        inst = self._pool.instances.get(key)
-        if inst is not None:
-            # Sync to instance.conversation using the centralized API
-            inst.rebuild_conversation(list(value))
-        super().__setitem__(key, value)
-
-
-class MockAgentPool:
-    """Lightweight mock of AgentPool that implements the methods compress_context needs.
-
-    This avoids the heavy real AgentPool (which has DB/file deps) while providing
-    correct behavior for get_compression_target_set, find_last_marker, and pool mutation.
-    """
-
-    def __init__(self, history=None):
-        self.history = list(history) if history else []
-        # Phase 3: Create instance first, then use _MockInstanceConversationMapping for sync
-        mock_inst = MockInstance(self.history)
-        self.instances = {"TestAgent": mock_inst}
-        # Use custom mapping that syncs to inst.conversation (mimics production _InstanceConversationMapping)
-        self.instance_conversations = _MockInstanceConversationMapping(self)
-        # Initialize the mapping with current conversation
-        self.instance_conversations["TestAgent"] = mock_inst.conversation
-        self.instance_loggers = {}  # No logger — avoids notification side-effects
-
-    def get_conversation(self, agent_name):
-        """Read from instance.conversation (Phase 3 pattern)."""
-        inst = self.instances.get(agent_name)
-        if inst is not None:
-            return list(inst.conversation)
-        return []  # Match production semantics — no fallback to bridge dict
-
-    def get_instance(self, agent_name):
-        """Phase 3: Return a mock instance if it exists."""
-        return self.instances.get(agent_name)
-
-    @staticmethod
-    def find_last_marker(history):
-        """Same logic as AgentPool.find_last_marker."""
-        for i in range(len(history) - 1, -1, -1):
-            msg = history[i]
-            role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-            content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-            if role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                return i
-        return -1
-
-    def get_compression_target_set(self, agent_name):
-        """Same logic as AgentPool.get_compression_target_set."""
-        history = self.get_conversation(agent_name)
-        return self.get_compression_target_set_from_conversation(agent_name, history)
-
-    def get_compression_target_set_from_conversation(self, agent_name, conv):
-        """Same logic as AgentPool.get_compression_target_set_from_conversation."""
-        if not conv:
-            return 0, [], -1
-
-        latest_marker = self.find_last_marker(conv)
-        if latest_marker >= 0:
-            active_start_idx = latest_marker + 1
-        else:
-            first_role = conv[0].get('role') if isinstance(conv[0], dict) else getattr(conv[0], 'role', '')
-            active_start_idx = 2 if first_role == SYSTEM else 1
-
-        active_set = conv[active_start_idx:]
-        return active_start_idx, active_set, latest_marker
 
 
 def _build_pool_with_history(num_user_msgs=10):

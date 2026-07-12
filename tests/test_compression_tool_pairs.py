@@ -289,7 +289,7 @@ class TestCompressContextToolPairsIntegration:
 
         Layout: [SYSTEM] + (USER, ASSISTANT+fc, FUNCTION) * num_pairs
         """
-        from tests.test_compression import MockAgentPool
+        from tests.conftest import MockAgentPool
 
         history = [_make_msg(SYSTEM, "You are a helpful agent")]
         for i in range(num_pairs):
@@ -302,7 +302,7 @@ class TestCompressContextToolPairsIntegration:
 
     def test_compression_respects_pair_boundaries(self):
         """After compression, remaining messages should not have orphaned pairs."""
-        from tests.test_compression import MockAgentPool
+        from tests.conftest import MockAgentPool
 
         history = [_make_msg(SYSTEM, "You are a helpful agent")]
         for i in range(8):
@@ -340,7 +340,7 @@ class TestCompressContextToolPairsIntegration:
 
     def test_no_orphaned_function_results_after_compression(self):
         """After compression, no FUNCTION message should appear without its ASSISTANT."""
-        from tests.test_compression import MockAgentPool
+        from tests.conftest import MockAgentPool
 
         history = [_make_msg(SYSTEM, "You are a helpful agent")]
         for i in range(6):
@@ -375,7 +375,7 @@ class TestCompressContextToolPairsIntegration:
 
     def test_compression_with_mixed_message_types(self):
         """Compression works when tool-call pairs are mixed with plain messages."""
-        from tests.test_compression import MockAgentPool
+        from tests.conftest import MockAgentPool
 
         history = [_make_msg(SYSTEM, "You are a helpful agent")]
         # Mix of: plain Q&A + tool-call chains
@@ -418,7 +418,7 @@ class TestParallelToolCallsPattern:
 
     def test_batched_parallel_calls_at_boundary(self):
         """Cut lands in middle of [A,A,A,F,F,F] chain → includes complete chain."""
-        from tests.test_compression import MockAgentPool
+        from tests.conftest import MockAgentPool
 
         # Simulate: 3 parallel tool calls → [A_fc1, A_fc2, A_fc3, F_res1, F_res2, F_res3]
         history = [_make_msg(SYSTEM, "You are a helpful agent")]

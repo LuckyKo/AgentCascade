@@ -27,6 +27,9 @@ from agent_cascade.compression.helpers import (
 )
 from agent_cascade.compression.core import compress_context
 
+# Shared mock pool from conftest — no need to redefine locally
+from tests.conftest import MockAgentPool
+
 
 # ──────────────────────────────────────────────
 # Helpers
@@ -35,121 +38,6 @@ from agent_cascade.compression.core import compress_context
 def _msg(role: str, content: str) -> Message:
     """Shorthand to create a Message for testing."""
     return Message(role=role, content=content)
-
-
-class MockInstance:
-    """Minimal AgentInstance mock with compression lock and conversation sync."""
-
-    class _FakeLock:
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-
-    _compression_lock = _FakeLock()
-    _cached_token_count = 0
-    _last_token_count_conversation_length = -1
-
-    def __init__(self, history: list[Message]):
-        self.conversation = list(history)
-        self._streaming_responses: list = []
-        self._pending_notifications: list = []
-        self._tool_warnings: list = []
-        self.agent_class = "coder"
-
-    def rebuild_conversation(self, new_history: list) -> None:
-        self.conversation = list(new_history)
-        self._last_token_count_conversation_length = -1
-
-
-class _MockInstanceConversationMapping(dict):
-    """Mirrors _InstanceConversationMapping — writes sync to instance.conversation."""
-
-    def __init__(self, pool):
-        super().__init__()
-        self._pool = pool
-
-    def __getitem__(self, key: str) -> list:
-        inst = self._pool.instances.get(key)
-        if inst is not None:
-            return list(inst.conversation)
-        try:
-            return super().__getitem__(key)
-        except KeyError:
-            raise KeyError(key)
-
-    def __setitem__(self, key: str, value: list) -> None:
-        inst = self._pool.instances.get(key)
-        if inst is not None:
-            inst.rebuild_conversation(list(value))
-        super().__setitem__(key, value)
-
-
-class MockAgentPool:
-    """Lightweight AgentPool mock implementing the compression interface."""
-
-    def __init__(self, history: list[Message], instance_name: str = "TestAgent"):
-        self.instance_name = instance_name
-        mock_inst = MockInstance(history)
-        self.instances = {instance_name: mock_inst}
-        self.instance_conversations = _MockInstanceConversationMapping(self)
-        self.instance_conversations[instance_name] = mock_inst.conversation
-        self.instance_loggers: dict = {}
-        self.instance_summaries: dict = {}
-
-    def get_conversation(self, agent_name: str) -> list[Message]:
-        inst = self.instances.get(agent_name)
-        return list(inst.conversation) if inst else []
-
-    def get_instance(self, agent_name: str):
-        return self.instances.get(agent_name)
-
-    @staticmethod
-    def find_last_marker(history):
-        """Same logic as AgentPool.find_last_marker."""
-        for i in range(len(history) - 1, -1, -1):
-            msg = history[i]
-            role = msg.get('role') if isinstance(msg, dict) else getattr(msg, 'role', '')
-            content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-            if role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                return i
-        return -1
-
-    def get_compression_target_set(self, agent_name: str):
-        """Same logic as AgentPool.get_compression_target_set."""
-        history = self.get_conversation(agent_name)
-        if not history:
-            return 0, [], -1
-        first_role = (history[0].get('role') if isinstance(history[0], dict)
-                      else getattr(history[0], 'role', ''))
-        start_idx = 2 if first_role == SYSTEM else 1
-        latest_marker = self.find_last_marker(history)
-        active_start = latest_marker + 1 if latest_marker >= 0 else start_idx
-        return active_start, history[active_start:], latest_marker
-
-    def get_compression_target_set_from_conversation(self, instance_name: str, conv):
-        """Same logic as AgentPool.get_compression_target_set_from_conversation.
-
-        Accepts a pre-fetched conversation snapshot instead of fetching from pool."""
-        if not conv:
-            return 0, [], -1
-        latest_marker = self.find_last_marker(conv)
-        if latest_marker >= 0:
-            active_start_idx = latest_marker + 1
-        else:
-            first_role = (conv[0].get('role') if isinstance(conv[0], dict)
-                          else getattr(conv[0], 'role', ''))
-            active_start_idx = 2 if first_role == SYSTEM else 1
-        active_set = conv[active_start_idx:]
-        return active_start_idx, active_set, latest_marker
-
-    def get_agent(self, name: str):
-        """Return a mock Compressor agent (needed by compress_context)."""
-        if name == 'Compressor':
-            fake = type('FakeAgent', (), {})()
-            fake.llm = type('LLM', (), {'generate_cfg': {}})()
-            return fake
-        return None
 
 
 # ──────────────────────────────────────────────
@@ -274,11 +162,11 @@ def simulate_reset_history(path: str, pool_conv: list[Message]):
             result_msgs = [to_dict(m) for m in pool_conv]
         else:
             # Keep ALL existing msgs to avoid data loss — insert at mirrored position.
-            # Handler logic: before_insert + discarded_remaining + marker + pool_tail
-            # Exclude last actual_tail_count from remaining (they're the tail, already in pool).
-            remaining = list(existing_msgs[insert_pos:-actual_tail_count]) if actual_tail_count > 0 else list(existing_msgs[insert_pos:])
-            result_msgs = (existing_msgs[:insert_pos] + remaining +
-                           [formatted_marker] + tail_from_pool)
+            # Handler logic: before_insert + marker + pool_tail + discarded_remaining
+            # Keep ALL remaining messages from insert_pos to end (design doc §5.2).
+            remaining = list(existing_msgs[insert_pos:])
+            result_msgs = (existing_msgs[:insert_pos] + [formatted_marker] + tail_from_pool +
+                           remaining)
 
     elif pool_conv:
         # No markers — use pool state as-is
@@ -331,8 +219,20 @@ def rebuild_working_set_from_jsonl(jsonl_msgs: list[dict]) -> list[Message]:
             u0_msg = Message(**m)
             break
 
-    # Tail after last marker
-    tail = [Message(**m) for m in jsonl_msgs[last_marker_idx + 1:]] if last_marker_idx is not None else []
+    # Tail after last marker — deduplicate only within the tail itself.
+    # Preserved originals placed after pool tail may share content with earlier
+    # JSONL entries, so don't exclude against pre-marker content (design doc §5.2).
+    if last_marker_idx is not None:
+        seen_contents = set()
+        raw_tail = []
+        for m in jsonl_msgs[last_marker_idx + 1:]:
+            content = m.get('content', '')
+            if content not in seen_contents:
+                raw_tail.append(m)
+                seen_contents.add(content)
+    else:
+        raw_tail = []
+    tail = [Message(**m) for m in raw_tail]
     marker_objs = [Message(**m) for m in markers]
 
     working_set = []
@@ -473,9 +373,9 @@ class TestSingleCompression:
         assert not lost_contents, \
             f"After 1 compression: lost original contents {lost_contents}"
 
-        # Verify tail count matches between pool and JSONL
+        # Verify tail count: JSONL >= pool (discarded originals preserved after pool tail)
         pool_tail, jsonl_tail = _count_tail(pool_conv, jsonl_msgs)
-        assert pool_tail == jsonl_tail, \
+        assert jsonl_tail >= pool_tail, \
             f"Tail mismatch: pool_tail={pool_tail}, jsonl_tail={jsonl_tail}"
 
     def test_pool_smaller_than_jsonl_after_compression(self, pool_with_history, tmp_jsonl):
@@ -633,9 +533,9 @@ class TestMultipleCompressions:
             print(f"\n  (Note: {len(lost_contents)} contents displaced during 2nd sync: "
                   f"{sorted(lost_contents)[:4]}...)")
 
-        # Tail count must match between pool and JSONL
+        # Tail count: JSONL >= pool (discarded originals preserved after pool tail)
         pool_tail, jsonl_tail = _count_tail(pool_conv, jsonl_msgs)
-        assert pool_tail == jsonl_tail, \
+        assert jsonl_tail >= pool_tail, \
             f"After 2 compressions: pool_tail={pool_tail}, jsonl_tail={jsonl_tail}"
 
     def test_marker_content_differentiation(self, pool_with_history):
@@ -745,11 +645,12 @@ class TestCrashRecovery:
         jsonl_msgs = _read_jsonl_messages(tmp_jsonl)
         recovered = rebuild_working_set_from_jsonl(jsonl_msgs)
 
-        # Compare structure
-        assert len(recovered) == len(pool_conv), \
+        # Compare structure: recovered should have at least as many msgs as pool.
+        # With message preservation fix, JSONL may contain extra preserved originals after pool tail.
+        assert len(recovered) >= len(pool_conv), \
             f"Multi-compression recovery: {len(recovered)} vs pool {len(pool_conv)}"
 
-        for i, (r, p) in enumerate(zip(recovered, pool_conv)):
+        for i, (r, p) in enumerate(zip(recovered[:len(pool_conv)], pool_conv)):
             r_role = getattr(r, 'role', r.get('role', ''))
             p_role = getattr(p, 'role', p.get('role', ''))
             assert r_role == p_role, \
@@ -876,22 +777,25 @@ class TestTailSyncVerification:
 
         pool_conv = pool.get_conversation("TestAgent")
 
-        # Write pool state to JSONL then inject an extra tail message (simulate drift)
+        # Write pool state to JSONL but REMOVE a tail message (simulate data loss / drift)
+        marker_idx = MockAgentPool.find_last_marker(pool_conv)
+        pool_tail_msgs = list(pool_conv[marker_idx + 1:])
+        if len(pool_tail_msgs) > 1:
+            pool_tail_msgs.pop()  # Remove one tail msg to create deficit
+
         jsonl_msgs = list(original_conv[:3])  # [SYS][U0][A0] — before compression cut
         marker_content = build_marker_message("Summary", 0.5)
         jsonl_msgs.append(marker_content)
-        jsonl_msgs.extend(pool_conv[MockAgentPool.find_last_marker(pool_conv) + 1:])
-        # Add an extra message to create drift
-        jsonl_msgs.append(_msg(ASSISTANT, "Extra tail message"))
+        jsonl_msgs.extend(pool_tail_msgs)
 
         _write_jsonl(tmp_jsonl, jsonl_msgs)
 
         in_sync, pool_tail, jsonl_tail = check_tail_sync(
             "TestAgent", pool_conv, tmp_jsonl
         )
-        assert not in_sync, "Tail sync should detect drift"
-        assert pool_tail != jsonl_tail, \
-            f"Expected different tail counts: pool={pool_tail}, jsonl={jsonl_tail}"
+        assert not in_sync, "Tail sync should detect drift (JSONL has fewer tail msgs)"
+        assert jsonl_tail < pool_tail, \
+            f"Expected JSONL deficit: pool={pool_tail}, jsonl={jsonl_tail}"
 
     def test_tail_sync_no_marker(self):
         """When no markers exist, entire conversation is the tail."""
@@ -1134,9 +1038,9 @@ class TestNCompressions:
             simulate_reset_history(tmp_jsonl, pool_conv)
             jsonl_msgs = _read_jsonl_messages(tmp_jsonl)
 
-            # Tail sync check
+            # Tail sync check: JSONL >= pool (discarded originals preserved after pool tail)
             pt, jt = _count_tail(pool_conv, jsonl_msgs)
-            assert pt == jt, \
+            assert jt >= pt, \
                 f"After comp #{comp_num+1}: pool_tail={pt}, jsonl_tail={jt}"
 
             # No original messages lost from JSONL
@@ -1332,11 +1236,11 @@ class TestForwardOnlyRecovery:
         assert last_marker_pos is not None
         jsonl_tail_count = len(jsonl_msgs) - last_marker_pos - 1
 
-        # Pool tail must match JSONL tail
+        # Pool tail <= JSONL tail (discarded originals preserved after pool tail)
         pool_last_marker = MockAgentPool.find_last_marker(pool_conv)
         pool_tail_count = len(pool_conv) - pool_last_marker - 1 if pool_last_marker >= 0 else len(pool_conv)
 
-        assert pool_tail_count == jsonl_tail_count, \
+        assert jsonl_tail_count >= pool_tail_count, \
             f"Forward-only recovery: pool_tail={pool_tail_count}, jsonl_tail={jsonl_tail_count}"
 
     def test_recovery_algorithm_invariance(self, tmp_path):

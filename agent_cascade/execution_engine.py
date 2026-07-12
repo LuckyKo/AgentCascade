@@ -138,7 +138,7 @@ def _get_active_functions_from_template(template, instance=None, pool=None) -> l
     # Check live pool config for real-time tool updates.
     if pool is not None and hasattr(pool, 'get_ui_disabled_tools_for_agent'):
         live_disabled = pool.get_ui_disabled_tools_for_agent(agent_name, agent_type)
-        disabled |= live_disabled
+        disabled |= set(live_disabled or [])
 
     # Defensive: template.function_map may be None for templates without tools
     func_map = getattr(template, 'function_map', None)

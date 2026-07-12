@@ -147,7 +147,8 @@ def check_tail_sync(
     # Count tail in JSONL (file read, but lightweight — only reads line structure)
     jsonl_tail_len, _, _ = _count_jsonl_tail(log_path) if log_path else (0, 0, None)
     
-    in_sync = (pool_tail_len == jsonl_tail_len)
+    # JSONL tail >= pool tail is correct: discarded originals preserved after pool tail
+    in_sync = (jsonl_tail_len >= pool_tail_len)
     return in_sync, pool_tail_len, jsonl_tail_len
 
 

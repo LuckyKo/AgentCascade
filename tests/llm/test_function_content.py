@@ -34,20 +34,21 @@ from agent_cascade.llm import get_chat_model
 ])
 def test_function_content(cfg, gen_cfg1, gen_cfg2):
     if cfg == 0:
+        # Use local LM Studio (dashscope mode with raw API)
         llm = get_chat_model({
-            # Use the model service provided by DashScope:
-            'model': 'qwen2.5-7b-instruct',
-            'model_server': 'dashscope',
-            'api_key': os.getenv('DASHSCOPE_API_KEY'),
+            'model': 'qwen2.5-0.5b-instruct',
+            'model_server': 'http://127.0.0.1:1234/v1',
+            'api_key': 'EMPTY',
             'generate_cfg': {
                 'fncall_prompt_type': 'qwen'
             },
         })
     else:
+        # Use local LM Studio (OAI compatible mode)
         llm = get_chat_model({
-            'model': 'qwen2.5-7b-instruct',
-            'model_server': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-            'api_key': os.getenv('DASHSCOPE_API_KEY', 'none'),
+            'model': 'qwen2.5-0.5b-instruct',
+            'model_server': 'http://127.0.0.1:1234/v1',
+            'api_key': 'EMPTY',
             'generate_cfg': {
                 'fncall_prompt_type': 'qwen'
             },

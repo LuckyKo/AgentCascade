@@ -5,7 +5,9 @@ import sys, os, tempfile, logging
 logging.disable(logging.WARNING)
 
 from pathlib import Path
-sys.path.insert(0, r"N:\work\WD\AgentCascade_unified")
+# Resolve project root relative to this test file (tests/ → project_root)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent_cascade.operation_manager.file_operations import FileOpsMixin
 

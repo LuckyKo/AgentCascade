@@ -171,39 +171,3 @@ agent_cascade.llm.base.ModelServiceError: Maximum number of retries (2) exceeded
 
 
 
-# inner loop detector error (FIXED: _loop_max was conditionally defined but used unconditionally)
-- Root cause: `_loop_max` was only set inside `_abort_stream()` and a retry branch, but used at line 2072 in the error handler. If neither path executed first, Python threw UnboundLocalError.
-- Fix: Initialize `_loop_max = getattr(self.pool.settings, 'loop_max_retries', 2)` before the while loop (line 1768). Removed redundant assignments from inside `_abort_stream()` and retry branch.
-2026-07-12 00:06:03,712 - base.py - 954 - INFO - Agent [Reviewer] - ALL tokens: 19411, Available tokens: 124107
-2026-07-12 00:06:05,113 - base.py - 954 - INFO - Agent [Reviewer] - ALL tokens: 19683, Available tokens: 124107
-2026-07-12 00:06:16,589 - execution_engine.py - 1860 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated sentence (score=320.0) for CodeQualityReviewer. Retrying…
-2026-07-12 00:06:16,589 - execution_engine.py - 1882 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-11.jsonl
-2026-07-12 00:06:16,591 - execution_engine.py - 1908 - DEBUG - [INNER_LOOP] Detection error for CodeQualityReviewer: cannot access local variable '_loop_max' where it is not associated with a value
-2026-07-12 00:06:16,596 - base.py - 954 - INFO - Agent [Reviewer] - ALL tokens: 19683, Available tokens: 124107
-2026-07-12 00:06:28,123 - execution_engine.py - 1860 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated sentence (score=320.0) for CodeQualityReviewer. Retrying…
-2026-07-12 00:06:28,125 - execution_engine.py - 1882 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-11.jsonl
-2026-07-12 00:06:28,127 - execution_engine.py - 1908 - DEBUG - [INNER_LOOP] Detection error for CodeQualityReviewer: cannot access local variable '_loop_max' where it is not associated with a value
-2026-07-12 00:06:28,127 - execution_engine.py - 1037 - DEBUG - EXIT - CodeQualityReviewer RUNNING→IDLE
-2026-07-12 00:06:28,131 - execution_engine.py - 3651 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=CodeQualityReviewer, reason=completed, inst_type=AgentInstance, conv_len=2, final_resp_len=66
-2026-07-12 00:06:28,136 - tool_dispatcher.py - 401 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'CodeQualityReviewer' completed in 140.77s
-2026-07-12 00:06:28,136 - tool_dispatcher.py - 414 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'Maine' after sync child
-2026-07-12 00:06:28,137 - agent_pool.py - 1926 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
-2026-07-12 00:06:28,137 - tool_dispatcher.py - 423 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 140.77s
-2026-07-12 00:06:28,140 - tool_dispatcher.py - 124 - DEBUG - handle_call_agent returned type=str
-2026-07-12 00:06:28,205 - base.py - 954 - INFO - Agent [Orchestrator] - ALL tokens: 40270, Available tokens: 108212
-2026-07-12 00:07:53,905 - tool_dispatcher.py - 563 - DEBUG - call_agent nesting - Maine depth=1/10
-2026-07-12 00:07:53,905 - tool_dispatcher.py - 381 - DEBUG - [SLOT_SYNC_RELEASE] Releasing slot for 'Maine' before running sync child 'CodeQualityReviewer2'
-2026-07-12 00:07:53,908 - tool_dispatcher.py - 385 - DEBUG - [SLOT_SYNC_RELEASE] Slot released for 'Maine', active agents can now acquire
-2026-07-12 00:07:53,908 - execution_engine.py - 3525 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target=CodeQualityReviewer2, class=reviewer, caller=Maine, nest_depth=1, force_fresh=False
-2026-07-12 00:07:53,910 - lifecycle_manager.py - 177 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for CodeQualityReviewer2
-2026-07-12 00:07:53,939 - execution_engine.py - 3573 - DEBUG - starting engine.run() for CodeQualityReviewer2
-2026-07-12 00:07:53,939 - execution_engine.py - 654 - DEBUG - engine.run() ENTRY - instance=CodeQualityReviewer2
-2026-07-12 00:07:53,945 - agent_pool.py - 1926 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=reviewer, instance_name=CodeQualityReviewer2, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
-2026-07-12 00:07:53,945 - execution_engine.py - 486 - DEBUG - [SLOT_ACQUIRE] initial - instance=CodeQualityReviewer2, class=reviewer
-2026-07-12 00:07:53,945 - execution_engine.py - 715 - DEBUG - [TURN_START] Calling _setup_turn for CodeQualityReviewer2
-2026-07-12 00:07:53,946 - execution_engine.py - 1109 - INFO - [CACHE_REBUILD] Rebuilding working set for CodeQualityReviewer2 (conv_len=2)
-2026-07-12 00:07:53,946 - execution_engine.py - 1192 - DEBUG - [CACHE_REBUILD] System prompt content CHANGED for CodeQualityReviewer2
-2026-07-12 00:07:53,947 - agent_instance_logger.py - 458 - INFO - Rewrote agent log n:\work\WD\AgentWorkspace\logs\reviewer_CodeQualityReviewer2_20260712_000753.jsonl with 2 messages.
-2026-07-12 00:07:53,947 - execution_engine.py - 750 - DEBUG - [TURN_DONE] Got messages=2, llm_messages=2
-2026-07-12 00:07:53,951 - base.py - 954 - INFO - Agent [Reviewer] - ALL tokens: 414, Available tokens: 124105
-2

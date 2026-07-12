@@ -1,23 +1,19 @@
 """Verify that today's loop samples ACTUALLY trigger the detector (they should, since they were caught in production).
 
 This confirms the detector is working — if these DON'T trigger, we've made the detector too loose."""
-import sys
 from pathlib import Path
 import json
-import importlib.util as _util
 
-CASCADE_ROOT = Path(__file__).resolve().parent.parent
+# Resolve project root relative to this test file (tests/ → project_root)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-_spec = _util.spec_from_file_location(
-    "inner_loop_detect",
-    CASCADE_ROOT / "agent_cascade" / "inner_loop_detect.py",
-)
-_mod = _util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
+from agent_cascade.inner_loop_detect import InnerLoopDetector
 
-InnerLoopDetector = _mod.InnerLoopDetector
-
-SAMPLE_FILE = Path(r"N:\work\WD\AgentWorkspace\logs\loop_samples\samples_2026-07-07.jsonl")
+# Try relative to project first, then fallback to sibling workspace dir
+SAMPLE_FILE = PROJECT_ROOT / "tests" / "loop_samples" / "samples_2026-07-07.jsonl"
+if not SAMPLE_FILE.exists():
+    # Sibling directory: AgentWorkspace/logs/loop_samples (same parent as project)
+    SAMPLE_FILE = PROJECT_ROOT.parent / "AgentWorkspace" / "logs" / "loop_samples" / "samples_2026-07-07.jsonl"
 
 samples = []
 with open(SAMPLE_FILE, "r", encoding="utf-8") as f:

@@ -649,13 +649,13 @@ class AgentInstanceLogger:
                 else:
                     # Insert marker at mirrored position, then append pool tail messages after it.
                     # Tail count = len(pool) - marker_idx - 1.
-                    # Pool tail is the authoritative source — remaining JSONL tail is just stale copies.
-                    # remaining = discarded messages between insert_pos and end of file.
                     tail_from_pool = [self._format_message(m) for m in new_pool_state[last_marker_idx + 1:]]
-                    # Exclude the last actual_tail_count messages from remaining (they're the tail,
-                    # already represented by pool tail). Keep discarded messages in between.
-                    remaining = list(existing_msgs[insert_pos:-actual_tail_count]) if actual_tail_count > 0 else list(existing_msgs[insert_pos:])
-                    result_msgs = existing_msgs[:insert_pos] + remaining + [formatted_marker] + tail_from_pool
+                    # Keep ALL remaining messages from insert_pos to end — they are original/discarded
+                    # messages that must be preserved (design doc §5.2). Do NOT exclude the last
+                    # actual_tail_count; those are not duplicates of pool tail but independent originals.
+                    # Place them AFTER marker+tail so the marker sits at the mirrored insert position.
+                    remaining = list(existing_msgs[insert_pos:])
+                    result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + tail_from_pool + remaining
             elif new_pool_state:
                 # No markers in pool — use pool state as-is (session load path)
                 result_msgs = [self._format_message(m) for m in new_pool_state]

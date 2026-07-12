@@ -322,7 +322,7 @@ class BaseChatModel(ABC):
         if self.use_raw_api:
             logger.debug('`use_raw_api` takes effect.')
             assert stream and (not delta_stream), '`use_raw_api` only support full stream!!!'
-            return self.raw_chat(messages=messages, functions=functions, stream=stream, generate_cfg=generate_cfg)
+            return self.raw_chat(messages=messages, functions=functions, stream=stream, generate_cfg=generate_cfg, _return_message_type=_return_message_type)
 
         if not fncall_mode:
             for k in ['parallel_function_calls', 'function_choice', 'thought_in_content']:
@@ -530,13 +530,40 @@ class BaseChatModel(ABC):
         functions: Optional[List[Dict]] = None,
         stream: bool = True,
         generate_cfg: Optional[Dict] = None,
+        _return_message_type: str = 'dict',
     ) -> Union[List[Message], List[Dict], Iterator[List[Message]], Iterator[List[Dict]]]:
         if functions and functions[0].get('type') != 'function':
             functions = [{'type': 'function', 'function': f} for f in functions]
         if functions:
             generate_cfg['tools'] = functions
+        
+        # Apply postprocessing to each message batch, matching the non-raw path
+        def _postprocess_batch(msg_batch):
+            processed = self._postprocess_messages(msg_batch, fncall_mode=bool(functions), generate_cfg=generate_cfg)
+            if not self.support_multimodal_output:
+                processed = _format_as_text_messages(processed)
+            return processed
+        
         if stream:
-            return self._chat_stream(messages=messages, delta_stream=False, generate_cfg=generate_cfg)
+            # Wrap with retry logic for robustness against transient failures
+            def _chat_stream_with_retry():
+                return self._chat_stream(messages=messages, delta_stream=False, generate_cfg=generate_cfg)
+            
+            output_iter = retry_model_service_iterator(_chat_stream_with_retry, max_retries=self.max_retries)
+            postprocessed_iter = (_postprocess_batch(batch) for batch in output_iter)
+            
+            return self._convert_messages_iterator_to_target_type(
+                postprocessed_iter, _return_message_type
+            )
+        else:
+            # Non-streaming: collect all batches and return the last one as a list
+            final_batch = None
+            for batch in self._chat_stream(messages=messages, delta_stream=False, generate_cfg=generate_cfg):
+                final_batch = batch
+            if final_batch is None:
+                raise ModelServiceError(message='raw_chat returned no output')
+            processed = _postprocess_batch(final_batch)
+            return self._convert_messages_to_target_type(processed, _return_message_type)
 
     @staticmethod
     def _sanitize_fn_args(fn_args):

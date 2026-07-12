@@ -971,22 +971,26 @@ class CodeInterpreter(BaseToolWithFileAccess):
         kc_list = []
         container_ids = []
         stale_cids = []
+        collected_keys = []  # Track all matched keys for path mapping cleanup
         with _KERNEL_LOCK:
             # Match both new session-based format and legacy instance_id format
             for k in list(_KERNEL_CLIENTS.keys()):
                 if not k.endswith(f'_{pid}'):
                     continue
                 kc_list.append(_KERNEL_CLIENTS[k])
+                collected_keys.append(k)
                 del _KERNEL_CLIENTS[k]
             for k in list(_DOCKER_CONTAINERS.keys()):
                 if not k.endswith(f'_{pid}'):
                     continue
                 container_ids.append(_DOCKER_CONTAINERS[k])
+                collected_keys.append(k)
                 del _DOCKER_CONTAINERS[k]
             for k in list(_STALE_CONTAINERS.keys()):
                 if not k.endswith(f'_{pid}'):
                     continue
                 stale_cids.append(_STALE_CONTAINERS[k]['container_id'])
+                collected_keys.append(k)
                 del _STALE_CONTAINERS[k]
 
         # Clean up kernel clients outside lock (shutdown can block)
@@ -1010,13 +1014,14 @@ class CodeInterpreter(BaseToolWithFileAccess):
             except Exception:
                 pass
 
-        # Clean up path mapping file for this kernel
-        mapping_file = os.path.join(self.work_dir, f'path_mapping_{k}.json')
-        try:
-            if os.path.exists(mapping_file):
-                os.remove(mapping_file)
-        except OSError:
-            pass
+        # Clean up path mapping files for collected kernels
+        for k in collected_keys:
+            mapping_file = os.path.join(self.work_dir, f'path_mapping_{k}.json')
+            try:
+                if os.path.exists(mapping_file):
+                    os.remove(mapping_file)
+            except OSError:
+                pass
 
     def _is_path_allowed(self, abs_path: str, allowed_prefixes: List[str]) -> bool:
         """Check if a path is within an allowed directory using proper containment check.
