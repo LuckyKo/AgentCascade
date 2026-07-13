@@ -1336,27 +1336,27 @@ class FileOpsMixin:
 
             # Generate unified diff before writing (both old and new content available)
             import difflib
-            changed_count = len(ws_counts)  # non-blank lines re-indented
-            if changed_count:
-                old_lines = file_content.splitlines()
-                new_lines = new_content_val.splitlines()
-                diff_lines = list(difflib.unified_diff(
-                    old_lines, new_lines,
-                    fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''
-                ))
-                # Count actual changed lines (comparing old vs new block directly)
+            diff_content = ''
+            if ws_counts:
                 changed_count = sum(1 for i in range(len(block_lines)) if block_lines[i] != new_block_lines[i])
-                # Skip --- and +++ headers (first 2), keep @@ headers and content
-                diff_content = '\n'.join(diff_lines[2:]) if len(diff_lines) > 2 else ''
-                # Limit diff output to ~17 lines when longer (8 + ... + 8)
-                if diff_content:
-                    all_diff_lines = diff_content.splitlines()
-                    if len(all_diff_lines) > 20:
-                        first_lines = all_diff_lines[:8]
-                        last_lines = all_diff_lines[-8:]
-                        diff_content = '\n'.join(first_lines + ['...'] + last_lines)
+                if changed_count > 0:
+                    old_lines = file_content.splitlines()
+                    new_lines = new_content_val.splitlines()
+                    diff_lines = list(difflib.unified_diff(
+                        old_lines, new_lines,
+                        fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''
+                    ))
+                    # Skip --- and +++ headers (first 2), keep @@ headers and content
+                    diff_content = '\n'.join(diff_lines[2:]) if len(diff_lines) > 2 else ''
+                    # Limit to 20 lines; truncate to ~17 if longer (8 + ... + 8)
+                    if diff_content:
+                        all_diff_lines = diff_content.splitlines()
+                        if len(all_diff_lines) > 20:
+                            first_lines = all_diff_lines[:8]
+                            last_lines = all_diff_lines[-8:]
+                            diff_content = '\n'.join(first_lines + ['...'] + last_lines)
             else:
-                diff_content = ''
+                changed_count = 0
 
             resolved.write_text(new_content_val, encoding='utf-8')
 
