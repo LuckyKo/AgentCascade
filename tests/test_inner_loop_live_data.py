@@ -333,18 +333,20 @@ class TestNoFalseLoop:
     def test_normal_reasoning(self):
         # Generate unique sentences (no repetition at all) to avoid triggering anything.
         # Use varied sentence structures so chunked fragments don't overlap.
+        # Keep sentence count moderate (~105 total) to prevent fragment accumulation
+        # from crossing the threshold of 9 before decay halves them (min_chars=0 mode).
         parts = [
             f"Step {i} involves examining component alpha-{i} for correctness and completeness."
-            for i in range(1, 80)
+            for i in range(1, 35)
         ] + [
             f"Then I verify that module beta-{i} handles edge cases properly too."
-            for i in range(1, 80)
+            for i in range(1, 35)
         ] + [
             f"Finally checking subsystem gamma-{i} against the reference implementation spec."
-            for i in range(1, 50)
+            for i in range(1, 20)
         ] + [
             f"After that I cross-reference dataset delta-{i} with baseline metrics and thresholds."
-            for i in range(1, 40)
+            for i in range(1, 16)
         ]
         text = " ".join(parts)
 

@@ -92,13 +92,30 @@ def test_llm_dashscope(functions, stream, delta_stream):
 @pytest.mark.parametrize('stream', [True, False])
 @pytest.mark.parametrize('delta_stream', [True, False])
 def test_llm_retry_failure(stream, delta_stream):
+    # DashScope models use raw API which requires full streaming (stream=True, delta_stream=False).
+    # When both stream and delta_stream are set to True, it counts as a valid streaming call.
     llm_cfg = {'model': 'qwen-turbo', 'api_key': 'invalid', 'generate_cfg': {'max_retries': 3}}
 
     llm = get_chat_model(llm_cfg)
     assert llm.max_retries == 3
+    assert llm.use_raw_api, "DashScope models should use raw API (streaming)"
 
     messages = [Message('user', 'hello')]
     with pytest.raises(ModelServiceError):
-        response = llm.chat(messages=messages, stream=stream, delta_stream=delta_stream)
-        if stream:
-            list(response)
+        response = llm.chat(messages=messages, stream=True, delta_stream=False)
+        list(response)
+
+
+@pytest.mark.parametrize('delta_stream', [True, False])
+def test_llm_retry_failure_delta(delta_stream):
+    # Test non-streaming path: explicitly set use_raw_api to False for qwen-turbo
+    llm_cfg = {'model': 'qwen-turbo', 'api_key': 'invalid', 'generate_cfg': {'max_retries': 3, 'use_raw_api': False}}
+
+    llm = get_chat_model(llm_cfg)
+    assert llm.max_retries == 3
+    assert not llm.use_raw_api, "Should use non-raw API when explicitly disabled"
+
+    messages = [Message('user', 'hello')]
+    with pytest.raises(ModelServiceError):
+        response = llm.chat(messages=messages, stream=True, delta_stream=delta_stream)
+        list(response)

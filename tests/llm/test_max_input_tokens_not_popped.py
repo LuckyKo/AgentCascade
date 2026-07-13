@@ -17,6 +17,7 @@ class _DummyLLM(BaseChatModel):
         self.cfg = cfg or {}
         self.generate_cfg: dict = {}
         self._preprocess_cache: dict = {}  # required by BaseChatModel.chat()
+        self._max_preprocess_cache_size = 50  # matches BaseChatModel.__init__ (line 104)
         self.cache = None  # skip cache lookup
         self.use_raw_api = False
 

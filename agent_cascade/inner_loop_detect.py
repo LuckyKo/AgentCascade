@@ -235,9 +235,13 @@ class InnerLoopDetector:
             if norm:
                 toks = _WORD_RE.findall(norm)
                 self.tokens.extend(toks)
-                # Accumulate sentence counts (checked below via activation factor).
-                self.sentences[norm] += 1
-                self._sentence_decay_counter += 1
+                # Skip tiny fragments (< 4 words) — they accumulate too fast at small
+                # chunk sizes (10-30 chars per feed) and cause false positives. A real
+                # sentence repetition signal needs meaningful content to be reliable.
+                if len(toks) >= 4:
+                    # Accumulate sentence counts (checked below via activation factor).
+                    self.sentences[norm] += 1
+                    self._sentence_decay_counter += 1
 
         # Apply periodic halving: counter increments per-sentence (line 240),
         # but the halving check fires at most once per feed() call.
