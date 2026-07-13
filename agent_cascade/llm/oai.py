@@ -465,41 +465,34 @@ class TextChatAtOAI(BaseFnCallModel):
                         if hasattr(chunk.choices[0].delta, 'tool_calls') and chunk.choices[0].delta.tool_calls:
                             # Track which positions were matched in this chunk to handle parallel tool calls sharing same index
                             _chunk_matched = set()
+                            _initial_len = len(full_tool_calls)  # Prevent merging distinct new calls created within this chunk
                             for tc in chunk.choices[0].delta.tool_calls:
-                                tc_index = getattr(tc, 'index', None)
                                 tc_id = getattr(tc, 'id', None)
                                 tc_func = getattr(tc, 'function', None)
                                 tc_name = getattr(tc_func, 'name', None) or '' if tc_func else ''
                                 tc_args = getattr(tc_func, 'arguments', None) or '' if tc_func else ''
                                 
-                                # Find existing tool call to append to (by ID or index)
+                                # Find existing tool call to append to (by ID, then reverse fallback for Grok compat)
                                 matched = None
-                                matched_idx = -1  # Track the index of the matched entry
-                                if tc_id:
-                                    # New tool call with an ID — skip already-matched positions in this chunk
+                                matched_idx = -1
+                                if tc_id and full_tool_calls:
+                                    # Has an ID — match by function_id across all entries
                                     for idx, existing in enumerate(full_tool_calls):
                                         if existing.extra.get('function_id') == tc_id and idx not in _chunk_matched:
                                             matched = existing
                                             matched_idx = idx
                                             break
-                                elif tc_index is not None:
-                                    # Continuation chunk — match by index, skip already-matched positions
-                                    for idx, existing in enumerate(full_tool_calls):
-                                        if existing.extra.get('tool_index') == tc_index and idx not in _chunk_matched:
-                                            matched = existing
-                                            matched_idx = idx
-                                            break
                                 elif full_tool_calls:
-                                    # No ID or index — find last unmatched entry
+                                    # No ID — reverse walk to match most recent entry first.
+                                    # Grok sends parallel tool calls with same index=0; continuations arrive
+                                    # for the newest call before older ones finish, so we need last-first matching.
                                     for idx in range(len(full_tool_calls) - 1, -1, -1):
-                                        if idx not in _chunk_matched:
+                                        if idx not in _chunk_matched and idx < _initial_len:
                                             matched = full_tool_calls[idx]
                                             matched_idx = idx
                                             break
-                                    # All entries already matched this chunk: only fall back to the
-                                    # last entry if the delta carries actual content (likely a continuation).
-                                    # Otherwise it's probably a new parallel tool call starting fresh.
-                                    if matched is None and (tc_name or tc_args):
+                                    # All pre-existing entries matched this chunk: merge into last entry only
+                                    if matched is None and _initial_len > 0 and (tc_name or tc_args):
                                         matched = full_tool_calls[-1]
                                         matched_idx = len(full_tool_calls) - 1
                                 
@@ -519,12 +512,11 @@ class TextChatAtOAI(BaseFnCallModel):
                                                 content='',
                                                 function_call=FunctionCall(name=tc_name,
                                                                            arguments=tc_args),
-                                                extra={'function_id': tc_id or f'call_{new_idx}',
-                                                       'tool_index': tc_index if tc_index is not None else new_idx}))
+                                                extra={'function_id': tc_id or f'call_{new_idx}'}))
                                     # Mark the newly created entry so subsequent deltas in this chunk
                                     # won't merge into it (parallel tool calls should stay separate)
                                     _chunk_matched.add(new_idx)
-
+                                    
                         res = []
                         finish_reason = getattr(chunk.choices[0], 'finish_reason', None)
                         extra = {'finish_reason': finish_reason} if finish_reason else {}
