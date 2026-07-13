@@ -1321,9 +1321,8 @@ class FileOpsMixin:
 
         try:
             resolved = self._resolve_path(path, mode="rw")
-            file_content = resolved.read_text(encoding='utf-8')
-            file_lines = file_content.splitlines(keepends=True)
 
+            # Reuse file_content from first read (line 1120) — no need to re-read
             safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
             backup_dir = self.base_dir / "logs" / "backups" / safe_agent
             backup_dir.mkdir(parents=True, exist_ok=True)
@@ -1334,13 +1333,37 @@ class FileOpsMixin:
             new_file_lines = list(file_lines)
             new_file_lines[start:end] = new_block_lines
             new_content_val = "".join(new_file_lines)
+
+            # Generate unified diff before writing (both old and new content available)
+            import difflib
+            changed_count = len(ws_counts)  # non-blank lines re-indented
+            if changed_count:
+                old_lines = file_content.splitlines()
+                new_lines = new_content_val.splitlines()
+                diff_lines = list(difflib.unified_diff(
+                    old_lines, new_lines,
+                    fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''
+                ))
+                # Count actual changed lines (comparing old vs new block directly)
+                changed_count = sum(1 for i in range(len(block_lines)) if block_lines[i] != new_block_lines[i])
+                # Skip --- and +++ headers (first 2), keep @@ headers and content
+                diff_content = '\n'.join(diff_lines[2:]) if len(diff_lines) > 2 else ''
+                # Limit diff output to ~17 lines when longer (8 + ... + 8)
+                if diff_content:
+                    all_diff_lines = diff_content.splitlines()
+                    if len(all_diff_lines) > 20:
+                        first_lines = all_diff_lines[:8]
+                        last_lines = all_diff_lines[-8:]
+                        diff_content = '\n'.join(first_lines + ['...'] + last_lines)
+            else:
+                diff_content = ''
+
             resolved.write_text(new_content_val, encoding='utf-8')
 
             self.file_ownership[str(resolved)] = agent_name
 
             display_start = start + 1
             total_in_range = end - start  # lines in the requested range
-            changed_count = len(ws_counts) if ws_counts else 0  # non-blank lines re-indented
             indent_type_label = 'sp' if indent_type == 'space' else 'tabs'
 
             if not ws_counts:
@@ -1365,6 +1388,10 @@ class FileOpsMixin:
 
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
+
+            # Unified diff snippet in code block
+            if diff_content:
+                res_msg += f'\n```\n{diff_content}\n```'
 
             if backup_path_str:
                 res_msg += f'\n  backup → {backup_path_str}'
