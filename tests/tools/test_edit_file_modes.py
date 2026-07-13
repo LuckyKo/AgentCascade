@@ -422,8 +422,8 @@ def test_re_indent_shift_mode():
     """Test all scenarios for the new shift mode of re_indent.
 
     Shift mode behavior:
-      - Positive indent: strips existing leading whitespace, prepends N chars of specified type
-      - Negative indent: removes up to N leading whitespace chars (type-agnostic)
+      - Positive indent: prepends N chars of specified type to each line's existing whitespace (adds right)
+      - Negative indent: removes up to N leading whitespace chars (type-agnostic, moves left)
       - Zero indent: no-op, lines unchanged
       - Blank lines always pass through unchanged regardless of sign
     """
@@ -434,11 +434,11 @@ def test_re_indent_shift_mode():
         file_path = Path(tmpdir) / "shift_test.py"
 
         # ── Test 1: Positive shift (add spaces) ────────────────────────
-        # Existing whitespace is stripped; N new space chars are prepended.
+        # N new space chars are prepended to each line's existing whitespace.
         file_path.write_text(
-            "    def foo():\n"
-            "        bar()\n"
-            "        baz()\n",
+            "    def foo():\n"       # 4 spaces
+            "        bar()\n"       # 8 spaces
+            "        baz()\n",      # 8 spaces
             encoding='utf-8'
         )
         op_mgr.file_ownership[str(file_path.resolve())] = "test_agent"
@@ -449,11 +449,11 @@ def test_re_indent_shift_mode():
         )
         assert "OK:" in res, f"Test 1 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
-        # Each line's ws stripped → prefix "  " prepended to bare content
+        # Each line gets +2 spaces prepended to existing ws: 4→6, 8→10, 8→10
         expected = (
-            "  def foo():\n"
-            "  bar()\n"
-            "  baz()\n"
+            "      def foo():\n"    # 6 spaces
+            "          bar()\n"     # 10 spaces
+            "          baz()\n"     # 10 spaces
         )
         assert content == expected, f"Test 1 assertion: got [{content}]"
 
@@ -501,8 +501,8 @@ def test_re_indent_shift_mode():
 
         # ── Test 4: Mixed indentation preserved during positive shift ──
         file_path.write_text(
-            "\tdef foo():\n"
-            "\t\tbar()\n",
+            "\tdef foo():\n"       # 1 tab
+            "\t\tbar()\n",         # 2 tabs
             encoding='utf-8'
         )
 
@@ -512,18 +512,18 @@ def test_re_indent_shift_mode():
         )
         assert "OK:" in res, f"Test 4 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
-        # Positive shift strips ws then prepends → tabs replaced by spaces
+        # Positive shift adds 2 spaces to existing ws: "\t"→"  \t", "\t\t"→"  \t\t"
         expected = (
-            "  def foo():\n"
-            "  bar()\n"
+            "  \tdef foo():\n"     # 2 spaces + 1 tab
+            "  \t\tbar()\n"        # 2 spaces + 2 tabs
         )
         assert content == expected, f"Test 4 assertion: got [{content}]"
 
         # ── Test 5: Blank lines preserved ──────────────────────────────
         file_path.write_text(
-            "    def foo():\n"
-            "\n"
-            "        bar()\n",
+            "    def foo():\n"       # 4 spaces
+            "\n"                     # blank line
+            "        bar()\n",       # 8 spaces
             encoding='utf-8'
         )
 
@@ -533,10 +533,11 @@ def test_re_indent_shift_mode():
         )
         assert "OK:" in res, f"Test 5 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
+        # Positive shift adds 3 spaces to existing ws: 4→7, blank unchanged, 8→11
         expected = (
-            "   def foo():\n"    # stripped + 3 spaces
-            "\n"                 # blank line unchanged
-            "   bar()\n"         # stripped + 3 spaces
+            "       def foo():\n"    # 7 spaces (4+3)
+            "\n"                     # blank line unchanged
+            "           bar()\n"     # 11 spaces (8+3)
         )
         assert content == expected, f"Test 5 assertion: got [{content}]"
 

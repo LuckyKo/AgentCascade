@@ -1214,15 +1214,16 @@ class FileOpsMixin:
             # --- shift mode: self-contained logic, no base_trim ---
             if mode == 'shift':
                 if indent > 0:
-                    # Prepend N characters of the specified type to each non-blank line
+                    # Prepend N characters of the specified type to each non-blank line's existing whitespace
                     prefix = ('\t' * indent) if indent_type == 'tab' else (' ' * indent)
                     new_block_lines = []
                     for i, info in enumerate(ws_info_list):
                         if info is None:
                             new_block_lines.append(block_lines[i])  # blank lines pass through unchanged
                             continue
-                        _, stripped_content = info
-                        new_block_lines.append(prefix + stripped_content)
+                        ws_count, stripped_content = info
+                        actual_ws = block_lines[i][:ws_count]
+                        new_block_lines.append(prefix + actual_ws + stripped_content)  # prepend to existing ws
 
                 elif indent < 0:
                     # Strip up to N leading whitespace characters from each non-blank line (type-agnostic removal)
