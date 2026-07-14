@@ -137,8 +137,10 @@ def run_agent_thread_unified(
             else:
                 turn_output, is_streaming_tick = turn_output_raw, False
 
-            # Check for stop request or pool shutdown
-            if pool.stopped or current_generation != pool._run_generation:
+            # FIX TODO #41: Check all stop conditions including per-instance halt and termination
+            if pool.stopped or current_generation != pool._run_generation \
+                    or instance_name in pool._halted_instances \
+                    or pool.is_instance_terminated(instance_name):
                 break
 
             now = time.monotonic()

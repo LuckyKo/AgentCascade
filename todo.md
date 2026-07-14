@@ -38,7 +38,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 - [ ] no agent tab refresh during tool call streaming
 - [x] we have about 10-15% discrepancy (less) between the nr of tokens we measure and the actual count that LMStudio processes — FIXED: reasoning_content now always counted, all magic numbers centralized in settings.py 
-- [ ] `Terminate` doesn't really terminate the agent properly, it keeps streaming, sometime left as an unreachable background thread.
+- [x] `Terminate` doesn't really terminate the agent properly — FIXED: (1) extracted `_check_stream_termination()` helper in execution_engine.py that checks `_is_stopped()` every 20 yield ticks during LLM streaming, (2) consolidated redundant `_is_stop_interrupted()` into `_is_stopped()`, (3) added `_halted_instances` + `is_instance_terminated()` to main loop in run_agent_unified.py for full stop condition coverage, (4) removed unnecessary time.sleep(0.1) from break path.
 - [ ] session loading sometime merges the old session with the new (mostly on server restart). should properly clean old session on load, just like it does a new session then loads.
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent info once it reached conclusion, only happens on [YES]
 - [ ] telemetry `Output Tokens (est)` severely undercounts

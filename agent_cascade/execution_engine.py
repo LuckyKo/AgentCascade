@@ -870,6 +870,8 @@ class ExecutionEngine:
                 # ── Phase 3: LLM Call with Injection Points ────────────────
                 #logger.debug(f"[LLM_CALL_START] Calling LLM for {inst_name} with {len(llm_messages)} messages")
                 turn_output = []
+                partial_msgs = []  # Initialize to avoid undefined reference on early break
+                stream_tick = 0  # Counter for periodic termination checks during streaming
                 for msg in self._call_llm_with_injection(instance, llm_messages):
                     if msg is None:
                         # Yield current partial conversation state to trigger streaming broadcast in run_agent_thread_unified.
@@ -878,6 +880,14 @@ class ExecutionEngine:
                         # to provide a complete "current view" for activity banners and UI rendering.
                         with instance._compression_lock:
                             partial_msgs = list(instance._streaming_responses)
+                        
+                        stream_tick += 1
+                        if (result := self._check_stream_termination(
+                            stream_tick, inst_name, response, turn_output, partial_msgs
+                        )) is not None:
+                            yield result
+                            break
+                        
                         yield (response + turn_output + partial_msgs, True)
                         continue
                     # FIX BOOL_LEAK: Validate message type before appending to prevent bool/list leak
@@ -885,6 +895,13 @@ class ExecutionEngine:
                         # Endpoint recovery: [RETRYING] messages are transient UI notifications only — don't add to conversation history
                         content = msg_field(msg, 'content', '')
                         is_retrying_msg = isinstance(content, str) and content.startswith("[RETRYING]")
+                        
+                        stream_tick += 1
+                        if (result := self._check_stream_termination(
+                            stream_tick, inst_name, response, turn_output, partial_msgs
+                        )) is not None:
+                            yield result
+                            break
                         
                         # Yield for UI visibility (even transient messages)
                         # Retry notifications show only the retry message; normal messages show with streaming state
@@ -902,7 +919,6 @@ class ExecutionEngine:
                 # Check generation change (old run superseded by newer one) alongside stop
                 if self._is_stopped(instance.instance_name):
                     logger.debug("halted/stopped/superseded - %s", instance.instance_name)
-                    time.sleep(0.1)
                     yield response
                     break  # ── Fix TODO #41: Break immediately instead of continuing loop ──
 
@@ -1272,23 +1288,35 @@ class ExecutionEngine:
                 inst_name in self.pool._halted_instances or
                 self.pool.is_instance_terminated(inst_name))
 
-    def _is_stop_interrupted(self, inst_name: str) -> bool:
-        """Check if pool is stopped, run superseded, or instance terminated (excludes pause).
+    def _check_stream_termination(
+        self, stream_tick: int, inst_name: str, response: List[Message],
+        turn_output: List[Message], partial_msgs: List[Message]
+    ) -> Optional[Tuple[List[Message], bool]]:
+        """Check for termination every N ticks during LLM streaming.
         
-        Used during streaming (Phase 3) where only actual stop/termination should interrupt.
-        Pause does NOT trigger interruption — it should only block tool execution (Phase 4).
-        This enforces the semantic distinction: pause = "hold tools", not "abort streaming".
+        Shared helper to avoid duplicating the 20-tick check pattern across multiple
+        yield paths in the streaming loop. Returns (messages, is_streaming) tuple
+        ready to yield, or signals a break via returning early.
         
         Args:
-            inst_name: Instance name to check halt/termination status
+            stream_tick: Current tick counter (incremented each loop iteration)
+            inst_name: Instance name for stop checks and logging
+            response: Accumulated persistent response messages
+            turn_output: Messages accumulated this turn (not yet committed to response)
+            partial_msgs: Currently streaming partial responses
             
         Returns:
-            True if any stop condition met (excluding pause), False otherwise.
+            Tuple of (messages_list, is_streaming_bool) ready to yield.
+            Returns (response + turn_output + partial_msgs, False) if stop detected.
+            Returns None if no stop detected (caller should continue normally).
         """
-        return (self.pool.stopped or 
-                self._my_generation != self.pool._run_generation or
-                inst_name in self.pool._halted_instances or
-                self.pool.is_instance_terminated(inst_name))
+        if stream_tick % 20 == 0 and self._is_stopped(inst_name):
+            logger.debug(
+                "[TERMINATE] Stopped mid-stream after %d ticks - %s",
+                stream_tick, inst_name
+            )
+            return (response + turn_output + partial_msgs, False)
+        return None
 
     def _inject_async_messages(
         self,
@@ -1956,9 +1984,7 @@ class ExecutionEngine:
                     # Also checks generation change (old run superseded by newer one on resume).
                     # This is defense-in-depth: _check_stop_conditions() runs before the LLM call, but stop
                     # can also be triggered DURING the streaming call itself (while chunks are arriving).
-                    # CRITICAL: Use _is_stop_interrupted() which excludes pause — pause should NOT abort
-                    # ongoing streaming; it only blocks tool execution after streaming completes.
-                    if self._is_stop_interrupted(inst_name):
+                    if self._is_stopped(inst_name):
                         # Telemetry: record LLM call end for mid-stream stop (non-blocking)
                         if (tel := self._telemetry()) is not None:
                             try:
@@ -1988,8 +2014,7 @@ class ExecutionEngine:
                             last_streaming_update_time = current_time
                     
                     # Re-check stop/halt after UI update (defense in depth — catches stop during slow streaming)
-                    # CRITICAL: Use _is_stop_interrupted() which excludes pause — same as above.
-                    if self._is_stop_interrupted(inst_name):
+                    if self._is_stopped(inst_name):
                         # Telemetry: record LLM call end for mid-stream stop (non-blocking)
                         if (tel := self._telemetry()) is not None:
                             try:
