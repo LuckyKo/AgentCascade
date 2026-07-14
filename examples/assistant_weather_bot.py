@@ -22,12 +22,14 @@ from agent_cascade.agents import Assistant
 ROOT_RESOURCE = os.path.join(os.path.dirname(__file__), 'resource')
 
 
-def init_agent_service():
-    llm_cfg = {'model': 'qwen-max'}
+def init_agent_service(llm_cfg=None):
+    if llm_cfg is None:
+        llm_cfg = {'model': 'qwen-max'}
     system = ('你扮演一个天气预报助手，你具有查询天气和画图能力。'
               '你需要查询相应地区的天气，然后调用给你的画图工具绘制一张城市的图，并从给定的诗词文档中选一首相关的诗词来描述天气，不要说文档以外的诗词。')
 
-    tools = ['image_gen', 'amap_weather']
+    # image_gen requires llm_cfg passed via dict config
+    tools = [{'name': 'image_gen', 'llm_cfg': llm_cfg}, 'amap_weather']
     bot = Assistant(
         llm=llm_cfg,
         name='天气预报助手',
@@ -39,9 +41,9 @@ def init_agent_service():
     return bot
 
 
-def test(query='海淀区天气', file: Optional[str] = os.path.join(ROOT_RESOURCE, 'poem.pdf')):
+def test(query='海淀区天气', file: Optional[str] = os.path.join(ROOT_RESOURCE, 'poem.pdf'), llm_cfg=None):
     # Define the agent
-    bot = init_agent_service()
+    bot = init_agent_service(llm_cfg=llm_cfg)
 
     # Chat
     messages = []

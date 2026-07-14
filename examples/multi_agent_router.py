@@ -22,14 +22,16 @@ from agent_cascade.agents import Assistant, ReActChat, Router
 ROOT_RESOURCE = os.path.join(os.path.dirname(__file__), 'resource')
 
 
-def init_agent_service():
+def init_agent_service(llm_cfg=None, vl_llm_cfg=None):
     # settings
-    llm_cfg = {'model': 'qwen-max'}
-    llm_cfg_vl = {'model': 'qwen-vl-max'}
-    tools = ['image_gen', 'code_interpreter']
+    if llm_cfg is None:
+        llm_cfg = {'model': 'qwen-max'}
+    if vl_llm_cfg is None:
+        vl_llm_cfg = {'model': 'qwen-vl-max'}
+    tools = [{'name': 'image_gen', 'llm_cfg': llm_cfg}, 'code_interpreter']
 
     # Define a vl agent
-    bot_vl = Assistant(llm=llm_cfg_vl, name='多模态助手', description='可以理解图像内容。')
+    bot_vl = Assistant(llm=vl_llm_cfg, name='多模态助手', description='可以理解图像内容。')
 
     # Define a tool agent
     bot_tool = ReActChat(
@@ -51,9 +53,10 @@ def test(
         query: str = 'hello',
         image: str = 'https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg',
         file: Optional[str] = os.path.join(ROOT_RESOURCE, 'poem.pdf'),
+        llm_cfg=None, vl_llm_cfg=None,
 ):
     # Define the agent
-    bot = init_agent_service()
+    bot = init_agent_service(llm_cfg=llm_cfg, vl_llm_cfg=vl_llm_cfg)
 
     # Chat
     messages = []

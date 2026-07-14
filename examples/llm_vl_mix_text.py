@@ -17,9 +17,11 @@ from agent_cascade.llm import get_chat_model
 from agent_cascade.llm.schema import ContentItem, Message
 
 
-def test():
-    llm_cfg = {'model': 'qwen-max', 'model_server': 'dashscope'}
-    llm_cfg_vl = {'model': 'qwen-vl-max', 'model_server': 'dashscope'}
+def test(llm_cfg=None, vl_llm_cfg=None):
+    if llm_cfg is None:
+        llm_cfg = {'model': 'qwen-max', 'model_server': 'dashscope'}
+    if vl_llm_cfg is None:
+        vl_llm_cfg = {'model': 'qwen-vl-max', 'model_server': 'dashscope'}
     functions = [{
         'name': 'image_gen',
         'name_for_human': 'AI绘画',
@@ -38,7 +40,7 @@ def test():
     }]
 
     # Chat with vl llm
-    llm_vl = get_chat_model(llm_cfg_vl)
+    llm_vl = get_chat_model(vl_llm_cfg)
     messages = [{
         'role':
             'user',

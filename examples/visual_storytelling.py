@@ -28,11 +28,14 @@ class VisualStorytelling(Agent):
 
     def __init__(self,
                  function_list: Optional[List[Union[str, Dict, BaseTool]]] = None,
-                 llm: Optional[Union[Dict, BaseChatModel]] = None):
+                 llm: Optional[Union[Dict, BaseChatModel]] = None,
+                 vl_llm: Optional[Union[Dict, BaseChatModel]] = None):
         super().__init__(llm=llm)
 
         # Nest one vl assistant for image understanding
-        self.image_agent = Assistant(llm={'model': 'qwen-vl-max'})
+        if vl_llm is None:
+            vl_llm = {'model': 'qwen-vl-max'}
+        self.image_agent = Assistant(llm=vl_llm)
 
         # Nest one assistant for article writing
         self.writing_agent = Assistant(llm=self.llm,
@@ -63,9 +66,14 @@ class VisualStorytelling(Agent):
 
 
 def test(query: Optional[str] = '看图说话',
-         image: str = 'https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg'):
+         image: str = 'https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg',
+         llm_cfg=None, vl_llm_cfg=None):
     # define a writer agent
-    bot = VisualStorytelling(llm={'model': 'qwen-max'})
+    if llm_cfg is None:
+        llm_cfg = {'model': 'qwen-max'}
+    if vl_llm_cfg is None:
+        vl_llm_cfg = {'model': 'qwen-vl-max'}
+    bot = VisualStorytelling(llm=llm_cfg, vl_llm=vl_llm_cfg)
 
     # Chat
     messages = [Message('user', [ContentItem(image=image)])]

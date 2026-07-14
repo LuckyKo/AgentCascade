@@ -284,29 +284,18 @@ class CropResize(BaseToolWithFileAccess):
         ]
 
 
-def init_agent_service():
-    llm_cfg_vl = {
-        # Using Qwen2-VL deployed at any openai-compatible service such as vLLM:
-        # 'model_type': 'qwenvl_oai',
-        # 'model': 'Qwen2-VL-7B-Instruct',
-        # 'model_server': 'http://localhost:8000/v1',  # api_base
-        # 'api_key': 'EMPTY',
-
-        # Using Qwen2-VL provided by Alibaba Cloud DashScope's openai-compatible service:
-        # 'model_type': 'qwenvl_oai',
-        # 'model': 'qwen-vl-max-0809',
-        # 'model_server': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        # 'api_key': os.getenv('DASHSCOPE_API_KEY'),
-
-        # Using Qwen2-VL provided by Alibaba Cloud DashScope:
-        'model_type': 'qwenvl_dashscope',
-        'model': 'qwen-vl-max-0809',
-        'api_key': os.getenv('DASHSCOPE_API_KEY'),
-        'generate_cfg': {
-            'max_retries': 10,
-            'fncall_prompt_type': 'qwen'
+def init_agent_service(vl_llm_cfg=None):
+    if vl_llm_cfg is None:
+        # Default: Using Qwen2-VL provided by Alibaba Cloud DashScope
+        vl_llm_cfg = {
+            'model_type': 'qwenvl_dashscope',
+            'model': 'qwen-vl-max-0809',
+            'api_key': os.getenv('DASHSCOPE_API_KEY'),
+            'generate_cfg': {
+                'max_retries': 10,
+                'fncall_prompt_type': 'qwen'
+            }
         }
-    }
 
     tools = [
         'crop_and_resize',
@@ -333,7 +322,7 @@ def init_agent_service():
         print('area_to_weather is disabled!')
 
     bot = FnCallAgent(
-        llm=llm_cfg_vl,
+        llm=vl_llm_cfg,
         name='Qwen2-VL',
         description='function calling',
         function_list=tools,
@@ -342,9 +331,9 @@ def init_agent_service():
     return bot
 
 
-def test():
+def test(vl_llm_cfg=None):
     # Define the agent
-    bot = init_agent_service()
+    bot = init_agent_service(vl_llm_cfg=vl_llm_cfg)
 
     # Chat
     messages = [{
@@ -364,9 +353,9 @@ def test():
         print('bot response:', response)
 
 
-def app_gui():
+def app_gui(vl_llm_cfg=None):
     # Define the agent
-    bot = init_agent_service()
+    bot = init_agent_service(vl_llm_cfg=vl_llm_cfg)
 
     WebUI(bot).run()
 

@@ -15,8 +15,10 @@
 from agent_cascade.agents import Assistant
 
 
-def test():
-    bot = Assistant(llm={'model': 'qwen-vl-max-latest'})
+def test(vl_llm_cfg=None):
+    if vl_llm_cfg is None:
+        vl_llm_cfg = {'model': 'qwen-vl-max-latest'}
+    bot = Assistant(llm=vl_llm_cfg)
 
     messages = [{
         'role':

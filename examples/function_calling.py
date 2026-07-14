@@ -33,31 +33,21 @@ def get_current_weather(location, unit='fahrenheit'):
         return json.dumps({'location': location, 'temperature': 'unknown'})
 
 
-def test(fncall_prompt_type: str = 'qwen'):
-    llm = get_chat_model({
-        # Use the model service provided by DashScope:
-        'model': 'qwen-plus-latest',
-        'model_server': 'dashscope',
-        'api_key': os.getenv('DASHSCOPE_API_KEY'),
-        'generate_cfg': {
-            'fncall_prompt_type': fncall_prompt_type
-        },
+def test(fncall_prompt_type: str = 'qwen', llm_cfg=None):
+    if llm_cfg is None:
+        # Default: Use the model service provided by DashScope
+        llm_cfg = {
+            'model': 'qwen-plus-latest',
+            'model_server': 'dashscope',
+            'api_key': os.getenv('DASHSCOPE_API_KEY'),
+        }
 
-        # Use the OpenAI-compatible model service provided by DashScope:
-        # 'model': 'qwen2.5-72b-instruct',
-        # 'model_server': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        # 'api_key': os.getenv('DASHSCOPE_API_KEY'),
+    # Merge fncall_prompt_type into generate_cfg regardless of source
+    cfg = dict(llm_cfg)
+    gen_cfg = cfg.setdefault('generate_cfg', {})
+    gen_cfg['fncall_prompt_type'] = fncall_prompt_type
 
-        # Use the model service provided by Together.AI:
-        # 'model': 'Qwen/qwen2.5-7b-instruct',
-        # 'model_server': 'https://api.together.xyz',  # api_base
-        # 'api_key': os.getenv('TOGETHER_API_KEY'),
-
-        # Use your own model service compatible with OpenAI API:
-        # 'model': 'Qwen/qwen2.5-7b-instruct',
-        # 'model_server': 'http://localhost:8000/v1',  # api_base
-        # 'api_key': 'EMPTY',
-    })
+    llm = get_chat_model(cfg)
 
     # Step 1: send the conversation and available functions to the model
     messages = [{'role': 'user', 'content': "What's the weather like in San Francisco?"}]

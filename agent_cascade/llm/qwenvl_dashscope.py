@@ -102,24 +102,58 @@ class QwenVLChatAtDS(BaseFnCallModel):
                                     full_audio += v.get('data')
                     tool_calls = chunk.output.choices[0].message.get('tool_calls', None)
                     if tool_calls:
+                        # Track which positions were matched in this chunk to handle parallel tool calls sharing same index
+                        _chunk_matched = set()
+                        _initial_len = len(full_tool_calls)  # Prevent merging distinct new calls created within this chunk
                         for tc in tool_calls:
-                            if full_tool_calls and (not tc['id'] or
-                                                    tc['id'] == full_tool_calls[-1]['extra']['function_id']):
-                                if tc['function'].get('name', ''):
-                                    full_tool_calls[-1].function_call['name'] += tc['function']['name']
-                                if tc['function'].get('arguments', ''):
-                                    full_tool_calls[-1].function_call['arguments'] += tc['function']['arguments']
+                            tc_id = tc.get('id')
+                            tc_name = tc['function'].get('name', '')
+                            tc_args = tc['function'].get('arguments', '')
+                            
+                            # Find existing tool call to append to (by ID, then fallback)
+                            matched = None
+                            matched_idx = -1
+                            if tc_id and full_tool_calls:
+                                # Match by exact function_id across all entries, skip already-matched positions
+                                for idx, existing in enumerate(full_tool_calls):
+                                    if existing.extra.get('function_id') == tc_id and idx not in _chunk_matched:
+                                        matched = existing
+                                        matched_idx = idx
+                                        break
+                            elif full_tool_calls:
+                                # No ID — find first unmatched entry from pre-existing calls (forward walk preserves order)
+                                for idx in range(len(full_tool_calls)):
+                                    if idx not in _chunk_matched and idx < _initial_len:
+                                        matched = full_tool_calls[idx]
+                                        matched_idx = idx
+                                        break
+                                # All pre-existing entries matched this chunk: merge into last entry only
+                                # if there were actual pre-existing calls (continuation, not first-chunk creation)
+                                if matched is None and _initial_len > 0 and (tc_name or tc_args):
+                                    matched = full_tool_calls[-1]
+                                    matched_idx = len(full_tool_calls) - 1
+                            
+                            if matched:
+                                if tc_name:
+                                    matched.function_call['name'] += tc_name
+                                if tc_args:
+                                    matched.function_call['arguments'] += tc_args
+                                # Mark the matched position so next tool call in this chunk won't reuse it
+                                _chunk_matched.add(matched_idx)
                             else:
+                                new_idx = len(full_tool_calls)
                                 full_tool_calls.append(
                                     Message(role=ASSISTANT,
                                             content='',
-                                            function_call=FunctionCall(name=tc['function'].get('name', ''),
-                                                                       arguments=tc['function'].get('arguments', '')),
+                                            function_call=FunctionCall(name=tc_name,
+                                                                       arguments=tc_args),
                                             extra={
                                                 'model_service_info': json.loads(str(chunk)),
                                                 'model': self.model,
-                                                'function_id': tc['id']
+                                                'function_id': tc_id or f'call_{new_idx}'
                                             }))
+                                # Mark the newly created entry so subsequent deltas in this chunk won't merge into it
+                                _chunk_matched.add(new_idx)
                     res = []
                     if full_reasoning_content:
                         msg_extra = {'model_service_info': json.loads(str(chunk)),

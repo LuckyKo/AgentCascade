@@ -51,8 +51,10 @@ CFGS = {
 }
 
 
-def test(query: str = '<1,1>'):
-    bot = GroupChat(agents=CFGS, llm={'model': 'qwen-max'})
+def test(query: str = '<1,1>', llm_cfg=None):
+    if llm_cfg is None:
+        llm_cfg = {'model': 'qwen-max'}
+    bot = GroupChat(agents=CFGS, llm=llm_cfg)
 
     messages = [Message('user', query, name=USER_NAME)]
     for response in bot.run(messages=messages):

@@ -42,9 +42,11 @@ class LLMRiddles(Agent):
         return self._call_llm(messages=messages)
 
 
-def test():
+def test(llm_cfg=None):
+    if llm_cfg is None:
+        llm_cfg = {'model': 'qwen-max'}
     # Define a writer agent
-    bot = LLMRiddles(llm={'model': 'qwen-max'})
+    bot = LLMRiddles(llm=llm_cfg)
 
     # Gaming
     for topic in bot.topics:

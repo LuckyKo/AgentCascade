@@ -22,15 +22,13 @@ from agent_cascade.agents import ReActChat
 ROOT_RESOURCE = os.path.join(os.path.dirname(__file__), 'resource')
 
 
-def init_agent_service():
-    llm_cfg = {
-        # 'model': 'Qwen/Qwen1.5-72B-Chat',
-        # 'model_server': 'https://api.together.xyz',
-        # 'api_key': os.getenv('TOGETHER_API_KEY'),
-        'model': 'qwen-max',
-        'model_server': 'dashscope',
-        'api_key': os.getenv('DASHSCOPE_API_KEY'),
-    }
+def init_agent_service(llm_cfg=None):
+    if llm_cfg is None:
+        llm_cfg = {
+            'model': 'qwen-max',
+            'model_server': 'dashscope',
+            'api_key': os.getenv('DASHSCOPE_API_KEY'),
+        }
     tools = ['code_interpreter']
     bot = ReActChat(llm=llm_cfg,
                     name='code interpreter',
@@ -40,9 +38,10 @@ def init_agent_service():
 
 
 def test(query: str = 'pd.head the file first and then help me draw a line chart to show the changes in stock prices',
-         file: Optional[str] = os.path.join(ROOT_RESOURCE, 'stock_prices.csv')):
+         file: Optional[str] = os.path.join(ROOT_RESOURCE, 'stock_prices.csv'),
+         llm_cfg=None):
     # Define the agent
-    bot = init_agent_service()
+    bot = init_agent_service(llm_cfg=llm_cfg)
 
     # Chat
     messages = []

@@ -46,8 +46,9 @@ class MyImageGen(BaseTool):
         )
 
 
-def init_agent_service():
-    llm_cfg = {'model': 'qwen-max'}
+def init_agent_service(llm_cfg=None):
+    if llm_cfg is None:
+        llm_cfg = {'model': 'qwen-max'}
     system = ("According to the user's request, you first draw a picture and then automatically "
               'run code to download the picture and select an image operation from the given document '
               'to process the image')
@@ -68,9 +69,9 @@ def init_agent_service():
     return bot
 
 
-def test(query: str = 'draw a dog'):
+def test(query: str = 'draw a dog', llm_cfg=None):
     # Define the agent
-    bot = init_agent_service()
+    bot = init_agent_service(llm_cfg=llm_cfg)
 
     # Chat
     messages = [{'role': 'user', 'content': query}]
