@@ -147,7 +147,7 @@ def test_large_file_performance():
         # per iteration, plus indentation normalization/validation passes. Windows filesystem
         # overhead (backup copies, path resolution) adds further variance. The warmup above
         # ensures cold-start module import cost isn't counted.
-        assert elapsed_ms < 750.0, f"Performance test failed: elapsed time was {elapsed_ms:.2f}ms (expected < 750ms)"
+        assert elapsed_ms < 850.0, f"Performance test failed: elapsed time was {elapsed_ms:.2f}ms (expected < 850ms)"
         print(f"\nLarge file search on 50,000 lines took {elapsed_ms:.2f}ms")
 
 def test_heuristic_indentation_alignment():

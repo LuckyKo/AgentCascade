@@ -21,5 +21,7 @@ ROOT_RESOURCE = os.path.abspath(os.path.join(__file__, '../../../examples/resour
 from examples.virtual_memory_qa import test as vm  # noqa
 
 
+@pytest.mark.extra_examples
 def test_vm():
+    """Test virtual memory QA with DashScope qwen-max — requires external API."""
     vm()

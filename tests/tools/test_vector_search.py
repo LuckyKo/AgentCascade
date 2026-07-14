@@ -12,10 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+
 from agent_cascade.tools import VectorSearch
 
 
+@pytest.mark.extra_tools
+@pytest.mark.skip_if_no_local
 def test_vector_search():
+    """Test vector search tool with local embeddings."""
+    # Check dependencies are available
+    try:
+        from langchain.schema import Document
+        from langchain_community.embeddings import DashScopeEmbeddings
+        from langchain_community.vectorstores import FAISS
+    except ModuleNotFoundError as e:
+        pytest.skip(f'Missing dependency for vector search: {e}')
+
     tool = VectorSearch()
     doc = ('主要序列转导模型基于复杂的循环或卷积神经网络，包括编码器和解码器。性能最好的模型还通过注意力机制连接编码器和解码器。'
            '我们提出了一种新的简单网络架构——Transformer，它完全基于注意力机制，完全不需要递归和卷积。对两个机器翻译任务的实验表明，'

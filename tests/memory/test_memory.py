@@ -12,21 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Memory module tests against a local LLM server."""
+
 import os
 import shutil
 from pathlib import Path
 
 import json5
+import pytest
 
 from agent_cascade.llm.schema import ContentItem, Message
 from agent_cascade.memory import Memory
 
 
-def test_memory():
+@pytest.mark.skip_if_no_local
+def test_memory(local_llm_cfg):
+    """Test memory retrieval with a PDF file."""
     if os.path.exists('workspace'):
         shutil.rmtree('workspace')
 
-    llm_cfg = {'model': 'qwen-max'}
+    llm_cfg = dict(local_llm_cfg)
     mem = Memory(llm=llm_cfg)
     messages = [
         Message('user', [
@@ -44,4 +49,4 @@ def test_memory():
 
 
 if __name__ == '__main__':
-    test_memory()
+    pytest.main([__file__, '-v'])

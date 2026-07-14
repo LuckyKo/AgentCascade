@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+
 from agent_cascade.agents.doc_qa import BasicDocQA
 
 
-def test_doc_qa():
-    llm_cfg = {'model': 'qwen-max', 'api_key': '', 'model_server': 'dashscope'}
+@pytest.mark.skip_if_no_local
+def test_doc_qa(local_llm_cfg):
+    llm_cfg = dict(local_llm_cfg)
     agent = BasicDocQA(llm=llm_cfg)
     messages = [{
         'role': 'user',

@@ -21,5 +21,7 @@ ROOT_RESOURCE = os.path.abspath(os.path.join(__file__, '../../../examples/resour
 from examples.long_dialogue import test as long_dialogue  # noqa
 
 
+@pytest.mark.extra_examples
 def test_long_dialogue():
+    """Test long dialogue with DashScope qwen-max — requires external API."""
     long_dialogue()

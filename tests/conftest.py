@@ -1,9 +1,248 @@
-"""Shared pytest fixtures for the AgentCascade_unified test suite."""
+"""Shared pytest fixtures for the AgentCascade_unified test suite.
 
+Provides local LLM auto-detection and fixtures so integration tests can run
+against LM Studio / Ollama without external API keys when a server is available,
+and skip cleanly (with clear messages) when not.
+"""
+
+import json
+import os
+import socket
 import threading
 from unittest.mock import MagicMock
 
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Local LLM Auto-Detection — session-scoped probe at test startup
+# ---------------------------------------------------------------------------
+
+# LM Studio runs on the host machine; from inside Docker containers we reach it
+# via host.docker.internal.  On bare-metal / WSL hosts, localhost works too.
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "host.docker.internal")
+
+# Endpoints to probe (ordered by preference)
+_LOCAL_ENDPOINTS = [
+    {
+        "name": "LM Studio",
+        "port": 1234,
+        "path": "/v1/models",
+        "model_type": "qwenvl_oai",
+    },
+    {
+        "name": "Ollama",
+        "port": 11434,
+        "path": "/v1/models",
+        "model_type": "qwenvl_oai",
+    },
+    {
+        "name": "vLLM / generic",
+        "port": 8000,
+        "path": "/v1/models",
+        "model_type": "qwenvl_oai",
+    },
+]
+
+# Default lightweight models for testing (must be loaded on the server)
+_DEFAULT_TEST_MODEL = "qwen/qwen3-4b-2507"   # fast general-purpose
+_DEFAULT_VL_TEST_MODEL = "qwen/qwen3-vl-4b"  # vision + text
+
+
+class _LocalLLMDetector:
+    """Session-scoped detector that probes once and caches the result.
+
+    Attributes
+    ----------
+    available : bool
+        True when at least one local server responded with models.
+    api_base : str | None
+        Base URL of the first responsive endpoint (e.g. http://host.docker.internal:1234/v1).
+    models : list[str]
+        Full model ID list from that endpoint.
+    name : str | None
+        Human-readable server name ("LM Studio", "Ollama", …).
+    """
+
+    def __init__(self):
+        self.available = False
+        self.api_base: str | None = None
+        self.models: list[str] = []
+        self.name: str | None = None
+
+    def probe(self, timeout: float = 5.0) -> bool:
+        """Try each endpoint on each host; return True if one works."""
+        for ep in _LOCAL_ENDPOINTS:
+            for host in _LOCAL_HOSTS:
+                url = f"http://{host}:{ep['port']}{ep['path']}"
+                try:
+                    import urllib.request
+                    resp = urllib.request.urlopen(url, timeout=timeout)
+                    data = json.loads(resp.read())
+                    models = [m.get("id", m.get("name", ""))
+                              for m in data.get("data", [])]
+                    if models:
+                        self.available = True
+                        self.api_base = f"http://{host}:{ep['port']}/v1"
+                        self.models = models
+                        self.name = ep["name"]
+                        return True
+                except Exception:
+                    continue
+        return False
+
+
+# Global detector instance — probed once at pytest_configure time
+_local_llm_detector = _LocalLLMDetector()
+
+
+def _find_text_model():
+    """Find the best text model from detected local models.
+    
+    Priority order:
+    1. Exact match for _DEFAULT_TEST_MODEL (prefer non-2507 variants if both exist)
+    2. Any 'qwen3' or 'qwen2.5' model with 'vl' excluded (text-only models)
+    3. First available non-embedding model as fallback
+    """
+    if not _local_llm_detector.available or not _local_llm_detector.models:
+        return _DEFAULT_TEST_MODEL
+    
+    # Prefer exact match, but skip -2507 variants that are known to crash on LM Studio
+    default = _DEFAULT_TEST_MODEL.replace('-2507', '')
+    if default in _local_llm_detector.models:
+        return default
+    if _DEFAULT_TEST_MODEL in _local_llm_detector.models:
+        return _DEFAULT_TEST_MODEL
+    
+    # Fallback: any model with 'qwen3' or 'qwen2.5' in name (text models, not VL)
+    for m in _local_llm_detector.models:
+        ml = m.lower()
+        if 'vl' not in ml and ('qwen3' in ml or 'qwen2.5' in ml):
+            return m
+    
+    # Last resort: first non-embedding model
+    for m in _local_llm_detector.models:
+        ml = m.lower()
+        if 'embed' not in ml:
+            return m
+    
+    return _DEFAULT_TEST_MODEL
+
+
+def _find_vl_model():
+    """Find the best VL model from detected local models.
+    
+    Priority order:
+    1. Exact match for _DEFAULT_VL_TEST_MODEL
+    2. Any model with 'vl' in its name (case-insensitive)
+    3. Fall back to _DEFAULT_VL_TEST_MODEL if nothing found
+    """
+    if not _local_llm_detector.available or not _local_llm_detector.models:
+        return _DEFAULT_VL_TEST_MODEL
+    # Exact match first
+    if _DEFAULT_VL_TEST_MODEL in _local_llm_detector.models:
+        return _DEFAULT_VL_TEST_MODEL
+    # Fallback: any model with 'vl' in name
+    for m in _local_llm_detector.models:
+        if 'vl' in m.lower():
+            return m
+    return _DEFAULT_VL_TEST_MODEL
+
+
+def pytest_configure(config):
+    """Auto-probe for local LLM servers when the test session starts."""
+    if _local_llm_detector.probe():
+        config.addinivalue_line(
+            "markers",
+            "skip_if_no_local: skip when no local LLM server is available",
+        )
+        print(f"\n[conftest] Local LLM found: {_local_llm_detector.name} "
+              f"({_local_llm_detector.api_base}) — {len(_local_llm_detector.models)} models")
+    else:
+        config.addinivalue_line(
+            "markers",
+            "skip_if_no_local: skip when no local LLM server is available",
+        )
+        print("\n[conftest] No local LLM server detected — integration tests will be skipped")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip tests marked 'skip_if_no_local' when no local server was found."""
+    if not _local_llm_detector.available:
+        skip_marker = pytest.mark.skip(reason="No local LLM server available (LM Studio / Ollama on localhost)")
+        for item in items:
+            if "skip_if_no_local" in item.keywords:
+                item.add_marker(skip_marker)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures: local LLM configuration dicts
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def local_llm_available():
+    """Return True if a local LLM server was detected at session start."""
+    return _local_llm_detector.available
+
+
+@pytest.fixture(scope="session")
+def local_llm_api_base():
+    """Base URL of the detected local LLM endpoint (e.g. http://host.docker.internal:1234/v1).
+
+    Raises pytest.skip if no server was found.
+    """
+    if not _local_llm_detector.available:
+        pytest.skip("No local LLM server available")
+    return _local_llm_detector.api_base
+
+
+@pytest.fixture(scope="session")
+def local_llm_models():
+    """List of model IDs available on the detected local endpoint."""
+    if not _local_llm_detector.available:
+        pytest.skip("No local LLM server available")
+    return _local_llm_detector.models
+
+
+@pytest.fixture
+def local_llm_cfg(local_llm_api_base):
+    """LLM config dict pointing to a lightweight text model on the local server.
+
+    Use this fixture in integration tests instead of hardcoding DashScope / OpenAI keys.
+    Example::
+
+        def test_chat(local_llm_cfg):
+            llm = get_chat_model(local_llm_cfg)
+            response = llm.chat(messages=[Message('user', 'hello')])
+    """
+    return {
+        "model": _find_text_model(),
+        "model_server": local_llm_api_base,
+        "api_key": "EMPTY",
+        "model_type": "qwenvl_oai",
+    }
+
+
+@pytest.fixture
+def local_vl_llm_cfg(local_llm_api_base):
+    """LLM config dict pointing to a vision+text model on the local server.
+
+    Use this for tests that need multimodal capabilities (image understanding).
+    """
+    return {
+        "model": _find_vl_model(),
+        "model_server": local_llm_api_base,
+        "api_key": "EMPTY",
+        "model_type": "qwenvl_oai",
+    }
+
+
+@pytest.fixture
+def local_llm_cfg_with_retry(local_llm_cfg):
+    """Like local_llm_cfg but with relaxed retry settings for CI environments."""
+    cfg = dict(local_llm_cfg)
+    cfg.setdefault("generate_cfg", {})["max_retries"] = 2
+    return cfg
 
 
 # ---------------------------------------------------------------------------
