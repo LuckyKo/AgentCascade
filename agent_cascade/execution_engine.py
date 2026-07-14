@@ -872,52 +872,60 @@ class ExecutionEngine:
                 turn_output = []
                 partial_msgs = []  # Initialize to avoid undefined reference on early break
                 stream_tick = 0  # Counter for periodic termination checks during streaming
-                for msg in self._call_llm_with_injection(instance, llm_messages):
-                    if msg is None:
-                        # Yield current partial conversation state to trigger streaming broadcast in run_agent_thread_unified.
-                        # We combine persisted history (response), committed turn messages (turn_output),
-                        # and currently streaming partial messages (instance._streaming_responses)
-                        # to provide a complete "current view" for activity banners and UI rendering.
-                        with instance._compression_lock:
-                            partial_msgs = list(instance._streaming_responses)
+                terminated_during_stream = False  # Track if we already yielded a termination result inside the loop
+
+                gen = self._call_llm_with_injection(instance, llm_messages)
+                try:
+                    for msg in gen:
+                        if msg is None:
+                            # Yield current partial conversation state to trigger streaming broadcast in run_agent_thread_unified.
+                            # We combine persisted history (response), committed turn messages (turn_output),
+                            # and currently streaming partial messages (instance._streaming_responses)
+                            # to provide a complete "current view" for activity banners and UI rendering.
+                            with instance._compression_lock:
+                                partial_msgs = list(instance._streaming_responses)
                         
-                        stream_tick += 1
-                        if (result := self._check_stream_termination(
-                            stream_tick, inst_name, response, turn_output, partial_msgs
-                        )) is not None:
-                            yield result
-                            break
+                            stream_tick += 1
+                            if (result := self._check_stream_termination(
+                                stream_tick, inst_name, response, turn_output, partial_msgs
+                            )) is not None:
+                                yield result
+                                terminated_during_stream = True
+                                break
                         
-                        yield (response + turn_output + partial_msgs, True)
-                        continue
-                    # FIX BOOL_LEAK: Validate message type before appending to prevent bool/list leak
-                    if isinstance(msg, (Message, dict)):
-                        # Endpoint recovery: [RETRYING] messages are transient UI notifications only — don't add to conversation history
-                        content = msg_field(msg, 'content', '')
-                        is_retrying_msg = isinstance(content, str) and content.startswith("[RETRYING]")
-                        
-                        stream_tick += 1
-                        if (result := self._check_stream_termination(
-                            stream_tick, inst_name, response, turn_output, partial_msgs
-                        )) is not None:
-                            yield result
-                            break
-                        
-                        # Yield for UI visibility (even transient messages)
-                        # Retry notifications show only the retry message; normal messages show with streaming state
-                        if is_retrying_msg:
-                            yield (response + turn_output + [msg], True)
-                        else:
                             yield (response + turn_output + partial_msgs, True)
+                            continue
+                        # FIX BOOL_LEAK: Validate message type before appending to prevent bool/list leak
+                        if isinstance(msg, (Message, dict)):
+                            # Endpoint recovery: [RETRYING] messages are transient UI notifications only — don't add to conversation history
+                            content = msg_field(msg, 'content', '')
+                            is_retrying_msg = isinstance(content, str) and content.startswith("[RETRYING]")
                         
-                        # Only append to turn_output if it's a real message (not transient retry notification)
-                        if not is_retrying_msg:
-                            turn_output.append(msg)
-                    else:
-                        logger.warning(f"[MSG_VALIDATION] Skipping non-Message in LLM response for {instance.instance_name}: type={type(msg).__name__}, value={str(msg)[:100]}")
+                            stream_tick += 1
+                            if (result := self._check_stream_termination(
+                                stream_tick, inst_name, response, turn_output, partial_msgs
+                            )) is not None:
+                                yield result
+                                terminated_during_stream = True
+                                break
+                        
+                            # Yield for UI visibility (even transient messages)
+                            # Retry notifications show only the retry message; normal messages show with streaming state
+                            if is_retrying_msg:
+                                yield (response + turn_output + [msg], True)
+                            else:
+                                yield (response + turn_output + partial_msgs, True)
+                        
+                            # Only append to turn_output if it's a real message (not transient retry notification)
+                            if not is_retrying_msg:
+                                turn_output.append(msg)
+                        else:
+                            logger.warning(f"[MSG_VALIDATION] Skipping non-Message in LLM response for {instance.instance_name}: type={type(msg).__name__}, value={str(msg)[:100]}")
+                finally:
+                    gen.close()  # Ensure generator cleanup on early break (prevents resource leak)
 
                 # Check generation change (old run superseded by newer one) alongside stop
-                if self._is_stopped(instance.instance_name):
+                if not terminated_during_stream and self._is_stopped(instance.instance_name):
                     logger.debug("halted/stopped/superseded - %s", instance.instance_name)
                     yield response
                     break  # ── Fix TODO #41: Break immediately instead of continuing loop ──
