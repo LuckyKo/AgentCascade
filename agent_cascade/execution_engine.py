@@ -304,6 +304,20 @@ def _build_resources_block(pool, template, instance=None) -> str:
     if enabled_tools:
         res += "\nEnabled Tools (can change per interaction): " + ", ".join(enabled_tools) + "\n"
 
+    # Append Argument Caching Pool instructions only if the feature is enabled
+    cache_enabled = getattr(pool.settings, 'cache_pool_enabled', True)
+    if cache_enabled:
+        res += (
+            "\n### Advanced Feature: Argument Caching Pool\n"
+            "The system maintains a rolling cache of tool arguments and large outputs (>1000 chars).\n"
+            "Each cached entry is assigned a sequential index N. You can insert any cached entry by using\n"
+            'the placeholder "{USE_CACHED_ENTRY_N}" inside any tool argument value, where N is the cache index.\n'
+            "A single argument value can contain multiple placeholders, e.g.\n"
+            '  content: "I found {USE_CACHED_ENTRY_12} from X and {USE_CACHED_ENTRY_23} from Y."\n'
+            "Each placeholder is independently resolved and replaced with its cached value.\n"
+            "Use system_info to view the current cache pool state. When entries are cached, you will see a [CACHE INFO] notification."
+        )
+
     return res
 
 
@@ -427,6 +441,9 @@ def _replace_resources_block(m0_content: str, new_block: str) -> str:
         The updated m0_content with the resources block replaced.
     """
     return _replace_section(m0_content, "--- CURRENT AVAILABLE RESOURCES", new_block)
+
+
+
 
 
 class ExecutionEngine:
@@ -1318,19 +1335,6 @@ class ExecutionEngine:
                         else:
                             # First injection — append to end
                             m0_content += new_block
-
-                    # 4. Inject Argument Caching Pool instructions — all agents
-                    if '### Advanced Feature: Argument Caching Pool' not in m0_content:
-                        m0_content += (
-                            "\n\n### Advanced Feature: Argument Caching Pool\n"
-                            "The system maintains a rolling cache of tool arguments and large outputs (>1000 chars).\n"
-                            "Each cached entry is assigned a sequential index N. You can insert any cached entry by using\n"
-                            'the placeholder "{USE_CACHED_ENTRY_N}" inside any tool argument value, where N is the cache index.\n'
-                            "A single argument value can contain multiple placeholders, e.g.\n"
-                            '  content: "I found {USE_CACHED_ENTRY_12} from X and {USE_CACHED_ENTRY_23} from Y."\n'
-                            "Each placeholder is independently resolved and replaced with its cached value.\n"
-                            "Use system_info to view the current cache pool state. When entries are cached, you will see a [CACHE INFO] notification."
-                        )
 
                     # Update the message ONLY if content actually changed
                     # (preserves LLM prefix caching)
