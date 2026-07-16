@@ -28,11 +28,12 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] add `delete_and_insert` match_mode to edit_file tool: the `old_content` argument takes a python range `start:end` (but start with 1) that will be deleted before the new content is inserted at position `start`. leaving `new_content` empty will just delete that line range, providing just `start` in range will be pure insert of `new_content`. range can go negative, a start of -1 will insert at tail-1, 0 will append at the end, 1 will insert at start.
 [x] add `shift` mode to re_indet tool, a mode where we just add or remove indent units from the start of the line. (the old `shit` mode will be renamed to `min`)
 [ ] add auto-rollback feature on edit_file fail
-[ ] store all agent instance IDs called by current agent so when dismissed, dismiss all the agents it called too. (it should result in a tree of dismissals recursively dismissing the whole branch)
+[x] keep all agent instance IDs called by current agent — FIXED: added `_child_instances` field to AgentInstance (agent_instance.py), centralized helper method `_update_child_relationship()` in AgentPool (agent_pool.py) atomically updates both `pool.children` and parent's `_child_instances` under `_children_lock` RLock with deduplication guards. All creation/reuse/removal paths use the helper. Thread-safe snapshot pattern used for recursive dismissal iterations, lock contention minimized in remove_instance via pre-snapshotting.
 [x] change read_logs argument to use `range` in the same indexing style as other tools like edit_file — FIXED: replaced start_index/nr_of_entries/last_n_messages with unified `range` string parameter (1-indexed, inclusive, e.g. "1:10", "5:", ":20", negative indices). Added _parse_range() static method. Updated dna.py metadata and audit documentation.
 [ ] implement a live scratchpad tool that injects text/image data into the last few FUNCTION/USER messages. the tool can load a live view of a file's content, console output of a program by PID, interface capture data of a program by PID, set persistence distance (nr of messages in tail agent pool retaining the data, older messages get the data trimmed). agent can call this tool to enable disable this scratchpad (disable by setting persistence to 0, defaults on 2) 
+[ ] add a stop button to shell_cmd messages so user can terminate them early
 [x] disable tools for the last turn of an agent so its forced to return a final answer — FIXED: disabled all tool schemas on last turn via instance._generate_cfg_override['disabled_tools'], cleaned up after LLM call returns.
-[ ] add diff to re_indent reply (same as edit_file)
+[x] add diff to re_indent reply (same as edit_file)
 
 # BUGS:
 
@@ -49,7 +50,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] we are pushing wrong summary from the inner loop detector if the compressor fails and gets stuck in a loop `[SYSTEM ERROR: Empty LLM response]` 
 - [x] the setting `DEFAULT_READ_FILE_MAX_LINES` does not seem to have any effect — FIXED: file_ops.py was using hardcoded DEFAULT_READ_LINES=250 instead of importing from settings; operation_manager read_file had hardcoded limit=1000 default. Both now use DEFAULT_READ_FILE_MAX_LINES from settings.py
 - [x] some UI setting get lost on refresh/restart (parts of inner loop settings) — FIXED: added pool_settings to server state responses (build_state_from_pool + build_stream_update_from_pool), frontend handleServerMessage now restores UI elements from received pool_settings creating proper roundtrip sync
-- [ ] there's an odd issue with LMStudio models getting stuck in repeating sequences like `??????` or `///////` permanently, and our inner loop detector catches them correctly. But the only fix is to reload the model (or switch to another). I'm thinking of switching to the fallback API on inner loop detect instead of kick to caller as that would fix it, basically treating inner loop detection as API connection loss.
+- [x] LMStudio models getting stuck in repeating sequences like `??????` or `///////` — FIXED: bridged Layer 2 (endpoint iteration in api_router.py call_with_fallback) with inner-loop detection from execution_engine.py; inner-loop and max-token exceptions now skip directly to next endpoint in fallback chain instead of retrying same model, treating generation loops as endpoint failures like rate-limit errors do
 
 
 # Errors to investigate:

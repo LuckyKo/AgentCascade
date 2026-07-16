@@ -145,6 +145,17 @@ class AgentLifecycleManager:
                 # timer starts from reuse event
                 inst.last_activity = now
 
+                # Clear old child tracking — reused instances start fresh with no children
+                # Track old parent for cleanup, then update to new caller (thread-safe)
+                with self.pool._children_lock:
+                    old_parent = inst.parent_instance
+                    inst.parent_instance = caller
+                    inst._child_instances.clear()
+
+                # Remove from old parent's tracking even if new caller is None
+                if old_parent is not None:
+                    self.pool._update_child_relationship(old_parent, instance_name, add=False)
+
                 logger.debug(
                     f"[INSTANCE REUSE] '{instance_name}' ({agent_class}) reusing existing inactive instance. "
                     f"Conversation history will be preserved and extended."
@@ -183,6 +194,18 @@ class AgentLifecycleManager:
                 "[CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for %s",
                 instance_name
             )
+
+            # Per-instance child tracking + pool.children sync via helper (thread-safe, deduped)
+            if caller is not None and caller != instance_name:
+                self.pool._update_child_relationship(caller, instance_name, add=True)
+        else:
+            # Reuse path: update per-instance child tracking for new caller (thread-safe via helper)
+            if caller is not None and caller != instance_name:
+                # Remove from old parent's tracking if caller changed
+                if old_parent is not None and old_parent != caller:
+                    self.pool._update_child_relationship(old_parent, instance_name, add=False)
+                # Add to new parent's tracking (helper handles deduplication)
+                self.pool._update_child_relationship(caller, instance_name, add=True)
 
         # BUG FIX (Bug 2): Load session from log_file if provided
         session_was_loaded = False

@@ -235,6 +235,7 @@ class AgentInstance:
     max_turns: Optional[int] = None      # Per-instance turn limit (None = use default 50)
     _current_turn: int = field(default=0)  # Current turn number during execution (for system_info display)
     parent_instance: Optional[str] = None  # Who called this agent (None for root/main)
+    _child_instances: List[str] = field(default_factory=list)  # Direct children spawned by this agent (for per-instance tree tracking / recursive dismissal visibility)
     compression_summary: Optional[str] = None  # Current cumulative summary (if any)
     _compression_lock: threading.RLock = field(default_factory=threading.RLock)  # RLock: recovery paths may re-acquire via instance_conversations.__setitem__
 

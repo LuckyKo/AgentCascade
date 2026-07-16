@@ -277,6 +277,7 @@ class AgentPool:
         self._compression_halted: set = set()              # instances halted by forced compression (not manual)
         self.terminated_instances: set = set()             # instances marked for immediate termination
         self.children: Dict[str, List[str]] = {}           # parent_name -> [child_names] for cascade termination
+        self._children_lock = threading.RLock()            # Lock for child tracking structures (pool.children + _child_instances)
 
         # ── Run generation counter (prevents resume race condition) ───────────
         # Each time a new execution thread starts, this is incremented. Old threads
@@ -325,6 +326,36 @@ class AgentPool:
         # ── Agent discovery (unchanged) ──────────────────────────────────────
         self.agents_dir = Path(agents_dir)
         self._discover_agents(agents_dir)
+
+    # ── Child relationship helper (centralized mutation for Bug41 fix) ────────
+
+    def _update_child_relationship(self, parent_name: str, child_name: str, add: bool = True) -> None:
+        """Update both pool.children and parent's _child_instances atomically under lock.
+        
+        Args:
+            parent_name: Name of the parent instance.
+            child_name: Name of the child instance.
+            add: If True, add the relationship; if False, remove it.
+        """
+        with self._children_lock:
+            if add:
+                # Add to pool.children
+                if parent_name not in self.children:
+                    self.children[parent_name] = []
+                if child_name not in self.children[parent_name]:
+                    self.children[parent_name].append(child_name)
+                # Add to parent instance's _child_instances
+                parent_inst = self.get_instance(parent_name)
+                if parent_inst and child_name not in parent_inst._child_instances:
+                    parent_inst._child_instances.append(child_name)
+            else:
+                # Remove from pool.children
+                if child_name in self.children.get(parent_name, []):
+                    self.children[parent_name].remove(child_name)
+                # Remove from parent instance's _child_instances
+                parent_inst = self.get_instance(parent_name)
+                if parent_inst and child_name in parent_inst._child_instances:
+                    parent_inst._child_instances.remove(child_name)
 
     def get_template(self, name: str) -> Optional[Assistant]:
         """Get template by name with case-insensitive fallback.
@@ -504,11 +535,9 @@ class AgentPool:
         )
         self.instances[instance_name] = instance
         self._instances_version += 1  # Fix #3: signal that instances changed
-        # Track parent-child relationship for cascade termination (Fix Bug41)
+        # Track parent-child relationship for cascade termination (Fix Bug41, thread-safe via helper)
         if parent_instance:
-            if parent_instance not in self.children:
-                self.children[parent_instance] = []
-            self.children[parent_instance].append(instance_name)
+            self._update_child_relationship(parent_instance, instance_name, add=True)
         # RECOMMENDED FIX: Removed redundant _mark_activity() call - constructor already sets last_activity=now above
         return instance
 
@@ -527,7 +556,7 @@ class AgentPool:
         Fires dismissal callbacks and cleans up message queues.
         """
         self._instances_version += 1  # Fix #3: signal that instances changed
-        self.instances.pop(instance_name, None)
+        inst = self.instances.pop(instance_name, None)
         self.terminated_instances.discard(instance_name)  # Issue #4 fix: prevent memory leaks
         with self._queue_lock:
             self.message_queues.pop(instance_name, None)
@@ -559,12 +588,22 @@ class AgentPool:
         log_path = log_inst.log_path if log_inst else None
         self._fire_on_dismissed(instance_name, log_path)
 
-        # Clean up children tracking (Fix Bug41)
-        self.children.pop(instance_name, None)
-        # Also remove from parent's children list
-        for parent, kids in self.children.items():
-            if instance_name in kids:
-                kids.remove(instance_name)
+        # Clean up children tracking (Fix Bug41) — snapshot under lock to minimize hold time
+        with self._children_lock:
+            self.children.pop(instance_name, None)
+            parent_keys = list(self.children.keys())
+            # Snapshot instances that reference this child for cleanup outside lock
+            stray_parents = [pi for pi in self.instances.values() if instance_name in pi._child_instances]
+
+        # Remove from all parents' tracking via helper (handles both pool.children and _child_instances)
+        for parent in parent_keys:
+            if instance_name in self.children.get(parent, []):
+                self._update_child_relationship(parent, instance_name, add=False)
+
+        # Clean up any remaining per-instance references outside lock
+        for parent_inst in stray_parents:
+            if instance_name in parent_inst._child_instances:
+                parent_inst._child_instances.remove(instance_name)
 
         # BUG31 Fix: Clean up api_integration module-level caches to prevent memory leaks
         # and stale data when instances are dismissed and re-created with same name.
@@ -615,8 +654,10 @@ class AgentPool:
                               via the global event. Bug5 Fix: Dismissal uses False to avoid
                               affecting other agents mid-execution.
         """
-        # First cascade-terminate all children (recursive, Fix Bug41)
-        for child_name in list(self.children.get(instance_name, [])):
+        # First cascade-terminate all children (recursive, Fix Bug41, thread-safe read)
+        with self._children_lock:
+            child_list = list(self.children.get(instance_name, []))
+        for child_name in child_list:
             if self.instances.get(child_name):
                 self.terminate_instance(child_name, set_global_stopped=False)  # Recursive — handles nested trees
 
@@ -685,8 +726,10 @@ class AgentPool:
         Bug5 Fix #1: Dismissal should NOT set global _stopped_event to avoid affecting
         other agents mid-execution. Only this specific instance is terminated.
         """
-        # First dismiss all children (recursive cascade, Fix Bug41)
-        for child_name in list(self.children.get(instance_name, [])):
+        # First dismiss all children (recursive cascade, Fix Bug41, thread-safe read)
+        with self._children_lock:
+            child_list = list(self.children.get(instance_name, []))
+        for child_name in child_list:
             if self.instances.get(child_name):
                 self.dismiss_instance(child_name)  # Recursive — handles nested trees
 
