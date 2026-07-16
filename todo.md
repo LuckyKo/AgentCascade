@@ -46,96 +46,54 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] call_agent returns `[SYSTEM ERROR: Empty LLM response]` if the agent failed a inner loop check — FIXED: inner-loop and max-tokens detection exceptions were suppressed by inner except block, added re-raise for inner_loop: and max_tokens: prefixes so outer retry handler shows proper error messages (execution_engine.py)
 - [x] inner loop detector severely missfires — FIXED: analyzed 48 false positive samples across 5 days, added UI controls for min_chars, score_threshold, per-mode toggles (char_run, sentence_rep, ngram_rep, block_rep, entropy), and dedicated loop_max_retries budget in Loop Detection Tuning panel. Toggles gate detection signals in inner_loop_detect.py, applied via pool settings from WebUI in real time
 - [x] add turn info (x / y available) to system_info — FIXED: added _current_turn field to AgentInstance, tracked in execution_engine.py loop, displayed in system_info tool output as "Current Turn: X / Y", centralized DEFAULT_MAX_TURNS constant in settings.py, reset on instance reuse
-- [x] we are sending custom sampling info when its disabled for the used API — FIXED: added _use_custom_sampling flag in api_router.py to_llm_cfg(), _build_merged_cfg() in execution_engine.py now strips stale sampling params from lower layers (template/UI) when endpoint has custom sampling disabled, SAMPLING_KEYS frozenset covers all 10 param variants, base.py agent_settings cleanup pops the internal flag
+- [ ] we are pushing wrong summary from the inner loop detector if the compressor fails and gets stuck in a loop
+- [ ] the setting `DEFAULT_READ_FILE_MAX_LINES` does not seem to have any effect
+- [ ] unhelpful message return when a child agent fails the inner loop detection `[SYSTEM ERROR: Empty LLM response]` 
+- [ ] some UI setting get lost on refresh/restart
+- [ ] there's an odd issue with LMStudio models getting stuck in repeating sequences like `??????` or `///////` permanently, and our inner loop detector catches them correctly. But the only fix is to reload the model (or switch to another). I'm thinking of switching to the fallback API on inner loop detect instead of kick to caller as that would fix it, basically treating inner loop detection as API connection loss.
+
 
 # Errors to investigate:
 
-# noisy fallback
-    raise ModelServiceError(exception=ex, code=code if code else None)
-agent_cascade.llm.base.ModelServiceError: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_2a1cfae7', 'timestamp': '2026-07-12T21:53:39.009531400+00:00', 'trace_id': 'ac701ebec30a482086c367cbb31b8d02'}
-
-2026-07-13 00:53:40,105 - base.py - 990 - INFO - Agent [Generalist] - ALL tokens: 233, Available tokens: 124208
-2026-07-13 00:53:40,690 - log.py - 41 - WARNING - [APIRouter] Endpoint 'grok-4.1-fast' @ http://127.0.0.1:4315/v1 attempt 2/2: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_cd1fc011', 'timestamp': '2026-07-12T21:53:40.690175100+00:00', 'trace_id': '8ff20a70695c4169a9f0e12e102aa670'}
-Traceback: Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 1053, in call_with_fallback
-    result = execute_with_sem(current_agent_name)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 999, in execute_with_sem
-    first_chunk = next(it)
-                  ^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 524, in _convert_messages_iterator_to_target_type
-    for messages in messages_iter:
-                    ^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 384, in _format_and_cache
-    for o in output:
-             ^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 508, in _postprocess_messages_iterator
-    for pre_msg in messages:
-                   ^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1054, in retry_model_service_iterator
-    num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
-                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1077, in _raise_or_delay
-    raise e from None
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1049, in retry_model_service_iterator
-    for rsp in it_fn():
-               ^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\oai.py", line 552, in _chat_stream
-    raise ModelServiceError(exception=ex, code=code if code else None)
-agent_cascade.llm.base.ModelServiceError: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_cd1fc011', 'timestamp': '2026-07-12T21:53:40.690175100+00:00', 'trace_id': '8ff20a70695c4169a9f0e12e102aa670'}
-[APIRouter] Endpoint 'grok-4.1-fast' @ http://127.0.0.1:4315/v1 attempt 2/2: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_cd1fc011', 'timestamp': '2026-07-12T21:53:40.690175100+00:00', 'trace_id': '8ff20a70695c4169a9f0e12e102aa670'}
-Traceback: Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 1053, in call_with_fallback
-    result = execute_with_sem(current_agent_name)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 999, in execute_with_sem
-    first_chunk = next(it)
-                  ^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 524, in _convert_messages_iterator_to_target_type
-    for messages in messages_iter:
-                    ^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 384, in _format_and_cache
-    for o in output:
-             ^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 508, in _postprocess_messages_iterator
-    for pre_msg in messages:
-                   ^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1054, in retry_model_service_iterator
-    num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
-                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1077, in _raise_or_delay
-    raise e from None
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1049, in retry_model_service_iterator
-    for rsp in it_fn():
-               ^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\oai.py", line 552, in _chat_stream
-    raise ModelServiceError(exception=ex, code=code if code else None)
-agent_cascade.llm.base.ModelServiceError: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_cd1fc011', 'timestamp': '2026-07-12T21:53:40.690175100+00:00', 'trace_id': '8ff20a70695c4169a9f0e12e102aa670'}
-
-2026-07-13 00:53:40,695 - base.py - 990 - INFO - Agent [Generalist] - ALL tokens: 233, Available tokens: 124208
-2026-07-13 00:53:40,698 - oai.py - 391 - INFO - LLM infrastructure changed. Re-detecting context for: http://localhost:1234/v1
-2026-07-13 00:53:42,762 - oai.py - 333 - DEBUG - Missing context metadata in list. Trying specific endpoint: http://localhost:1234/v1/models/agents-a1-35b-mtp
-2026-07-13 00:53:44,799 - oai.py - 354 - INFO - Model agents-a1-35b-mtp found, but could not detect context length via API.
-
-# Web_extract error
-
-2026-07-13 01:34:39,985 - base.py - 990 - INFO - Agent [Researcher] - ALL tokens: 11745, Available tokens: 124134
-2026-07-13 01:34:43,966 - simple_doc_parser.py - 450 - INFO - Start parsing https://dl.acm.org/doi/10.1016/j.cosrev.2026.100902...
-2026-07-13 01:34:43,989 - utils.py - 274 - INFO - Downloading https://dl.acm.org/doi/10.1016/j.cosrev.2026.100902 to n:\work\WD\AgentWorkspace\tools\simple_doc_parser\b941e841623e0e8c8ff8e9d12d620d8f79636b86082b8642cebaca02070bb5ae\j.cosrev.2026.100902...
-2026-07-13 01:34:44,011 - agent.py - 260 - WARNING - An error occurred when calling tool `web_extractor`:
-ValueError: Can not download this file. Please check your network or the file link.
-Traceback:
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\agent.py", line 248, in _call_tool
-    tool_result = tool.call(tool_args, **kwargs)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\tools\web_extractor.py", line 44, in call
-    parsed_web = self.simple_doc_parser.call({'url': url})
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\tools\simple_doc_parser.py", line 466, in call
-    path = save_url_to_local_work_dir(path, tmp_file_root)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\utils\utils.py", line 289, in save_url_to_local_work_dir
-    raise ValueError('Can not download this file. Please check your network or the file link.')
-
-2026-07-13 01:34:44,027 - simple_doc_parser.py - 450 - INFO - Start parsing https://www.deloitte.com/us/en/insights/industry/technology/technology-media-and-telecom-predictions/2026/ai-agent-orchestration.html...
-2
+# push of summary on loop detected
+2026-07-14 22:46:58,682 - execution_engine.py - 716 - DEBUG - [TURN_START] Calling _setup_turn for Compressor_1
+2026-07-14 22:46:58,683 - execution_engine.py - 1152 - INFO - [CACHE_REBUILD] Rebuilding working set for Compressor_1 (conv_len=2)
+2026-07-14 22:46:58,683 - execution_engine.py - 1235 - DEBUG - [CACHE_REBUILD] System prompt content CHANGED for Compressor_1
+2026-07-14 22:46:58,690 - agent_instance_logger.py - 458 - INFO - Rewrote agent log n:\work\WD\AgentWorkspace\logs\compressor_Compressor_1_20260714_224658.jsonl with 2 messages.
+2026-07-14 22:46:58,690 - execution_engine.py - 751 - DEBUG - [TURN_DONE] Got messages=2, llm_messages=2
+2026-07-14 22:46:58,766 - base.py - 990 - INFO - Agent [Compressor] - ALL tokens: 83146, Available tokens: 124493
+2026-07-14 22:46:58,772 - oai.py - 77 - DEBUG - [CACHE] MISS creating new client key=('http://127.0.0.1:1234/v1', 'EMPTY')
+2026-07-14 22:47:49,610 - execution_engine.py - 1906 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for Compressor_1. Retrying…
+2026-07-14 22:47:49,611 - execution_engine.py - 1951 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-14.jsonl
+2026-07-14 22:47:49,611 - execution_engine.py - 1977 - DEBUG - [INNER_LOOP] Detection error for Compressor_1: inner_loop: repeated ngram
+2026-07-14 22:47:49,612 - execution_engine.py - 2198 - WARNING - [ENDPOINT_RETRY] LLM call failed for Compressor_1, retry 1/5. Retrying in 1.1s with new endpoint... Error: inner_loop: repeated ngram
+2026-07-14 22:47:50,685 - base.py - 990 - INFO - Agent [Compressor] - ALL tokens: 83146, Available tokens: 124493
+2026-07-14 22:47:53,012 - execution_engine.py - 1906 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for Compressor_1. Retrying…
+2026-07-14 22:47:53,013 - execution_engine.py - 1951 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-14.jsonl
+2026-07-14 22:47:53,013 - execution_engine.py - 1977 - DEBUG - [INNER_LOOP] Detection error for Compressor_1: inner_loop: repeated ngram
+2026-07-14 22:47:53,014 - execution_engine.py - 2198 - WARNING - [ENDPOINT_RETRY] LLM call failed for Compressor_1, retry 2/5. Retrying in 2.0s with new endpoint... Error: inner_loop: repeated ngram
+2026-07-14 22:47:55,051 - base.py - 990 - INFO - Agent [Compressor] - ALL tokens: 83146, Available tokens: 124493
+2026-07-14 22:47:57,485 - execution_engine.py - 1906 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for Compressor_1. Retrying…
+2026-07-14 22:47:57,486 - execution_engine.py - 1951 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-14.jsonl
+2026-07-14 22:47:57,486 - execution_engine.py - 1977 - DEBUG - [INNER_LOOP] Detection error for Compressor_1: inner_loop: repeated ngram
+2026-07-14 22:47:57,486 - execution_engine.py - 2198 - WARNING - [ENDPOINT_RETRY] LLM call failed for Compressor_1, retry 3/5. Retrying in 4.3s with new endpoint... Error: inner_loop: repeated ngram
+2026-07-14 22:48:01,766 - base.py - 990 - INFO - Agent [Compressor] - ALL tokens: 83146, Available tokens: 124493
+2026-07-14 22:48:04,092 - execution_engine.py - 1906 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for Compressor_1. Retrying…
+2026-07-14 22:48:04,093 - execution_engine.py - 1951 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-14.jsonl
+2026-07-14 22:48:04,093 - execution_engine.py - 1977 - DEBUG - [INNER_LOOP] Detection error for Compressor_1: inner_loop: repeated ngram
+2026-07-14 22:48:04,093 - execution_engine.py - 2198 - WARNING - [ENDPOINT_RETRY] LLM call failed for Compressor_1, retry 4/5. Retrying in 5.0s with new endpoint... Error: inner_loop: repeated ngram
+2026-07-14 22:48:09,107 - base.py - 990 - INFO - Agent [Compressor] - ALL tokens: 83146, Available tokens: 124493
+2026-07-14 22:48:11,447 - execution_engine.py - 1906 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated ngram (score=352.1) for Compressor_1. Retrying…
+2026-07-14 22:48:11,448 - execution_engine.py - 1951 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-14.jsonl
+2026-07-14 22:48:11,448 - execution_engine.py - 1977 - DEBUG - [INNER_LOOP] Detection error for Compressor_1: inner_loop_exhausted: retried 5 times, giving up — last reason: repeated ngram
+2026-07-14 22:48:11,450 - base.py - 990 - INFO - Agent [Compressor] - ALL tokens: 83146, Available tokens: 124493
+2026-07-14 22:48:13,801 - execution_engine.py - 1906 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for Compressor_1. Retrying…
+2026-07-14 22:48:13,802 - execution_engine.py - 1951 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-14.jsonl
+2026-07-14 22:48:13,802 - execution_engine.py - 1977 - DEBUG - [INNER_LOOP] Detection error for Compressor_1: inner_loop_exhausted: retried 5 times, giving up — last reason: repeated ngram
+2026-07-14 22:48:13,805 - execution_engine.py - 1080 - DEBUG - EXIT - Compressor_1 RUNNING→IDLE
+2026-07-14 22:48:14,122 - handler.py - 843 - INFO - /compress applied for Maine: Context compressed (auto mode): 93 messages summarized for 'Maine'.
+2026-07-14 22:48:14,122 - handler.py - 311 - DEBUG - Logger sync after /compress command for 'Maine': pool_len=28, using reset_history() for full sync
+2026-07-14 22:48:14,153 - agent_instance_logger.py - 678 - INFO - Synced compression marker in n:\work\WD\AgentWorkspace\logs\orchestrator_Maine_20260714_224616.jsonl (315 messages).
+2026-07-14 22:48:14,172 - execution_engine.py - 1645 - DEBUG - Rebuilt working sets for Maine: messages=28, llm_messages=28
+2026-07-14 22:48:14,176 - execution_engine.py - 1457 - DEBUG - [PRE_LLM] Compress command handled for Maine
+2026-07-14 22:48:14,176 - execution_engine.py - 824 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop

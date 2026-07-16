@@ -12,10 +12,38 @@ import json
 import os
 import shutil
 import datetime
+import threading
 from typing import Any, Dict, List, Optional, Union
 
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
+
+
+# ── Timestamp uniqueness guarantee ──────────────────────────────────────────────
+# Module-level counter to ensure unique timestamps even under rapid calls.
+# datetime.now().isoformat() can produce identical values within the same microsecond.
+_timestamp_counter = 0
+_timestamp_lock = threading.Lock()
+
+def _next_unique_timestamp() -> str:
+    """Generate a strictly increasing timestamp string (microsecond resolution + monotonic counter).
+
+    Guarantees uniqueness across rapid successive calls by appending an incrementing
+    counter to the base ISO timestamp when collisions would occur.
+    Safe against second/minute/hour rollover at boundaries (e.g., 59→60).
+    """
+    with _timestamp_lock:
+        global _timestamp_counter
+        ts = datetime.datetime.now()
+        # Use counter as an offset to guarantee uniqueness
+        microsecond = (ts.microsecond + _timestamp_counter) % 1_000_000
+        if microsecond < ts.microsecond and _timestamp_counter > 0:
+            # Overflow occurred - bump by one second using timedelta (safe at boundaries)
+            ts = ts.replace(microsecond=microsecond) + datetime.timedelta(seconds=1)
+        else:
+            ts = ts.replace(microsecond=microsecond)
+        _timestamp_counter += 1
+    return ts.isoformat()
 
 
 class AgentInstanceLogger:
@@ -72,35 +100,35 @@ class AgentInstanceLogger:
     @classmethod
     def copy_session_file(cls, source_path: str, log_dir: str, agent_class: str, instance_name: str) -> str:
         """Copy a session file to a new timestamped location.
-        
+
         This creates a working copy of an existing session file with a new timestamp,
         preserving the original file intact. Returns the path to the copied file.
-        
+
         Args:
             source_path: Path to the original session file
             log_dir: Directory where the copy should be created
             agent_class: Normalized agent class name (lowercase)
             instance_name: Agent instance name
-            
+
         Returns:
             Path to the newly created copy
-            
+
         Raises:
             FileNotFoundError: If source_path does not exist
         """
         # Guard against missing source file (Fix #3)
         if not os.path.exists(source_path):
             raise FileNotFoundError(f"Source session file not found: {source_path}")
-        
+
         # Generate a new timestamped filename for this working session
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         new_filename = f"{agent_class}_{instance_name}_{timestamp}.jsonl"
         new_log_path = os.path.join(log_dir, new_filename)
-        
+
         # Copy the original file to the new path (preserves metadata with copy2)
         shutil.copy2(source_path, new_log_path)
         logger.debug(f"Copied session from {source_path} to {new_log_path}")
-        
+
         return new_log_path
 
     # ── File handle management ────────────────────────────────────────────
@@ -133,7 +161,7 @@ class AgentInstanceLogger:
             if ts:
                 msg_dict['timestamp'] = ts
             else:
-                ts = datetime.datetime.now().isoformat()
+                ts = _next_unique_timestamp()
                 try:
                     message.timestamp = ts
                 except Exception:
@@ -146,7 +174,7 @@ class AgentInstanceLogger:
             # Return a copy instead of mutating in-place (Fix #6)
             msg_copy = dict(message)
             if 'timestamp' not in msg_copy:
-                msg_copy['timestamp'] = datetime.datetime.now().isoformat()
+                msg_copy['timestamp'] = _next_unique_timestamp()
             return msg_copy
 
         # Fallback for generic objects or Message dataclass
@@ -158,7 +186,7 @@ class AgentInstanceLogger:
                     msg_dict[k] = val
 
         if 'timestamp' not in msg_dict:
-            ts = datetime.datetime.now().isoformat()
+            ts = _next_unique_timestamp()
             msg_dict['timestamp'] = ts
             try:
                 setattr(message, 'timestamp', ts)
@@ -167,7 +195,7 @@ class AgentInstanceLogger:
 
         if not msg_dict and isinstance(message, str):
             msg_dict = {'role': 'unknown', 'content': message,
-                        'timestamp': datetime.datetime.now().isoformat()}
+                        'timestamp': _next_unique_timestamp()}
 
         return msg_dict
 
@@ -186,25 +214,25 @@ class AgentInstanceLogger:
     def _initial_save(self):
         """Write metadata as the first line. Guard against duplicate calls,
         and also check if file already has metadata from another logger instance.
-        
+
         Thread-safety note: The primary protection against duplicate writes is the
         LoggerManager._lock which protects get_logger() calls. This method provides
         a secondary defense for edge cases where multiple instances might access the same file.
         The file-read-then-write sequence is not atomic, but race conditions are unlikely
         in practice since the composite key cache ensures only one logger instance per (instance_name, agent_class).
-        
+
         When log_path was externally provided (session load scenario), skip writing metadata here
         as reset_history(rewrite=True) will handle it. This avoids redundant I/O. (Fix #2)
         """
         if self._initialized:
             return
-        
+
         # Skip initial save when log_path was externally provided (session load path)
         # The caller will handle file initialization via reset_history/rewrite
         if getattr(self, '_log_path_provided', False):
             self._initialized = True
             return
-        
+
         # Defensive check: if file already exists with metadata on first line, skip writing
         if os.path.exists(self.log_path):
             try:
@@ -221,7 +249,7 @@ class AgentInstanceLogger:
                     os.remove(self.log_path)
                 except OSError:
                     pass
-        
+
         self._append_line({"metadata": self.data["metadata"]})
         self._initialized = True
 
@@ -235,7 +263,7 @@ class AgentInstanceLogger:
         """Append a single message to history and file."""
         self.update_timestamp()
         formatted_msg = self._format_message(message)
-        
+
         self.data["history"].append(formatted_msg)
         self._append_line(formatted_msg)
 
@@ -243,25 +271,25 @@ class AgentInstanceLogger:
 
     def load_history_from_file(self):
         """Load existing message history from the JSONL file into in-memory data["history"].
-        
+
         Called during session restore to ensure the logger's in-memory state matches
         what's already persisted on disk. This prevents double-logging when initial
         messages are re-added to the conversation.
-        
+
         The JSONL format is:
           - Line 1: metadata dict (has "metadata" key) — skip this
           - Lines 2+: message dicts — load these into data["history"]
         """
         # FIX #1: Clear history before loading to prevent duplication if called twice
         self.data["history"] = []
-        
+
         if not os.path.exists(self.log_path):
             return
-        
+
         try:
             with open(self.log_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
-            
+
             for line in lines[1:]:  # Skip metadata line
                 line = line.strip()
                 if not line:
@@ -279,17 +307,17 @@ class AgentInstanceLogger:
                            "History may be out of sync, potentially causing duplicate appends.")
             pass  # File disappeared or unreadable — stay with empty history
 
-    # ── Compression marker insertion ──────────────────────────────────────
+    # ── Compression marker insertion ───────────────────────────────────────────────
 
     def insert_compression_marker(self, summary_msg: Any, tail_count: int):
         """DEPRECATED: Insert a compression marker into the log.
-        
+
         This method is now a no-op placeholder. Actual logger synchronization
         after compression is handled by CompressionHandler._sync_logger_after_compression()
         which calls reset_history(conv, rewrite=True) for all compression paths.
-        
+
         Kept for backward compatibility but no longer called in production code.
-        
+
         Args:
             summary_msg: The compression summary message (unused).
             tail_count: Number of tail messages (unused).
@@ -317,10 +345,10 @@ class AgentInstanceLogger:
         if not self._file_history_synced and os.path.exists(self.log_path):
             self.load_history_from_file()
             self._file_history_synced = True
-        
+
         # Update timestamp AFTER sync check to avoid misleading metadata when no writes occur
         self.update_timestamp()
-        
+
         old_history = self.data["history"]
         last_match_in_log = -1
         needs_rewrite = False
@@ -421,7 +449,7 @@ class AgentInstanceLogger:
         if needs_rewrite:
             self.rewrite_log_with_history(old_history)
 
-    # ── History reset / rewrite ───────────────────────────────────────────
+    # ── History reset / rewrite ────────────────────────────────────────────────────
 
     def rewrite_log_with_history(self, new_history: List[Any]) -> bool:
         """Rewrite the log file from scratch with a complete history.
@@ -460,108 +488,10 @@ class AgentInstanceLogger:
             logger.error(f"Failed to rewrite agent log {self.log_path}: {e}")
             return False
 
-        # Update internal tracking — pool state (active set) for in-memory history
-        self.data["history"] = [self._format_message(msg) for msg in new_history]
+        # Update internal tracking — mirror what was written to disk.
+        # After rewrite, logger history is the single source of truth for this session.
+        self.data["history"] = formatted_msgs  # Use already-formatted list from above (avoids re-formatting which can assign new timestamps)
         self._file_history_synced = True  # Prevent unnecessary file reload on next update_history()
-
-        return True
-
-    def sync_compression_marker(self, new_pool_state: List[Any]) -> bool:
-        """Insert a new compression marker into the log at a mirrored tail position.
-
-        SRP: Post-compression log maintenance — reads existing log messages from disk,
-        finds the newest compression marker in the pool state, deduplicates against
-        the file, and inserts it at a position mirroring its tail distance.
-        All original messages in the JSONL are preserved (not replaced).
-
-        Args:
-            new_pool_state: Current pool working set containing the new compression marker.
-
-        Returns:
-            True on success, False on error.
-        """
-        # Close cached handle before overwriting (Fix #1)
-        if self._file_handle and not self._file_handle.closed:
-            self._file_handle.flush()
-            self._file_handle.close()
-            self._file_handle = None
-
-        try:
-            # ── Read existing log messages from disk ──
-            # Always read from file to get full history. Pool working set is smaller after compression.
-            existing_msgs = []
-            if self.log_path and os.path.exists(self.log_path):
-                with open(self.log_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            item = json.loads(line)
-                            if isinstance(item, dict) and "metadata" not in item and "event" not in item:
-                                existing_msgs.append(item)
-                        except json.JSONDecodeError:
-                            logger.warning(f"Skipping malformed JSON line in {self.log_path}")
-                            continue
-
-            # ── Find the LAST (newest) compression marker in pool state ──
-            from agent_cascade.llm.schema import USER as USER_ROLE
-            last_marker_idx = -1
-            marker_content = None
-            for i in range(len(new_pool_state) - 1, -1, -1):
-                msg = new_pool_state[i]
-                role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
-                content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
-                if role == USER_ROLE and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
-                    last_marker_idx = i
-                    marker_content = content
-                    break
-
-            # ── Dedup guard: check if this specific marker already exists in the log file ──
-            marker_already_in_file = any(
-                isinstance(m.get('content', ''), str) and m['content'] == marker_content
-                for m in existing_msgs
-            ) if last_marker_idx >= 0 else False
-
-            # ── Build result: existing log + marker inserted at mirrored tail offset ──
-            if last_marker_idx >= 0:
-                actual_tail_count = len(new_pool_state) - last_marker_idx - 1
-                formatted_marker = self._format_message(new_pool_state[last_marker_idx])
-
-                insert_pos = len(existing_msgs) - actual_tail_count
-                insert_pos = max(0, min(insert_pos, len(existing_msgs)))
-
-                if marker_already_in_file:
-                    logger.debug(f"Skipping duplicate marker insert — content already in {self.log_path}")
-                    result_msgs = existing_msgs
-                else:
-                    result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
-            else:
-                # No markers found — prefer pool state, fall back to file contents
-                if new_pool_state:
-                    result_msgs = [self._format_message(m) for m in new_pool_state]
-                elif existing_msgs:
-                    result_msgs = [self._format_message(m) for m in existing_msgs]  # File has content, pool is empty → use file as source of truth
-                else:
-                    result_msgs = []
-
-            # ── Write to file (overwrite) ──
-            lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
-            for msg in result_msgs:
-                lines.append(json.dumps(msg if isinstance(msg, dict) else self._format_message(msg), ensure_ascii=False) + '\n')
-
-            with open(self.log_path, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
-
-            self._file_handle = None
-            logger.info(f"Synced compression marker in {self.log_path} ({len(result_msgs)} messages).")
-        except Exception as e:
-            logger.error(f"Failed to sync compression marker for {self.log_path}: {e}")
-            return False
-
-        # Update internal tracking — pool state (active set) for in-memory history
-        self.data["history"] = [self._format_message(msg) for msg in new_pool_state]
-        self._file_history_synced = True
 
         return True
 
@@ -623,47 +553,34 @@ class AgentInstanceLogger:
                     last_marker_idx = i
                     break
 
-            # ── Build result: existing log + marker inserted at mirrored tail offset ──
+            # ── Build result messages ──
+            # Design §5.2: Insert marker at mirrored position, keep all originals (full history retention).
             if last_marker_idx >= 0:
                 actual_tail_count = len(new_pool_state) - last_marker_idx - 1
                 formatted_marker = self._format_message(new_pool_state[last_marker_idx])
 
-                # Dedup guard: skip if this exact marker content already exists
+                insert_pos = max(0, len(existing_msgs) - actual_tail_count)
+
+                # Dedup guard: skip if marker already in file (idempotent no-op)
                 marker_already_in_file = any(
                     isinstance(m.get('content', ''), str) and m['content'] == formatted_marker['content']
                     for m in existing_msgs
                 )
 
-                insert_pos = max(0, min(len(existing_msgs) - actual_tail_count, len(existing_msgs)))
-                if marker_already_in_file and existing_msgs:
-                    # Marker already there — but also include tail messages from pool that aren't in file
+                if marker_already_in_file:
                     result_msgs = list(existing_msgs)
-                    # Append any tail messages from pool not already in existing_msgs
-                    tail_from_pool = new_pool_state[last_marker_idx + 1:]
-                    if tail_from_pool and len(existing_msgs) <= actual_tail_count:
-                        for tmsg in tail_from_pool:
-                            result_msgs.append(self._format_message(tmsg))
-                elif not existing_msgs:
-                    # No existing messages — write full pool state (marker + tail)
-                    result_msgs = [self._format_message(m) for m in new_pool_state]
                 else:
-                    # Insert marker at mirrored position, then append pool tail messages after it.
-                    # Tail count = len(pool) - marker_idx - 1.
-                    tail_from_pool = [self._format_message(m) for m in new_pool_state[last_marker_idx + 1:]]
-                    # Keep ALL remaining messages from insert_pos to end — they are original/discarded
-                    # messages that must be preserved (design doc §5.2). Do NOT exclude the last
-                    # actual_tail_count; those are not duplicates of pool tail but independent originals.
-                    # Place them AFTER marker+tail so the marker sits at the mirrored insert position.
-                    remaining = list(existing_msgs[insert_pos:])
-                    result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + tail_from_pool + remaining
+                    # Design §5.2: Insert marker at insert_pos, keep all original messages (tail already in file)
+                    result_msgs = existing_msgs[:insert_pos] + [formatted_marker] + existing_msgs[insert_pos:]
             elif new_pool_state:
                 # No markers in pool — use pool state as-is (session load path)
                 result_msgs = [self._format_message(m) for m in new_pool_state]
-            elif existing_msgs:
-                # Empty pool but file has content — preserve file with timestamps
-                result_msgs = [self._format_message(m) if not isinstance(m, dict) or 'timestamp' not in m else m for m in existing_msgs]
             else:
-                result_msgs = []
+                # Both empty or no marker — just write what we have
+                if existing_msgs and not new_pool_state:
+                    result_msgs = [self._format_message(m) for m in existing_msgs]
+                else:
+                    result_msgs = []
 
             # ── Single write to disk ──
             lines = [json.dumps({"metadata": self.data["metadata"]}, ensure_ascii=False) + '\n']
@@ -794,7 +711,7 @@ class AgentInstanceLogger:
         # Fix #2: Reset the sync guard flag after file modification (soft=False) so future update_history() calls can properly sync again
         if not soft:
             self._file_history_synced = False
-        
+
         if soft:
             logger.info(f"Soft rollback of {count} messages for {self.instance_name} recorded in log.")
 

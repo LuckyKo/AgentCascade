@@ -458,6 +458,8 @@ Working set feeds to LLM: [SYS][U0][COMP1...][COMP2...][recent messages...]
 NOTE: Agent memory and JSONL are NOT in full sync. the logs retain the full conversation history at all times. The rule is that the tail end past the last marker MUST be in sync at all times and have the EXACT same number of messages since the last compression marker.
 All atomic operations on agent pool should be mirrored in the log AFTER they have changed the active message pool.
 
+NOTE: Per OpenAI API rules, tool call pairs or parallel call chains must not be split by any other message types. Our marker insertion logic skips forwards past any of these pair (if it initial calculation lands in the middle of one) to ensure any of the `[Atc,F]` or `[Atc_1,Atc_2...Atc_n,F_1,F_2...F_n]` sequences are not split by our compression marker. Before the first `Atc` its always a safe insertion position.
+
 **Overfeeding Protection — How Compression Avoids Its Own Token Budget:**
 
 The compressor agent has a finite context window (default 125K tokens). To prevent sending more messages to the compressor than it can handle, the system uses a two-stage protection:
