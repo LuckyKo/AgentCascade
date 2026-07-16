@@ -129,8 +129,11 @@ class SystemInfo(BaseTool):
                 active_tools_schemas = []
             
             active_tools = sorted([t['name'] for t in active_tools_schemas]) if isinstance(active_tools_schemas, list) else []
+            # Show all tools and which are disabled (if any) — enabled is redundant since full schemas are provided
+            disabled = set(all_tools) - set(active_tools)
             tools_str = f"Available Tools: {', '.join(all_tools)}\n"
-            tools_str += f"Enabled Tools: {', '.join(active_tools)}\n"
+            if disabled:
+                tools_str += f"Disabled Tools: {', '.join(sorted(disabled))}\n"
         
         # Update max_context from template if still Unknown
         if max_context == "Unknown" and template and hasattr(template, 'llm') and template.llm:

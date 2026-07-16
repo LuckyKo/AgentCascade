@@ -297,13 +297,6 @@ def _build_resources_block(pool, template, instance=None) -> str:
         if not has_agents:
             res += "- None currently available.\n"
 
-    # List enabled tools (excluding disabled ones)
-    # Descriptions are omitted — LLM already knows them via native function
-    # schemas
-    enabled_tools = sorted(f['name'] for f in active_functions)
-    if enabled_tools:
-        res += "\nEnabled Tools (can change per interaction): " + ", ".join(enabled_tools) + "\n"
-
     # Append Argument Caching Pool instructions only if the feature is enabled
     cache_enabled = getattr(pool.settings, 'cache_pool_enabled', True)
     if cache_enabled:
@@ -1322,8 +1315,8 @@ class ExecutionEngine:
                                 content_lines.insert(insert_pos + i, ml)
                             m0_content = '\n'.join(content_lines)
 
-                    # 3. Inject/update available resources (enabled tools
-                    # always; agent types only if call_agent is available)
+                    # 3. Inject/update available resources (agent types and
+                    # cache pool note based on feature flags)
                     # Note: Using already-resolved template, no need for
                     # re-lookup
                     new_block = _build_resources_block(self.pool, template, instance)

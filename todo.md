@@ -51,6 +51,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] some UI setting get lost on refresh/restart (parts of inner loop settings) — FIXED: added pool_settings to server state responses (build_state_from_pool + build_stream_update_from_pool), frontend handleServerMessage now restores UI elements from received pool_settings creating proper roundtrip sync
 - [x] LMStudio models getting stuck in repeating sequences like `??????` or `///////` — FIXED: bridged Layer 2 (endpoint iteration in api_router.py call_with_fallback) with inner-loop detection from execution_engine.py; inner-loop and max-token exceptions now skip directly to next endpoint in fallback chain instead of retrying same model, treating generation loops as endpoint failures like rate-limit errors do
 - [x] we need to stop appending the system prompt note about `Advanced Feature: Argument Caching Pool` if the feature is disabled — FIXED: moved cache pool note into `_build_resources_block()` with conditional check on `pool.settings.cache_pool_enabled`, removed unconditional injection from `_setup_turn()`. Note only appears when feature is enabled, determined at agent init time.
+- [x] remove redundant "Enabled Tools" list from system prompt resources block — FIXED: removed from `_build_resources_block()` in execution_engine.py (tool schemas already provided natively), replaced with "Disabled Tools" line in `system_info` tool output that only shows when tools are actually disabled.
 
 
 # Errors to investigate:
