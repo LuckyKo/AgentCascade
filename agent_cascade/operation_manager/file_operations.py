@@ -407,8 +407,14 @@ class FileOpsMixin:
 
     # ─── Read file ────────────────────────────────────────────────────────
 
-    def read_file(self, path: str, start_line: int = 1, limit: int = 1000) -> str:
-        """Read a file. Uses line-by-line iteration for memory efficiency when range is specified."""
+    def read_file(self, path: str, start_line: int = 1, limit: Optional[int] = None) -> str:
+        """Read a file. Uses line-by-line iteration for memory efficiency when range is specified.
+
+        If *limit* is not provided, falls back to ``DEFAULT_READ_FILE_MAX_LINES`` from settings.
+        """
+        if limit is None:
+            from agent_cascade.settings import DEFAULT_READ_FILE_MAX_LINES
+            limit = DEFAULT_READ_FILE_MAX_LINES
         try:
             resolved = self._resolve_path(path, mode="ro")
             if not resolved.exists():

@@ -157,7 +157,7 @@ TOOL_METADATA = {
         'parameters': {
             'path': "Path to the file, absolute or relative to the workspace root (e.g., 'src/main.py', 'data/input.csv').",
             'start_line': "Optional: 1-based line number to start reading from. Supports negative values (-1 = last line, -3 = third-to-last). Default is 1.",
-            'limit': "Optional: For text files, maximum number of lines to read. Default is 250. Set to -1 for unlimited (uses higher internal line cap). Use with 'start_line' to paginate through large files."
+            'limit': "Optional: For text files, maximum number of lines to read. Default is 1000 (configurable via QWEN_AGENT_READ_FILE_MAX_LINES env var / settings.py). Set to -1 for unlimited (uses higher internal line cap). Use with 'start_line' to paginate through large files."
         }
     },
     'view_image': {
