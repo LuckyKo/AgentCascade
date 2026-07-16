@@ -10,12 +10,14 @@ from typing import List, Optional, Tuple
 
 # Project imports (used by ShellMixin.execute_shell_command)
 from agent_cascade.log import logger
+from agent_cascade.shell_utils import (
+    DRAIN_THREAD_JOIN_TIMEOUT,
+    drain_pipe_chunks,
+    configure_windows_utf8,
+)
 from agent_cascade.tool_utils import MAX_SPILL_SIZE, generate_spillover_filename
 
 # ─── Named constants (avoid magic numbers) ──────────────────────────────
-PIPE_READ_SIZE = 4096                   # Bytes per read call on stdout/stderr pipes
-DRAIN_THREAD_JOIN_TIMEOUT = 3           # Seconds to wait for drain threads after process ends
-WINDOWS_UTF8_CODE_PAGE = '65001'        # Windows code page for UTF-8 output
 TASKKILL_RETRY_DELAY = 0.5              # Seconds between taskkill passes on timeout
 MAX_PROCESS_TREE_DEPTH = 10             # Max recursion depth when killing process descendants
 DEFAULT_SHELL_TIMEOUT = 30              # Default seconds before shell command times out
@@ -155,8 +157,7 @@ class ShellMixin:
         Returns:
             (modified_command, creationflags) tuple ready for subprocess.Popen.
         """
-        return (f'chcp {WINDOWS_UTF8_CODE_PAGE} > nul 2>&1 & {command}',
-                subprocess.CREATE_NEW_PROCESS_GROUP)  # type: ignore[arg-type]
+        return configure_windows_utf8(command, create_new_console=False)
 
     # ------------------------------------------------------------------
     def _terminate_process_tree_windows(self, pid: int):
@@ -303,19 +304,8 @@ class ShellMixin:
             stderr_chunks: List[str] = []
             drain_errors: List[Exception] = []
 
-            def _drain_pipe(pipe, chunks: List[str], errors: List[Exception]) -> None:
-                """Continuously drain a pipe into a list until EOF or error."""
-                try:
-                    while True:
-                        chunk = pipe.read(PIPE_READ_SIZE)
-                        if not chunk:
-                            break  # EOF
-                        chunks.append(chunk)
-                except Exception as e:
-                    errors.append(e)
-
-            t_out = threading.Thread(target=_drain_pipe, args=(proc.stdout, stdout_chunks, drain_errors), daemon=True, name='shell_stdout_reader')
-            t_err = threading.Thread(target=_drain_pipe, args=(proc.stderr, stderr_chunks, drain_errors), daemon=True, name='shell_stderr_reader')
+            t_out = threading.Thread(target=drain_pipe_chunks, args=(proc.stdout, stdout_chunks, drain_errors), daemon=True, name='shell_stdout_reader')
+            t_err = threading.Thread(target=drain_pipe_chunks, args=(proc.stderr, stderr_chunks, drain_errors), daemon=True, name='shell_stderr_reader')
             t_out.start()
             t_err.start()
 

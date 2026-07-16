@@ -289,13 +289,20 @@ TOOL_METADATA = {
     'shell_cmd': {
         'description': (
             'Execute a shell command on the host system. This ALWAYS requires explicit user approval so use it as a last resort tool only! '
-            'Commands run with the workspace directory as the working directory.'
+            'Commands run with the workspace directory as the working directory.\n\n'
+            '**Async Mode**: Set async_mode=true to run commands in the background — returns immediately with a tool_id and PID. '
+            'The command runs while you continue working, sending periodic heartbeat updates (if heartbeat_interval > 0) and a final result message when done. '
+            'Use the tool_id parameter to manage running shells: send input, check status (__status), kill (__kill), update heartbeat (__heartbeat=N seconds), or send Ctrl+C (__ctrl_c). '
+            'Max 5 concurrent async shells per agent.'
         ),
         'parameters': {
-            'command': 'The exact shell command to execute.',
+            'command': 'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input.',
             'justification': 'Why you need to execute this command.',
             'cwd': 'Optional working directory, absolute or relative to workspace root.',
-            'timeout': 'Optional timeout in seconds (default: 30). Use a higher value for long-running commands.'
+            'timeout': 'Optional timeout in seconds (default: 30 for sync mode, 3600 for async mode). Use a higher value for long-running commands.',
+            'async_mode': 'Run the command in background and return immediately with tool_id + PID. The agent continues working while the command runs. Heartbeat updates are injected as user messages at intervals. Default: false (blocking/synchronous execution).',
+            'heartbeat_interval': 'Seconds between heartbeat output updates (-1 means only notify on completion, 0 or positive = periodic heartbeats). Only effective when async_mode=true. Default: -1.',
+            'tool_id': 'Reference an existing running shell by its tool_id to send input, update settings, or kill it. Returned in the initial response when launching with async_mode=true.'
         }
     },
     'system_info': {

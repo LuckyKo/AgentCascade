@@ -302,6 +302,10 @@ class AgentPool:
         self._async_results: AsyncResultBuffer = AsyncResultBuffer()
         self._async_registry: AsyncToolRegistry = AsyncToolRegistry(pool=self)
 
+        # ── Async Shell Infrastructure (background shell_cmd support) ────────
+        from agent_cascade.async_shell import AsyncShellTracker
+        self._async_shell_tracker = AsyncShellTracker(pool=self)
+
         # ── Global state ─────────────────────────────────────────────────────
         self._stopped_event = threading.Event()         # M3 fix: stopped flag for emergency shutdown
 
@@ -698,6 +702,18 @@ class AgentPool:
                 self._async_results.drain(instance_name)
             except Exception as e:
                 logger.debug(f"Draining async results for {instance_name} failed (non-critical): {e}")
+
+        # Kill all background shell processes for this agent
+        if hasattr(self, '_async_shell_tracker'):
+            try:
+                killed = self._async_shell_tracker.kill_all(instance_name)
+                if killed:
+                    logger.debug(f"Killed {killed} async shell process(es) for {instance_name}")
+                    # Fix #5: Brief wait for tracking threads to exit after kill
+                    import time as _time
+                    _time.sleep(0.3)
+            except Exception as e:
+                logger.debug(f"Killing async shells for {instance_name} failed (non-critical): {e}")
 
         # Clear message queue to prevent stale messages from being processed
         with self._queue_lock:

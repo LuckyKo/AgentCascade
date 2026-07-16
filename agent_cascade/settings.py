@@ -152,7 +152,7 @@ class InnerLoopSettings:
     block_size: int = 128                  # Token window size for block repetition
     entropy_window: int = 128             # Token window for Shannon entropy calculation
     char_run_limit: int = 70              # Max consecutive identical chars before alert
-    score_threshold: int = 250            # Cumulative score to trigger loop detection (balanced between catching real loops and avoiding false positives on varied text with repeated patterns)
+    score_threshold: int = 350            # Cumulative score to trigger loop detection (balanced between catching real loops and avoiding false positives on varied text with repeated patterns)
 
     # Detection thresholds (hardcoded in detection logic)
     sentence_repetition_threshold: int = 9   # Sentence count to flag repetition (raised further to reduce FPs on live data and chunked text fragments)
@@ -174,8 +174,8 @@ class InnerLoopSettings:
 # ── Code interpreter settings (Feature: CI session sharing) ────────────────
 CI_EXECUTION_TIMEOUT: int = int(os.getenv('M6_CODE_INTERPRETER_EXEC_TIMEOUT', '120'))   # Per-call execution timeout (seconds)
 CI_WATCHDOG_TIMEOUT: int = int(os.getenv('M6_CODE_INTERPRETER_WATCHDOG_TIMEOUT', '300'))  # Kernel inactivity watchdog timeout (seconds)
-CI_STALE_CONTAINER_TTL: int = int(os.getenv('M6_CODE_INTERPRETER_STALE_TTL', '600'))      # Stale container cleanup TTL (seconds)
-CI_MIN_EXECUTION_TIMEOUT: int = 10    # Minimum per-call execution timeout (seconds)
+CI_STALE_CONTAINER_TTL: int = int(os.getenv('M6_CODE_INTERPRETER_STALE_TTL', '900'))      # Stale container cleanup TTL (seconds)
+CI_MIN_EXECUTION_TIMEOUT: int = 1    # Minimum per-call execution timeout (seconds)
 CI_MIN_WATCHDOG_TIMEOUT: int = 30     # Minimum watchdog timeout (seconds)
 CI_MIN_STALE_CONTAINER_TTL: int = 30  # Minimum stale container TTL (seconds)
 
@@ -183,3 +183,8 @@ CI_MIN_STALE_CONTAINER_TTL: int = 30  # Minimum stale container TTL (seconds)
 CACHE_POOL_ENABLED: bool = True               # Toggle cache pool on/off (default: enabled)
 CACHE_POOL_SIZE: int = int(os.getenv('QWEN_AGENT_CACHE_POOL_SIZE', '64'))          # Rolling buffer entries per instance
 CACHE_THRESHOLD_CHARS: int = int(os.getenv('QWEN_AGENT_CACHE_THRESHOLD_CHARS', '1000'))  # Min chars for output & granular arg caching
+
+# ── Async shell command settings (Feature: async shell_cmd) ───────────
+MAX_ASYNC_SHELL_PER_AGENT: int = 5            # Max concurrent async shells per agent
+ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS: int = int(os.getenv('QWEN_AGENT_ASYNC_SHELL_HEARTBEAT_CHARS', '800'))  # Max chars per heartbeat message
+ASYNC_SHELL_DEFAULT_TIMEOUT: int = 3600       # Default timeout for async shells (1 hour)
