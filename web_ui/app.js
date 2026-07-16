@@ -4082,8 +4082,8 @@ function getGenerateCfg() {
   if ($('#setting-loop-entropy')) cfg.loop_entropy_enabled = $('#setting-loop-entropy').checked;
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
   if ($('#setting-max-rollbacks')) cfg.max_auto_rollbacks = parseInt($('#setting-max-rollbacks').value);
-  if ($('#setting-idle-timeout')) cfg.idle_timeout_seconds = parseFloat($('#setting-idle-timeout').value);
-  if ($('#setting-system-idle-timeout')) cfg.system_agent_idle_timeout_seconds = parseFloat($('#setting-system-idle-timeout').value);
+  if ($('#setting-idle-timeout')) cfg.idle_timeout_seconds = parseFloat($('#setting-idle-timeout').value) || 900;
+  if ($('#setting-system-idle-timeout')) cfg.system_agent_idle_timeout_seconds = parseFloat($('#setting-system-idle-timeout').value) || 900;
   if ($('#setting-tool-result-max-chars')) cfg.tool_result_max_chars = parseInt($('#setting-tool-result-max-chars').value) || 10000;
   if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value) || -1;
   if ($('#setting-grep-spillover')) cfg.grep_spillover = $('#setting-grep-spillover').checked;

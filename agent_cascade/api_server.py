@@ -1261,7 +1261,7 @@ if __name__ == "__main__":
                         help="Seconds of inactivity before auto-dismissing an idle agent (default: 900). "
                              "Also settable via QWEN_AGENT_IDLE_TIMEOUT env var.")
     parser.add_argument("--system-agent-idle-timeout", type=float, default=None,
-                        help="Idle timeout for system agents (Compressor/Security), overrides env var. 0=off. "
+                        help="Idle timeout for system agents (Compressor/Security) (default: 900). 0=off. "
                              "Also settable via QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT env var.")
     parser.add_argument("--idle-check-interval", type=float, default=None,
                         help="Seconds between idle-check sweeps (default: 60). "

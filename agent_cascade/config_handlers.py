@@ -100,9 +100,15 @@ def _handle_default_workspace(ui_cfg: dict, agent_pool: Optional[Any], agents: l
 @register_config_handler('idle_timeout_seconds')
 def _handle_idle_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update idle timeout setting on the agent pool."""
+    from agent_cascade.log import logger as _logger
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        val = float(ui_cfg['idle_timeout_seconds'])
-        agent_pool.settings.idle_timeout_seconds = max(0.0, val)
+        try:
+            val = float(ui_cfg['idle_timeout_seconds'])
+            if val != val or val == float('inf'):  # NaN or inf check
+                raise ValueError(f"Invalid timeout value: {val}")
+            agent_pool.settings.idle_timeout_seconds = max(0.0, val)
+        except Exception as e:
+            _logger.warning(f"Failed to set idle timeout: {e}")
 
 
 @register_config_handler('system_agent_idle_timeout_seconds')
@@ -112,6 +118,8 @@ def _handle_system_agent_idle_timeout(ui_cfg: dict, agent_pool: Optional[Any], a
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         try:
             val = float(ui_cfg['system_agent_idle_timeout_seconds'])
+            if val != val or val == float('inf'):  # NaN or inf check
+                raise ValueError(f"Invalid timeout value: {val}")
             agent_pool.settings.system_agent_idle_timeout_seconds = max(0.0, val)
         except Exception as e:
             _logger.warning(f"Failed to set system agent idle timeout: {e}")

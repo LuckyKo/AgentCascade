@@ -2478,6 +2478,11 @@ class IdleManager:
                 logger.warning("Idle checker thread did not exit in time.")
         self._checker_thread = None
 
+    @staticmethod
+    def _is_system_agent(agent_class: str) -> bool:
+        """Check if agent class is a system-invoked type (Compressor, Security)."""
+        return agent_class.lower() in ('security', 'compressor')
+
     def _checker_loop(self):
         """Background loop that periodically checks for and dismisses idle agents."""
         while not self._stop_event.is_set():
@@ -2539,10 +2544,10 @@ class IdleManager:
         # Must have exceeded the idle timeout threshold
         # System agents (Compressor, Security) use a separate timeout setting
         idle_secs = time.monotonic() - last_activity
-        is_system_agent = agent_class.lower() in ('security', 'compressor')
+        is_system_agent = IdleChecker._is_system_agent(agent_class)
         effective_timeout = self.pool.settings.system_agent_idle_timeout_seconds if is_system_agent else self.pool.settings.idle_timeout_seconds
 
-        # 0 means "off" — never auto-dismiss
+        # 0 means "off" — never auto-dismiss; NaN/inf treated as always idle
         if effective_timeout == 0:
             return False
 
@@ -2560,7 +2565,7 @@ class IdleManager:
         idle_secs = time.monotonic() - inst.last_activity
 
         # Determine which timeout threshold applies to this agent
-        is_system_agent = inst.agent_class.lower() in ('security', 'compressor')
+        is_system_agent = IdleChecker._is_system_agent(inst.agent_class)
         effective_timeout = self.pool.settings.system_agent_idle_timeout_seconds if is_system_agent else self.pool.settings.idle_timeout_seconds
 
         # Capture log path before clearing
