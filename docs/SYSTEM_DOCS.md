@@ -1,7 +1,7 @@
 # Agent Cascade — System Documentation
 
 **Version:** 1.0 (based on DESIGN_REWRITE.md)  
-**Last Updated:** 2026-05-31  
+**Last Updated:** 2026-07-16  
 **Architecture:** Unified Single-Instance Model
 
 ---
@@ -99,7 +99,7 @@ OLD ARCHITECTURE (Dual Paths)          NEW ARCHITECTURE (Unified)
 | `instance_name` | `str` | Unique identifier (e.g., "Maine", "Coder1", "Researcher3") |
 | `agent_class` | `str` | Template class name defining capabilities (e.g., "Orchestrator", "coder", "researcher") |
 | `conversation` | `List[Message]` | Full cumulative message history for this instance — the single source of truth |
-| `is_active` | `bool` | Whether this agent is currently executing a turn |
+| `state` | `AgentState` | Current lifecycle state: IDLE, RUNNING, SLEEPING, COMPLETING, or TERMINATED |
 | `max_turns` | `Optional[int]` | Per-agent turn limit (None = use default of 50) |
 | `parent_instance` | `Optional[str]` | The instance that created this one (None for the root/main agent) |
 | `created_at` | `float` | Monotonic timestamp when the instance was created |
@@ -587,7 +587,13 @@ LLM Streaming Chunk Arrives
         ▼
 ┌─────────────────────┐
 │ Abort Stream        │ ← Stop LLM generation, save sample for debugging
-│ + Retry Generation  │   Sample saved to workspace/logs/loop_samples/
+│ + Raise Exception   │   inner_loop: or max_tokens: error raised
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│ API Router catches  │ ← In api_router.py call_with_fallback()
+│ exception           │    Treats as early exit signal, advances to next endpoint
 └─────────────────────┘
 ```
 
@@ -599,7 +605,8 @@ All tunable parameters are centralized in the `InnerLoopSettings` dataclass in `
 
 - A fresh `InnerLoopDetector` is created at the start of each retry attempt
 - Each streaming chunk is checked against the toggle setting (gated by `pool.settings.inner_loop_detect_enabled`)
-- On detection: the stream is aborted, a sample is saved for debugging, and an exception triggers the retry loop
+- On detection: the stream is aborted, a sample is saved for debugging, and an exception (`inner_loop:` or `max_tokens:`) is raised
+- The API router catches this exception and treats it as an early exit signal, advancing to the next endpoint in the chain rather than retrying the same model
 - A max-output-token guard (default: 2048, configurable via max_tokens) serves as a safety net if the detector misses a loop
 
 ### 5.4 Parallel Execution
@@ -824,17 +831,23 @@ The backend sends a flat dictionary of instances with parent pointers:
       "instance_name": "Maine",
       "agent_class": "Orchestrator",
       "messages": [...],
-      "is_active": true,
+      "active": true,
+      "agent_state": "RUNNING",
       "is_halted": false,
-      "parent_instance": null
+      "parent_instance": null,
+      "has_queued_messages": false,
+      "is_waiting": false
     },
     "Coder1": {
       "instance_name": "Coder1",
       "agent_class": "coder",
       "messages": [...],
-      "is_active": false,
+      "active": false,
+      "agent_state": "IDLE",
       "is_halted": false,
-      "parent_instance": "Maine"
+      "parent_instance": "Maine",
+      "has_queued_messages": true,
+      "is_waiting": false
     }
   },
   "active_stack": ["Maine"],
@@ -867,9 +880,11 @@ nodes = { "Maine": {...}, "Coder1": {...} }
 
 | State | Visual Indicator |
 |-------|-----------------|
-| `is_active: true` | Pulsing/glowing tab indicator |
+| `active: true` | Pulsing/glowing tab indicator (agent is RUNNING) |
+| `agent_state: "RUNNING"` | Real-time state name displayed in tooltip or status bar |
 | `is_halted: true` | Pause icon on tab |
-| Waiting for parallel agent | Spinner or "waiting" badge |
+| `has_queued_messages: true` | Message bubble indicator |
+| `is_waiting: true` | Spinner or "waiting" badge (blocked on API slot) |
 | Instance dismissed | Tab closes automatically via WebSocket event |
 
 ### No Structural Duality in the UI
@@ -930,5 +945,5 @@ Active Execution ──→ Phases 1-5 repeat until completion
 | API Server | `api_server.py` (single file, ~140KB) |
 | API Router | `api_router.py` |
 | Compression | `compression/core.py`, `compression/agent_invoker.py` |
-| Agent Base Classes | `agent.py`, `agent_instance.py`, `agents/fncall_agent.py`, `agents/assistant.py` |
+| Agent Base Classes | `agent_cascade/agent.py`, `agent_cascade/agent_instance.py`, `agent_cascade/agents/fncall_agent.py`, `agent_cascade/agents/assistant.py` |
 | Tools | `tools/*.py` (unchanged) |
