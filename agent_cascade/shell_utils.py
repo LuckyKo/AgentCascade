@@ -21,7 +21,12 @@ WINDOWS_UTF8_CODE_PAGE = '65001'        # Windows code page for UTF-8 output
 # ─── Shared pipe drain function (line-based, used by async_shell) ──
 
 def drain_pipe_lines(pipe, target_list: list, lock: threading.Lock) -> None:
-    """Read from a pipe in chunks, split into lines, and append to target_list under lock.
+    """Read from a pipe line-by-line and append to target_list under lock.
+
+    Uses readline() instead of read(chunk_size) so that output arrives incrementally
+    even when the shell buffers stdout in full-buffer mode (common on Linux pipes).
+    This is critical for async heartbeats: if we wait for 4KB chunks, no heartbeat
+    fires until the process exits.
 
     Used by the async shell tracker where output is consumed line-by-line for heartbeat
     tracking. The lock ensures thread-safe access when the polling loop reads concurrently.
@@ -33,12 +38,13 @@ def drain_pipe_lines(pipe, target_list: list, lock: threading.Lock) -> None:
     """
     try:
         while True:
-            chunk = pipe.read(PIPE_READ_SIZE)
-            if not chunk:
+            line = pipe.readline()
+            if not line:
                 break
-            lines = chunk.split('\n')
+            # Strip trailing newline; readline returns '\n'-terminated strings
+            stripped = line.rstrip('\n').rstrip('\r')
             with lock:
-                target_list.extend(lines)
+                target_list.append(stripped)
     except Exception as e:
         logger.warning(f"[Shell] Pipe drain error: {e}")
 
