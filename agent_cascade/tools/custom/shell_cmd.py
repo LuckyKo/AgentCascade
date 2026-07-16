@@ -159,7 +159,7 @@ class ShellCmd(BaseTool):
             return f"[shell_cmd] {e}"
 
         return (
-            f"[shell_cmd launched - Tool ID: {tool_id}]\n"
+            f"⟨shell_cmd launched⟩ Tool ID: {tool_id}\n"
             f"Command running in background.\n"
             f"Command: `{command[:200]}`\n"
             f"Heartbeat interval: {heartbeat_interval}s\n"

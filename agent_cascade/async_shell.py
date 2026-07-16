@@ -491,7 +491,14 @@ class AsyncShellTracker:
             truncated_lines.extend(lines[-keep_last:])
             output_text = '\n'.join(truncated_lines)
 
-        msg = f"[shell_cmd heartbeat - Tool ID: {tool_id}]:\n{output_text}"
+        # Count lines for info header
+        line_count = len(output_text.split('\n'))
+
+        msg = (
+            f"⟨shell_cmd heartbeat⟩ Tool ID: {tool_id} | "
+            f"{line_count} line{'s' if line_count != 1 else ''} since last tick\n"
+            f"{output_text}"
+        )
         self._enqueue(agent_name, msg)
 
     # ────────────────────────────────────────────────────────────────
@@ -511,11 +518,22 @@ class AsyncShellTracker:
             return
 
         output_text = self._format_output_text(remaining)
-        if timed_out:
-            prefix = f"STDOUT (partial):"
-            output_text = f"{prefix}\n{output_text}"
+        line_count = len(output_text.split('\n'))
 
-        self._enqueue(agent_name, output_text)
+        if timed_out:
+            msg = (
+                f"⟨shell_cmd final output⟩ Tool ID: {tool_id} | "
+                f"{line_count} remaining line{'s' if line_count != 1 else ''}\n"
+                f"{output_text}"
+            )
+        else:
+            msg = (
+                f"⟨shell_cmd final output⟩ Tool ID: {tool_id} | "
+                f"{line_count} line{'s' if line_count != 1 else ''}\n"
+                f"{output_text}"
+            )
+
+        self._enqueue(agent_name, msg)
 
     # ────────────────────────────────────────────────────────────────
     def _send_completion_message(
@@ -526,16 +544,15 @@ class AsyncShellTracker:
         task = self._get_task(agent_name, tool_id)
 
         if timed_out and not error:
-            rc = task.return_code if task else -1
             msg = (
-                f"[shell_cmd completed - Tool ID: {tool_id}]\n"
-                f"Command timed out after {task.timeout if task else '?'} seconds. "
+                f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
+                f"Timed out after {task.timeout if task else '?'} seconds. "
                 f"All child processes terminated.\n"
                 f"Command: `{command[:200]}`\n"
             )
         elif error:
             msg = (
-                f"[shell_cmd completed - Tool ID: {tool_id}]\n"
+                f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
                 f"Error: {error}\n"
                 f"Command: `{command[:200]}`\n"
             )
@@ -543,8 +560,8 @@ class AsyncShellTracker:
             rc = task.return_code if task else 0
             status = "success" if (rc == 0) else f"exit code {rc}"
             msg = (
-                f"[shell_cmd completed - Tool ID: {tool_id}]\n"
-                f"Command completed ({status}).\n"
+                f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
+                f"Completed ({status}).\n"
                 f"Command: `{command[:200]}`\n"
             )
 
@@ -697,7 +714,7 @@ class AsyncShellTracker:
 
         status_label = "completed" if completed else f"running ({elapsed:.0f}s elapsed)"
         msg = (
-            f"[shell_cmd status - Tool ID: {tool_id}]\n"
+            f"⟨shell_cmd status⟩ Tool ID: {tool_id}\n"
             f"Status: {status_label}\n"
             f"PID: {pid}\n"
             f"Return code: {return_code if completed else 'N/A'}\n"
