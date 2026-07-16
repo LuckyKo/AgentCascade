@@ -922,6 +922,7 @@ class APIRouter:
 
         for cfg_idx, llm_cfg in enumerate(chain):
             max_retries = 2
+            skipped_early = False         # Track if endpoint was skipped before retries exhausted
             concurrency_limit = 0
             base_retry_delay = 1.0       # Default for exponential backoff
             max_retry_delay = 30.0       # Default maximum delay cap
@@ -1063,17 +1064,34 @@ class APIRouter:
                     return result
                     
                 except Exception as e:
+                    err_msg = str(e)
+
                     # Rate limit errors skip retries and jump directly to the next endpoint.
-                    # All other errors (connection, timeout, etc.) retry within the current
-                    # endpoint first, then cascade through the fallback chain on exhaustion.
-                    if "Rate limit exceeded" in str(e):
+                    if "Rate limit exceeded" in err_msg:
                         logger.warning(
                             f"[APIRouter] Rate limit hit for '{endpoint_name}' @ {endpoint_base}. "
                             f"Skipping to next endpoint."
                         )
                         all_errors.append(f"Rate limit exceeded for '{endpoint_name}' @ {endpoint_base}")
+                        skipped_early = True
                         break  # Go to next endpoint, don't waste retries
 
+                    # Inner-loop / max-token detection: treat as endpoint failure and
+                    # skip directly to the next endpoint in the chain. Retrying the same
+                    # model is unlikely to help — a stuck generation or token overflow
+                    # means the model state is degraded and needs switching. This bridges
+                    # Layer 2 (endpoint iteration) with detection from execution_engine.py.
+                    if err_msg.startswith("inner_loop:") or err_msg.startswith("max_tokens:"):
+                        logger.warning(
+                            f"[APIRouter] Loop/token limit detected for '{endpoint_name}' @ {endpoint_base}. "
+                            f"Advancing to next endpoint."
+                        )
+                        all_errors.append(f"Loop/token limit detected for '{endpoint_name}' @ {endpoint_base}: {err_msg}")
+                        skipped_early = True
+                        break  # Go to next endpoint, don't waste retries
+
+                    # All other errors (connection, timeout, etc.) retry within the current
+                    # endpoint first, then cascade through the fallback chain on exhaustion.
                     tb_str = traceback.format_exc()
                     error_msg = (
                         f"Endpoint '{endpoint_name}' @ {endpoint_base} "
@@ -1092,7 +1110,10 @@ class APIRouter:
                         )
                         time.sleep(delay + jitter)
 
-            logger.info(f"[APIRouter] Exhausted retries for endpoint '{endpoint_name}'. Moving to next...")
+            if skipped_early:
+                logger.info(f"[APIRouter] Skipped endpoint '{endpoint_name}' (early exit). Moving to next...")
+            else:
+                logger.info(f"[APIRouter] Exhausted retries for endpoint '{endpoint_name}'. Moving to next...")
 
         raise RuntimeError(
             f"All API endpoints exhausted for agent type '{agent_type}'.\n"
