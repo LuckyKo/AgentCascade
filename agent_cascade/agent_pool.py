@@ -2544,7 +2544,7 @@ class IdleManager:
         # Must have exceeded the idle timeout threshold
         # System agents (Compressor, Security) use a separate timeout setting
         idle_secs = time.monotonic() - last_activity
-        is_system_agent = IdleChecker._is_system_agent(agent_class)
+        is_system_agent = IdleManager._is_system_agent(agent_class)
         effective_timeout = self.pool.settings.system_agent_idle_timeout_seconds if is_system_agent else self.pool.settings.idle_timeout_seconds
 
         # 0 means "off" — never auto-dismiss; NaN/inf treated as always idle
@@ -2565,7 +2565,7 @@ class IdleManager:
         idle_secs = time.monotonic() - inst.last_activity
 
         # Determine which timeout threshold applies to this agent
-        is_system_agent = IdleChecker._is_system_agent(inst.agent_class)
+        is_system_agent = IdleManager._is_system_agent(inst.agent_class)
         effective_timeout = self.pool.settings.system_agent_idle_timeout_seconds if is_system_agent else self.pool.settings.idle_timeout_seconds
 
         # Capture log path before clearing
