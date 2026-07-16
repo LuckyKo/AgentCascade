@@ -611,7 +611,7 @@ All tunable parameters are centralized in the `InnerLoopSettings` dataclass in `
 
 ### 5.4 Parallel Execution
 
-Agents can spawn sub-agents that run concurrently in a background thread pool, allowing the system to perform multiple independent tasks simultaneously.
+Agents can spawn sub-agents that run concurrently in a background thread pool, allowing the system to perform multiple independent tasks simultaneously. **All `call_agent` invocations use an async-by-default path**, with automatic fallback to synchronous execution when necessary to prevent deadlocks.
 
 **How It Works:**
 
@@ -627,34 +627,52 @@ Agent A calls: call_agent(agent_class="researcher", instance_name="Researcher1",
             │
             ▼
 ┌───────────────────────────┐
-│ Check Concurrency Limits  │ ← Via _acquire_slot() in submit_task()
-│ (from API Router)         │    All calls are async now
+│ Check if caller holds     │ ← Lines 230-240, tool_dispatcher.py
+│ a concurrency slot?       │ (detects deadlock risk)
 └───────────┬───────────────┘
             │
-            ▼
-    ┌───────────────┐
-    │ Submit to     │
-    │ ThreadPoolExecutor  │
-    │ via submit_parallel()│
-    └───────┬───────┘
-            │
-            ▼
-      New thread runs:
-      ExecutionEngine.
-      run() loop
-            │
-            ▼
-      On completion:
-      pool.send_message()
-      → caller's queue
+    ┌───────┴───────┐
+    │ YES           │ NO
+    ▼               ▼
+┌──────────┐    ┌───────────────────┐
+│ _run_    │    │ _run_child_async()│
+│ child_   │    │ → pool.           │
+│ sync()   │    │   register_async  │
+│ (direct  │    │   _call()         │
+│ execution,│   └────────┬──────────┘
+│ no thread│             │
+│ pool)    │             ▼
+└──────────┘    ┌───────────────────┐
+                │ AsyncToolRegistry │
+                │ (async_tools.py)  │
+                └────────┬──────────┘
+                         │
+                         ▼
+                  ThreadPoolExecutor
+                   submits to background
+                   thread
+                         │
+                         ▼
+                   New thread runs:
+                   ExecutionEngine.
+                   run() loop
+                         │
+                         ▼
+                   On completion:
+                   pool.drain_async_results()
+                   → [Parallel Agent ...] messages
 ```
 
 **Key Details:**
 
-- All call_agent invocations use the unified async path via `submit_parallel()`
-- Concurrency is enforced by `_acquire_slot()` in `submit_task()` based on endpoint limits
-- The caller continues its turn and transitions to SLEEPING at end-of-turn if pending calls exist
-- When child completes, result is injected as USER message with `[BACKGROUND TOOL RESULT]:` prefix
+- All `call_agent` invocations go through the async path via `register_async_call()` → `AsyncToolRegistry` → `ThreadPoolExecutor` by default
+- **Automatic sync fallback**: If the caller already holds a concurrency slot, `_run_child_sync()` is invoked directly (no thread pool) to prevent deadlock — this occurs when the same thread would otherwise hold the semaphore while trying to spawn a child that also needs it (lines 230-240, tool_dispatcher.py)
+- **Concurrency control** is enforced by `EndpointScheduler` per API endpoint:
+  - `concurrency_limit = -1`: unlimited (no scheduling)
+  - `concurrency_limit = 0`: sequential — agents run one at a time; all seq endpoints share the same slot to avoid cache trashing
+  - `concurrency_limit = N>0`: up to N agents can run simultaneously on that endpoint
+- Slot acquisition happens via `_acquire_slot()` in `agent_pool.py` → `router.scheduler.acquire()`
+- The caller continues its turn and transitions to **SLEEPING** at end-of-turn if pending async calls exist. It wakes up to drain results from `pool.drain_async_results()`, which returns `[Parallel Agent ...]` prefixed messages
 - Completion is communicated via the message queue system — the caller drains its queue on the next iteration and sees the result
 - If the pool reaches capacity, new requests block until a slot opens (via endpoint slot acquisition)
 - The `active_stack` tracks which agents are currently running for UI rendering and concurrency counting
