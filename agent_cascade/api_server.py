@@ -1258,8 +1258,11 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=12345, help="Port to bind to")
     parser.add_argument("--workspace", type=str, default=str(DEFAULT_WORKSPACE), help="Workspace directory")
     parser.add_argument("--idle-timeout", type=float, default=None,
-                        help="Seconds of inactivity before auto-dismissing an idle agent (default: 300). "
+                        help="Seconds of inactivity before auto-dismissing an idle agent (default: 900). "
                              "Also settable via QWEN_AGENT_IDLE_TIMEOUT env var.")
+    parser.add_argument("--system-agent-idle-timeout", type=float, default=None,
+                        help="Idle timeout for system agents (Compressor/Security), overrides env var. 0=off. "
+                             "Also settable via QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT env var.")
     parser.add_argument("--idle-check-interval", type=float, default=None,
                         help="Seconds between idle-check sweeps (default: 60). "
                              "Also settable via QWEN_AGENT_IDLE_CHECK_INTERVAL env var.")
@@ -1272,8 +1275,9 @@ if __name__ == "__main__":
         'api_key': os.getenv('QWEN_AGENT_API_KEY', 'EMPTY'),
     }
 
-    # Resolve idle timeout settings: CLI > env var > default
-    idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
+    # Resolve idle timeout settings: CLI > env var > default (matches settings.py AGENT_IDLE_TIMEOUT)
+    idle_timeout = args.idle_timeout if args.idle_timeout is not None else float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 900.0))
+    system_idle_timeout = args.system_agent_idle_timeout if args.system_agent_idle_timeout is not None else float(os.getenv('QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT', 900.0))
     idle_check_interval = args.idle_check_interval if args.idle_check_interval is not None else float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
 
     # Create OperationManager for blocking user approvals on mutating operations
@@ -1301,6 +1305,7 @@ if __name__ == "__main__":
 
     # Set idle timeout settings via PoolSettings (new pool uses PoolSettings instead of constructor args)
     agent_pool.settings.idle_timeout_seconds = idle_timeout
+    agent_pool.settings.system_agent_idle_timeout_seconds = system_idle_timeout
     agent_pool.settings.idle_check_interval = idle_check_interval
 
     # Create the root orchestrator instance in the new pool (use lowercase to match template key)

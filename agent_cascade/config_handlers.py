@@ -105,6 +105,18 @@ def _handle_idle_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) 
         agent_pool.settings.idle_timeout_seconds = max(0.0, val)
 
 
+@register_config_handler('system_agent_idle_timeout_seconds')
+def _handle_system_agent_idle_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update idle timeout setting for system agents (Compressor, Security)."""
+    from agent_cascade.log import logger as _logger
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        try:
+            val = float(ui_cfg['system_agent_idle_timeout_seconds'])
+            agent_pool.settings.system_agent_idle_timeout_seconds = max(0.0, val)
+        except Exception as e:
+            _logger.warning(f"Failed to set system agent idle timeout: {e}")
+
+
 @register_config_handler('approval_timeout_seconds')
 def _handle_approval_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Set approval timeout on the operation manager."""

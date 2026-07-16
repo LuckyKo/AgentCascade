@@ -783,6 +783,7 @@ function saveSettings() {
   if ($('#setting-agent-budgeting')) s['enable_agent_budgeting'] = $('#setting-agent-budgeting').checked;
   if ($('#setting-tool-result-max-chars')) s['tool-result-max-chars'] = $('#setting-tool-result-max-chars').value;
   if ($('#setting-idle-timeout')) s['idle-timeout'] = $('#setting-idle-timeout').value;
+  if ($('#setting-system-idle-timeout')) s['system-idle-timeout'] = $('#setting-system-idle-timeout').value;
   if (settingVisionEnabled) s['vision-enabled'] = settingVisionEnabled.checked;
   if (afkToggle) s['afk-enabled'] = afkToggle.checked;
   if (settingAfkMessage) s['afk-message'] = settingAfkMessage.value;
@@ -905,6 +906,9 @@ function loadSettings() {
     }
     if (s['idle-timeout'] !== undefined) {
       $('#setting-idle-timeout').value = s['idle-timeout'];
+    }
+    if (s['system-idle-timeout'] !== undefined) {
+      $('#setting-system-idle-timeout').value = s['system-idle-timeout'];
     }
     if (s['grep_char_limit'] !== undefined) {
       $('#setting-grep-char-limit').value = s['grep_char_limit'];
@@ -4079,6 +4083,7 @@ function getGenerateCfg() {
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
   if ($('#setting-max-rollbacks')) cfg.max_auto_rollbacks = parseInt($('#setting-max-rollbacks').value);
   if ($('#setting-idle-timeout')) cfg.idle_timeout_seconds = parseFloat($('#setting-idle-timeout').value);
+  if ($('#setting-system-idle-timeout')) cfg.system_agent_idle_timeout_seconds = parseFloat($('#setting-system-idle-timeout').value);
   if ($('#setting-tool-result-max-chars')) cfg.tool_result_max_chars = parseInt($('#setting-tool-result-max-chars').value) || 10000;
   if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value) || -1;
   if ($('#setting-grep-spillover')) cfg.grep_spillover = $('#setting-grep-spillover').checked;

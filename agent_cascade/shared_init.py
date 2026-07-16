@@ -90,7 +90,7 @@ def create_agent_pool(llm_cfg, agents_path: str, workspace_dir: str, operation_m
         raise SystemExit(1)
 
 
-def configure_and_start_pool(agent_pool, idle_timeout: float, idle_check_interval: float):
+def configure_and_start_pool(agent_pool, idle_timeout: float, system_agent_idle_timeout: float, idle_check_interval: float):
     """
     Configure pool settings (idle timeout), set the back-reference on OperationManager,
     and start background services.
@@ -101,6 +101,7 @@ def configure_and_start_pool(agent_pool, idle_timeout: float, idle_check_interva
     # Configure pool settings before starting background services (avoids race window)
     if hasattr(agent_pool, 'settings'):
         agent_pool.settings.idle_timeout_seconds = idle_timeout
+        agent_pool.settings.system_agent_idle_timeout_seconds = system_agent_idle_timeout
         agent_pool.settings.idle_check_interval = idle_check_interval
 
     try:
@@ -178,14 +179,15 @@ def initialize_infrastructure(project_root: Path, llm_cfg):
     workspace_dir = detect_workspace_dir(project_root)
     ensure_workspace(workspace_dir)
 
-    idle_timeout = float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 300.0))
+    idle_timeout = float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 900.0))
+    system_agent_idle_timeout = float(os.getenv('QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT', 900.0))
     idle_check_interval = float(os.getenv('QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))
 
     operation_mgr = create_operation_manager(workspace_dir)
 
     agents_path = str(project_root / 'agents')
     agent_pool = create_agent_pool(llm_cfg, agents_path, workspace_dir, operation_mgr)
-    configure_and_start_pool(agent_pool, idle_timeout, idle_check_interval)
+    configure_and_start_pool(agent_pool, idle_timeout, system_agent_idle_timeout, idle_check_interval)
 
     return operation_mgr, agent_pool
 

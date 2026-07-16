@@ -20,7 +20,7 @@ from agent_cascade.settings import (
     DEFAULT_COMPRESSION_COOLDOWN_SECONDS, DEFAULT_COMPRESSION_MAX_ATTEMPTS,
     COMPRESSION_FORCE_THRESHOLD, COMPRESSION_WARNING_THRESHOLD, COMPRESSION_TIMEOUT,
     COMPRESSION_SECURITY_CHECK_TIMEOUT,
-    AGENT_IDLE_TIMEOUT, AGENT_IDLE_CHECK_INTERVAL,
+    AGENT_IDLE_TIMEOUT, SYSTEM_AGENT_IDLE_TIMEOUT, AGENT_IDLE_CHECK_INTERVAL,
     AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
     AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL,
     CI_EXECUTION_TIMEOUT, CI_WATCHDOG_TIMEOUT, CI_STALE_CONTAINER_TTL,
@@ -579,7 +579,8 @@ class AgentInstance:
 class PoolSettings:
     """Configurable thresholds and timeouts for the agent pool."""
 
-    idle_timeout_seconds: float = AGENT_IDLE_TIMEOUT  # Auto-dismiss after this much inactivity
+    idle_timeout_seconds: float = AGENT_IDLE_TIMEOUT  # Auto-dismiss regular agents after this much inactivity
+    system_agent_idle_timeout_seconds: float = SYSTEM_AGENT_IDLE_TIMEOUT  # Auto-dismiss Compressor/Security after this much inactivity
     idle_check_interval: float = AGENT_IDLE_CHECK_INTERVAL  # Check every N seconds
     compression_force_threshold: float = COMPRESSION_FORCE_THRESHOLD  # Force compress at X% usage
     compression_warning_threshold: float = COMPRESSION_WARNING_THRESHOLD  # Warn at X% usage

@@ -28,7 +28,7 @@ DEFAULT_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_DEFAULT_MAX_TURNS', 50))  # D
 # Settings for tools
 DEFAULT_WORKSPACE: str = os.path.abspath(os.getenv('QWEN_AGENT_DEFAULT_WORKSPACE', 'workspace/'))
 DEFAULT_TOOL_RESULT_MAX_CHARS: int = int(os.getenv('QWEN_AGENT_TOOL_RESULT_MAX_CHARS', 10000))
-DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('QWEN_AGENT_READ_FILE_MAX_LINES', 1000))
+DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('QWEN_AGENT_READ_FILE_MAX_LINES', 150))
 DEFAULT_HEURISTIC_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_HEURISTIC_MATCH_THRESHOLD', 0.90))
 
 # Settings for RAG
@@ -64,7 +64,9 @@ COMPRESSION_SECURITY_CHECK_TIMEOUT: float = float(os.getenv(
     'QWEN_AGENT_COMPRESSION_SECURITY_CHECK_TIMEOUT', 120.0))  # Max seconds for security advisor during compression
 # Settings for agent pool
 AGENT_IDLE_TIMEOUT: float = float(os.getenv(
-    'QWEN_AGENT_IDLE_TIMEOUT', 900.0))  # Auto-dismiss after X seconds inactivity
+    'QWEN_AGENT_IDLE_TIMEOUT', 900.0))  # Auto-dismiss regular agents after X seconds inactivity
+SYSTEM_AGENT_IDLE_TIMEOUT: float = float(os.getenv(
+    'QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT', 900.0))  # Auto-dismiss Compressor/Security after X seconds inactivity
 AGENT_IDLE_CHECK_INTERVAL: float = float(os.getenv(
     'QWEN_AGENT_IDLE_CHECK_INTERVAL', 60.0))  # Check every N seconds
 AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv(

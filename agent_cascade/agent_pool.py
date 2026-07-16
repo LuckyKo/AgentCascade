@@ -2517,11 +2517,12 @@ class IdleManager:
         if inst.parent_instance is None:
             return False
 
-        # MAJOR FIX: Read state and last_activity under same lock for consistency (prevents TOCTOU race)
+        # Read state, last_activity, and agent_class under same lock for consistency (prevents TOCTOU race)
         with inst._state_lock:
             state = inst.state
             last_activity = inst.last_activity
-        
+            agent_class = inst.agent_class
+
         # Must NOT be sleeping (waiting for async results)
         if state == AgentState.SLEEPING:
             return False
@@ -2536,8 +2537,16 @@ class IdleManager:
             return False
 
         # Must have exceeded the idle timeout threshold
+        # System agents (Compressor, Security) use a separate timeout setting
         idle_secs = time.monotonic() - last_activity
-        if idle_secs < self.pool.settings.idle_timeout_seconds:
+        is_system_agent = agent_class.lower() in ('security', 'compressor')
+        effective_timeout = self.pool.settings.system_agent_idle_timeout_seconds if is_system_agent else self.pool.settings.idle_timeout_seconds
+
+        # 0 means "off" — never auto-dismiss
+        if effective_timeout == 0:
+            return False
+
+        if idle_secs < effective_timeout:
             return False
 
         return True
@@ -2550,6 +2559,10 @@ class IdleManager:
 
         idle_secs = time.monotonic() - inst.last_activity
 
+        # Determine which timeout threshold applies to this agent
+        is_system_agent = inst.agent_class.lower() in ('security', 'compressor')
+        effective_timeout = self.pool.settings.system_agent_idle_timeout_seconds if is_system_agent else self.pool.settings.idle_timeout_seconds
+
         # Capture log path before clearing
         log_path = None
         try:
@@ -2558,9 +2571,10 @@ class IdleManager:
         except Exception as e:
             logger.debug(f"Idle checker log path lookup failed for {instance_name} (non-critical): {e}")
 
+        agent_type_label = f"system agent ({inst.agent_class})" if is_system_agent else "agent"
         logger.info(
-            f"[idle_checker] Auto-dismissing idle agent '{instance_name}' "
-            f"(idle for {idle_secs:.0f}s, threshold={self.pool.settings.idle_timeout_seconds:.0f}s)"
+            f"[idle_checker] Auto-dismissing idle {agent_type_label} '{instance_name}' "
+            f"(idle for {idle_secs:.0f}s, threshold={effective_timeout:.0f}s)"
         )
 
         # Remove the instance (fires dismissal callbacks)
