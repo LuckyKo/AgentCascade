@@ -775,6 +775,25 @@ def build_state_from_pool(
     # Get pending approvals (only include if non-empty to prevent UI flickering)
     pending_approvals = _get_approvals(pool)
 
+    # Extract pool settings for frontend sync (inner-loop detection tuning + cache pool)
+    pool_settings = {}
+    if hasattr(pool, 'settings'):
+        ps = pool.settings
+        pool_settings.update({
+            'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False),
+            'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
+            'loop_score_threshold': getattr(ps, 'loop_score_threshold', 300),
+            'loop_max_retries': getattr(ps, 'loop_max_retries', 2),
+            'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),
+            'loop_sentence_rep_enabled': getattr(ps, 'loop_sentence_rep_enabled', True),
+            'loop_ngram_rep_enabled': getattr(ps, 'loop_ngram_rep_enabled', True),
+            'loop_block_rep_enabled': getattr(ps, 'loop_block_rep_enabled', True),
+            'loop_entropy_enabled': getattr(ps, 'loop_entropy_enabled', True),
+            'cache_pool_enabled': getattr(ps, 'cache_pool_enabled', True),
+            'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
+            'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
+        })
+
     return {
         # Kept for backward compat — frontend fallback reads data.messages if root not in agent_instances
         'messages': [serialize_message(m, i) for i, m in enumerate(msgs)],
@@ -800,6 +819,7 @@ def build_state_from_pool(
         'default_workspace': default_workspace,
         'is_waiting': is_waiting,
         'api_router': api_router_state,
+        'pool_settings': pool_settings,
     }
 
 
@@ -887,7 +907,26 @@ def build_stream_update_from_pool(
 
     # Get pending approvals (only include if non-empty to prevent UI flickering)
     pending_approvals = _get_approvals(pool)
-    
+
+    # Extract pool settings for frontend sync (inner-loop detection tuning + cache pool)
+    pool_settings = {}
+    if hasattr(pool, 'settings'):
+        ps = pool.settings
+        pool_settings.update({
+            'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False),
+            'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
+            'loop_score_threshold': getattr(ps, 'loop_score_threshold', 300),
+            'loop_max_retries': getattr(ps, 'loop_max_retries', 2),
+            'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),
+            'loop_sentence_rep_enabled': getattr(ps, 'loop_sentence_rep_enabled', True),
+            'loop_ngram_rep_enabled': getattr(ps, 'loop_ngram_rep_enabled', True),
+            'loop_block_rep_enabled': getattr(ps, 'loop_block_rep_enabled', True),
+            'loop_entropy_enabled': getattr(ps, 'loop_entropy_enabled', True),
+            'cache_pool_enabled': getattr(ps, 'cache_pool_enabled', True),
+            'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
+            'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
+        })
+
     return {
         'instances': all_instances,
         'agent_instances': all_instances,
@@ -901,6 +940,7 @@ def build_stream_update_from_pool(
         'telemetry': telemetry_data,
         'stopped': pool.stopped,
         'paused': pool.is_paused(),  # Pause state for frontend "Paused" indicator
+        'pool_settings': pool_settings,
     }
 
 

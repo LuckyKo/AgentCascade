@@ -122,6 +122,41 @@ function clearAutoSecurityTimers() {
   }
 }
 
+/** Sync pool settings from server state to UI elements.
+ * Called on every state/stream_update message to ensure UI matches server truth.
+ * @param {Object} ps - Pool settings object (inner-loop detection tuning + cache pool) */
+function syncPoolSettings(ps) {
+  if (!ps) return;
+  // Inner-loop detection toggle
+  if ($('#setting-inner-loop-detect') && ps.inner_loop_detect_enabled !== undefined)
+    $('#setting-inner-loop-detect').checked = ps.inner_loop_detect_enabled;
+  // Loop tuning numbers
+  if ($('#setting-loop-min-chars') && ps.loop_min_chars !== undefined)
+    $('#setting-loop-min-chars').value = ps.loop_min_chars;
+  if ($('#setting-loop-score-threshold') && ps.loop_score_threshold !== undefined)
+    $('#setting-loop-score-threshold').value = ps.loop_score_threshold;
+  if ($('#setting-loop-max-retries') && ps.loop_max_retries !== undefined)
+    $('#setting-loop-max-retries').value = ps.loop_max_retries;
+  // Per-mode toggles
+  if ($('#setting-loop-char-run') && ps.loop_char_run_enabled !== undefined)
+    $('#setting-loop-char-run').checked = ps.loop_char_run_enabled;
+  if ($('#setting-loop-sentence-rep') && ps.loop_sentence_rep_enabled !== undefined)
+    $('#setting-loop-sentence-rep').checked = ps.loop_sentence_rep_enabled;
+  if ($('#setting-loop-ngram-rep') && ps.loop_ngram_rep_enabled !== undefined)
+    $('#setting-loop-ngram-rep').checked = ps.loop_ngram_rep_enabled;
+  if ($('#setting-loop-block-rep') && ps.loop_block_rep_enabled !== undefined)
+    $('#setting-loop-block-rep').checked = ps.loop_block_rep_enabled;
+  if ($('#setting-loop-entropy') && ps.loop_entropy_enabled !== undefined)
+    $('#setting-loop-entropy').checked = ps.loop_entropy_enabled;
+  // Cache pool settings
+  if ($('#setting-cache-pool-enabled') && ps.cache_pool_enabled !== undefined)
+    $('#setting-cache-pool-enabled').checked = ps.cache_pool_enabled;
+  if ($('#setting-cache-pool-size') && ps.cache_pool_size !== undefined)
+    $('#setting-cache-pool-size').value = ps.cache_pool_size;
+  if ($('#setting-cache-threshold-chars') && ps.cache_threshold_chars !== undefined)
+    $('#setting-cache-threshold-chars').value = ps.cache_threshold_chars;
+}
+
 // Per-panel scroll lock state for ALL panels including root (managed via subAgentScrollLocks)
 const subAgentScrollLocks = {};
 
@@ -1262,6 +1297,9 @@ function handleServerMessage(data) {
         }
       }
 
+      // Sync pool settings from server state to UI elements
+      syncPoolSettings(data.pool_settings);
+
       if (data.current_model && statusModel) {
         statusModel.textContent = data.current_model;
       }
@@ -1458,6 +1496,9 @@ function handleServerMessage(data) {
       state.generating = true;
       const newStackStr = (state.activeStack || []).join(',');
       const stackChanged = oldStackStr !== newStackStr;
+
+      // Sync pool settings from server state to UI elements
+      syncPoolSettings(data.pool_settings);
 
       // Update scalar stats (always lightweight — no DOM work)
       if (data.total_tokens !== undefined) state.totalTokens = data.total_tokens;

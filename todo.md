@@ -36,7 +36,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 # BUGS:
 
-- [ ] no agent tab refresh during tool call streaming
+- [ ] no agent tab refresh during tool call streaming causes `Activity` bar to be still during tool writing process
 - [x] we have about 10-15% discrepancy (less) between the nr of tokens we measure and the actual count that LMStudio processes — FIXED: reasoning_content now always counted, all magic numbers centralized in settings.py 
 - [x] `Terminate` doesn't really terminate the agent properly — FIXED: (1) extracted `_check_stream_termination()` helper in execution_engine.py that checks `_is_stopped()` every 20 yield ticks during LLM streaming, (2) consolidated redundant `_is_stop_interrupted()` into `_is_stopped()`, (3) added `_halted_instances` + `is_instance_terminated()` to main loop in run_agent_unified.py for full stop condition coverage, (4) removed unnecessary time.sleep(0.1) from break path.
 - [ ] session loading sometime merges the old session with the new (mostly on server restart). should properly clean old session on load, just like it does a new session then loads.
@@ -46,10 +46,9 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] call_agent returns `[SYSTEM ERROR: Empty LLM response]` if the agent failed a inner loop check — FIXED: inner-loop and max-tokens detection exceptions were suppressed by inner except block, added re-raise for inner_loop: and max_tokens: prefixes so outer retry handler shows proper error messages (execution_engine.py)
 - [x] inner loop detector severely missfires — FIXED: analyzed 48 false positive samples across 5 days, added UI controls for min_chars, score_threshold, per-mode toggles (char_run, sentence_rep, ngram_rep, block_rep, entropy), and dedicated loop_max_retries budget in Loop Detection Tuning panel. Toggles gate detection signals in inner_loop_detect.py, applied via pool settings from WebUI in real time
 - [x] add turn info (x / y available) to system_info — FIXED: added _current_turn field to AgentInstance, tracked in execution_engine.py loop, displayed in system_info tool output as "Current Turn: X / Y", centralized DEFAULT_MAX_TURNS constant in settings.py, reset on instance reuse
-- [ ] we are pushing wrong summary from the inner loop detector if the compressor fails and gets stuck in a loop
+- [ ] we are pushing wrong summary from the inner loop detector if the compressor fails and gets stuck in a loop `[SYSTEM ERROR: Empty LLM response]` 
 - [ ] the setting `DEFAULT_READ_FILE_MAX_LINES` does not seem to have any effect
-- [ ] unhelpful message return when a child agent fails the inner loop detection `[SYSTEM ERROR: Empty LLM response]` 
-- [ ] some UI setting get lost on refresh/restart
+- [x] some UI setting get lost on refresh/restart (parts of inner loop settings) — FIXED: added pool_settings to server state responses (build_state_from_pool + build_stream_update_from_pool), frontend handleServerMessage now restores UI elements from received pool_settings creating proper roundtrip sync
 - [ ] there's an odd issue with LMStudio models getting stuck in repeating sequences like `??????` or `///////` permanently, and our inner loop detector catches them correctly. But the only fix is to reload the model (or switch to another). I'm thinking of switching to the fallback API on inner loop detect instead of kick to caller as that would fix it, basically treating inner loop detection as API connection loss.
 
 
