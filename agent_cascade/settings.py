@@ -174,7 +174,7 @@ class InnerLoopSettings:
 # ── Code interpreter settings (Feature: CI session sharing) ────────────────
 CI_EXECUTION_TIMEOUT: int = int(os.getenv('M6_CODE_INTERPRETER_EXEC_TIMEOUT', '120'))   # Per-call execution timeout (seconds)
 CI_WATCHDOG_TIMEOUT: int = int(os.getenv('M6_CODE_INTERPRETER_WATCHDOG_TIMEOUT', '300'))  # Kernel inactivity watchdog timeout (seconds)
-CI_STALE_CONTAINER_TTL: int = int(os.getenv('M6_CODE_INTERPRETER_STALE_TTL', '900'))      # Stale container cleanup TTL (seconds)
+CI_STALE_CONTAINER_TTL: int = int(os.getenv('M6_CODE_INTERPRETER_STALE_TTL', '1200'))      # Stale container cleanup TTL (seconds)
 CI_MIN_EXECUTION_TIMEOUT: int = 1    # Minimum per-call execution timeout (seconds)
 CI_MIN_WATCHDOG_TIMEOUT: int = 30     # Minimum watchdog timeout (seconds)
 CI_MIN_STALE_CONTAINER_TTL: int = 30  # Minimum stale container TTL (seconds)
@@ -188,3 +188,9 @@ CACHE_THRESHOLD_CHARS: int = int(os.getenv('QWEN_AGENT_CACHE_THRESHOLD_CHARS', '
 MAX_ASYNC_SHELL_PER_AGENT: int = 5            # Max concurrent async shells per agent
 ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS: int = int(os.getenv('QWEN_AGENT_ASYNC_SHELL_HEARTBEAT_CHARS', '800'))  # Max chars per heartbeat message
 ASYNC_SHELL_DEFAULT_TIMEOUT: int = 3600       # Default timeout for async shells (1 hour)
+
+# ── Skills system settings (Feature: Skills System Phase 1) ────────────
+LOAD_SKILL_AUTO: str = "AUTO"     # Auto-match relevant skills from task context
+LOAD_SKILL_NONE: str = "NONE"     # No skill loading (saves tokens)
+DEFAULT_LOAD_SKILL_MODE: str = os.getenv('QWEN_AGENT_DEFAULT_LOAD_SKILL', 'AUTO')  # Default load_skill mode: AUTO or NONE
+SKILL_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_SKILL_MATCH_THRESHOLD', '0.15'))  # Minimum relevance score for AUTO mode skill loading

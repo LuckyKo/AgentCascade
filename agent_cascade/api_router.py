@@ -987,7 +987,7 @@ class APIRouter:
         """
         # Extract instance name from kwargs (set by execution_engine) so we can
         # apply per-instance cursor rotation and skip already-failed endpoints.
-        _inst_name = kwargs.get('agent_instance_name')
+        _inst_name = kwargs.pop('agent_instance_name')
         chain = self.get_endpoint_chain(
             agent_type, allocated_tokens=allocated_tokens, instance_name=_inst_name,
         )

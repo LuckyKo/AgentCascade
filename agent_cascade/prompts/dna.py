@@ -45,6 +45,7 @@ AVAILABLE_TOOLS: List[str] = [
     'code_map',         # Quick file structure overview
     'calculate',        # Evaluate mathematical expressions
     'syntax_check',     # Check file syntax without execution
+    'scan_skills',      # Scan registered skills and return matching skills with relevance scores
 ]
 
 # Tools NOT in AVAILABLE_TOOLS (hidden from agents, used internally only):
@@ -408,6 +409,25 @@ TOOL_METADATA = {
                 'minimum': 1,
                 'description': 'Optional turn limit for sub-agent execution. If omitted, defaults to caller\'s limit. Useful for short tasks requiring strict budget control. The sub-agent will be informed of its turn budget via context.'
             },
+            'load_skill': {
+                'oneOf': [
+                    {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'List of skill names to load (e.g., ["httpx-connection-pooling", "code-review"]). Full instructions will be injected into the child agent.'
+                    },
+                    {
+                        'type': 'string',
+                        'enum': ['AUTO', 'NONE'],
+                        'description': '"AUTO" = auto-match relevant skills from task context; "NONE" = no skill loading (saves tokens).'
+                    },
+                    {
+                        'type': 'null',
+                        'description': 'Omit skill loading (same as "NONE").'
+                    }
+                ],
+                'description': 'Controls which specialized skills are loaded for this agent call. Use scan_skills to discover available skills.'
+            },
         },
         'required': ['agent_class', 'instance_name', 'task'],
     },
@@ -491,6 +511,16 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'path': 'Path to the file to check, absolute or relative to the workspace root.'
+        }
+    },
+    'scan_skills': {
+        'description': (
+            'Scan registered skills and return matching skills with relevance scores. '
+            'Use this to discover which skills are available before calling call_agent with load_skill. '
+            'Returns skill names, descriptions, and match scores for the given query.'
+        ),
+        'parameters': {
+            'query': 'Search query or task description to match against available skills. Leave empty to list all registered skills.'
         }
     }
 }

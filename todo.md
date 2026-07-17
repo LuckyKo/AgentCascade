@@ -14,7 +14,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 # TODO:
 
-[ ] Add skills (custom agent loading)
+[ ] Add skills (custom agent loading?). there are some pre-existing modules from Qwen agent that deal with skills that havent been integrated, investigate hw they could be incorporated in AC, alternatives or improvements to that.
 [ ] Add an Overseer agent that periodically checks on the health of the system, reads logs and telemetry, check if running agents got stuck in undetectable loops or migrated goals towards something that the user never asked for, suggests fixes and improvements into a suggestion box. Main agent will pull from the suggestion box during idle times when user is AFK to self improve the agents or the framework during our daily operation - do the whole DNA A/B testing thing. Overseer agent will always get its full working queue compressed when it finishes and save it into the suggestion box (no chat messages) - should be persistent across sessions. We'll set the interval at which it activates, it will silently interrupt running agents when it activates and resume them like it never happens when its done (unless it decides to kill an agent), or work in parallel using a different API endpoint. - big task, will do it after we stabilize the framework
 [ ] need a memory consolidation task ran periodically - takes all summaries in log and arranges them in a neat continuous package like long term memory -> replaces last summary
 [x] implement async shell_cmd launch (immediate tool response that it was launched, runs in background while agent keeps running and return final output as user message when done, can have heartbeat value that will periodically send console output back to caller agent) — DONE: AsyncShellTracker module with per-agent ID counters, max 5 concurrent shells, heartbeat injection via message queue, process tree cleanup on dismiss
@@ -34,113 +34,73 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 # Errors to investigate:
 
-# push of summary on loop detected
-2026-07-14 22:46:58,682 - execution_engine.py - 716 - DEBUG - [TURN_START] Calling _setup_turn for Compressor_1
-2026-07-14 22:46:58,683 - execution_engine.py - 1152 - INFO - [CACHE_REBUILD] Rebuilding working set for Compressor_1 (conv_len=2)
-2026-07-14 22:46:58,683 - execution_engine.py - 1235 - DEBUG - [CACHE_REBUILD] System prompt content CHANGED for Compressor_1
-2026-07-14 22:46:58,690 - agent_instance_logger.py - 458 - INFO - Rewrote agent log n:\work\WD\AgentWorkspace\logs\compressor_Compressor_1_20260714_224658.jsonl with 2 messages.
-2026-07-14 22:46:58,690 - execution_engine.py - 751 - DEBUG - [TURN_DONE] Got messages=2, llm_messages=2
-2026-07-14 22:46:58,766 - base.py - 990 - INFO - Agent [Compressor] - ALL tokens: 83146, Available tokens: 124493
-2026-07-14 22:46:58,772 - oai.py - 77 - DEBUG - [CACHE] MISS creating new client key=('http://127.0.0.1:1234/v1', 'EMPTY')
-2026-07-14 22:47:49,610 - execution_engine.py - 1906 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for Compressor_1. Retrying…
-2026-07-14 22:47:49,611 - execution_engine.py - 1951 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-14.jsonl
-2026-07-14 22:47:49,611 - execution_engine.py - 1977 - DEBUG - [INNER_LOOP] Detection error for Compressor_1: inner_loop: repeated ngram
-2026-07-14 22:47:49,612 - execution_engine.py - 2198 - WARNING - [ENDPOINT_RETRY] LLM call failed for Compressor_1, retry 1/5. Retrying in 1.1s with new endpoint... Error: inner_loop: repeated ngram
-2026-07-14 22:47:50,685 - base.py - 990 - INFO - Agent [Compressor] - ALL tokens: 83146, Available tokens: 124493
-2026-07-14 22:47:53,012 - execution_engine.py - 1906 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for Compressor_1. Retrying…
-2026-07-14 22:47:53,013 - execution_engine.py - 1951 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-14.jsonl
-2026-07-14 22:47:53,013 - execution_engine.py - 1977 - DEBUG - [INNER_LOOP] Detection error for Compressor_1: inner_loop: repeated ngram
-2026-07-14 22:47:53,014 - execution_engine.py - 2198 - WARNING - [ENDPOINT_RETRY] LLM call failed for Compressor_1, retry 2/5. Retrying in 2.0s with new endpoint... Error: inner_loop: repeated ngram
-2026-07-14 22:47:55,051 - base.py - 990 - INFO - Agent [Compressor] - ALL tokens: 83146, Available tokens: 124493
-2026-07-14 22:47:57,485 - execution_engine.py - 1906 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for Compressor_1. Retrying…
-2026-07-14 22:47:57,486 - execution_engine.py - 1951 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-14.jsonl
-2026-07-14 22:47:57,486 - execution_engine.py - 1977 - DEBUG - [INNER_LOOP] Detection error for Compressor_1: inner_loop: repeated ngram
-2026-07-14 22:47:57,486 - execution_engine.py - 2198 - WARNING - [ENDPOINT_RETRY] LLM call failed for Compressor_1, retry 3/5. Retrying in 4.3s with new endpoint... Error: inner_loop: repeated ngram
-2026-07-14 22:48:01,766 - base.py - 990 - INFO - Agent [Compressor] - ALL tokens: 83146, Available tokens: 124493
-2026-07-14 22:48:04,092 - execution_engine.py - 1906 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for Compressor_1. Retrying…
-2026-07-14 22:48:04,093 - execution_engine.py - 1951 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-14.jsonl
-2026-07-14 22:48:04,093 - execution_engine.py - 1977 - DEBUG - [INNER_LOOP] Detection error for Compressor_1: inner_loop: repeated ngram
-2026-07-14 22:48:04,093 - execution_engine.py - 2198 - WARNING - [ENDPOINT_RETRY] LLM call failed for Compressor_1, retry 4/5. Retrying in 5.0s with new endpoint... Error: inner_loop: repeated ngram
-2026-07-14 22:48:09,107 - base.py - 990 - INFO - Agent [Compressor] - ALL tokens: 83146, Available tokens: 124493
-2026-07-14 22:48:11,447 - execution_engine.py - 1906 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated ngram (score=352.1) for Compressor_1. Retrying…
-2026-07-14 22:48:11,448 - execution_engine.py - 1951 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-14.jsonl
-2026-07-14 22:48:11,448 - execution_engine.py - 1977 - DEBUG - [INNER_LOOP] Detection error for Compressor_1: inner_loop_exhausted: retried 5 times, giving up — last reason: repeated ngram
-2026-07-14 22:48:11,450 - base.py - 990 - INFO - Agent [Compressor] - ALL tokens: 83146, Available tokens: 124493
-2026-07-14 22:48:13,801 - execution_engine.py - 1906 - DEBUG - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for Compressor_1. Retrying…
-2026-07-14 22:48:13,802 - execution_engine.py - 1951 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade_unified\workspace\logs\loop_samples\samples_2026-07-14.jsonl
-2026-07-14 22:48:13,802 - execution_engine.py - 1977 - DEBUG - [INNER_LOOP] Detection error for Compressor_1: inner_loop_exhausted: retried 5 times, giving up — last reason: repeated ngram
-2026-07-14 22:48:13,805 - execution_engine.py - 1080 - DEBUG - EXIT - Compressor_1 RUNNING→IDLE
-2026-07-14 22:48:14,122 - handler.py - 843 - INFO - /compress applied for Maine: Context compressed (auto mode): 93 messages summarized for 'Maine'.
-2026-07-14 22:48:14,122 - handler.py - 311 - DEBUG - Logger sync after /compress command for 'Maine': pool_len=28, using reset_history() for full sync
-2026-07-14 22:48:14,153 - agent_instance_logger.py - 678 - INFO - Synced compression marker in n:\work\WD\AgentWorkspace\logs\orchestrator_Maine_20260714_224616.jsonl (315 messages).
-2026-07-14 22:48:14,172 - execution_engine.py - 1645 - DEBUG - Rebuilt working sets for Maine: messages=28, llm_messages=28
-2026-07-14 22:48:14,176 - execution_engine.py - 1457 - DEBUG - [PRE_LLM] Compress command handled for Maine
-2026-07-14 22:48:14,176 - execution_engine.py - 824 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
+# Some errors in tools
+2026-07-17 12:25:04,311 - base.py - 994 - INFO - Agent [Security] - ALL tokens: 6459, Available tokens: 164667
+2026-07-17 12:25:06,453 - simple_doc_parser.py - 450 - INFO - Start parsing n:\work\WD\AgentWorkspace\file:///N:/work/WD/AgentCascade_unified/agent_cascade/execution_engine.py...
+2026-07-17 12:25:06,455 - utils.py - 140 - ERROR - Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\tools\simple_doc_parser.py", line 446, in call
+    parsed_file = self.db.get(cached_name_ori)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\tools\storage.py", line 92, in get
+    raise KeyNotExistsError(f'Get Failed: {key} does not exist')
+agent_cascade.tools.storage.KeyNotExistsError: Get Failed: 74f5fcaeecf752ea24624701337bae4e0e38896dcc6c7d2959455299f0370f53_ori does not exist
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\utils\utils.py", line 347, in get_file_type
+    content = read_text_from_file(path)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\utils\utils.py", line 302, in read_text_from_file
+    with open(path, 'r', encoding='utf-8') as file:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 22] Invalid argument: 'n:\\work\\WD\\AgentWorkspace\\file:///N:/work/WD/AgentCascade_unified/agent_cascade/execution_engine.py'
+
+2026-07-17 12:25:06,456 - agent.py - 251 - WARNING - Tool `web_extractor` reported a service error:
+
+Error code: ValueError. Error message: Failed: The current parser does not support this file type! Supported types: pdf/docx/pptx/md/txt/html/csv/tsv/xlsx/xls
+2026-07-17 12:25:06,475 - base.py - 994 - INFO - Agent [Security] - ALL tokens: 6549, Available tokens: 164667
+2026-07-17 12:25:08,789 - base.py - 994 - INFO - Agent [Security] - ALL tokens: 7430, Available tokens: 164667
 
 
-# API errors
+2026-07-17 13:32:51,973 - simple_doc_parser.py - 448 - INFO - Read parsed https://docs.langchain.com/oss/python/langchain/tools from cache.
+2026-07-17 13:32:51,996 - tool_dispatcher.py - 747 - INFO - Wrote spillover file for 'web_extractor' result of langchain_tools_deep_dive_researcher: 50540 chars -> logs/spillover/langchain_tools_deep_dive_researcher_web_extractor_20260717_133251_993003.txt
+2026-07-17 13:32:51,999 - base.py - 994 - INFO - Agent [Researcher] - ALL tokens: 19743, Available tokens: 124340
+2026-07-17 13:32:55,903 - simple_doc_parser.py - 450 - INFO - Start parsing https://raw.githubusercontent.com/langchain-ai/langchain/main/libs/experimental/langchain_experimental/utilities/python_repl.py...
+2026-07-17 13:32:56,165 - utils.py - 274 - INFO - Downloading https://raw.githubusercontent.com/langchain-ai/langchain/main/libs/experimental/langchain_experimental/utilities/python_repl.py to n:\work\WD\AgentWorkspace\tools\simple_doc_parser\f336f8f29434878dfb5059cb6019ae23c0ba29613e663579e5b5de5a719947ea\python_repl.py...
+2026-07-17 13:32:56,263 - agent.py - 260 - WARNING - An error occurred when calling tool `web_extractor`:
+ValueError: Can not download this file. Please check your network or the file link.
+Traceback:
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\agent.py", line 248, in _call_tool
+    tool_result = tool.call(tool_args, **kwargs)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\tools\web_extractor.py", line 44, in call
+    parsed_web = self.simple_doc_parser.call({'url': url})
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\tools\simple_doc_parser.py", line 466, in call
+    path = save_url_to_local_work_dir(path, tmp_file_root)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\utils\utils.py", line 289, in save_url_to_local_work_dir
+    raise ValueError('Can not download this file. Please check your network or the file link.')
 
-- [x] grok-4.1-fast returns 400: "reasoning_content must be passed back" — FIXED: `_conv_agent_cascade_messages_to_oai` in base.py now always includes `reasoning_content` for assistant messages (defaults to empty string), satisfying thinking mode requirements.
+2026-07-17 13:32:56,302 - base.py - 994 - INFO - Agent [Researcher] - ALL tokens: 20511, Available tokens: 124340
 
-2026-07-17 01:59:16,683 - base.py - 990 - INFO - Agent [Security] - ALL tokens: 2497, Available tokens: 164665
-2026-07-17 01:59:17,269 - log.py - 41 - WARNING - [APIRouter] Endpoint 'grok-4.1-fast' @ http://127.0.0.1:4315/v1 attempt 2/2: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_83c3ce48', 'timestamp': '2026-07-16T22:59:17.268579400+00:00', 'trace_id': '5422009cbfdd4e65a4fd3f054ed487d7'}
-Traceback: Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 1054, in call_with_fallback
-    result = execute_with_sem(current_agent_name)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 1000, in execute_with_sem
-    first_chunk = next(it)
-                  ^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 524, in _convert_messages_iterator_to_target_type
-    for messages in messages_iter:
-                    ^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 384, in _format_and_cache
-    for o in output:
-             ^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 508, in _postprocess_messages_iterator
-    for pre_msg in messages:
-                   ^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1054, in retry_model_service_iterator
-    num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
-                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1077, in _raise_or_delay
-    raise e from None
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1049, in retry_model_service_iterator
-    for rsp in it_fn():
-               ^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\oai.py", line 544, in _chat_stream
-    raise ModelServiceError(exception=ex, code=code if code else None)
-agent_cascade.llm.base.ModelServiceError: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_83c3ce48', 'timestamp': '2026-07-16T22:59:17.268579400+00:00', 'trace_id': '5422009cbfdd4e65a4fd3f054ed487d7'}
-[APIRouter] Endpoint 'grok-4.1-fast' @ http://127.0.0.1:4315/v1 attempt 2/2: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_83c3ce48', 'timestamp': '2026-07-16T22:59:17.268579400+00:00', 'trace_id': '5422009cbfdd4e65a4fd3f054ed487d7'}
-Traceback: Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 1054, in call_with_fallback
-    result = execute_with_sem(current_agent_name)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 1000, in execute_with_sem
-    first_chunk = next(it)
-                  ^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 524, in _convert_messages_iterator_to_target_type
-    for messages in messages_iter:
-                    ^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 384, in _format_and_cache
-    for o in output:
-             ^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 508, in _postprocess_messages_iterator
-    for pre_msg in messages:
-                   ^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1054, in retry_model_service_iterator
-    num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
-                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1077, in _raise_or_delay
-    raise e from None
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1049, in retry_model_service_iterator
-    for rsp in it_fn():
-               ^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\oai.py", line 544, in _chat_stream
-    raise ModelServiceError(exception=ex, code=code if code else None)
-agent_cascade.llm.base.ModelServiceError: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_83c3ce48', 'timestamp': '2026-07-16T22:59:17.268579400+00:00', 'trace_id': '5422009cbfdd4e65a4fd3f054ed487d7'}
 
-2026-07-17 01:59:17,273 - base.py - 990 - INFO - Agent [Security] - ALL tokens: 2497, Available tokens: 164665
-2026-07-17 01:59:17,275 - oai.py - 391 - INFO - LLM infrastructure changed. Re-detecting context for: http://localhost:1234/v1
-2026-07-17 01:59:19,327 - oai.py - 356 - DEBUG - Could not identify a target model in http://localhost:1234/v1/models for context length detection.
-2
+# Agent launched in async mode when it shouldnt?
+2026-07-17 23:10:55,952 - execution_engine.py - 4103 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=code_execution_research_1, reason=completed, inst_type=AgentInstance, conv_len=14, final_resp_len=44
+2026-07-17 23:10:55,955 - tool_dispatcher.py - 401 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'code_execution_research_1' completed in 87.01s
+2026-07-17 23:10:55,955 - tool_dispatcher.py - 414 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'skill_researcher_1' after sync child
+2026-07-17 23:10:55,956 - agent_pool.py - 2085 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=researcher, instance_name=skill_researcher_1, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
+2026-07-17 23:10:55,957 - tool_dispatcher.py - 423 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'skill_researcher_1'. Total SYNC path elapsed: 87.01s
+2026-07-17 23:10:55,957 - tool_dispatcher.py - 124 - DEBUG - handle_call_agent returned type=str
+2026-07-17 23:10:55,975 - base.py - 994 - INFO - Agent [Researcher] - ALL tokens: 13273, Available tokens: 123165
+2026-07-17 23:11:03,036 - tool_dispatcher.py - 563 - DEBUG - call_agent nesting - skill_researcher_1 depth=1/10
+2026-07-17 23:11:03,037 - tool_dispatcher.py - 447 - DEBUG - Taking ASYNC path - skill_researcher_1 calls code_execution_research_2/researcher at depth 1
+2026-07-17 23:11:03,040 - execution_engine.py - 3928 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target=code_execution_research_2, class=researcher, caller=skill_researcher_1, nest_depth=1, force_fresh=False
+2026-07-17 23:11:03,040 - tool_dispatcher.py - 461 - DEBUG - ASYNC - code_execution_research_2 launched by skill_researcher_1
+2026-07-17 23:11:03,040 - lifecycle_manager.py - 193 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for code_execution_research_2
+2026-07-17 23:11:03,041 - tool_dispatcher.py - 124 - DEBUG - handle_call_agent returned type=str
+2026-07-17 23:11:03,041 - agent_pool.py - 603 - DEBUG - Instance conversation cleanup key missing (expected): 'code_execution_research_1'
+2026-07-17 23:11:03,042 - agent_pool.py - 603 - DEBUG - Instance conversation cleanup key missing (expected): 'code_execution_research_2'
+2026-07-17 23:11:03,054 - agent_instance_logger.py - 130 - DEBUG - Copied session from n:\work\WD\AgentWorkspace\logs\researcher_skill_researcher_1_20260717_230911.jsonl to n:\work\WD\AgentWorkspace\logs\researcher_code_execution_research_2_20260717_231103.jsonl
+2026-07-17 23:11:03,057 - base.py - 994 - INFO - Agent [Researcher] - ALL tokens: 13498, Available tokens: 123165

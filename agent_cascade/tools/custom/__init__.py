@@ -10,6 +10,7 @@ from .code_map import CodeMap
 from .forget_last_tool import ForgetLast
 from .syntax_check import SyntaxCheck
 from .ddg_search import DDGSearch
+from .scan_skills import ScanSkills
 
 __all__ = [
     'ReadFile',
@@ -30,4 +31,5 @@ __all__ = [
     'ForgetLast',
     'SyntaxCheck',
     'DDGSearch',
+    'ScanSkills',
 ]
