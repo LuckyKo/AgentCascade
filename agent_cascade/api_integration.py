@@ -792,6 +792,7 @@ def build_state_from_pool(
             'cache_pool_enabled': getattr(ps, 'cache_pool_enabled', True),
             'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
             'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
+            'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
         })
 
     return {
@@ -925,6 +926,7 @@ def build_stream_update_from_pool(
             'cache_pool_enabled': getattr(ps, 'cache_pool_enabled', True),
             'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
             'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
+            'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
         })
 
     return {

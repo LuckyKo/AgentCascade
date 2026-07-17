@@ -25,6 +25,7 @@ from enum import Enum, auto
 from agent_cascade.agent_instance import ArgumentCachePool  # Cache pool for {USE_CACHED_ENTRY_N}
 from agent_cascade.settings import (
     COMPRESSION_DEFAULT_FRACTION,
+    DEFAULT_LOAD_SKILL_MODE,
     DEFAULT_MAX_TURNS,
     LLM_MAX_RETRIES,
     LLM_RETRY_BASE_DELAY,
@@ -312,6 +313,31 @@ def _build_resources_block(pool, template, instance=None) -> str:
         )
 
     return res
+
+
+def _build_skills_block(loaded_skills: list) -> str:
+    """Build the skills section for system prompt injection.
+
+    Formats a markdown block containing full instructions from loaded skills.
+    Each skill's instructions are wrapped in a clearly labeled section so the
+    agent knows which expertise applies to its current task.
+
+    Args:
+        loaded_skills: List of instruction strings (from SkillManager.resolve_load_skill).
+
+    Returns:
+        Formatted markdown block, or empty string if no skills loaded.
+    """
+    if not loaded_skills:
+        return ""
+
+    parts = ["\n\n## Active Skills"]
+    for idx, instructions in enumerate(loaded_skills, 1):
+        parts.append(f"\n### Skill {idx}\n{instructions}")
+
+    logger.debug("[SKILLS] Built skills block with %d skill(s), total ~%d chars",
+                 len(loaded_skills), sum(len(s) for s in loaded_skills))
+    return '\n'.join(parts)
 
 
 def _build_session_metadata(pool, instance) -> str:
@@ -3919,8 +3945,29 @@ class ExecutionEngine:
         # was loaded from log file)
         sys_msg = self.lifecycle.build_system_message(inst.agent_class, instance_name)
 
-        # Phase 4.1: Delegate to lifecycle manager for task message building
-        task_msg = self.lifecycle.build_task_message(args, caller)
+        # ── Skills System: Resolve load_skill and inject into sys_msg ────────
+        load_skill_value = args.get('load_skill')
+        if load_skill_value is None:
+            # Read from pool settings (set via UI toggle), fall back to env var default
+            load_skill_value = getattr(self.pool.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
+
+        task_text = args.get('task', '')
+        context_text = args.get('context', '')
+        skill_manager = getattr(self.pool, 'skill_manager', None)
+        loaded_skills = []
+        if skill_manager and load_skill_value != "NONE":
+            try:
+                loaded_skills = skill_manager.resolve_load_skill(
+                    load_skill_value, task_text, context_text
+                )
+            except Exception as e:
+                logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
+                loaded_skills = []
+
+        # Inject skill instructions into system prompt if any were loaded
+        if loaded_skills:
+            skills_block = _build_skills_block(loaded_skills)
+            sys_msg += skills_block
 
         # Phase 4.1: Delegate to lifecycle manager for conversation
         # initialization

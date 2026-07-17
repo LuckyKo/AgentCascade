@@ -178,6 +178,15 @@ def _handle_inner_loop_detect(ui_cfg: dict, agent_pool: Optional[Any], agents: l
         agent_pool.settings.inner_loop_detect_enabled = bool(ui_cfg['inner_loop_detect_enabled'])
 
 
+@register_config_handler('default_load_skill_mode')
+def _handle_default_load_skill_mode(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update default load_skill mode (AUTO or NONE)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = str(ui_cfg.get('default_load_skill_mode', 'AUTO')).upper()
+        if val in ('AUTO', 'NONE'):
+            agent_pool.settings.default_load_skill_mode = val
+
+
 @register_config_handler('loop_min_chars')
 def _handle_loop_min_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update minimum characters before activating heavy loop detection."""

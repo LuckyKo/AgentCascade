@@ -155,6 +155,12 @@ function syncPoolSettings(ps) {
     $('#setting-cache-pool-size').value = ps.cache_pool_size;
   if ($('#setting-cache-threshold-chars') && ps.cache_threshold_chars !== undefined)
     $('#setting-cache-threshold-chars').value = ps.cache_threshold_chars;
+  // Skills system toggle
+  if ($('#setting-enable-skills') && ps.default_load_skill_mode !== undefined)
+    $('#setting-enable-skills').checked = (ps.default_load_skill_mode === 'AUTO');
+
+  // Persist synced settings to localStorage only (skip server broadcast to avoid feedback loop).
+  saveSettings(false);
 }
 
 // Per-panel scroll lock state for ALL panels including root (managed via subAgentScrollLocks)
@@ -750,7 +756,9 @@ ranges.forEach(r => {
 
 // ── Settings Persistence ─────────────────────────────────────────────────────
 
-function saveSettings() {
+// sendToServer defaults to true for backward compatibility; pass false to skip server broadcast (e.g. from syncPoolSettings)
+function saveSettings(sendToServer) {
+  if (sendToServer === undefined) sendToServer = true;
   const s = getGenerateCfg();
   if (settingLinesEnabled) s['setting-lines-enabled'] = settingLinesEnabled.checked;
   if (settingSoundIntervention) s['setting-sound-intervention'] = settingSoundIntervention.checked;
@@ -778,6 +786,7 @@ function saveSettings() {
 
   if ($('#setting-max-turns')) s['max-turns'] = $('#setting-max-turns').value;
   if ($('#setting-auto-continue')) s['auto-continue'] = $('#setting-auto-continue').checked;
+  if ($('#setting-enable-skills')) s['enable-skills'] = $('#setting-enable-skills').checked;
   if ($('#setting-inner-loop-detect')) s['inner-loop-detect'] = $('#setting-inner-loop-detect').checked;
   // Save Agent Budgeting toggle state
   if ($('#setting-agent-budgeting')) s['enable_agent_budgeting'] = $('#setting-agent-budgeting').checked;
@@ -810,7 +819,7 @@ function saveSettings() {
 
   localStorage.setItem('agent-cascade-settings', JSON.stringify(s));
   
-  if (state.connected) {
+  if (sendToServer && state.connected) {
     send({ type: 'update_config', generate_cfg: getGenerateCfg() });
   }
   
@@ -888,6 +897,7 @@ function loadSettings() {
     if (s['vision-enabled'] !== undefined) $('#setting-vision-enabled').checked = s['vision-enabled'];
     if (s['max-turns'] !== undefined) $('#setting-max-turns').value = s['max-turns'];
     if (s['auto-continue'] !== undefined) $('#setting-auto-continue').checked = s['auto-continue'];
+    if (s['enable-skills'] !== undefined) $('#setting-enable-skills').checked = s['enable-skills'];
     if (s['inner-loop-detect'] !== undefined) $('#setting-inner-loop-detect').checked = s['inner-loop-detect'];
     // Restore Agent Budgeting toggle state
     if (s['enable_agent_budgeting'] !== undefined) $('#setting-agent-budgeting').checked = s['enable_agent_budgeting'];
@@ -4070,6 +4080,7 @@ function getGenerateCfg() {
   if ($('#setting-max-parallel')) cfg.max_parallel_agents = parseInt($('#setting-max-parallel').value) || 3;
   if ($('#setting-auto-continue')) cfg.auto_continue = $('#setting-auto-continue').checked;
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;
+  if ($('#setting-enable-skills')) cfg.default_load_skill_mode = $('#setting-enable-skills').checked ? 'AUTO' : 'NONE';
   if ($('#setting-inner-loop-detect')) cfg.inner_loop_detect_enabled = $('#setting-inner-loop-detect').checked;
   // Loop detection tuning settings
   if ($('#setting-loop-min-chars')) cfg.loop_min_chars = parseInt($('#setting-loop-min-chars').value) || 4000;

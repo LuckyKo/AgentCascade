@@ -25,6 +25,7 @@ from agent_cascade.settings import (
     AGENT_SLEEPING_TIMEOUT, AGENT_SLEEPING_WAKEUP_INTERVAL,
     CI_EXECUTION_TIMEOUT, CI_WATCHDOG_TIMEOUT, CI_STALE_CONTAINER_TTL,
     CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS,
+    DEFAULT_LOAD_SKILL_MODE,
 )
 
 
@@ -624,5 +625,8 @@ class PoolSettings:
     cache_pool_enabled: bool = CACHE_POOL_ENABLED      # Toggle on/off (default: enabled)
     cache_pool_size: int = CACHE_POOL_SIZE             # Rolling buffer entries per instance
     cache_threshold_chars: int = CACHE_THRESHOLD_CHARS  # Min chars for output & granular arg caching
+
+    # Skills system settings
+    default_load_skill_mode: str = DEFAULT_LOAD_SKILL_MODE  # "AUTO" (default) or "NONE" — controls whether skills auto-load on call_agent
     
     
