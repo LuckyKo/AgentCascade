@@ -227,10 +227,14 @@ class ToolDispatcher:
         # and return actual result. This avoids deadlock and ensures child can make progress.
         
         # Check if caller currently holds the concurrency slot
+        # BUG FIX: Read _slot_release under state lock to prevent race conditions
+        # where another thread modifies it between check and decision
         caller_slot_holder = self.pool.get_instance(caller_name)
         caller_holds_slot = False
-        if caller_slot_holder and hasattr(caller_slot_holder, '_slot_release') and caller_slot_holder._slot_release is not None:
-            caller_holds_slot = True
+        if caller_slot_holder and hasattr(caller_slot_holder, '_state_lock'):
+            with caller_slot_holder._state_lock:
+                if caller_slot_holder._slot_release is not None:
+                    caller_holds_slot = True
         
         if caller_holds_slot:
             # Extracted to _run_child_sync() - Phase 4.3
@@ -494,9 +498,12 @@ class ToolDispatcher:
         
         for attempt in range(max_attempts):
             try:
-                slot_holder._slot_release = self.pool._acquire_slot(
+                release_cb = self.pool._acquire_slot(
                     slot_holder.agent_class, slot_holder_name
                 )
+                # BUG FIX: _acquire_slot returns None for unlimited endpoints.
+                # Store the result (None is valid - means no concurrency limit).
+                slot_holder._slot_release = release_cb
                 return True
             except Exception as e:
                 if attempt < max_attempts - 1:

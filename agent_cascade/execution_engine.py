@@ -3544,12 +3544,24 @@ class ExecutionEngine:
         # _release_slot checks
         # for None before releasing. No need to guard with skip_slot_acquire
         # check.
-        # Release concurrency slot when sleeping — allows children to proceed
-        # (using helper method FIX Mi3)
-        self._release_slot(instance, instance.instance_name, "sleep transition")
-
+        # BUG FIX: Acquire state lock BEFORE releasing slot to prevent race
+        # where another thread steals the slot between release and state transition.
         with instance._state_lock:
             if instance.state == AgentState.RUNNING:
+                # Inline slot release under lock — avoids nested lock acquisition
+                # (matching agent_pool.py pattern at lines ~1118-1125)
+                if instance._slot_release is not None:
+                    release_cb = instance._slot_release
+                    instance._slot_release = None
+                    try:
+                        release_cb()
+                    except Exception as e:
+                        logger.error(
+                            f"[SLOT_RELEASE_ERROR] Failed to release slot for "
+                            f"{instance.instance_name} during sleep transition: {e}",
+                            exc_info=True,
+                        )
+
                 # Mark activity before transitioning to SLEEPING so idle timer
                 # is updated
                 self.pool._mark_activity(instance.instance_name)
