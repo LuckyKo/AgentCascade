@@ -76,3 +76,71 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 2026-07-14 22:48:14,172 - execution_engine.py - 1645 - DEBUG - Rebuilt working sets for Maine: messages=28, llm_messages=28
 2026-07-14 22:48:14,176 - execution_engine.py - 1457 - DEBUG - [PRE_LLM] Compress command handled for Maine
 2026-07-14 22:48:14,176 - execution_engine.py - 824 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
+
+
+# API errors
+
+- [x] grok-4.1-fast returns 400: "reasoning_content must be passed back" — FIXED: `_conv_agent_cascade_messages_to_oai` in base.py now always includes `reasoning_content` for assistant messages (defaults to empty string), satisfying thinking mode requirements.
+
+2026-07-17 01:59:16,683 - base.py - 990 - INFO - Agent [Security] - ALL tokens: 2497, Available tokens: 164665
+2026-07-17 01:59:17,269 - log.py - 41 - WARNING - [APIRouter] Endpoint 'grok-4.1-fast' @ http://127.0.0.1:4315/v1 attempt 2/2: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_83c3ce48', 'timestamp': '2026-07-16T22:59:17.268579400+00:00', 'trace_id': '5422009cbfdd4e65a4fd3f054ed487d7'}
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 1054, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 1000, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 524, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 384, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 508, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1054, in retry_model_service_iterator
+    num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1077, in _raise_or_delay
+    raise e from None
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1049, in retry_model_service_iterator
+    for rsp in it_fn():
+               ^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\oai.py", line 544, in _chat_stream
+    raise ModelServiceError(exception=ex, code=code if code else None)
+agent_cascade.llm.base.ModelServiceError: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_83c3ce48', 'timestamp': '2026-07-16T22:59:17.268579400+00:00', 'trace_id': '5422009cbfdd4e65a4fd3f054ed487d7'}
+[APIRouter] Endpoint 'grok-4.1-fast' @ http://127.0.0.1:4315/v1 attempt 2/2: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_83c3ce48', 'timestamp': '2026-07-16T22:59:17.268579400+00:00', 'trace_id': '5422009cbfdd4e65a4fd3f054ed487d7'}
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 1054, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\api_router.py", line 1000, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 524, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 384, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 508, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1054, in retry_model_service_iterator
+    num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1077, in _raise_or_delay
+    raise e from None
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\base.py", line 1049, in retry_model_service_iterator
+    for rsp in it_fn():
+               ^^^^^^^
+  File "n:\work\WD\AgentCascade_unified\agent_cascade\llm\oai.py", line 544, in _chat_stream
+    raise ModelServiceError(exception=ex, code=code if code else None)
+agent_cascade.llm.base.ModelServiceError: Error code: 400 - {'message': 'user input rejected (HTTP 400): API returned unexpected status code: 400: The `reasoning_content` in the thinking mode must be passed back to the API.', 'request_id': 'req_83c3ce48', 'timestamp': '2026-07-16T22:59:17.268579400+00:00', 'trace_id': '5422009cbfdd4e65a4fd3f054ed487d7'}
+
+2026-07-17 01:59:17,273 - base.py - 990 - INFO - Agent [Security] - ALL tokens: 2497, Available tokens: 164665
+2026-07-17 01:59:17,275 - oai.py - 391 - INFO - LLM infrastructure changed. Re-detecting context for: http://localhost:1234/v1
+2026-07-17 01:59:19,327 - oai.py - 356 - DEBUG - Could not identify a target model in http://localhost:1234/v1/models for context length detection.
+2
