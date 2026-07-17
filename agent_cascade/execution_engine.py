@@ -2355,6 +2355,15 @@ class ExecutionEngine:
                             f"giving up — last reason: {error_str.split(':')[-1].strip()}"
                         )
 
+                # Advance endpoint cursor on inner-loop or max-token detection so the
+                # next retry starts from a different endpoint in the chain. This is the
+                # "kick to next endpoint" mechanism — without this, retries would try
+                # the same (failing) endpoint again because call_with_fallback builds
+                # a fresh chain each time.
+                error_str = str(e)
+                if 'inner_loop' in error_str or 'max_tokens' in error_str:
+                    self.pool.api_router.advance_instance_endpoint(inst_name)
+
                 # Classify error type
                 error_type = self._classify_llm_error(e)
 
@@ -2401,6 +2410,12 @@ class ExecutionEngine:
         if last_output is not None:
             with instance._compression_lock:
                 self._update_streaming_responses(instance, last_output)
+
+            # Reset endpoint cursor on successful completion so the next run
+            # starts from index 0 (preferred endpoint first). This prevents
+            # stale cursors from persisting across turns.
+            if not error_already_yielded and hasattr(self.pool.api_router, 'reset_instance_endpoint'):
+                self.pool.api_router.reset_instance_endpoint(inst_name)
 
         if not last_output or (isinstance(last_output, list) and len(last_output) == 0):
             if not error_already_yielded:
@@ -2588,9 +2603,11 @@ class ExecutionEngine:
                 )
 
             # Pass _do_call directly — call_with_fallback handles generator
-            # lifecycle via finally blocks
+            # lifecycle via finally blocks. Also pass instance_name so the router
+            # can apply per-instance cursor rotation (kick to next endpoint).
             return self.pool.api_router.call_with_fallback(
-                agent_type, _do_call, allocated_tokens=allocated_tokens
+                agent_type, _do_call, allocated_tokens=allocated_tokens,
+                agent_instance_name=instance.instance_name,
             )
         else:
             # Direct call without router — same merge priority as fallback

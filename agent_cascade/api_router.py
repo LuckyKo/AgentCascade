@@ -573,6 +573,9 @@ class APIRouter:
         # api_base -> deque of timestamps (seconds since epoch) for efficient sliding window.
         self._endpoint_call_history: Dict[str, Deque[float]] = {}
 
+        # Per-instance endpoint cursor for "kick to next endpoint" behavior (thread-safe via self._lock).
+        self._instance_endpoint_position: Dict[str, int] = {}
+
         # Persistence path
         if config_dir:
             self._config_dir = Path(config_dir)
@@ -803,7 +806,12 @@ class APIRouter:
         # This ensures consistent behavior across restarts regardless of source ordering
         return CANONICAL_AGENT_TYPES.get(agent_type_lower, agent_type)
 
-    def get_endpoint_chain(self, agent_type: str, allocated_tokens: Optional[int] = None) -> List[dict]:
+    def get_endpoint_chain(
+        self,
+        agent_type: str,
+        allocated_tokens: Optional[int] = None,
+        instance_name: Optional[str] = None,
+    ) -> List[dict]:
         """
         Returns an ordered list of LLM configs to try for the given agent type:
           1. Agent-specific endpoints (priority order, enabled only) — Tier 1
@@ -814,10 +822,17 @@ class APIRouter:
         upstream so any endpoint in the chain can handle them without reordering,
         ensuring the admin's preferred endpoint always gets tried first.
         
+        When ``instance_name`` is provided, the returned chain is rotated to start
+        from that instance's tracked cursor position (see :meth:`advance_instance_endpoint`).
+        This enables "kick to next endpoint" — after inner-loop detection, retries
+        skip past endpoints that already failed instead of starting from index 0.
+        
         Args:
             agent_type: The type of agent requesting endpoints
             allocated_tokens: Optional - the agent's allocated context size in tokens.
                             When provided, used to filter/weight endpoint selection for sufficient capacity.
+            instance_name:  Optional - when provided, rotates chain starting from
+                          this instance's tracked cursor position (per-instance memory).
         """
         # Read general_limit inside lock scope for thread safety (same pattern as get_effective_max_tokens)
         general_limit = 0
@@ -881,18 +896,70 @@ class APIRouter:
                         configs.append(cfg)
                         break
 
-        # 3. Always append the default as last resort (Tier 3)
-        configs.append(copy.deepcopy(self.default_llm_cfg))
-        
-        # Adjust default endpoint for allocated tokens requirement (dynamic endpoint selection)
-        # Note: We only adjust if effective_limit > 0 (explicitly configured). A limit of 0 means "unlimited".
-        if allocated_tokens is not None and configs:
-            default_cfg = configs[-1]
-            effective_limit = default_cfg.get('max_input_tokens', 0)
-            if effective_limit > 0 and effective_limit < allocated_tokens:
-                default_cfg['max_input_tokens'] = allocated_tokens
+        # 3. Always append the default as last resort (Tier 3) — inside lock
+            # so cursor rotation below reads atomically with config building
+            if self.default_llm_cfg is not None:
+                configs.append(copy.deepcopy(self.default_llm_cfg))
+            
+            # Adjust default endpoint for allocated tokens requirement (dynamic endpoint selection)
+            if allocated_tokens is not None and configs:
+                default_cfg = configs[-1]
+                effective_limit = default_cfg.get('max_input_tokens', 0)
+                if effective_limit > 0 and effective_limit < allocated_tokens:
+                    default_cfg['max_input_tokens'] = allocated_tokens
+
+            # Per-instance cursor rotation: rotate the chain so it starts from the
+            # tracked position. This skips endpoints that already failed with inner-loop
+            # in previous retry attempts. Done inside lock to atomically read cursor
+            # and return a consistent rotated view (prevents race with advance/reset).
+            if instance_name and len(configs) > 1:
+                tier_count = len(configs) - 1  # Everything except the default (Tier 3)
+                cursor = self._instance_endpoint_position.get(instance_name, 0)
+                default_cfg = configs[-1]
+                tier_configs = configs[:tier_count]
+
+                if tier_count == 1:
+                    if cursor > 0:
+                        configs = [default_cfg] + tier_configs
+                else:
+                    effective_cursor = cursor % tier_count
+                    if effective_cursor > 0:
+                        rotated_tiers = tier_configs[effective_cursor:] + tier_configs[:effective_cursor]
+                        configs = rotated_tiers + [default_cfg]
+                        logger.debug(f"[APIRouter] Endpoint cursor for '{instance_name}' rotated by {effective_cursor}")
 
         return configs
+
+    # ── Per-Instance Endpoint Cursor Management ───────────────────────────
+    # Manages the "kick to next endpoint" mechanism. When inner-loop detection
+    # happens, execution_engine calls advance_instance_endpoint() to move past
+    # the failing endpoint before retrying. On success or dismissal, the cursor
+    # is reset so the instance starts fresh from index 0 again.
+
+    def advance_instance_endpoint(self, instance_name: str) -> int:
+        """Advance endpoint cursor by one for the given instance (called on inner-loop detection)."""
+        if not instance_name:
+            return 0
+        with self._lock:
+            pos = self._instance_endpoint_position.get(instance_name, 0) + 1
+            self._instance_endpoint_position[instance_name] = pos
+            logger.debug(
+                f"[APIRouter] Endpoint cursor advanced for '{instance_name}': "
+                f"position {pos - 1} → {pos}. Next call will skip past this endpoint."
+            )
+        return pos
+
+    def reset_instance_endpoint(self, instance_name: str) -> None:
+        """Reset endpoint cursor to zero for the given instance (called on success/dismissal)."""
+        if not instance_name:
+            return
+        with self._lock:
+            old_pos = self._instance_endpoint_position.pop(instance_name, None)
+            if old_pos is not None and old_pos > 0:
+                logger.debug(
+                    f"[APIRouter] Endpoint cursor reset for '{instance_name}': "
+                    f"position {old_pos} → 0 (cleaned up)."
+                )
 
     # ── Retry + Fallback Execution ───────────────────────────────────────
 
@@ -915,9 +982,15 @@ class APIRouter:
             call_fn: The function to execute with the selected endpoint config
             allocated_tokens: Optional - the agent's allocated context size in tokens.
                            When provided, used for endpoint selection to ensure sufficient capacity.
-            *args, **kwargs: Additional arguments passed to call_fn
+            *args, **kwargs: Additional arguments passed to call_fn. If ``agent_instance_name``
+                          is present it is forwarded as ``instance_name`` to rotate the chain.
         """
-        chain = self.get_endpoint_chain(agent_type, allocated_tokens=allocated_tokens)
+        # Extract instance name from kwargs (set by execution_engine) so we can
+        # apply per-instance cursor rotation and skip already-failed endpoints.
+        _inst_name = kwargs.get('agent_instance_name')
+        chain = self.get_endpoint_chain(
+            agent_type, allocated_tokens=allocated_tokens, instance_name=_inst_name,
+        )
         all_errors = []
 
         for cfg_idx, llm_cfg in enumerate(chain):

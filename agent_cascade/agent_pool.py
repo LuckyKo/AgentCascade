@@ -613,6 +613,10 @@ class AgentPool:
         # and stale data when instances are dismissed and re-created with same name.
         from agent_cascade.api_integration import _cache_mgr
         _cache_mgr.evict_instance(instance_name)
+
+        # Clean up per-instance endpoint cursor (kick-to-next-endpoint mechanism)
+        if hasattr(self, 'api_router') and self.api_router is not None:
+            self.api_router.reset_instance_endpoint(instance_name)
         # Note: _token_stats_cache is NOT cleaned here — it's keyed by conversation identity
         # (msg_count, id(last_msg)), not instance name. Entries auto-evict via FIFO at 5000 cap.
 
