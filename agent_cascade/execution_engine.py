@@ -3969,6 +3969,9 @@ class ExecutionEngine:
             skills_block = _build_skills_block(loaded_skills)
             sys_msg += skills_block
 
+        # Build task message using lifecycle manager
+        task_msg = self.lifecycle.build_task_message(args, caller)
+
         # Phase 4.1: Delegate to lifecycle manager for conversation
         # initialization
         conv = self.lifecycle.initialize_conversation(
