@@ -501,7 +501,7 @@
                       <input type="number" id="setting-max-parallel" min="1" max="10" value="3" />
                     </label>
                     <label class="setting-field toggle-field">
-                      <span>Auto-Continue (Truncation)</span>
+                      <span title="Auto-detects three cases: reasoning-only blocks (no output text), broken tool calls (malformed JSON args), and empty output. When detected, sends a continue signal and resets the turn counter. Capped at 3 consecutive resets to prevent infinite loops.">Auto-Continue & Recovery</span>
                       <input type="checkbox" id="setting-auto-continue" checked />
                     </label>
                     <label class="setting-field toggle-field">

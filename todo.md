@@ -30,6 +30,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent info once it reached conclusion, only happens on [YES]
 - [ ] telemetry `Output Tokens (est)` severely undercounts
 - [ ] we are pushing wrong summary from the inner loop detector if the compressor fails and gets stuck in a loop `[SYSTEM ERROR: Empty LLM response]` 
+- [x] `Auto-continue` option fixed — extended detection beyond token truncation to catch incomplete states (mid-reasoning, mid-tool_call with unclosed JSON). Turn counter resets on auto-continue. Hover tooltip added explaining the feature.
 
 
 # Errors to investigate:
@@ -85,22 +86,3 @@ Traceback:
 
 2026-07-17 13:32:56,302 - base.py - 994 - INFO - Agent [Researcher] - ALL tokens: 20511, Available tokens: 124340
 
-
-# Agent launched in async mode when it shouldnt?
-2026-07-17 23:10:55,952 - execution_engine.py - 4103 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=code_execution_research_1, reason=completed, inst_type=AgentInstance, conv_len=14, final_resp_len=44
-2026-07-17 23:10:55,955 - tool_dispatcher.py - 401 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'code_execution_research_1' completed in 87.01s
-2026-07-17 23:10:55,955 - tool_dispatcher.py - 414 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'skill_researcher_1' after sync child
-2026-07-17 23:10:55,956 - agent_pool.py - 2085 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=researcher, instance_name=skill_researcher_1, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
-2026-07-17 23:10:55,957 - tool_dispatcher.py - 423 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'skill_researcher_1'. Total SYNC path elapsed: 87.01s
-2026-07-17 23:10:55,957 - tool_dispatcher.py - 124 - DEBUG - handle_call_agent returned type=str
-2026-07-17 23:10:55,975 - base.py - 994 - INFO - Agent [Researcher] - ALL tokens: 13273, Available tokens: 123165
-2026-07-17 23:11:03,036 - tool_dispatcher.py - 563 - DEBUG - call_agent nesting - skill_researcher_1 depth=1/10
-2026-07-17 23:11:03,037 - tool_dispatcher.py - 447 - DEBUG - Taking ASYNC path - skill_researcher_1 calls code_execution_research_2/researcher at depth 1
-2026-07-17 23:11:03,040 - execution_engine.py - 3928 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target=code_execution_research_2, class=researcher, caller=skill_researcher_1, nest_depth=1, force_fresh=False
-2026-07-17 23:11:03,040 - tool_dispatcher.py - 461 - DEBUG - ASYNC - code_execution_research_2 launched by skill_researcher_1
-2026-07-17 23:11:03,040 - lifecycle_manager.py - 193 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for code_execution_research_2
-2026-07-17 23:11:03,041 - tool_dispatcher.py - 124 - DEBUG - handle_call_agent returned type=str
-2026-07-17 23:11:03,041 - agent_pool.py - 603 - DEBUG - Instance conversation cleanup key missing (expected): 'code_execution_research_1'
-2026-07-17 23:11:03,042 - agent_pool.py - 603 - DEBUG - Instance conversation cleanup key missing (expected): 'code_execution_research_2'
-2026-07-17 23:11:03,054 - agent_instance_logger.py - 130 - DEBUG - Copied session from n:\work\WD\AgentWorkspace\logs\researcher_skill_researcher_1_20260717_230911.jsonl to n:\work\WD\AgentWorkspace\logs\researcher_code_execution_research_2_20260717_231103.jsonl
-2026-07-17 23:11:03,057 - base.py - 994 - INFO - Agent [Researcher] - ALL tokens: 13498, Available tokens: 123165

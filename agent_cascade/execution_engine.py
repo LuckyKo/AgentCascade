@@ -254,6 +254,76 @@ def _check_message_truncation(msg):
     return extra is not None and isinstance(extra, dict) and extra.get('finish_reason') == 'length'
 
 
+def _is_incomplete_state(turn_output: List[Message]) -> str | None:
+    """Check if the latest LLM response indicates a malformed/incomplete output.
+
+    Detects three cases of malformed messages (dump and continue):
+    1. Reasoning-only block: has reasoning but no content and no tool calls
+    2. Incomplete tool call: broken JSON arguments (bracket/brace mismatch)
+    3. Empty output: no reasoning, no content, no tool calls
+
+    Only checks the last assistant message (the one sent back to the caller).
+
+    Args:
+        turn_output: Messages from the latest LLM response
+
+    Returns:
+        A string describing the case ("reasoning-only", "broken-json", "empty-output")
+        if incomplete, or None if the output looks complete.
+    """
+    # Find the last assistant message in reverse order
+    for msg in reversed(turn_output):
+        role = msg_field(msg, 'role', '')
+        if role != ASSISTANT:
+            continue
+
+        # Check reasoning/thinking content
+        reasoning = (msg_field(msg, 'reasoning_content') or
+                     msg_field(msg, 'thought') or '')
+        has_reasoning = isinstance(reasoning, str) and len(reasoning.strip()) > 1
+
+        # Check tool calls
+        func_call = msg_field(msg, 'function_call')
+        has_tool_call = bool(func_call)
+
+        # Check text content
+        content = msg_field(msg, 'content', '') or ''
+        if isinstance(content, list):
+            text_parts = [item.get('text', '') for item in content
+                         if isinstance(item, dict) and item.get('type') == 'text']
+            content = ' '.join(text_parts).strip()
+        elif not isinstance(content, str):
+            content = str(content).strip()
+
+        # Malformed message detection — any of these means incomplete output:
+        # 1. Reasoning-only block: has reasoning but no content and no tool calls
+        if has_reasoning and not content.strip() and not has_tool_call:
+            return "reasoning-only"
+
+        # 2. Incomplete tool call: has tool call with broken JSON arguments
+        if has_tool_call:
+            args = func_call.get('arguments', '') if isinstance(func_call, dict) else ''
+            if args and isinstance(args, str):
+                stripped = args.strip()
+                # Count all bracket types for robustness
+                open_braces = stripped.count('{')
+                close_braces = stripped.count('}')
+                open_brackets = stripped.count('[')
+                close_brackets = stripped.count(']')
+                has_mismatch = (open_braces > close_braces) or (open_brackets > close_brackets)
+                # Only flag if mismatch exists, or ends with comma/quote AND has some content
+                if has_mismatch or (stripped and (stripped[-1] in ',\'"') and len(stripped) < 200):
+                    return "broken-json"
+
+        # 3. Empty output: no reasoning, no content, no tool calls
+        if not has_reasoning and not content.strip() and not has_tool_call:
+            return "empty-output"
+
+        break  # Only check the last assistant message
+
+    return None
+
+
 def _build_resources_block(pool, template, instance=None) -> str:
     """Build the '--- CURRENT AVAILABLE RESOURCES' block reflecting current disabled_tools.
 
@@ -1050,6 +1120,14 @@ class ExecutionEngine:
                 # messages from LLM")
                 # ── Phase 4: Response Processing and Tool Execution ─────────
                 if self._process_response(instance, turn_output, messages, llm_messages, response):
+                    # Reset turn counter on auto-continue to prevent agents running out of turns
+                    # when they keep getting cut off mid-reasoning/tool_call
+                    if getattr(instance, '_auto_continue_triggered', False):
+                        instance._auto_continue_triggered = False
+                        instance._auto_continue_count = getattr(instance, '_auto_continue_count', 0) + 1
+                        max_turns = instance.max_turns or DEFAULT_MAX_TURNS
+                        turns_available = max_turns
+                        logger.debug(f"[AUTO-CONTINUE] Turn counter reset for {inst_name}: {turns_available} turns remaining (consecutive resets: {instance._auto_continue_count}).")
                     # logger.debug("tool used - %s looping",
                     # instance.instance_name)
                     yield response
@@ -2759,11 +2837,14 @@ class ExecutionEngine:
         messages: List[Message],
         llm_messages: List[Message]
     ) -> bool:
-        """Inject continue message if truncation detected and auto_continue enabled.
+        """Inject continue message if truncation or incomplete state detected and auto_continue enabled.
 
-        If any message in turn_output is truncated (finish_reason == 'length') and
-        auto_continue setting is enabled, injects a continue message to all working sets
-        and returns True to continue to next LLM call.
+        Checks for two conditions that warrant auto-continuing:
+        1. Token truncation (finish_reason == 'length') — response was cut off by token limit
+        2. Incomplete state — agent stopped mid-reasoning, mid-tool_call, or produced no usable output
+
+        When either condition is met and auto_continue setting is enabled, injects a continue
+        message to all working sets and returns True to continue to next LLM call.
 
         Args:
             is_truncated: Pre-computed truncation flag from caller (FIX #2: avoid double-check)
@@ -2774,23 +2855,30 @@ class ExecutionEngine:
             llm_messages: LLM-formatted message set to append continue message
 
         Returns:
-            True if truncation detected and continue message injected, False otherwise
+            True if truncation or incomplete state detected and continue message injected, False otherwise
 
         Note:
             is_truncated is pre-computed by caller to avoid checking truncation twice
             (once in normalization, once here). This method only handles the injection logic.
         """
-        # Auto-continue on truncation (only if user has enabled the setting)
-        # FIX
-        if is_truncated and not self._is_stopped(inst_name) and self.pool.settings.auto_continue:
-            logger.info(f"Detected message truncation for {inst_name}. Auto-continuing.")
-            cont_msg = Message(
-                role=USER,
-                content="[SYSTEM]: Your previous response was cut off. Continue from where you left off."
-            )
-            self._append_and_log(instance, cont_msg)
+        # Auto-continue on truncation OR incomplete state (only if user has enabled the setting)
+        # Extended from token truncation to also catch premature stops mid-reasoning/tool_call.
+        # No message injection needed — just loop back and resend current conversation as-is,
+        # same as the Continue button does. The turn counter is reset via _auto_continue_triggered flag.
+        is_incomplete = _is_incomplete_state(turn_output)
+        if (is_truncated or bool(is_incomplete)) and not self._is_stopped(inst_name) and self.pool.settings.auto_continue:
+            # Cap consecutive auto-continue resets to prevent infinite loops (max 3)
+            current_count = getattr(instance, '_auto_continue_count', 0)
+            if current_count >= 3:
+                logger.warning(f"[AUTO-CONTINUE] Max consecutive resets (3) reached for {inst_name}. Letting agent finish normally.")
+                return False
+            reason = "truncation" if is_truncated else f"incomplete state ({is_incomplete})"
+            logger.info(f"Detected {reason} for {inst_name}. Auto-continuing.")
+            instance._auto_continue_triggered = True  # Signal caller to reset turn counter
             return True
 
+        # Reset counter on successful non-auto-continue turn
+        instance._auto_continue_count = 0
         return False
 
     def _execute_detected_tools(

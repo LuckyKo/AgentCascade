@@ -287,6 +287,10 @@ class AgentInstance:
     # merged with the new response to create a single concatenated message.
     _continue_saved_msg: Optional[Message] = field(default=None)  # Temporary storage for Continue button merge
 
+    # ── Auto-Continue State Tracking ──────────────────────────────────────────
+    _auto_continue_triggered: bool = field(default=False)  # Set when auto-continue fires, signals caller to reset turn counter
+    _auto_continue_count: int = field(default=0)  # Consecutive auto-continue reset counter (capped to prevent infinite loops)
+
     # ── Compression-Specific Notification Queue ───────────────────────────────
     # Used by compression/handler.py to queue notifications during forced compression.
     # These are drained and surfaced after compression completes.
