@@ -25,7 +25,7 @@ from enum import Enum, auto
 from agent_cascade.agent_instance import ArgumentCachePool  # Cache pool for {USE_CACHED_ENTRY_N}
 from agent_cascade.settings import (
     COMPRESSION_DEFAULT_FRACTION,
-    DEFAULT_LOAD_SKILL_MODE,
+    DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE,
     DEFAULT_MAX_TURNS,
     LLM_MAX_RETRIES,
     LLM_RETRY_BASE_DELAY,
