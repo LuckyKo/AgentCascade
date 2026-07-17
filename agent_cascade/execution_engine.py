@@ -3955,7 +3955,11 @@ class ExecutionEngine:
         context_text = args.get('context', '')
         skill_manager = getattr(self.pool, 'skill_manager', None)
         loaded_skills = []
-        if skill_manager and load_skill_value != "NONE":
+        if isinstance(load_skill_value, str):
+            load_skill_value_upper = load_skill_value.strip().upper()
+        else:
+            load_skill_value_upper = "AUTO"
+        if skill_manager and load_skill_value_upper != LOAD_SKILL_NONE:
             try:
                 loaded_skills = skill_manager.resolve_load_skill(
                     load_skill_value, task_text, context_text
@@ -3967,7 +3971,7 @@ class ExecutionEngine:
         # Inject skill instructions into system prompt if any were loaded
         if loaded_skills:
             skills_block = _build_skills_block(loaded_skills)
-            sys_msg += skills_block
+            sys_msg.content += skills_block
 
         # Build task message using lifecycle manager
         task_msg = self.lifecycle.build_task_message(args, caller)
