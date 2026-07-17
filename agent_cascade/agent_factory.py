@@ -13,7 +13,7 @@ from agent_cascade.tools.web_extractor import WebExtractor
 from agent_cascade.tools.custom import (
     ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep,
     DeleteFile, CopyFile, ReIndent, ListAgents, ShellCmd,
-    ReadLogs, Calculate, CodeMap, ForgetLast, SyntaxCheck,
+    ReadLogs, Calculate, CodeMap, ForgetLast, SyntaxCheck, ScanSkills,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
 from agent_cascade.tools.custom import DDGSearch, SystemInfo as _SystemInfo
@@ -124,6 +124,9 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
         elif tool_name == 'syntax_check':
             t = SyntaxCheck()
             tools_to_register[tool_name] = (t, True, False)
+        elif tool_name == 'scan_skills':
+            t = ScanSkills(agent_pool=agent_pool)
+            tools_to_register[tool_name] = (t, False, False)
         else:
             logger.debug("Unknown tool '%s' in AVAILABLE_TOOLS — skipping", tool_name)
 
