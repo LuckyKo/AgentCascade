@@ -2866,11 +2866,14 @@ class ExecutionEngine:
         # No message injection needed — just loop back and resend current conversation as-is,
         # same as the Continue button does. The turn counter is reset via _auto_continue_triggered flag.
         is_incomplete = _is_incomplete_state(turn_output)
-        if (is_truncated or bool(is_incomplete)) and not self._is_stopped(inst_name) and self.pool.settings.auto_continue:
+        if (is_truncated or is_incomplete) and not self._is_stopped(inst_name) and self.pool.settings.auto_continue:
             # Cap consecutive auto-continue resets to prevent infinite loops (max 3)
             current_count = getattr(instance, '_auto_continue_count', 0)
             if current_count >= 3:
-                logger.warning(f"[AUTO-CONTINUE] Max consecutive resets (3) reached for {inst_name}. Letting agent finish normally.")
+                # Increment blocked counter and decay every 2 blocked attempts to allow periodic retry
+                instance._auto_continue_count = current_count + 1
+                if instance._auto_continue_count >= 5:
+                    instance._auto_continue_count = 0
                 return False
             reason = "truncation" if is_truncated else f"incomplete state ({is_incomplete})"
             logger.info(f"Detected {reason} for {inst_name}. Auto-continuing.")
