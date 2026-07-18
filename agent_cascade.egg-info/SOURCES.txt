@@ -44,6 +44,12 @@ agent_cascade/agents/writing/__init__.py
 agent_cascade/agents/writing/continue_writing.py
 agent_cascade/agents/writing/expand_writing.py
 agent_cascade/agents/writing/outline_writing.py
+agent_cascade/compression/__init__.py
+agent_cascade/compression/agent_invoker.py
+agent_cascade/compression/constants.py
+agent_cascade/compression/core.py
+agent_cascade/compression/helpers.py
+agent_cascade/compression/result.py
 agent_cascade/llm/__init__.py
 agent_cascade/llm/azure.py
 agent_cascade/llm/base.py
@@ -86,6 +92,7 @@ agent_cascade/tools/custom/calculation.py
 agent_cascade/tools/custom/code_map.py
 agent_cascade/tools/custom/compression_tools.py
 agent_cascade/tools/custom/file_ops.py
+agent_cascade/tools/custom/forget_last_tool.py
 agent_cascade/tools/custom/manager_ops.py
 agent_cascade/tools/custom/read_logs.py
 agent_cascade/tools/custom/shell_cmd.py
@@ -108,5 +115,14 @@ agent_cascade/utils/thinking_block.py
 agent_cascade/utils/tokenization_qwen.py
 agent_cascade/utils/utils.py
 tests/test_code_interpreter_extra_mounts.py
+tests/test_code_interpreter_fixes.py
+tests/test_compression.py
+tests/test_grep_compare.py
+tests/test_grep_usability.py
+tests/test_greptool.py
+tests/test_heuristic_comment_fix.py
 tests/test_json_robustness.py
+tests/test_llm.py
+tests/test_llm_local.py
+tests/test_safe_shell_cmd.py
 tests/test_security_parser.py

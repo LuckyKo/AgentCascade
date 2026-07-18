@@ -21,7 +21,7 @@ KEEP_TAIL_MESSAGES = 2               # Always keep last N messages when not forc
 MAX_COMPRESSION_RETRIES = 3          # Max consecutive forced compression failures before skipping
 
 # ── Compression Agent Configuration ──
-COMPRESSION_AGENT_TIMEOUT = 30      # 5-minute timeout for large compression tasks
+COMPRESSION_AGENT_TIMEOUT = 300      # 5-minute timeout for large compression tasks
 ESTIMATED_TOKENS_PER_MESSAGE = 500   # Estimate for context window calculations
 COMPRESSION_INPUT_FRACTION = 0.9     # Reserve 90% of agent's context for input messages
 

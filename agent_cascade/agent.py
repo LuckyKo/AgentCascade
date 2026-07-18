@@ -181,6 +181,8 @@ class Agent(ABC):
         Yields:
             The response generator of LLM.
         """
+        from agent_cascade.log import logger
+        logger.info(f"[TOOL_RECOVERY] {self.name} LLM API CALL START (llm.chat)")
         return self.llm.chat(messages=messages,
                              functions=functions,
                              stream=stream,

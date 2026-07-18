@@ -145,7 +145,7 @@ def rebuild_working_set(
     if not compressed:
         return
 
-    # FIX 2: Use slice_history_for_llm to extract the proper working set from the pool.
+    # FIX-2: Use slice_history_for_llm to extract the proper working set from the pool.
     # The pool stores the full post-compression history (system + prefix + marker + tail),
     # but callers need only the system message + messages from the latest marker onward.
     # slice_history_for_llm extracts this sliced view while preserving the system message.

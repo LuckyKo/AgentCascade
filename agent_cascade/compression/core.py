@@ -87,12 +87,29 @@ def apply_compression(
             )
             return False
         
-        # FIX: Ensure system message is preserved even if active_start_idx=0
-        # When active_start_idx == 0, history[:0] returns empty list, dropping the system message.
-        # We calculate prefix_len to always include at least the system message when it exists.
+        # FIX-5: Simplified SYSTEM validation — raise error instead of silent repair (Root-Cause Fix)
+        # The previous defensive repair logic (searching for SYSTEM and repositioning it) masked the root cause.
+        # Now that api_server.py properly syncs pool with SYSTEM at index 0, we simply validate and fail fast.
         prefix_len = active_start_idx
-        if history and get_role(history[0]) == SYSTEM and prefix_len < 1:
-            prefix_len = 1
+        if history:
+            first_role = get_role(history[0])
+            
+            if first_role != SYSTEM:
+                # Pool corruption detected — this should be caught upstream in api_server.py finalization sync.
+                # Raise a clear error to indicate the root cause is in pool management, not compression logic.
+                logger.error(
+                    f"[POOL CORRUPTION] System message missing from history[0] for '{target_agent_name}'. "
+                    f"First role: {first_role}. This indicates upstream corruption in api_server.py finalization sync "
+                    f"(line ~1365) or initial pool setup (line ~494). The pool should always have SYSTEM at index 0."
+                )
+                raise ValueError(
+                    f"Compression failed for '{target_agent_name}': SYSTEM message missing at history[0]. "
+                    f"Found role '{first_role}' instead. Check api_server.py pool sync logic."
+                )
+            
+            # Case A: System message exists at index 0 — ensure it's included in prefix when active_start_idx == 0
+            if prefix_len < 1:
+                prefix_len = 1
         
         # Build new history atomically: prefix + force_marker (optional) + summary_marker + tail
         if include_force_marker:
@@ -101,13 +118,15 @@ def apply_compression(
             new_history = history[:prefix_len] + [marker_message] + history[insert_pos:]
         
         # ── FINAL SYSTEM MESSAGE VALIDATION GATE ──
-        # All compression paths converge here. Validate once and fail fast.
+        # Redundant check — should already be caught by the validation above before building new_history.
+        # Kept as a final safety net in case of unexpected mutation during new_history construction.
         if new_history:
             first_role = get_role(new_history[0])
             if first_role != SYSTEM:
                 logger.error(
                     f"[COMPRESSION BUG] System message missing from new_history for '{target_agent_name}'. "
-                    f"First role: {first_role}. active_start_idx={active_start_idx}, insert_pos={insert_pos}"
+                    f"First role: {first_role}. active_start_idx={active_start_idx}, insert_pos={insert_pos}. "
+                    f"This indicates unexpected mutation during new_history construction."
                 )
                 return False  # Prevent applying corrupted history to pool
         

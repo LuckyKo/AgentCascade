@@ -123,7 +123,7 @@ def invoke_compression_agent(
     ]
 
     summary = ""
-    # FIX 3: Initialize subagent_return_value BEFORE the if/else split so it's always defined
+    # FIX-3: Initialize subagent_return_value BEFORE the if/else split so it's always defined
     # This prevents UnboundLocalError if an exception occurs in the else branch and
     # the code at line 244 references this variable
     subagent_return_value = None
@@ -144,7 +144,7 @@ def invoke_compression_agent(
             manager_history = comp_history
 
             final_msgs = []
-            # subagent_return_value already initialized above (FIX 3)
+            # subagent_return_value already initialized above (FIX-3)
             start_time = _time.monotonic()   # Monotonic clock — immune to NTP adjustments
             max_poll_time = COMPRESSION_AGENT_TIMEOUT
             poll_count = 0

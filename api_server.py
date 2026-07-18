@@ -491,8 +491,12 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
     # Initial load
     session['history'], session['summary'] = _load_session_history(default_session_name)
     if agent_pool:
-        agent_pool.instance_conversations[default_session_name] = session['history']
-        agent_pool.instance_summaries[default_session_name] = session['summary']
+        # FIX-1: Use deepcopy when syncing to pool to prevent shared-reference corruption.
+        # All pool mutations use deepcopy throughout this file — without it, mutations to
+        # session['history'] (e.g., .clear(), .append()) would silently affect the pool and vice versa.
+        with session_lock:
+            agent_pool.instance_conversations[default_session_name] = copy.deepcopy(session['history'])
+            agent_pool.instance_summaries[default_session_name] = session['summary']
 
 
     # ── E2E Encryption State ─────────────────────────────────────────────
@@ -588,22 +592,22 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                         stats = get_history_stats(active_msgs)
                     
                     session[cache_key + '_count'] = active_count
-                    session[cache_key] = stats.copy()  # FIX: Store stats so next call can use the cache
+                    session[cache_key] = stats.copy()  # FIX-10: Store stats so next call can use the cache
                 elif active_count < last_active_count:
                     # FIX2 (history shrank due to compression): Recompute from scratch.
                     # slice_history_for_llm may have dropped older messages after a context_summary,
                     # so the cached stats would overcount tokens if we reused them.
                     stats = get_history_stats(active_msgs)
                     session[cache_key + '_count'] = active_count
-                    session[cache_key] = stats.copy()  # FIX: Store stats so next call can use the cache
+                    session[cache_key] = stats.copy()  # FIX-10: Store stats so next call can use the cache
                 elif cache_key in session:
                     # Same active count AND cache exists — use cached stats (avoids tiktoken.encode per tick)
                     stats = session.get(cache_key, {'tokens': 0, 'words': 0}).copy()
                 else:
                     # First access or cache missing — compute stats to populate the cache
                     stats = get_history_stats(active_msgs)
-                    session[cache_key + '_count'] = active_count  # FIX: Also store count for next comparison
-                    session[cache_key] = stats.copy()  # FIX: Store stats so next call can use the cache
+                    session[cache_key + '_count'] = active_count  # FIX-10: Also store count for next comparison
+                    session[cache_key] = stats.copy()  # FIX-10: Store stats so next call can use the cache
                 
                 # Dynamically extract summary from messages if missing from tracker (e.g. after restart)
                 summary = agent_pool.instance_summaries.get(name, "")
@@ -803,7 +807,7 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
         show_active_only = ui_cfg.get('show_active_only', False)
         history_count = len(active_h) if show_active_only else history_count
 
-        # FIX: Send only delta messages to prevent duplication (critical fix for UI duplication issue)
+        # FIX-11: Send only delta messages to prevent duplication (critical fix for UI duplication issue)
         # Track how many response messages were last sent to compute the delta
         last_sent_resp_count = session.get('_last_sent_resp_count', 0)
         
@@ -865,7 +869,7 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                     content = " ".join([str(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')) for item in content])
                 else:
                     content = str(content)
-                # FIX: Only estimate the delta (new chars since last tick) to avoid cumulative drift.
+                # FIX-11: Only estimate the delta (new chars since last tick) to avoid cumulative drift.
                 # Previously this added the full content length each tick on top of cached_r_stats,
                 # causing token counts to inflate by hundreds over long streaming sessions.
                 prev_len = session.get('_last_resp_content_len', 0)
@@ -1209,7 +1213,7 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                                         loop_reason, pop_count = loop_info
                                         # Raise LoopDetectedError to be caught by outer try/except for cleaner state management.
                                         # This matches the approach used in agent_orchestrator.py for consistency.
-                                        # FIX: The original code did `del new_responses[-refined_pop:]` which deleted from a slice copy,
+                                        # FIX-12: The original code did `del new_responses[-refined_pop:]` which deleted from a slice copy,
                                         # not the original responses list, causing rollback to fail silently.
                                         raise LoopDetectedError(
                                             reason=loop_reason,
@@ -1255,7 +1259,7 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                                         orch_logger = agent_pool.get_logger(session['session_name'], 'Orchestrator')
                                         orch_logger.rollback(refined_pop, soft=True, reason=loop_reason)
                                         
-                                        # FIX: Reset delta counter after rollback to force full re-send on next tick
+                                        # FIX-12: Reset delta counter after rollback to force full re-send on next tick
                                         # This prevents stale counter from causing messages to be dropped or duplicated
                                         session['_last_sent_resp_count'] = 0
                             elif agent_pool:
@@ -1333,8 +1337,8 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                     session['history'] = current_history
 
                 if agent_pool:
-                    # CRITICAL: Sync back to pool so tools like CompressionTool see the current history
-                    agent_pool.instance_conversations[session['session_name']] = session['history']
+                    # FIX-1: Use deepcopy to prevent shared-reference corruption between pool and session.
+                    agent_pool.instance_conversations[session['session_name']] = copy.deepcopy(session['history'])
 
             if hasattr(agent_runner, 'turn_final_messages') and agent_runner.turn_final_messages:
                 tfm = agent_runner.turn_final_messages
@@ -1357,17 +1361,64 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                         if len(tfm) >= len(working_history):
                             is_slice = True
 
-                if not is_slice and len(tfm) < len(session['history']):
-                    logger.info(f"Syncing history from agent state ({len(tfm)} vs {len(session['history'])} messages).")
-                    session['history'].clear()
-                    for res in tfm:
-                        msg = res.model_dump() if hasattr(res, 'model_dump') else (res if isinstance(res, dict) else {})
-                        # FIX: Keep system message to maintain consistency with pool conversation.
-                        # Previously stripped at line 1356, but this caused inconsistency where
-                        # session['history'] lost the system message while pool kept it.
-                        # This triggered full context reprocessing when slice_history_for_llm()
-                        # prepended a new system message reference to the working set.
-                        session['history'].append(msg)
+                # FIX-2: Rewrite finalization sync logic to ALWAYS ensure pool has SYSTEM at index 0.
+                # Original condition `len(tfm) < len(session['history'])` was skipped when tfm has SYSTEM but pool doesn't,
+                # because base agent prepends SYSTEM locally (agent.py line 119) but pool_conv doesn't get it during _run().
+                
+                if not is_slice:
+                    # Check if pool's first message is SYSTEM - if not, pool is corrupted and MUST be rebuilt from tfm
+                    pool_has_system = False
+                    if session['history']:
+                        first_msg = session['history'][0]
+                        first_role = first_msg.get('role') if isinstance(first_msg, dict) else getattr(first_msg, 'role', '')
+                        pool_has_system = (first_role == SYSTEM)
+                    
+                    tfm_has_system = False
+                    if tfm:
+                        first_tfmsg = tfm[0]
+                        first_tf_role = first_tfmsg.get('role') if isinstance(first_tfmsg, dict) else getattr(first_tfmsg, 'role', '')
+                        tfm_has_system = (first_tf_role == SYSTEM)
+                    
+                    # Rebuild pool from tfm ONLY when the pool is corrupted (missing SYSTEM).
+                    # When pool HAS SYSTEM at index 0, it is authoritative — even if lengths differ.
+                    # Length differences happen because tfm is set before compression mid-turn,
+                    # so rebuilding from stale tfm would destroy fresh compressed data in the pool.
+                    needs_rebuild = not pool_has_system and (tfm_has_system or len(tfm) != len(session['history']))
+                    
+                    # If NEITHER has SYSTEM at index 0, that's a CRITICAL corruption case — halt the system
+                    neither_has_system = not pool_has_system and not tfm_has_system
+                    if neither_has_system:
+                        logger.critical(
+                            f"CRITICAL: Neither pool nor tfm has SYSTEM for '{session['session_name']}'. "
+                            f"This indicates severe corruption that cannot be recovered. Halting system."
+                        )
+                        raise RuntimeError(
+                            f"[CRITICAL POOL CORRUPTION] Neither pool nor tfm has SYSTEM at index 0 for session '{session['session_name']}'. "
+                            f"Pool length: {len(session['history'])}, tfm length: {len(tfm)}. "
+                            f"This is a critical error requiring manual intervention."
+                        )
+                    
+                    if needs_rebuild:
+                        logger.info(
+                            f"Syncing history from agent state - pool corruption detected. "
+                            f"Pool has SYSTEM: {pool_has_system}, tfm has SYSTEM: {tfm_has_system}. "
+                            f"Pool length: {len(session['history'])}, tfm length: {len(tfm)}."
+                        )
+                        session['history'] = []
+                        for res in tfm:
+                            msg = res.model_dump() if hasattr(res, 'model_dump') else (res if isinstance(res, dict) else {})
+                            session['history'].append(copy.deepcopy(msg))
+                        
+                        if agent_pool:
+                            with session_lock:
+                                agent_pool.instance_conversations[session['session_name']] = copy.deepcopy(session['history'])
+                    elif not needs_rebuild and pool_has_system and len(tfm) != len(session['history']):
+                        # Pool has SYSTEM but lengths differ — pool is authoritative, tfm is stale.
+                        # Log for debugging but don't rebuild.
+                        logger.debug(
+                            f"Pool length ({len(session['history'])}) differs from tfm length ({len(tfm)}) "
+                            f"but pool has SYSTEM at index 0 — trusting pool as authoritative."
+                        )
                 agent_runner.turn_final_messages = None
 
             _save_session_history()
@@ -1887,8 +1938,8 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                         session['stop_requested'] = False
                     if agent_pool:
                         agent_pool.stopped = False
-                        # Sync history to pool so tools can see it
-                        agent_pool.instance_conversations[session['session_name']] = session['history']
+                        with session_lock:
+                            agent_pool.instance_conversations[session['session_name']] = copy.deepcopy(session['history'])
                     
                     session['generation_id'] += 1
                     gen_id = session['generation_id']
@@ -1948,7 +1999,8 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                                 session['stop_requested'] = False
                             if agent_pool:
                                 agent_pool.stopped = False
-                                agent_pool.instance_conversations[session['session_name']] = session['history']
+                                with session_lock:
+                                    agent_pool.instance_conversations[session['session_name']] = copy.deepcopy(session['history'])
                                 
                                 # ── Fix 3: Restore sub-agent pools from JSONL logs if corrupted ──
                                 # After a failed forced compression cycle, sub-agent pools may be empty/corrupted.
@@ -2005,7 +2057,8 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                                                     f"Restoring sub-agent {sa_name} pool from log during resume "
                                                     f"({len(recov)} messages)"
                                                 )
-                                                agent_pool.instance_conversations[sa_name] = copy.deepcopy(recov)
+                                                with session_lock:
+                                                    agent_pool.instance_conversations[sa_name] = copy.deepcopy(recov)
                                             else:
                                                 logger.warning(
                                                     f"Could not restore sub-agent {sa_name} pool — "
@@ -2276,9 +2329,10 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                                         agent_pool.sub_agent_state[sec_state_key] = {
                                             'active': True,
                                             'agent_name': f"Security",
-                                            'messages': list(history),
+                                        'messages': copy.deepcopy(history),
                                         }
-                                        agent_pool.instance_conversations[sec_state_key] = list(history)
+                                        with session_lock:
+                                            agent_pool.instance_conversations[sec_state_key] = copy.deepcopy(history)
                                         if sec_state_key not in agent_pool.active_stack:
                                             agent_pool.active_stack.append(sec_state_key)
                                         # Broadcast initial state so the tab appears immediately
@@ -2338,8 +2392,9 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                                                 
                                                 final_msgs = partial
                                                 # Update sub_agent_state with current message history during streaming
-                                                agent_pool.sub_agent_state[sec_state_key]['messages'] = list(history) + list(final_msgs) if isinstance(final_msgs, list) else [history[0]] + list(final_msgs)
-                                                agent_pool.instance_conversations[sec_state_key] = list(agent_pool.sub_agent_state[sec_state_key]['messages'])
+                                                agent_pool.sub_agent_state[sec_state_key]['messages'] = copy.deepcopy(history) + copy.deepcopy(final_msgs) if isinstance(final_msgs, list) else [history[0]] + copy.deepcopy(final_msgs)
+                                                with session_lock:
+                                                    agent_pool.instance_conversations[sec_state_key] = copy.deepcopy(agent_pool.sub_agent_state[sec_state_key]['messages'])
                                                 # Only broadcast at start and end of security check (not every token)
                                                 if sec_first_broadcast:
                                                     asyncio.run_coroutine_threadsafe(
@@ -2595,6 +2650,17 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                     if (idx is not None
                             and not session['generating']
                             and 0 <= idx < len(history)):
+                        
+                        # FIX-3: Protect system message at index 0 from editing (Compression Bug Fix)
+                        if idx == 0:
+                            first_role = _get_msg_role(history[0])
+                            if first_role == SYSTEM:
+                                logger.warning(
+                                    f"[EDIT MESSAGE] Attempted to edit system message (index 0) for '{target_name}' — blocked"
+                                )
+                                await broadcast({'type': 'state', **build_state()})
+                                continue
+                        
                         msg = history[idx]
                         
                         # Get current content regardless of message type (dict or Message object)
@@ -2633,12 +2699,13 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                             # (sub_agent_state[name]['messages'] may be a separate reference and won't
                             #  reflect in-place edits to instance_conversations)
                             if target_name != session['session_name'] and target_name in agent_pool.sub_agent_state:
-                                agent_pool.sub_agent_state[target_name]['messages'] = list(history)
+                                agent_pool.sub_agent_state[target_name]['messages'] = copy.deepcopy(history)
                             
                             # Also sync main session back to pool so next generation doesn't
                             # overwrite the edit (line 1180 does copy.deepcopy from pool)
                             if target_name == session['session_name']:
-                                agent_pool.instance_conversations[target_name] = list(history)
+                                with session_lock:
+                                    agent_pool.instance_conversations[target_name] = copy.deepcopy(history)
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'delete_messages':
@@ -2652,8 +2719,23 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                     elif agent_pool and target_name in agent_pool.instance_conversations:
                         history = agent_pool.instance_conversations[target_name]
                         
+                    # FIX-4: Protect system message at index 0 from deletion (Compression Bug Fix)
                     indices = sorted(data.get('indices', []), reverse=True)
+                    
+                    # Filter out index 0 if it's a system message
+                    indices_to_delete = []
                     for idx in indices:
+                        if idx == 0 and len(history) > 0:
+                            first_role = _get_msg_role(history[0])
+                            if first_role == SYSTEM:
+                                logger.warning(
+                                    f"[DELETE MESSAGES] Attempted to delete system message (index 0) for '{target_name}' — blocked"
+                                )
+                                continue
+                        indices_to_delete.append(idx)
+                    
+                    # Only proceed with deletions if there are valid indices
+                    for idx in indices_to_delete:
                         if 0 <= idx < len(history):
                             history.pop(idx)
                     if agent_pool:
@@ -2664,12 +2746,13 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                         
                         # Sync sub_agent_state so build_state() sees the deletion
                         if target_name != session['session_name'] and target_name in agent_pool.sub_agent_state:
-                            agent_pool.sub_agent_state[target_name]['messages'] = list(history)
+                            agent_pool.sub_agent_state[target_name]['messages'] = copy.deepcopy(history)
                         
                         # Also sync main session back to pool so next generation doesn't
                         # re-deep-copy the un-deleted version (line 1180 does copy.deepcopy from pool)
                         if target_name == session['session_name']:
-                            agent_pool.instance_conversations[target_name] = list(history)
+                            with session_lock:
+                                agent_pool.instance_conversations[target_name] = copy.deepcopy(history)
                     await broadcast({'type': 'state', **build_state()})
 
                 elif msg_type == 'select_agent':
@@ -2728,10 +2811,11 @@ def create_app(agents, agent_pool, config=None, root_agent=None):
                     session['session_name'] = new_name
                     if agent_pool:
                         # Migrate history to new name in pool
-                        if old_name in agent_pool.instance_conversations:
-                            agent_pool.instance_conversations[new_name] = agent_pool.instance_conversations.pop(old_name)
-                        if old_name in agent_pool.instance_summaries:
-                            agent_pool.instance_summaries[new_name] = agent_pool.instance_summaries.pop(old_name)
+                        with session_lock:
+                            if old_name in agent_pool.instance_conversations:
+                                agent_pool.instance_conversations[new_name] = agent_pool.instance_conversations.pop(old_name)
+                            if old_name in agent_pool.instance_summaries:
+                                agent_pool.instance_summaries[new_name] = agent_pool.instance_summaries.pop(old_name)
                     
                     await broadcast({'type': 'state', **build_state()})
 

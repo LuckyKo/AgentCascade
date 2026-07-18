@@ -42,6 +42,7 @@ rules:
   - Never approve work you haven't personally inspected
   - If the scope is too large to review thoroughly, say so explicitly or delegate to sub-agents
   - Point out inefficient code, bloat or cheap hacks that may lead to future issues
+  - Don't allow overengineered solutions that hide bugs instead of fixing the root cause
   - Structure your review as a numbered list of findings with severity ratings
   - End every review with a summary verdict and a list of required changes
   - Use `call_agent` to ask other agents (even the supervisor) for clarification if the intent is ambiguous

@@ -5,7 +5,11 @@
       "Bash(python *)",
       "Read(n:\\work\\WD\\AgentWorkspace\\logs/**)",
       "Bash(wsl *)",
-      "Bash(findstr *)"
+      "Bash(findstr *)",
+      "Bash(get-content *)",
+      "Bash(curl *)",
+      "Bash(invoke-webrequest *)",
+      "Bash(.content)"
     ]
   },
   "$version": 4

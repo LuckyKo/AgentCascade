@@ -124,7 +124,7 @@ def detect_loop(messages: List[Union[dict, Message]]) -> Optional[Tuple[str, int
             # Handle both dict and object function calls
             name = fc.get('name') if isinstance(fc, dict) else getattr(fc, 'name', '')
             args = fc.get('arguments') if isinstance(fc, dict) else getattr(fc, 'arguments', '')
-            # FIX: We no longer strip thinking tags from args here, as they might be 
+            # FIX-6: We no longer strip thinking tags from args here, as they might be 
             # legitimate data (e.g. an agent reviewing code that contains tags).
             # This prevents data corruption.
             return f"{role}:{name}:{args}"
@@ -379,7 +379,13 @@ def validate_message_pool(messages: List[Union[dict, Message]], agent_name: str)
     first = messages[0]
     first_role = first.get('role') if isinstance(first, dict) else getattr(first, 'role', '')
     if first_role != SYSTEM:
-        logger.warning(f"[MSG POOL VALIDATION] First message for '{agent_name}' is not SYSTEM (got {first_role})")
+        # FIX-1: Return False when system message is missing (Compression Bug Fix)
+        # This ensures corrupted pools are rejected during recovery and validation
+        logger.error(
+            f"[MSG POOL VALIDATION] First message for '{agent_name}' is not SYSTEM (got {first_role}). "
+            f"Pool validation failed — this will prevent corrupted history from being used."
+        )
+        return False
     
     # Check for duplicate consecutive messages (compression can cause this via extend+clear issues)
     prev_content = None
@@ -834,7 +840,7 @@ class OrchestratorAgent(Assistant):
                 logger.debug(f"Skipping forceful compression for {instance_name} — already ran this cycle.")
                 return False  # Let LLM call through — forced compression already ran, agent needs to make progress
 
-            # FIX 2: Check retry counter — if forced compression has failed 3+ times, skip it
+            # FIX-2: Check retry counter — if forced compression has failed 3+ times, skip it
             fail_count = self._compress_fail_count.get(instance_name, 0)
             if fail_count >= MAX_COMPRESSION_RETRIES:
                 logger.warning(
@@ -870,7 +876,7 @@ class OrchestratorAgent(Assistant):
                         f"(pool has {len(pool_conv)}) before forced compression for {instance_name}"
                     )
                     
-                    # FIX 1: Preserve system message during sync (prevents pool corruption)
+                    # FIX-3: Preserve system message during sync (prevents pool corruption)
                     # Check if existing pool has a system message that's not in the incoming messages
                     pool_has_system = False
                     system_message = None
@@ -952,7 +958,7 @@ class OrchestratorAgent(Assistant):
                         f"The upcoming API call will likely fail due to length.]"
                     )
                     self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
-                    # FIX 3: Don't overwrite pool with stale local messages on failure
+                    # FIX-4: Don't overwrite pool with stale local messages on failure
                     # The notification was appended to `messages` for display purposes but won't persist to the pool
                     # Increment fail counter
                     self._compress_fail_count[instance_name] = self._compress_fail_count.get(instance_name, 0) + 1
@@ -969,7 +975,7 @@ class OrchestratorAgent(Assistant):
                 )
                 self._append_system_notification(messages, "[SYSTEM NOTIFICATION: Context exceeded", notification)
                 
-                # FIX 3: Don't overwrite pool with stale local messages on failure
+                # FIX-4: Don't overwrite pool with stale local messages on failure
                 # Increment fail counter
                 self._compress_fail_count[instance_name] = self._compress_fail_count.get(instance_name, 0) + 1
                 
@@ -1067,6 +1073,26 @@ class OrchestratorAgent(Assistant):
         
         # Using the base agent_type for the class metadata field keeps logs clean.
         logger_inst = self.agent_pool.get_logger(instance, self.agent_type)
+        
+        # FIX-5: Hard assertion that fails loudly if SYSTEM is missing at runtime.
+        # This catches pool corruption upstream before it propagates through _run().
+        
+        # FIX-5 Part 1: Assert that messages is non-empty — empty messages list is also corruption
+        assert len(messages) > 0, (
+            f"[POOL CORRUPTION DETECTED] Instance '{instance}' received EMPTY messages list. "
+            f"This indicates severe pool corruption. Check upstream pool setup or sync logic."
+        )
+        
+        # FIX-5 Part 2: Assert SYSTEM at index 0 regardless of knowledge presence
+        # (the base agent always prepends SYSTEM via agent.py line 119)
+        first_msg = messages[0]
+        first_role = first_msg.get('role') if isinstance(first_msg, dict) else getattr(first_msg, 'role', '')
+        
+        assert first_role == SYSTEM, (
+            f"[POOL CORRUPTION DETECTED] Instance '{instance}' received messages without SYSTEM at index 0. "
+            f"First role found: '{first_role}'. Pool length: {len(messages)}. "
+            f"Root cause: upstream pool corruption — check api_server.py finalization sync or initial pool setup."
+        )
         
         # Log the latest turn
         if messages:
@@ -1325,7 +1351,7 @@ class OrchestratorAgent(Assistant):
                             if recov and validate_message_pool(recov, self.session_name):
                                 # ── TRANSITION NOTE: agent_orchestrator.py is being phased out by Root.
                                 #     This recovery validation may need to be revisited when migration is complete. ──
-                                # FIX 3: Ensure recovered history starts with SYSTEM message before recovery
+                                # FIX-6: Ensure recovered history starts with SYSTEM message before recovery
                                 first_role = recov[0].get('role') if isinstance(recov[0], dict) else getattr(recov[0], 'role', '')
                                 if first_role != SYSTEM:
                                     logger.error(f"[COMPRESSION BUG] Recovered history missing SYSTEM message for '{self.session_name}' - skipping recovery. First role: {first_role}")
@@ -1348,8 +1374,8 @@ class OrchestratorAgent(Assistant):
                     llm_messages.clear()
                     llm_messages.extend(copy.deepcopy(sliced))
                     
-                    # CRITICAL FIX: Skip update_history() after forced compression.
-                    # apply_compression() already atomically updated both pool and log (FIX 2-4).
+                    # FIX-7: Skip update_history() after forced compression.
+                    # apply_compression() already atomically updated both pool and log.
                     # Calling update_history() here causes divergence because:
                     # - Pool has compressed history (discarded messages removed)
                     # - Log has preserved history (all original messages + marker inserted via tail-offset method)
@@ -1461,7 +1487,7 @@ class OrchestratorAgent(Assistant):
                 if m.get('reasoning_content') and isinstance(m['reasoning_content'], str):
                     m['reasoning_content'] = strip_thinking_blocks(m['reasoning_content'])
                 
-                # FIX: In newer AgentCascade, tool calls should NOT have reasoning injected 
+                # FIX-7: In newer AgentCascade, tool calls should NOT have reasoning injected 
                 # into 'content' if it's already in 'reasoning_content' and there's a tool call,
                 # as the UI/orchestrator handles the combined display and it confuses history trackers.
                 reasoning_content = m.get('reasoning_content')
@@ -1854,13 +1880,31 @@ class OrchestratorAgent(Assistant):
                     compressed_conv = self.agent_pool.get_conversation(self.session_name)
                     if compressed_conv:
                         # Validate pool integrity after agent-triggered compression
-                        if not validate_message_pool(compressed_conv, self.session_name):
-                            logger.error(f"[COMPRESSION BUG] Message pool validation FAILED for '{self.session_name}' after compress_context tool call.")
+                        validation_passed = validate_message_pool(compressed_conv, self.session_name)
+                        
+                        if not validation_passed:
+                            logger.error(
+                                f"[COMPRESSION BUG] Pool validation FAILED for '{self.session_name}' after compress_context. "
+                                f"Attempting recovery from log..."
+                            )
+                            # FIX-1: Simplified recovery — one attempt from log, then fall back to pre-compression context
+                            recov = self.agent_pool.get_logger(self.session_name, self.agent_type).data.get('history', [])
+                            if recov and validate_message_pool(recov, self.session_name):
+                                logger.info(
+                                    f"Recovered valid history from log for '{self.session_name}' ({len(recov)} messages)."
+                                )
+                                compressed_conv = recov
+                            else:
+                                logger.warning(
+                                    f"Log recovery failed for '{self.session_name}'. Using pre-compression context as fallback."
+                                )
+                                compressed_conv = llm_messages
                         
                         sliced = self.agent_pool.slice_history_for_llm(compressed_conv) if hasattr(self.agent_pool, 'slice_history_for_llm') else compressed_conv
+                        
                         llm_messages.clear()
                         llm_messages.extend(copy.deepcopy(sliced))
-                        # FIX: Also sync messages to prevent divergence with llm_messages.
+                        # FIX-8: Also sync messages to prevent divergence with llm_messages.
                         # Without this, messages retains stale pre-compression content, and since
                         # turn_final_messages = messages (line 1790), the stale data propagates.
                         messages.clear()
@@ -2403,7 +2447,7 @@ class OrchestratorAgent(Assistant):
                                 # Incremental logging via log_message (already called in agent loop)
                                 # ensures history is persistent. update_history is redundant here.
                                 
-                                # FIX 4: Track sub-agent self-compression via compress_context tool call
+                                # FIX-9: Track sub-agent self-compression via compress_context tool call
                                 compress_func_name = None
                                 if isinstance(last_resp, dict):
                                     compress_func_name = last_resp.get('name') or last_resp.get('function_name')
@@ -2494,7 +2538,7 @@ class OrchestratorAgent(Assistant):
             if final_resp:
                 # IMPORTANT: Update the persistent conversation instance with the FULL TURN result.
                 # This ensures the next turn (or next 'call_agent') sees the tool results.
-                # CRITICAL FIX: If forced compression ran during this turn, final_resp contains
+                # FIX-8: If forced compression ran during this turn, final_resp contains
                 # stale pre-compression messages AND new post-compression messages. Use conv length
                 # as cutoff — after rebuild_working_set synced the pool, len(conv) = messages already
                 # in the pool. Only extend with messages beyond that count (post-compression work).

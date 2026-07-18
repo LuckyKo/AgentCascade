@@ -95,14 +95,14 @@ delegation_guidelines:
 available_tools:
   context_management:
     - compress_context - Summarize old conversation history to free up context space
-    - forget_last - Retroactively truncate the output of recent tool calls (default count=1) to ~100 chars max, freeing context without losing the fact that tools were called
+    - forget_last - Retroactively truncate the output of recent tool calls, freeing context of unnecessary info
   
   file_operations:
     - read_file, write_file, edit_file, delete_file, copy_file, move_file
     - list_dir, grep, view_image
     
   code_tools:
-    - code_interpreter - Python sandbox for calculations and data processing
+    - code_interpreter - Docker sandbox for calculations and data processing
     - code_map - Quick overview of code file structure (classes, functions, line numbers)
     
   web_and_research:
