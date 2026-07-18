@@ -229,6 +229,67 @@ def _normalize_thinking_blocks(text):
     return cleaned
 
 
+# ── Embedded Tool Call Detection Constants ────────────────────────────
+# LLMs sometimes leak tool call formats into reasoning/content text.
+# These patterns detect and extract them before they cause infinite loops.
+# Qwen format: ✿FUNCTION✿: name ... ✿ARGS✿: args
+# Lookahead stops at next Qwen markers, PEG <function= tags, and </function>
+_EMBEDDED_TOOL_QWEN_RE = re.compile(
+    r'✿FUNCTION✿\s*:\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\n?\s*'
+    r'✿ARGS✿\s*:\s*([\s\S]*?)(?=\s*✿FUNCTION✿|\s*✿RETURN✿|\s*<function=|\s*$)',
+    re.IGNORECASE
+)
+
+# PEG-native format: <function=name>...<parameter>args</parameter>...</function>
+_EMBEDDED_TOOL_PEG_RE = re.compile(
+    r'<function=(\w+)>([\s\S]*?)</function>',
+    re.IGNORECASE
+)
+
+_EMBEDDED_TOOL_PEG_PARAM_RE = re.compile(
+    r'<parameter>([\s\S]*?)</parameter>',
+    re.IGNORECASE
+)
+
+
+def _extract_tool_calls_from_text(text):
+    """Extract tool calls from reasoning/content text.
+
+    LLMs sometimes embed tool calls inside reasoning blocks instead of
+    using proper function_call attributes. This extracts them.
+
+    Returns all matches found. Callers (e.g. _detect_tool, _check_for_tool_calls_in_output)
+    typically only use the first match (calls[0]) to execute a single tool per turn.
+
+    Args:
+        text: Raw text that may contain embedded tool call markers
+
+    Returns:
+        List of (name, args) tuples, empty if none found.
+    """
+    if not isinstance(text, str) or not text:
+        return []
+    results = []
+    # Try Qwen format first
+    for m in _EMBEDDED_TOOL_QWEN_RE.finditer(text):
+        name, args = m.group(1).strip(), m.group(2).strip()
+        if name:
+            results.append((name, args))
+    if results:
+        return results
+    # Fall back to peg-native format
+    for m in _EMBEDDED_TOOL_PEG_RE.finditer(text):
+        name = m.group(1).strip()
+        body = m.group(2).strip()
+        # Extract <parameter> content if present, otherwise use full body
+        pm = _EMBEDDED_TOOL_PEG_PARAM_RE.search(body)
+        args = pm.group(1).strip() if pm else body
+        # Skip if args contain nested <function= tags (incomplete extraction)
+        if name and args and '<function=' not in args:
+            results.append((name, args))
+    return results
+
+
 def _normalize_tool_arguments(func_call):
     """Clean thinking blocks from function call arguments.
 
@@ -3423,11 +3484,26 @@ class ExecutionEngine:
         """
         # Check if last assistant message had a tool call (still working)
         has_tool_call = False
-        for msg in reversed(response):
+        # Collect all executed tool names from FUNCTION results (lowercase for case-insensitive comparison)
+        executed_tools = set()
+        for msg in response:
+            if msg_field(msg, 'role', '') == FUNCTION:
+                name = msg_field(msg, 'name', '')
+                if name:
+                    executed_tools.add(name.lower())
+
+        for idx in range(len(response) - 1, -1, -1):
+            msg = response[idx]
             role = msg_field(msg, 'role', '')
             if role == ASSISTANT:
                 fc = msg_field(msg, 'function_call')
-                has_tool_call = fc is not None
+                if fc is not None:
+                    has_tool_call = True
+                else:
+                    # Also scan reasoning_content and content for embedded tool calls
+                    use_tool, tool_name, tool_args, _ = self._detect_tool(msg)
+                    if use_tool and tool_name.lower() not in executed_tools:
+                        has_tool_call = True
                 break
 
         return has_tool_call
@@ -4464,7 +4540,17 @@ class ExecutionEngine:
     # loop_detection.py ──
 
     def _detect_tool(self, message: Message) -> Tuple[bool, str, Any, str]:
-        """Detect if a message contains a tool call. Returns (use_tool, tool_name, tool_args, text)."""
+        """Detect if a message contains a tool call. Returns (use_tool, tool_name, tool_args, text).
+
+        Checks in order:
+        1. function_call attribute (standard path)
+        2. Embedded tool calls in content text (Qwen/PEG format leaked into content)
+
+        NOTE: reasoning_content is intentionally NOT scanned. LLMs often leak
+        tool call syntax into thinking/reasoning blocks as part of their
+        chain-of-thought. Treating those as real tool calls causes infinite
+        loops (detect → execute → LLM regenerates same reasoning → repeat).
+        """
         func_call = (message.get('function_call') if isinstance(message, dict)
                      else getattr(message, 'function_call', None))
         text = (message.get('content', '') if isinstance(message, dict)
@@ -4475,6 +4561,12 @@ class ExecutionEngine:
                 return True, func_call.get('name'), func_call.get('arguments'), text
             else:
                 return True, getattr(func_call, 'name', ''), getattr(func_call, 'arguments', ''), text
+
+        # Scan content text for embedded tool calls as last resort
+        if text:
+            calls = _extract_tool_calls_from_text(text)
+            if calls:
+                return True, calls[0][0], calls[0][1], text
 
         return False, None, None, text or ''
 
