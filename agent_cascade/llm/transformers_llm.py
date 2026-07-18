@@ -145,7 +145,7 @@ class Transformers(BaseFnCallModel):
         generate_cfg.update(inputs)
         generate_cfg.update(dict(
             streamer=streamer,
-            max_new_tokens=generate_cfg.get('max_new_tokens', 2048)
+            max_new_tokens=generate_cfg.get('max_new_tokens', 8192)
         ))
         
         if 'seed' in generate_cfg:
@@ -176,7 +176,7 @@ class Transformers(BaseFnCallModel):
         inputs = self._get_inputs(messages)
         generate_cfg.update(inputs)
         generate_cfg.update(dict(
-            max_new_tokens=generate_cfg.get('max_new_tokens', 2048)
+            max_new_tokens=generate_cfg.get('max_new_tokens', 8192)
         ))
         
         if 'seed' in generate_cfg:

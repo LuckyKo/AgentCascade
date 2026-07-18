@@ -120,7 +120,7 @@ class OpenVINO(BaseFnCallModel):
             dict(
                 input_ids=input_token,
                 streamer=streamer,
-                max_new_tokens=generate_cfg.get('max_new_tokens', 2048),
+                max_new_tokens=generate_cfg.get('max_new_tokens', 8192),
                 stopping_criteria=self._get_stopping_criteria(generate_cfg=generate_cfg),
             ))
         del generate_cfg['stop']
@@ -150,7 +150,7 @@ class OpenVINO(BaseFnCallModel):
         generate_cfg.update(
             dict(
                 input_ids=input_token,
-                max_new_tokens=generate_cfg.get('max_new_tokens', 2048),
+                max_new_tokens=generate_cfg.get('max_new_tokens', 8192),
                 stopping_criteria=self._get_stopping_criteria(generate_cfg=generate_cfg),
             ))
         del generate_cfg['stop']

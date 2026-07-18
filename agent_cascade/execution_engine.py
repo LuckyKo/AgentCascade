@@ -70,6 +70,10 @@ from .inner_loop_detect import InnerLoopDetector, save_loop_sample
 from .settings import InnerLoopSettings as _InnerLoopSettings
 from .operation_manager import set_current_instance_name, clear_current_instance_name
 
+# ── Constants ────────────────────────────────────────────────────────────────
+MAX_TEXT_LENGTH_FOR_REGEX = 1_000_000  # Threshold to skip expensive regex ops
+MIN_OUTPUT_LENGTH = 200               # Minimum output length for broken-json detection
+
 # Sampling & limit parameters to strip when custom sampling is disabled for an
 # endpoint.
 SAMPLING_AND_LIMIT_KEYS = frozenset({
@@ -214,7 +218,7 @@ def _normalize_thinking_blocks(text):
     """
     # Early return for very long texts to avoid expensive regex operations
     # (Issue
-    if isinstance(text, str) and len(text) > 1_000_000:
+    if isinstance(text, str) and len(text) > MAX_TEXT_LENGTH_FOR_REGEX:
         return text
     if not isinstance(text, str):
         return text
@@ -312,7 +316,7 @@ def _is_incomplete_state(turn_output: List[Message]) -> str | None:
                 close_brackets = stripped.count(']')
                 has_mismatch = (open_braces > close_braces) or (open_brackets > close_brackets)
                 # Only flag if mismatch exists, or ends with comma/quote AND has some content
-                if has_mismatch or (stripped and (stripped[-1] in ',\'"') and len(stripped) < 200):
+                if has_mismatch or (stripped and (stripped[-1] in ',\'"') and len(stripped) < MIN_OUTPUT_LENGTH):
                     return "broken-json"
 
         # 3. Empty output: no reasoning, no content, no tool calls
@@ -467,11 +471,9 @@ def _build_session_metadata(pool, instance) -> str:
                 extra_rw = log_inst.data['metadata'].get('extra_paths_rw', [])
 
         except (AttributeError, KeyError) as e:
-            from agent_cascade.log import logger
             logger.debug("Logger metadata access failed for %s: %s", inst_name, e)
 
     except Exception as e:
-        from agent_cascade.log import logger
         logger.debug("Session metadata build failed: %s", e)
         working_dir = os.getcwd() if hasattr(os, 'getcwd') else "Unknown"
 
@@ -635,13 +637,14 @@ class ExecutionEngine:
         """Append a message to conversation AND log it atomically under compression lock."""
         inst_name = instance.instance_name
         agent_class = instance.agent_class
-        if not lock_held:
+        log_inst = self.pool.get_logger(inst_name, agent_class)
+        if lock_held:
+            instance.append_message(msg)
+            log_inst.log_message(msg)
+        else:
             with instance._compression_lock:
                 instance.append_message(msg)
-                self.pool.get_logger(inst_name, agent_class).log_message(msg)
-        else:
-            instance.append_message(msg)
-            self.pool.get_logger(inst_name, agent_class).log_message(msg)
+                log_inst.log_message(msg)
 
     def _append_and_log_batch(
         self,
@@ -651,19 +654,20 @@ class ExecutionEngine:
         lock_held: bool = False  # Caller already holds _compression_lock (RLock)
     ) -> None:
         """Append multiple messages to conversation AND log them atomically under compression lock."""
-        inst_name = instance.instance_name
-        agent_class = instance.agent_class
         if not msgs:
             return
-        if not lock_held:
+        inst_name = instance.instance_name
+        agent_class = instance.agent_class
+        log_inst = self.pool.get_logger(inst_name, agent_class)
+        if lock_held:
+            instance.append_messages(msgs)
+            for msg in msgs:
+                log_inst.log_message(msg)
+        else:
             with instance._compression_lock:
                 instance.append_messages(msgs)
                 for msg in msgs:
-                    self.pool.get_logger(inst_name, agent_class).log_message(msg)
-        else:
-            instance.append_messages(msgs)
-            for msg in msgs:
-                self.pool.get_logger(inst_name, agent_class).log_message(msg)
+                    log_inst.log_message(msg)
 
     def _drain_and_inject(
         self,
@@ -728,8 +732,8 @@ class ExecutionEngine:
                     # Also drain cache notifications into USER messages
                     # (prepended)
                     first_msg.content = self.compression_handler._drain_cache_notifications(instance, first_msg.content, prepend=True)
-            except Exception:
-                pass  # Don't let drain failures interfere with message injection
+            except Exception as e:
+                logger.debug(f"Drain failed for {inst_name} (non-critical): {e}")
 
         with instance._compression_lock:
             for msg in processed_messages:
@@ -755,6 +759,19 @@ class ExecutionEngine:
             logger.debug(f"Logging failed for {inst_name} (non-critical): {e}")
 
         return True
+
+    def _clear_llm_preprocess_cache(self, instance: 'AgentInstance', inst_name: str) -> None:
+        """Clear the LLM preprocessing cache for an instance's template.
+
+        Extracted to eliminate duplicate cache-clearing blocks (M11 fix).
+        Silently swallows errors — cache clearing is best-effort.
+        """
+        template = self.pool.get_template(instance.agent_class)
+        if template and hasattr(template, 'llm') and template.llm:
+            try:
+                template.llm._clear_preprocess_cache()
+            except Exception as e:
+                logger.debug(f"Failed to clear LLM preprocess cache for {inst_name}: {e}")
 
     @staticmethod
     def _make_user_message(text: str) -> Message:
@@ -1579,14 +1596,8 @@ class ExecutionEngine:
             drain_fn=self.pool.drain_queue,
             factory=self._make_user_message,
         ):
-            # Invalidate LLM preprocessing cache after queue injection for
-            # fresh processing
-            template = self.pool.get_template(instance.agent_class)
-            if template and hasattr(template, 'llm') and template.llm:
-                try:
-                    template.llm._clear_preprocess_cache()
-                except Exception as e:
-                    logger.debug(f"Failed to clear LLM preprocess cache for {inst_name}: {e}")
+            # Invalidate LLM preprocessing cache after queue injection for fresh processing
+            self._clear_llm_preprocess_cache(instance, inst_name)
 
             return True
 
@@ -1878,12 +1889,8 @@ class ExecutionEngine:
             _invalidate_token_cache(inst)  # Critical: invalidates ALL cache fields including _last_actual_token_count
 
         # Invalidate LLM preprocessing cache for this instance's template
-        template = self.pool.get_template(inst.agent_class) if inst else None
-        if template and hasattr(template, 'llm') and template.llm:
-            try:
-                template.llm._clear_preprocess_cache()
-            except Exception as e:
-                logger.debug(f"Failed to clear LLM preprocess cache for {inst_name}: {e}")
+        if inst:
+            self._clear_llm_preprocess_cache(inst, inst_name)
 
         # Sync the instance caches (Fix LLM Reprocessing)
         if inst:
@@ -2122,16 +2129,16 @@ class ExecutionEngine:
                 # their token budget
                 # Resolve the output token limit from generate_cfg override,
                 # template config, or default
-                _max_output_tokens = 2048  # Default cap per single response
+                _max_output_tokens = 8192  # Default cap per single response
                 _gen_override = getattr(instance, '_generate_cfg_override', None)
                 if _gen_override and isinstance(_gen_override, dict):
                     _mt = _gen_override.get('max_tokens') or _gen_override.get('max_output_tokens') or _gen_override.get('max_input_tokens')
                     if isinstance(_mt, int) and _mt > 0:
                         _max_output_tokens = _mt
                 # Also check template LLM generate_cfg as fallback
-                if _max_output_tokens == 2048:
+                if _max_output_tokens == 8192:
                     _llm_cfg = getattr(getattr(template, 'llm', None), 'generate_cfg', None) or {}
-                    _mt = _llm_cfg.get('max_tokens') or _llm_cfg.get('max_output_tokens')
+                    _mt = _llm_cfg.get('max_tokens') or _llm_cfg.get('max_output_tokens') or _llm_cfg.get('max_input_tokens')
                     if isinstance(_mt, int) and _mt > 0:
                         _max_output_tokens = _mt
 
@@ -2165,7 +2172,7 @@ class ExecutionEngine:
                         gen.close()
                     except RuntimeError:
                         pass  # Already closed/exhausted
-                    logger.debug(f"[STREAM_GUARD] {reason_msg} for {inst_name}. Retrying…")
+                    logger.info(f"[STREAM_GUARD] {reason_msg} for {inst_name}. Retrying…")
                     # Increment counters BEFORE yield — ensures update even if
                     # consumer drops iterator mid-yield
                     nonlocal last_output, retry_count, loop_retry_count

@@ -398,7 +398,7 @@ TOOL_METADATA = {
             },
             'context': {
                 'type': 'string',
-                'description': 'Optional background context for the agent instance'
+                'description': 'Optional background context for the agent instance, usefull for auto skill allocator to match relevant skills.'
             },
             'log_file': {
                 'type': 'string',

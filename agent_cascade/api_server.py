@@ -78,8 +78,8 @@ from agent_cascade.agent_instance import AgentState, InvalidStateTransition
 
 # Pre-compiled regexes moved to agent_cascade.utils.thinking_block
 
-# Module-level lock used by helper functions before create_app() runs.
-# Overwritten inside create_app() for the per-app instance, but safe as a fallback.
+# Module-level lock shared by session helper functions and create_app() internals.
+# Protects session state mutations (generation_id, generating, stop_requested).
 session_lock = threading.Lock()
 
 # LLM config keys for update_config optimization (defense-in-depth)
@@ -133,15 +133,6 @@ def _parse_multimodal_content(text):
     if len(parts) == 1 and 'text' in parts[0]:
         return parts[0]['text']
     return parts
-    
-
-
-
-
-
-
-
-
 
 
 def _validate_disabled_tools(ui_cfg: Dict[str, Any]) -> None:
@@ -259,52 +250,21 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
     )
 
     # ── Helpers ───────────────────────────────────────────────────────────
-    def _save_session_history():
-        try:
-            if not agent_pool:
-                return
-                
-            name = session.get('session_name', 'Maine')
-            # Phase 6: Read history directly from pool instance instead of session['history']
-            inst = agent_pool.get_instance(name)
-            if inst is not None:
-                with inst._compression_lock:
-                    history = list(inst.conversation)
-            else:
-                logger.warning(f"Session instance '{name}' not found in pool during save — skipping history sync")
-                history = []
-            
-            # Use the standardized logger to ensure append-only behavior
-            logger_inst = agent_pool.get_logger(name, 'Orchestrator')
-            logger_inst.update_history(history)
-            logger_inst._file_history_synced = True
-            
-            # Also sync to instance_summaries for the UI if history was compressed
-            for msg in reversed(history):
-                content = msg.get(CONTENT, '')
-                if isinstance(content, str) and "<context_summary>" in content:
-                    match = _CONTEXT_SUMMARY_RE.search(content)
-                    if match:
-                        agent_pool.instance_summaries[name] = match.group(1).strip()
-                    break
-        except Exception as e:
-            logger.error(f"Failed to save session history: {e}")
-
-    def _load_session_history(name):
+    def _load_session_history(name, agent_pool):
         """Load session history into the pool from log files.
-        
+
         Returns True on success, False on failure. The pool already has the data
         after load_session_from_log(), so returning the tuples is redundant.
         """
         try:
             if not agent_pool:
                 return False
-                
+
             if hasattr(agent_pool, 'operation_manager') and agent_pool.operation_manager:
                 log_dir = agent_pool.operation_manager.base_dir / 'logs'
             else:
                 log_dir = Path(DEFAULT_WORKSPACE) / 'logs'
-            
+
             # Orchestrator logs might be named session_NAME.jsonl or follow the agent instance pattern
             path = log_dir / f"session_{name}.jsonl"
             if not path.exists():
@@ -323,56 +283,11 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
             if status.startswith("Error"):
                 logger.error(f"Failed to load session {name} via pool: {status}")
                 return False
-            
+
             return True
         except Exception as e:
             logger.error(f"Failed to load session history: {e}")
         return False
-
-    def get_session_history(session, instance_name=None):
-        """Read session history from the pool (unified single source of truth).
-
-        Phase 2: Always reads from agent_pool.get_instance().conversation.
-        Falls back to instance_state only for very old sessions that might not
-        have instances registered in the pool yet (should be rare post-unification).
-
-        Args:
-            session: Flask session dict (used to resolve default instance_name)
-            instance_name: Agent instance name. If None, defaults to
-                session['session_name'] (the root/main chat instance).
-
-        Returns:
-            list of message objects
-        """
-        # Resolve default: when no instance_name is given, use the session's
-        # session_name so callers don't need to know about "root".
-        if instance_name is None:
-            instance_name = session.get('session_name') or 'Maine'
-
-        # Primary path: read from agent_pool.instances (the single source of truth)
-        inst = agent_pool.get_instance(instance_name) if agent_pool else None
-        if inst and hasattr(inst, 'conversation'):
-            return list(inst.conversation)
-
-        # Fallback for very old sessions that might not have pool instances yet
-        state = agent_pool.instance_state.get(instance_name, {}) if agent_pool else {}
-        return state.get('messages', [])
-
-    def get_agent_state(instance_name):
-        """Get state for any agent instance, including root.
-        
-        All agents including root come from agent_pool.instance_state.
-        
-        Args:
-            instance_name: Agent instance name ('root' for main chat, or agent name)
-        
-        Returns:
-            dict with 'messages', 'active', etc. or None if not found
-        """
-        if not agent_pool:
-            return None
-        state = agent_pool.instance_state.get(instance_name)
-        return state.copy() if state else None
 
     # ── Shared session state ──────────────────────────────────────────────
     default_session_name = config.get('session_name', 'Maine')
@@ -385,7 +300,7 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
     }
     # Initial load — pool is the single source of truth for conversation state (Phase 6)
     if agent_pool:
-        loaded = _load_session_history(default_session_name)
+        loaded = _load_session_history(default_session_name, agent_pool)
         # Validate partial success: instance exists but has no conversation data beyond system message
         if loaded:
             inst = agent_pool.get_instance(default_session_name)
@@ -436,19 +351,6 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
     # Non-stream events (state, done, dismissal) still get priority via regular put().
     # Increased from 32 to 128 to reduce dropped updates during heavy multi-agent activity.
     send_queue: asyncio.Queue = asyncio.Queue(maxsize=128)
-
-    # Lock for session state accessed across threads (asyncio loop + agent thread).
-    # Protects: session['generating'], session['stop_requested'].
-    # Phase 6: session['history'] removed — pool is the single source of truth.
-    session_lock = threading.Lock()
-
-
-
-    def get_agent():
-        idx = session['agent_index']
-        if 0 <= idx < len(agents):
-            return agents[idx]
-        return agents[0]
 
     def get_active_stack():
         if agent_pool and hasattr(agent_pool, 'active_stack'):
@@ -901,7 +803,7 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
             return build_state()
         except Exception as e:
             logger.warning("State build failed: %s", e, exc_info=True)
-            return {"agents": [], "messages": [], "agent_instances": {}, "instances": {}, "active_stack": [], "generating": False, "session_name": "Maine", "instance_name": "Maine", "total_tokens": 0, "total_words": 0, "max_tokens": 2048, "summary": "", "has_queued_messages": False, "queued_messages": [], "stopped": False, "current_model": "Unknown", "telemetry": None, "default_workspace": str(DEFAULT_WORKSPACE), "is_waiting": False, "api_router": {"endpoints": [], "agent_priorities": {}}}
+            return {"agents": [], "messages": [], "agent_instances": {}, "instances": {}, "active_stack": [], "generating": False, "session_name": "Maine", "instance_name": "Maine", "total_tokens": 0, "total_words": 0, "max_tokens": 8192, "summary": "", "has_queued_messages": False, "queued_messages": [], "stopped": False, "current_model": "Unknown", "telemetry": None, "default_workspace": str(DEFAULT_WORKSPACE), "is_waiting": False, "api_router": {"endpoints": [], "agent_priorities": {}}}
 
     @app.post("/api/reset")
     async def api_reset():

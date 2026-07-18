@@ -122,43 +122,37 @@ function clearAutoSecurityTimers() {
   }
 }
 
+/** Mapping of pool settings to UI elements for syncPoolSettings loop-based sync (m7 fix).
+ * Each entry: { id, prop, transform? } — prop is 'checked' or 'value'.
+ * transform(value) is called to convert the server value before assignment. */
+const POOL_SETTINGS_MAP = [
+  { id: 'setting-inner-loop-detect', prop: 'checked', key: 'inner_loop_detect_enabled' },
+  { id: 'setting-loop-min-chars', prop: 'value', key: 'loop_min_chars' },
+  { id: 'setting-loop-score-threshold', prop: 'value', key: 'loop_score_threshold' },
+  { id: 'setting-loop-max-retries', prop: 'value', key: 'loop_max_retries' },
+  { id: 'setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled' },
+  { id: 'setting-loop-sentence-rep', prop: 'checked', key: 'loop_sentence_rep_enabled' },
+  { id: 'setting-loop-ngram-rep', prop: 'checked', key: 'loop_ngram_rep_enabled' },
+  { id: 'setting-loop-block-rep', prop: 'checked', key: 'loop_block_rep_enabled' },
+  { id: 'setting-loop-entropy', prop: 'checked', key: 'loop_entropy_enabled' },
+  { id: 'setting-cache-pool-enabled', prop: 'checked', key: 'cache_pool_enabled' },
+  { id: 'setting-cache-pool-size', prop: 'value', key: 'cache_pool_size' },
+  { id: 'setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars' },
+  { id: 'setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode',
+    transform: (v) => v === 'AUTO' },
+];
+
 /** Sync pool settings from server state to UI elements.
  * Called on every state/stream_update message to ensure UI matches server truth.
  * @param {Object} ps - Pool settings object (inner-loop detection tuning + cache pool) */
 function syncPoolSettings(ps) {
   if (!ps) return;
-  // Inner-loop detection toggle
-  if ($('#setting-inner-loop-detect') && ps.inner_loop_detect_enabled !== undefined)
-    $('#setting-inner-loop-detect').checked = ps.inner_loop_detect_enabled;
-  // Loop tuning numbers
-  if ($('#setting-loop-min-chars') && ps.loop_min_chars !== undefined)
-    $('#setting-loop-min-chars').value = ps.loop_min_chars;
-  if ($('#setting-loop-score-threshold') && ps.loop_score_threshold !== undefined)
-    $('#setting-loop-score-threshold').value = ps.loop_score_threshold;
-  if ($('#setting-loop-max-retries') && ps.loop_max_retries !== undefined)
-    $('#setting-loop-max-retries').value = ps.loop_max_retries;
-  // Per-mode toggles
-  if ($('#setting-loop-char-run') && ps.loop_char_run_enabled !== undefined)
-    $('#setting-loop-char-run').checked = ps.loop_char_run_enabled;
-  if ($('#setting-loop-sentence-rep') && ps.loop_sentence_rep_enabled !== undefined)
-    $('#setting-loop-sentence-rep').checked = ps.loop_sentence_rep_enabled;
-  if ($('#setting-loop-ngram-rep') && ps.loop_ngram_rep_enabled !== undefined)
-    $('#setting-loop-ngram-rep').checked = ps.loop_ngram_rep_enabled;
-  if ($('#setting-loop-block-rep') && ps.loop_block_rep_enabled !== undefined)
-    $('#setting-loop-block-rep').checked = ps.loop_block_rep_enabled;
-  if ($('#setting-loop-entropy') && ps.loop_entropy_enabled !== undefined)
-    $('#setting-loop-entropy').checked = ps.loop_entropy_enabled;
-  // Cache pool settings
-  if ($('#setting-cache-pool-enabled') && ps.cache_pool_enabled !== undefined)
-    $('#setting-cache-pool-enabled').checked = ps.cache_pool_enabled;
-  if ($('#setting-cache-pool-size') && ps.cache_pool_size !== undefined)
-    $('#setting-cache-pool-size').value = ps.cache_pool_size;
-  if ($('#setting-cache-threshold-chars') && ps.cache_threshold_chars !== undefined)
-    $('#setting-cache-threshold-chars').value = ps.cache_threshold_chars;
-  // Skills system toggle
-  if ($('#setting-enable-skills') && ps.default_load_skill_mode !== undefined)
-    $('#setting-enable-skills').checked = (ps.default_load_skill_mode === 'AUTO');
-
+  for (const { id, prop, key, transform } of POOL_SETTINGS_MAP) {
+    const el = $(id);
+    if (el && ps[key] !== undefined) {
+      el[prop] = transform ? transform(ps[key]) : ps[key];
+    }
+  }
   // Persist synced settings to localStorage only (skip server broadcast to avoid feedback loop).
   saveSettings(false);
 }
@@ -237,6 +231,7 @@ const ActivityBar = {
   el: null,          // DOM ref to #globalActivityBar
   fifoEl: null,      // DOM ref to .activity-fifo
   queuedEl: null,    // DOM ref to .activity-queued
+  queueBanner: null, // DOM ref to queue banner container
   lastRenderTime: 0, // Throttle timer for render()
   _lastPushTime: 0,      // Throttle timer for pushImmediate()
   _initialized: false,   // Guard against duplicate init calls
@@ -291,54 +286,68 @@ const ActivityBar = {
     this.render(text);
   },
   
+  /** Build the status string for an agent from agentData and optional streaming text.
+   * Shared by pushImmediate() and render() to eliminate duplicated status logic (C2 fix).
+   * @param {Object} agentData - subAgents entry for the instance
+   * @param {Object} opts - { preview, isWaiting, tokenCount, streamingText }
+   * @returns {string} status text
+   */
+  _buildActivityStatus(agentData, opts = {}) {
+    const { preview, isWaiting, tokenCount, streamingText } = opts;
+    const instName = this.getFilterInstance();
+    let status = '';
+
+    if (!isSessionPrimaryAgent(instName) && isWaiting) {
+      status = 'Waiting for API slot...';
+    } else if (preview !== undefined && preview != null) {
+      status = (preview === '' || !preview.trim()) ? 'Streaming...' : preview;
+    } else if (streamingText !== undefined) {
+      status = (streamingText === '' || !streamingText.trim()) ? 'Streaming...' : streamingText;
+    } else {
+      const msgs = agentData?.messages || [];
+      status = getActivityPreview(msgs[msgs.length - 1]) || 'Agent Idle';
+    }
+
+    // Append token/word counts if available
+    const tokCount = (tokenCount > 0 ? tokenCount
+      : agentData?.total_tokens ?? state.totalTokens);
+    if (tokCount > 0) {
+      const wordCount = agentData?.total_words ?? state.totalWords;
+      status += ` (${wordCount} words, ${tokCount} tokens)`;
+    }
+    return status || 'Agent Idle';
+  },
+
   pushImmediate(instanceName, preview, isWaiting, tokenCount) {
     if (instanceName !== this.getFilterInstance()) return;
     if (!this.el || !this.fifoEl) return;
-  
+
     // Fast dedup: skip if content hasn't changed since last call
     if (this._dedupInstance === instanceName &&
     this._dedupPreview === preview &&
     this._dedupWaiting === isWaiting &&
     this._dedupTokens === tokenCount) return;
-  
+
     if (performance.now() - this._lastPushTime < THROTTLE.PUSH_IMMEDIATE_MS) return;
     this._lastPushTime = performance.now();
-  
+
     this._dedupInstance = instanceName;
     this._dedupPreview = preview;
     this._dedupWaiting = isWaiting;
     this._dedupTokens = tokenCount;
-  
+
     const agentData = state.subAgents[instanceName];
     const isActive = agentData?.active ?? false;
-  
+
     this.el.classList.toggle('active', isActive);
-
-    if (isActive) {
-      let status = '';
-
-      if (!isSessionPrimaryAgent(instanceName) && isWaiting) {
-        status = 'Waiting for API slot...';
-      } else if (preview !== undefined && preview != null) {
-        status = (preview === '' || !preview.trim()) ? 'Streaming...' : preview;
-      }
-
-      const tokCount = tokenCount > 0 ? tokenCount : (agentData?.total_tokens ?? state.totalTokens);
-      if (tokCount > 0) {
-        const wordCount = agentData?.total_words ?? state.totalWords;
-        status += ` (${wordCount} words, ${tokCount} tokens)`;
-      }
-
-      this.fifoEl.textContent = status || 'Agent Idle';
-    } else {
-      this.fifoEl.textContent = 'Agent Idle';
-    }
+    this.fifoEl.textContent = isActive
+      ? this._buildActivityStatus(agentData, { preview, isWaiting, tokenCount })
+      : 'Agent Idle';
 
     if (this.queuedEl) {
       this.queuedEl.style.display = agentData?.has_queued_messages ? 'block' : 'none';
     }
 
-    // Render queue banner with actual message previews
     this.renderQueueBanner(agentData?.queued_messages);
   },
   
@@ -361,33 +370,14 @@ render(streamingText) {
     const isActive = agentData?.active ?? false;
 
     this.el.classList.toggle('active', isActive);
+    this.fifoEl.textContent = isActive
+      ? this._buildActivityStatus(agentData, { streamingText, isWaiting: agentData?.is_waiting })
+      : 'Agent Idle';
 
-    if (isActive) {
-      let status = '';
-
-      if (!isSessionPrimaryAgent(this.getFilterInstance()) && agentData.is_waiting) {
-        status = 'Waiting for API slot...';
-      } else if (streamingText !== undefined) {
-        status = (streamingText === '' || !streamingText.trim()) ? 'Streaming...' : streamingText;
-      } else {
-        const msgs = agentData?.messages || [];
-        status = getActivityPreview(msgs[msgs.length - 1]) || 'Agent Idle';
-      }
-
-      if (agentData.total_tokens !== undefined) {
-        status += ` (${agentData.total_words ?? state.totalWords} words, ${agentData.total_tokens ?? state.totalTokens} tokens)`;
-      }
-
-      this.fifoEl.textContent = status;
-    } else {
-      this.fifoEl.textContent = 'Agent Idle';
-    }
-      
     if (this.queuedEl) {
-    this.queuedEl.style.display = agentData?.has_queued_messages ? 'block' : 'none';
+      this.queuedEl.style.display = agentData?.has_queued_messages ? 'block' : 'none';
     }
 
-    // Render queue banner with actual message previews
     this.renderQueueBanner(agentData?.queued_messages);
   },
   
@@ -4072,7 +4062,7 @@ function getGenerateCfg() {
   if ($('#setting-repeat-penalty')) cfg.repeat_penalty = parseFloat($('#setting-repeat-penalty').value);
   if ($('#setting-presence-penalty')) cfg.presence_penalty = parseFloat($('#setting-presence-penalty').value);
   if ($('#setting-frequency-penalty')) cfg.frequency_penalty = parseFloat($('#setting-frequency-penalty').value);
-  if ($('#setting-max-tokens')) cfg.max_tokens = parseInt($('#setting-max-tokens').value) || 2048;
+  if ($('#setting-max-tokens')) cfg.max_tokens = parseInt($('#setting-max-tokens').value) || 8192;
   if ($('#setting-max-context')) cfg.max_input_tokens = parseInt($('#setting-max-context').value) || 32768;
 
   if ($('#setting-max-turns')) cfg.max_turns = parseInt($('#setting-max-turns').value) || 50;
