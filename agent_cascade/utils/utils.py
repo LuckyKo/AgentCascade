@@ -42,6 +42,9 @@ from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
 # Max length for function/tool call arguments before truncation (shared across utils and agent_invoker)
 MAX_FC_ARGS_LEN = 2048
 
+# Default timeout for HTTP requests (seconds)
+DEFAULT_REQUEST_TIMEOUT = 30
+
 
 # ── Message Field Accessor Helpers (consolidated from execution_engine, handler, api_server) ──
 
@@ -281,12 +284,13 @@ def save_url_to_local_work_dir(url: str, save_dir: str, save_filename: str = '')
             'User-Agent':
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
         }
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
+        try:
+            response = requests.get(url, headers=headers, timeout=DEFAULT_REQUEST_TIMEOUT)
+            response.raise_for_status()
             with open(new_path, 'wb') as file:
                 file.write(response.content)
-        else:
-            raise ValueError('Can not download this file. Please check your network or the file link.')
+        except requests.RequestException as e:
+            raise ValueError(f'Can not download this file. Please check your network or the file link. (Error: {e})')
     end_time = time.time()
     logger.info(f'Finished downloading {url} to {new_path}. Time spent: {end_time - start_time} seconds.')
     return new_path

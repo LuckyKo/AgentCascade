@@ -427,8 +427,14 @@ class SimpleDocParser(BaseTool):
         params = self._verify_json_format_args(params)
         path = params['url']
         
-        # Add http:// protocol prefix to URLs missing it (e.g., "www.example.com/..." or "arxiv.org/...")
+        # Strip file:// prefix using existing utility (robust URL parsing via urllib.parse)
+        if path.startswith('file://'):
+            path = sanitize_chrome_file_path(path)
+        
+        # Normalize local paths to resolve '..' segments and prevent traversal issues
         if not is_http_url(path):
+            path = os.path.normpath(path)
+            # Add http:// protocol prefix to URLs missing it (e.g., "www.example.com/..." or "arxiv.org/...")
             normalized = path.replace('\\', '/')
             segments = normalized.split('/')
             first_segment = segments[0] if segments else ''

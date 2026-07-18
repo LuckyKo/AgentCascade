@@ -36,6 +36,8 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 # Errors to investigate:
 
 # Some errors in tools
+- [x] Fixed `file://` URL path duplication bug — consolidated with sanitize_chrome_file_path(), added os.path.normpath() for path safety (2026-07-18)
+- [x] Fixed download timeout/exception handling — DEFAULT_REQUEST_TIMEOUT constant, raise_for_status(), requests.RequestException catch (2026-07-18)
 2026-07-17 12:25:04,311 - base.py - 994 - INFO - Agent [Security] - ALL tokens: 6459, Available tokens: 164667
 2026-07-17 12:25:06,453 - simple_doc_parser.py - 450 - INFO - Start parsing n:\work\WD\AgentWorkspace\file:///N:/work/WD/AgentCascade_unified/agent_cascade/execution_engine.py...
 2026-07-17 12:25:06,455 - utils.py - 140 - ERROR - Traceback (most recent call last):
