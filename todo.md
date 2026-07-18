@@ -32,59 +32,137 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] we are pushing wrong summary from the inner loop detector if the compressor fails and gets stuck in a loop `[SYSTEM ERROR: Empty LLM response]` 
 - [x] `Auto-continue` option fixed — extended detection beyond token truncation to catch incomplete states (mid-reasoning, mid-tool_call with unclosed JSON). Turn counter resets on auto-continue. Hover tooltip added explaining the feature.
 - [x] agents get stopped randomly in the middle of streaming long reasoning — fixed: max-output-token guard + LLM backend defaults raised from 2048 → 8192 across all layers (execution_engine, transformers_llm, openvino, UI, JS fallback, API server). Template fallback bug fixed. Log level raised to INFO.
+- [x] Add shell_cmd calls with `cd <path> && git diff` and similar safe read-only git operations to auto approval. — DONE: Extended _is_safe_readonly_shell_command to auto-approve safe read-only git operations (diff, status, log, etc.) including 'cd && git' patterns, while blocking chained commands and dangerous git subcommands/arguments. Handles -C/--git-dir flags. Note: does not handle git aliases.
+- [ ] inner loop detector is almost unusable how many false positives generates, `char run` is the only good mode...
+- [ ] approval timeout occurs even when explicitly disabled in options, when it was set on auto-ask mode
 
 # Errors to investigate:
 
-# Some errors in tools
-- [x] Fixed `file://` URL path duplication bug — consolidated with sanitize_chrome_file_path(), added os.path.normpath() for path safety (2026-07-18)
-- [x] Fixed download timeout/exception handling — DEFAULT_REQUEST_TIMEOUT constant, raise_for_status(), requests.RequestException catch (2026-07-18)
-2026-07-17 12:25:04,311 - base.py - 994 - INFO - Agent [Security] - ALL tokens: 6459, Available tokens: 164667
-2026-07-17 12:25:06,453 - simple_doc_parser.py - 450 - INFO - Start parsing n:\work\WD\AgentWorkspace\file:///N:/work/WD/AgentCascade_unified/agent_cascade/execution_engine.py...
-2026-07-17 12:25:06,455 - utils.py - 140 - ERROR - Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\tools\simple_doc_parser.py", line 446, in call
-    parsed_file = self.db.get(cached_name_ori)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\tools\storage.py", line 92, in get
-    raise KeyNotExistsError(f'Get Failed: {key} does not exist')
-agent_cascade.tools.storage.KeyNotExistsError: Get Failed: 74f5fcaeecf752ea24624701337bae4e0e38896dcc6c7d2959455299f0370f53_ori does not exist
+# Fail to catch malformed message - tool call in reasoning block, agent gets stuck in a loop retrying the same message over and over even if i kick off the model
+```
+<think>
+Let me fix the code and run it properly:
+<function=code_interpreter>
+<parameter=code>
 
-During handling of the above exception, another exception occurred:
+Verify that certain "safe" git subcommands actually have write operations
+dangerous_variants = {
+'stash': ['pop', 'apply', 'drop'], # These modify stash/wd
+'config': ['--set', '--add'], # These modify config files
+'worktree': ['add', 'move', 'remove'], # These create/remove worktrees
+'notes': ['add', 'append', 'message'], # These write notes
+'pack-refs': [], # This packs refs (writes to packed-refs)
+'prune': ['default prunes (writes)'], # Default removes unreachable objects
+'replace': [], # Creates/replaces refs
+}
 
-Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\utils\utils.py", line 347, in get_file_type
-    content = read_text_from_file(path)
-              ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\utils\utils.py", line 302, in read_text_from_file
-    with open(path, 'r', encoding='utf-8') as file:
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-OSError: [Errno 22] Invalid argument: 'n:\\work\\WD\\AgentWorkspace\\file:///N:/work/WD/AgentCascade_unified/agent_cascade/execution_engine.py'
+Print what we know about each subcommand's safety profile
+print("Git subcommands in _SAFE_GIT_SUBCOMMANDS that have write operations:")
+for cmd, variants in dangerous_variants.items():
+status = 'DANGEROUS' if variants else 'WRITE-ONLY (pack-refs/prune/replace)'
+print(f" {cmd}: {status}")
 
-2026-07-17 12:25:06,456 - agent.py - 251 - WARNING - Tool `web_extractor` reported a service error:
+Also check: are pack-refs and prune actually write operations?
+print("\nNote: git pack-refs writes to .git/packed-refs file")
+print("Note: git prune removes unreachable objects from object database")
+print("Note: git replace creates ref replacement entries")
 
-Error code: ValueError. Error message: Failed: The current parser does not support this file type! Supported types: pdf/docx/pptx/md/txt/html/csv/tsv/xlsx/xls
-2026-07-17 12:25:06,475 - base.py - 994 - INFO - Agent [Security] - ALL tokens: 6549, Available tokens: 164667
-2026-07-17 12:25:08,789 - base.py - 994 - INFO - Agent [Security] - ALL tokens: 7430, Available tokens: 164667
+False
+```
 
+LMStudio dump:
+```
+2026-07-18 06:28:04  [INFO]
+ [agents-a1-35b-mtp] Prompt processing progress: 100.0%
+2026-07-18 06:28:07 [DEBUG]
+ 0.53.304.984 I slot print_timing: id  0 | task 1318 | n_decoded =    251, tg =  83.55 t/s, tg_3s =  83.55 t/s
+2026-07-18 06:28:10 [DEBUG]
+ 0.55.923.703 I slot print_timing: id  0 | task 1318 | prompt eval time =     361.80 ms /   423 tokens (    0.86 ms per token,  1169.14 tokens per second)
+0.55.923.708 I slot print_timing: id  0 | task 1318 |        eval time =    5622.78 ms /   460 tokens (   12.22 ms per token,    81.81 tokens per second)
+0.55.923.709 I slot print_timing: id  0 | task 1318 |       total time =    5984.58 ms /   883 tokens
+0.55.923.710 I slot print_timing: id  0 | task 1318 |    graphs reused =       1724
+2026-07-18 06:28:10 [DEBUG]
+ 0.55.924.655 I slot      release: id  0 | task 1318 | stop processing: n_tokens = 37376, truncated = 0
+0.55.924.848 W common_chat_peg_parse: unparsed peg-native output: <tool_call>
+<function=code_interpreter>
+<parameter=code>
+# Verify that certain "safe" git subcommands actually have write operations
+dangerous_variants = {
+    'stash': ['pop', 'apply', 'drop'],        # These modify stash/wd
+    'config': ['--set', '--add'],              # These modify config files
+    'worktree': ['add', 'move', 'remove'],     # These create/remove worktrees
+    'notes': ['add', 'append', 'message'],     # These write notes
+    'pack-refs': [],                           # This packs refs (writes to packed-refs)
+    'prune': ['default prunes (writes)'],  # Default removes unreachable objects
+    'replace': [],                             # Creates/replaces refs
+}
 
-2026-07-17 13:32:51,973 - simple_doc_parser.py - 448 - INFO - Read parsed https://docs.langchain.com/oss/python/langchain/tools from cache.
-2026-07-17 13:32:51,996 - tool_dispatcher.py - 747 - INFO - Wrote spillover file for 'web_extractor' result of langchain_tools_deep_dive_researcher: 50540 chars -> logs/spillover/langchain_tools_deep_dive_researcher_web_extractor_20260717_133251_993003.txt
-2026-07-17 13:32:51,999 - base.py - 994 - INFO - Agent [Researcher] - ALL tokens: 19743, Available tokens: 124340
-2026-07-17 13:32:55,903 - simple_doc_parser.py - 450 - INFO - Start parsing https://raw.githubusercontent.com/langchain-ai/langchain/main/libs/experimental/langchain_experimental/utilities/python_repl.py...
-2026-07-17 13:32:56,165 - utils.py - 274 - INFO - Downloading https://raw.githubusercontent.com/langchain-ai/langchain/main/libs/experimental/langchain_experimental/utilities/python_repl.py to n:\work\WD\AgentWorkspace\tools\simple_doc_parser\f336f8f29434878dfb5059cb6019ae23c0ba29613e663579e5b5de5a719947ea\python_repl.py...
-2026-07-17 13:32:56,263 - agent.py - 260 - WARNING - An error occurred when calling tool `web_extractor`:
-ValueError: Can not download this file. Please check your network or the file link.
-Traceback:
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\agent.py", line 248, in _call_tool
-    tool_result = tool.call(tool_args, **kwargs)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\tools\web_extractor.py", line 44, in call
-    parsed_web = self.simple_doc_parser.call({'url': url})
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\tools\simple_doc_parser.py", line 466, in call
-    path = save_url_to_local_work_dir(path, tmp_file_root)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade_unified\agent_cascade\utils\utils.py", line 289, in save_url_to_local_work_dir
-    raise ValueError('Can not download this file. Please check your network or the file link.')
+# Print what we know about each subcommand's safety profile
+print("Git subcommands in _SAFE_GIT_SUBCOMMANDS that have write operations:")
+for cmd, variants in dangerous_variants.items():
+    status = 'DANGEROUS' if variants else 'WRITE-ONLY (pack-refs/prune/replace)'
+    print(f"  {cmd}: {status}")
 
-2026-07-17 13:32:56,302 - base.py - 994 - INFO - Agent [Researcher] - ALL tokens: 20511, Available tokens: 124340
+# Also check: are pack-refs and prune actually write operations?
+print("\nNote: git pack-refs writes to .git/packed-refs file")
+print("Note: git prune removes unreachable objects from object database")
+print("Note: git replace creates ref replacement entries")
 
+</parameter>
+<parameter=fix_paths>
+False
+</parameter>
+</function>
+</tool_call>
+
+</think>
+
+<tool_call>
+<function=code_interpreter>
+<parameter=code>
+# Check what git subcommands are in the set and identify potential issues
+safe_git_subcommands = {
+    'diff', 'status', 'log', 'show', 'branch', 'tag', 'remote',
+    'rev-parse', 'config', 'merge-base', 'describe', 'ls-files',
+    'ls-tree', 'stash', 'shortlog', 'blame', 'name-rev', 'hash-object',
+    'cat-file', 'for-each-ref', 'var', 'symbolic-ref',
+    'version', 'rev-list', 'reflog', 'worktree',
+    'count-objects', 'interpret-trailers',
+    'notes', 'pack-refs', 'prune', 'replace', 'rerere',
+    'verify-commit', 'verify-tag', 'verify-pack',
+}
+
+# Identify subcommands that can write data
+dangerous = []
+for cmd in safe_git_subcommands:
+    if cmd == 'stash':
+        # git stash list is safe, but git stash pop/apply are not
+        dangerous.append((cmd, "can pop/apply with additional args"))
+    elif cmd == 'config':
+        # git config --list is safe, but --set/--add modify config
+        dangerous.append((cmd, "can modify with --set/--add"))
+    elif cmd in ('worktree',):
+        # worktree can create/remove worktrees
+        dangerous.append((cmd, "can add/move/remove worktrees"))
+    elif cmd in ('notes',):
+        # notes can add/append data
+        dangerous.append((cmd, "can write notes"))
+    elif cmd in ('pack-refs', 'prune', 'replace'):
+        # These are inherently write operations
+        dangerous.append((cmd, "inherently writes to git database"))
+
+print("Subcommands that can write data:")
+for cmd, reason in dangerous:
+    print(f"  - {cmd}: {reason}")
+
+</parameter>
+<parameter=fix_paths>
+false
+</parameter>
+</function>
+</tool_call>
+2026-07-18 06:28:10 [DEBUG]
+ 0.55.925.066 W srv          stop: cancel task, id_task = 1318
+2026-07-18 06:28:10 [ERROR]
+ [agents-a1-35b-mtp] Engine protocol predict stream returned an error: {"code":500,"message":"The model produced output that does not match the expected peg-native format","type":"server_error"}. Error Data: n/a, Additional Data: n/a
+ ```

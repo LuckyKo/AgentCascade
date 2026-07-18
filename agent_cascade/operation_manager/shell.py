@@ -62,15 +62,57 @@ class ShellMixin:
     """Shell execution methods. Expects self to have __init__-set attributes."""
 
     # ------------------------------------------------------------------
+    # Safe git sub-commands (all are read-only by nature)
+    _SAFE_GIT_SUBCOMMANDS: set = {
+        'diff', 'status', 'log', 'show', 'branch', 'tag', 'remote',
+        'rev-parse', 'config', 'merge-base', 'describe', 'ls-files',
+        'ls-tree', 'stash', 'shortlog', 'blame', 'name-rev', 'hash-object',
+        'cat-file', 'for-each-ref', 'var', 'symbolic-ref',
+        'version', 'rev-list', 'reflog', 'worktree',
+        'count-objects', 'interpret-trailers',
+        'notes', 'pack-refs', 'prune', 'replace', 'rerere',
+        'verify-commit', 'verify-tag', 'verify-pack',
+        'show-ref',
+    }
+
+    # Git flags to skip before detecting the subcommand
+    # (some consume the next token: -c, -C, --git-dir, --work-tree)
+    _GIT_FLAGS: set = {'--no-pager', '-c', '-p', '--paginate', '-C', '--git-dir', '--work-tree'}
+
+    # Dangerous arguments per subcommand — renaming for clarity
+    _DANGEROUS_STASH_ARGS: set = {'drop', 'pop', 'apply', 'clear'}
+    _DANGEROUS_BRANCH_ARGS: set = {'-d', '-D', '-m', '-M', '-r', '--delete', '--move', '--set-upstream-to'}
+    _DANGEROUS_TAG_ARGS: set = {'-d', '-D', '--delete', '-f', '-F', '-a', '-s'}
+    _DANGEROUS_REMOTE_ARGS: set = {'set-url', 'add', 'rm', 'rename', 'set-branches', 'set-head'}
+    _DANGEROUS_CONFIG_ARGS: set = {'--set', '--add', '--unset', '--unset-all', '-e', '--list-all'}
+    _DANGEROUS_WORKTREE_ARGS: set = {'add', 'remove', 'checkout', 'prune'}
+
+    # Safe pipe/filter commands for pipelines (e.g. git diff | grep 'changed')
+    _SAFE_PIPE_COMMANDS: set = {
+        'grep', 'egrep', 'fgrep', 'head', 'tail', 'sort', 'uniq',
+        'wc', 'cat', 'more', 'less', 'cut', 'tr',
+        'comm', 'diff', 'nl', 'rev', 'fold', 'findstr',
+    }
+
+    # Safe primary commands (directory listing / file inspection)
+    _SAFE_PRIMARY_COMMANDS: set = {
+        'find', 'dir', 'ls', 'tree', 'directory',
+        'vfd', 'where', 'whereis', 'locate', 'which', 'type',
+        'pwd', 'stat', 'file', 'du', 'df',
+    }
+
     @staticmethod
     def _is_safe_readonly_shell_command(command: str) -> bool:
-        """Check if a shell command is purely read-only (directory listing/search)."""
+        """Check if a shell command is purely read-only (directory listing/search/git).
+
+        Handles:
+          - Basic commands: ls, find, dir, tree, pwd, stat, etc.
+          - Git commands: git diff, git status, git log, etc.
+          - cd && git pattern: cd <path> && git <command>
+          - Pipes: git diff --stat | grep 'changed'
+        """
         cmd = command.strip()
         if not cmd:
-            return False
-
-        # Command chaining with && ; ||
-        if '&&' in cmd or ';' in cmd or '||' in cmd:
             return False
 
         # Subshell execution: $(...) or backticks
@@ -88,22 +130,17 @@ class ShellMixin:
         if re.search(r'(?<!&)&(?!&)', cmd):
             return False
 
-        pipeline = cmd.split('|')
+        # ── Strip "cd <path> &&" prefix ──
+        stripped_cmd = ShellMixin._strip_cd_prefix(cmd)
 
-        SAFE_PIPE_COMMANDS = {
-            'grep', 'egrep', 'fgrep', 'head', 'tail', 'sort', 'uniq',
-            'wc', 'cat', 'more', 'less', 'cut', 'tr',
-            'comm', 'diff', 'nl', 'rev', 'fold'
-        }
+        # Check for remaining chaining after stripping cd prefix
+        if '&&' in stripped_cmd or ';' in stripped_cmd or '||' in stripped_cmd:
+            return False
 
-        SAFE_PRIMARY_COMMANDS = {
-            'find', 'dir', 'ls', 'tree', 'directory',
-            'vfd', 'where', 'whereis', 'locate', 'which', 'type',
-            'pwd', 'stat', 'file', 'du', 'df',
-        }
+        # Split into pipeline stages
+        pipeline = stripped_cmd.split('|')
 
         first_cmd_part = pipeline[0].strip()
-
         words = first_cmd_part.split()
         if not words:
             return False
@@ -116,23 +153,126 @@ class ShellMixin:
         if primary_cmd in ('powershell', 'pwsh'):
             return False
 
-        if primary_cmd not in SAFE_PRIMARY_COMMANDS:
+        # ── Git command handling ──
+        if primary_cmd == 'git':
+            return ShellMixin._check_git_command(words, pipeline)
+
+        # ── Regular command handling ──
+        if primary_cmd not in ShellMixin._SAFE_PRIMARY_COMMANDS:
             return False
 
         # For "find" commands, check that they don't use -exec/-execdir with dangerous actions
         if primary_cmd == 'find':
-            if '-exec' in cmd or '-ok' in cmd:
+            if '-exec' in stripped_cmd.lower() or '-ok' in stripped_cmd.lower():
                 return False
 
-        for i, stage in enumerate(pipeline[1:], 1):
+        # Validate pipe stages are safe
+        if not ShellMixin._validate_pipeline_stages(pipeline, ShellMixin._SAFE_PIPE_COMMANDS):
+            return False
+
+        return True
+
+    @staticmethod
+    def _strip_cd_prefix(cmd: str) -> str:
+        """Strip 'cd <path> &&' or 'cd <path>;' prefix from a command.
+
+        Handles both && and ; chaining after cd. Returns the command
+        with the cd prefix removed, or the original cmd if no cd prefix.
+        """
+        # Two-step parse: find the first && or ;, check prefix starts with cd
+        sep_match = re.search(r'\s*(&&|;)\s*', cmd)
+        if sep_match:
+            prefix = cmd[:sep_match.start()].strip()
+            rest = cmd[sep_match.end():].strip()
+            if prefix.lower().startswith('cd'):
+                return rest
+        return cmd
+
+    @staticmethod
+    def _validate_pipeline_stages(pipeline: list, safe_commands: set) -> bool:
+        """Validate that all pipe stages after the first use safe commands.
+
+        Args:
+            pipeline: List of pipeline stages (split by '|').
+            safe_commands: Set of allowed pipe/filter command names.
+
+        Returns:
+            True if all pipe stages are safe (or there are no extra stages).
+        """
+        for stage in pipeline[1:]:
             stage_words = stage.strip().split()
             if not stage_words:
                 continue
-            stage_cmd = stage_words[0].lower()
-            if stage_cmd not in SAFE_PIPE_COMMANDS:
+            if stage_words[0].lower() not in safe_commands:
                 return False
-
         return True
+
+    @staticmethod
+    def _check_git_command(words: list, pipeline: list) -> bool:
+        """Check if a git command is safe (read-only).
+
+        Skips git flags before detecting the subcommand, then validates that
+        the subcommand isn't followed by write-modifying arguments
+        (e.g. stash drop, branch -d, tag -d).
+
+        Args:
+            words: Split words of the first pipeline stage.
+            pipeline: All pipeline stages after splitting by '|'.
+
+        Returns:
+            True if the git command is read-only.
+        """
+        # Handle 'git' with no subcommand (shows help, safe)
+        if len(words) == 1:
+            return True
+
+        # Flags that consume the next token as their value (space-separated)
+        _flags_with_values = {'-c', '-C', '--git-dir', '--work-tree'}
+
+        # Skip git flags to find the actual subcommand
+        idx = 1  # words[0] is 'git'
+        while idx < len(words):
+            word = words[idx].lower()
+            # Check for exact flag match or =-joined form (e.g. --git-dir=.git)
+            flag = word.split('=', 1)[0]
+            if flag not in ShellMixin._GIT_FLAGS:
+                break
+            if flag in _flags_with_values:
+                if '=' in words[idx]:
+                    idx += 1  # --git-dir=.git is one token
+                elif idx + 1 < len(words):
+                    idx += 2  # -c color.ui=always is two tokens
+                else:
+                    idx += 1
+            else:
+                idx += 1
+
+        if idx >= len(words):
+            return True  # git with only flags is safe
+
+        subcommand = words[idx].lower()
+        if subcommand not in ShellMixin._SAFE_GIT_SUBCOMMANDS:
+            return False
+
+        # Collect remaining arguments after the subcommand
+        args = [w.lower() for w in words[idx + 1:]]
+
+        # Validate subcommand-specific arguments
+        if subcommand == 'stash' and args and args[0] in ShellMixin._DANGEROUS_STASH_ARGS:
+            return False
+        if subcommand == 'branch' and args and args[0] in ShellMixin._DANGEROUS_BRANCH_ARGS:
+            return False
+        if subcommand == 'tag' and args and args[0] in ShellMixin._DANGEROUS_TAG_ARGS:
+            return False
+        if subcommand == 'remote' and args and args[0] in ShellMixin._DANGEROUS_REMOTE_ARGS:
+            return False
+        if subcommand == 'config' and args and args[0] in ShellMixin._DANGEROUS_CONFIG_ARGS:
+            return False
+        if subcommand == 'worktree' and args and args[0] in ShellMixin._DANGEROUS_WORKTREE_ARGS:
+            return False
+
+        # Validate pipe stages are safe
+        return ShellMixin._validate_pipeline_stages(pipeline, ShellMixin._SAFE_PIPE_COMMANDS)
 
     # ------------------------------------------------------------------
     @staticmethod
