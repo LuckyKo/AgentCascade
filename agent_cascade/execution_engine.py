@@ -27,6 +27,7 @@ from agent_cascade.settings import (
     COMPRESSION_DEFAULT_FRACTION,
     DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE,
     DEFAULT_MAX_TURNS,
+    MAX_AUTO_CONTINUE_ATTEMPTS,
     LLM_MAX_RETRIES,
     LLM_RETRY_BASE_DELAY,
     LLM_RETRY_MAX_BACKOFF,
@@ -336,6 +337,7 @@ def _is_incomplete_state(turn_output: List[Message]) -> str | None:
         A string describing the case ("reasoning-only", "broken-json", "empty-output")
         if incomplete, or None if the output looks complete.
     """
+
     # Find the last assistant message in reverse order
     for msg in reversed(turn_output):
         role = msg_field(msg, 'role', '')
@@ -1202,7 +1204,7 @@ class ExecutionEngine:
                     # when they keep getting cut off mid-reasoning/tool_call
                     if getattr(instance, '_auto_continue_triggered', False):
                         instance._auto_continue_triggered = False
-                        instance._auto_continue_count = getattr(instance, '_auto_continue_count', 0) + 1
+                        # Counter already incremented in _check_and_handle_truncation
                         max_turns = instance.max_turns or DEFAULT_MAX_TURNS
                         turns_available = max_turns
                         logger.debug(f"[AUTO-CONTINUE] Turn counter reset for {inst_name}: {turns_available} turns remaining (consecutive resets: {instance._auto_continue_count}).")
@@ -2905,51 +2907,41 @@ class ExecutionEngine:
         messages: List[Message],
         llm_messages: List[Message]
     ) -> bool:
-        """Inject continue message if truncation or incomplete state detected and auto_continue enabled.
-
-        Checks for two conditions that warrant auto-continuing:
-        1. Token truncation (finish_reason == 'length') — response was cut off by token limit
-        2. Incomplete state — agent stopped mid-reasoning, mid-tool_call, or produced no usable output
-
-        When either condition is met and auto_continue setting is enabled, injects a continue
-        message to all working sets and returns True to continue to next LLM call.
+        """Check for truncation or incomplete state and inject a continue message.
 
         Args:
-            is_truncated: Pre-computed truncation flag from caller (FIX #2: avoid double-check)
-            turn_output: Messages from LLM (for logging context only)
-            instance: AgentInstance for conversation access and token cache
-            inst_name: Instance name for logging and halt checks
-            messages: Full message set to append continue message
-            llm_messages: LLM-formatted message set to append continue message
+            is_truncated: Pre-computed truncation flag from caller.
+            turn_output: Messages from LLM.
+            instance: AgentInstance for conversation access and state tracking.
+            inst_name: Instance name for logging and halt checks.
+            messages: Full message set to append continue message.
+            llm_messages: LLM-formatted message set to append continue message.
 
         Returns:
-            True if truncation or incomplete state detected and continue message injected, False otherwise
-
-        Note:
-            is_truncated is pre-computed by caller to avoid checking truncation twice
-            (once in normalization, once here). This method only handles the injection logic.
+            True if truncation or incomplete state detected and continue injected,
+            False otherwise.
         """
-        # Auto-continue on truncation OR incomplete state (only if user has enabled the setting)
-        # Extended from token truncation to also catch premature stops mid-reasoning/tool_call.
-        # No message injection needed — just loop back and resend current conversation as-is,
-        # same as the Continue button does. The turn counter is reset via _auto_continue_triggered flag.
         is_incomplete = _is_incomplete_state(turn_output)
         if (is_truncated or is_incomplete) and not self._is_stopped(inst_name) and self.pool.settings.auto_continue:
-            # Cap consecutive auto-continue resets to prevent infinite loops (max 3)
-            current_count = getattr(instance, '_auto_continue_count', 0)
-            if current_count >= 3:
-                # Increment blocked counter and decay every 2 blocked attempts to allow periodic retry
-                instance._auto_continue_count = current_count + 1
-                if instance._auto_continue_count >= 5:
-                    instance._auto_continue_count = 0
+            instance._auto_continue_count = getattr(instance, '_auto_continue_count', 0) + 1
+            if instance._auto_continue_count >= MAX_AUTO_CONTINUE_ATTEMPTS:
+                instance._auto_continue_count = 0
+                instance._continue_fallback_append = False
                 return False
             reason = "truncation" if is_truncated else f"incomplete state ({is_incomplete})"
             logger.info(f"Detected {reason} for {inst_name}. Auto-continuing.")
-            instance._auto_continue_triggered = True  # Signal caller to reset turn counter
+            pop_count = len(turn_output)
+            if getattr(instance, '_continue_fallback_append', False):
+                pop_count += 1
+            if pop_count > 0:
+                self.pool._rollback_instance(inst_name, pop_count=pop_count)
+                self._rebuild_working_set(messages, llm_messages, inst_name)
+                response.clear()
+            instance._auto_continue_triggered = True
             return True
 
-        # Reset counter on successful non-auto-continue turn
         instance._auto_continue_count = 0
+        instance._continue_fallback_append = False
         return False
 
     def _execute_detected_tools(
@@ -3416,6 +3408,7 @@ class ExecutionEngine:
                         f"no assistant message found in turn_output. Re-appending as separate message."
                     )
                     self._append_and_log(instance, saved)
+                    instance._continue_fallback_append = True
 
         # Extract ground-truth usage info from LLM response (ground-truth token
         # tracking)
