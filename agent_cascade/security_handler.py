@@ -109,9 +109,6 @@ class SecurityAdvisorHandler:
         # Lazy imports — avoid top-level circular dependencies
         from agent_cascade.log import logger
         from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT
-        from agent_cascade.operation_manager import (
-            SECURITY_ADVISOR_TIMEOUT_SECONDS, SECURITY_ADVISOR_WARNING_SECONDS,
-        )
 
         instance_name = self.session.get('session_name', 'Maine')
         inst = self.agent_pool.get_instance(instance_name) if self.agent_pool else None
@@ -148,13 +145,25 @@ class SecurityAdvisorHandler:
                 return
             active_checks.add(rid)
 
+        # ── Compute timeout from operation manager settings ──────────────
+        if self.agent_pool and self.agent_pool.operation_manager:
+            op_mgr = self.agent_pool.operation_manager
+            if not op_mgr.enable_timeout:
+                timeout_seconds = 3600  # Match request_user_approval behavior when disabled
+            else:
+                timeout_seconds = op_mgr.approval_timeout_seconds
+        else:
+            timeout_seconds = 3600  # Safe fallback
+        timeout_seconds = max(10, timeout_seconds)
+        warning_seconds = timeout_seconds * 2 / 3  # Warn at ~67% of timeout (matches 120/180 ratio)
+
         # Spawn background thread to run the full check lifecycle
         threading.Thread(
             target=self._run_check_worker,
             args=(ap, sec_inst, rid, auto_apply, instance_name,
                   SECURITY_ADVISOR_PROMPT,
-                  SECURITY_ADVISOR_TIMEOUT_SECONDS,
-                  SECURITY_ADVISOR_WARNING_SECONDS),
+                  timeout_seconds,
+                  warning_seconds),
             daemon=True,
         ).start()
 
@@ -394,7 +403,7 @@ class SecurityAdvisorHandler:
                 rid, auto_apply, sec_state_key, parsing_response,
                 is_yes, is_no, justification,
                 sec_timeout_reached, sec_elapsed_at_timeout,
-                loop,
+                timeout_seconds, loop,
             )
 
         finally:
@@ -495,7 +504,7 @@ class SecurityAdvisorHandler:
         self, rid: str, auto_apply: bool, sec_state_key: str,
         parsing_response: str, is_yes: bool, is_no: bool,
         justification: str, timeout_reached: bool,
-        elapsed_at_timeout: Optional[float], loop,
+        elapsed_at_timeout: Optional[float], timeout_seconds: float, loop,
     ) -> None:
         """Handle the security check result.
 
@@ -506,19 +515,17 @@ class SecurityAdvisorHandler:
           - Ambiguous in auto-apply mode → reject + notify
         """
         from agent_cascade.log import logger
-        from agent_cascade.operation_manager import SECURITY_ADVISOR_TIMEOUT_SECONDS
 
         if timeout_reached:
-            self._handle_timeout(rid, auto_apply, elapsed_at_timeout)
+            self._handle_timeout(rid, auto_apply, elapsed_at_timeout, timeout_seconds)
         elif is_yes or is_no:
             self._handle_verdict(rid, auto_apply, is_yes, is_no, justification, parsing_response, loop)
         else:
             self._handle_ambiguous(rid, auto_apply, parsing_response, loop)
 
-    def _handle_timeout(self, rid: str, auto_apply: bool, elapsed: float) -> None:
+    def _handle_timeout(self, rid: str, auto_apply: bool, elapsed: float, timeout_seconds: float) -> None:
         """Handle security check timeout — reject and notify UI."""
         from agent_cascade.log import logger
-        from agent_cascade.operation_manager import SECURITY_ADVISOR_TIMEOUT_SECONDS
 
         logger.info(
             f"[SECURITY] Timeout after {elapsed:.0f}s for request {rid}. "
@@ -538,7 +545,7 @@ class SecurityAdvisorHandler:
         self.agent_pool.operation_manager.user_reject(rid, reject_msg)
 
         # Notify UI about the timeout
-        response_text = f"[TIMEOUT] Security check exceeded {SECURITY_ADVISOR_TIMEOUT_SECONDS}s limit after {elapsed:.0f}s."
+        response_text = f"[TIMEOUT] Security check exceeded {timeout_seconds:.0f}s limit after {elapsed:.0f}s."
         if not auto_apply:
             response_text += " Please resubmit with clearer justification if needed."
 

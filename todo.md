@@ -34,135 +34,72 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] agents get stopped randomly in the middle of streaming long reasoning — fixed: max-output-token guard + LLM backend defaults raised from 2048 → 8192 across all layers (execution_engine, transformers_llm, openvino, UI, JS fallback, API server). Template fallback bug fixed. Log level raised to INFO.
 - [x] Add shell_cmd calls with `cd <path> && git diff` and similar safe read-only git operations to auto approval. — DONE: Extended _is_safe_readonly_shell_command to auto-approve safe read-only git operations (diff, status, log, etc.) including 'cd && git' patterns, while blocking chained commands and dangerous git subcommands/arguments. Handles -C/--git-dir flags. Note: does not handle git aliases.
 - [ ] inner loop detector is almost unusable how many false positives generates, `char run` is the only good mode...
-- [ ] approval timeout occurs even when explicitly disabled in options, when it was set on auto-ask mode
+- [x] approval timeout occurs even when explicitly disabled in options, when it was set on auto-ask mode — DONE: Security advisor used hard-coded 180s timeout constant instead of reading from operation_manager settings. Fixed `security_handler.run_check()` to dynamically read `enable_timeout` and `approval_timeout_seconds` from operation manager. Timeout message now shows actual configured value. Added None guards for safety.
+- [ ] I dont want truncation of the user messages in the que (UI user que display)
 
 # Errors to investigate:
 
-# Fail to catch malformed message - tool call in reasoning block, agent gets stuck in a loop retrying the same message over and over even if i kick off the model
+# Auto continue error: System went into a sending same message stack loop when the agent had this in reasoning block
 ```
-<think>
-Let me fix the code and run it properly:
-<function=code_interpreter>
-<parameter=code>
+The depth counting is wrong - it's just counting all 'with' statements, not actual nesting. Let me check the actual structure properly:
 
-Verify that certain "safe" git subcommands actually have write operations
-dangerous_variants = {
-'stash': ['pop', 'apply', 'drop'], # These modify stash/wd
-'config': ['--set', '--add'], # These modify config files
-'worktree': ['add', 'move', 'remove'], # These create/remove worktrees
-'notes': ['add', 'append', 'message'], # These write notes
-'pack-refs': [], # This packs refs (writes to packed-refs)
-'prune': ['default prunes (writes)'], # Default removes unreachable objects
-'replace': [], # Creates/replaces refs
-}
+import re
+Check actual nesting by looking at indentation
+with open(r"N:\work\WD\AgentCascade\api_server.py", 'r', encoding='utf-8') as f:
+lines = f.readlines()
 
-Print what we know about each subcommand's safety profile
-print("Git subcommands in _SAFE_GIT_SUBCOMMANDS that have write operations:")
-for cmd, variants in dangerous_variants.items():
-status = 'DANGEROUS' if variants else 'WRITE-ONLY (pack-refs/prune/replace)'
-print(f" {cmd}: {status}")
+print("Checking for actual nested locking...")
+stack = [] # track (line_num, indent_level) of with session_lock
+nested_found = []
 
-Also check: are pack-refs and prune actually write operations?
-print("\nNote: git pack-refs writes to .git/packed-refs file")
-print("Note: git prune removes unreachable objects from object database")
-print("Note: git replace creates ref replacement entries")
+for i, line in enumerate(lines, 1):
+stripped = line.lstrip()
+indent = len(line) - len(stripped)
 
-False
-```
+if 'with session_lock:' in stripped:
+    if stack and stack[-1][1] <= indent:
+        # This is a sibling or nested at same level - check indentation
+        pass
+    stack.append((i, indent))
 
-LMStudio dump:
-```
-2026-07-18 06:28:04  [INFO]
- [agents-a1-35b-mtp] Prompt processing progress: 100.0%
-2026-07-18 06:28:07 [DEBUG]
- 0.53.304.984 I slot print_timing: id  0 | task 1318 | n_decoded =    251, tg =  83.55 t/s, tg_3s =  83.55 t/s
-2026-07-18 06:28:10 [DEBUG]
- 0.55.923.703 I slot print_timing: id  0 | task 1318 | prompt eval time =     361.80 ms /   423 tokens (    0.86 ms per token,  1169.14 tokens per second)
-0.55.923.708 I slot print_timing: id  0 | task 1318 |        eval time =    5622.78 ms /   460 tokens (   12.22 ms per token,    81.81 tokens per second)
-0.55.923.709 I slot print_timing: id  0 | task 1318 |       total time =    5984.58 ms /   883 tokens
-0.55.923.710 I slot print_timing: id  0 | task 1318 |    graphs reused =       1724
-2026-07-18 06:28:10 [DEBUG]
- 0.55.924.655 I slot      release: id  0 | task 1318 | stop processing: n_tokens = 37376, truncated = 0
-0.55.924.848 W common_chat_peg_parse: unparsed peg-native output: <tool_call>
-<function=code_interpreter>
-<parameter=code>
-# Verify that certain "safe" git subcommands actually have write operations
-dangerous_variants = {
-    'stash': ['pop', 'apply', 'drop'],        # These modify stash/wd
-    'config': ['--set', '--add'],              # These modify config files
-    'worktree': ['add', 'move', 'remove'],     # These create/remove worktrees
-    'notes': ['add', 'append', 'message'],     # These write notes
-    'pack-refs': [],                           # This packs refs (writes to packed-refs)
-    'prune': ['default prunes (writes)'],  # Default removes unreachable objects
-    'replace': [],                             # Creates/replaces refs
-}
+# When we see dedent, pop from stack
+elif stack and indent < stack[-1][1]:
+    # Pop all that are greater than current indent
+    while stack and indent < stack[-1][1]:
+        stack.pop()
+print(f"Stack ended with {len(stack)} items - not useful")
 
-# Print what we know about each subcommand's safety profile
-print("Git subcommands in _SAFE_GIT_SUBCOMMANDS that have write operations:")
-for cmd, variants in dangerous_variants.items():
-    status = 'DANGEROUS' if variants else 'WRITE-ONLY (pack-refs/prune/replace)'
-    print(f"  {cmd}: {status}")
+Better approach: just look for consecutive 'with' blocks inside each other
+for i, line in enumerate(lines, 1):
+if 'with session_lock:' in line:
+# Look at next lines to see if another 'with' is inside
+for j in range(i+1, min(i+5, len(lines))):
+next_line = lines[j-1]
+next_stripped = next_line.lstrip()
+next_indent = len(next_line) - len(next_stripped)
+current_indent = len(line) - len(line.lstrip())
 
-# Also check: are pack-refs and prune actually write operations?
-print("\nNote: git pack-refs writes to .git/packed-refs file")
-print("Note: git prune removes unreachable objects from object database")
-print("Note: git replace creates ref replacement entries")
-
-</parameter>
-<parameter=fix_paths>
-False
-</parameter>
-</function>
-</tool_call>
-
-</think>
-
-<tool_call>
-<function=code_interpreter>
-<parameter=code>
-# Check what git subcommands are in the set and identify potential issues
-safe_git_subcommands = {
-    'diff', 'status', 'log', 'show', 'branch', 'tag', 'remote',
-    'rev-parse', 'config', 'merge-base', 'describe', 'ls-files',
-    'ls-tree', 'stash', 'shortlog', 'blame', 'name-rev', 'hash-object',
-    'cat-file', 'for-each-ref', 'var', 'symbolic-ref',
-    'version', 'rev-list', 'reflog', 'worktree',
-    'count-objects', 'interpret-trailers',
-    'notes', 'pack-refs', 'prune', 'replace', 'rerere',
-    'verify-commit', 'verify-tag', 'verify-pack',
-}
-
-# Identify subcommands that can write data
-dangerous = []
-for cmd in safe_git_subcommands:
-    if cmd == 'stash':
-        # git stash list is safe, but git stash pop/apply are not
-        dangerous.append((cmd, "can pop/apply with additional args"))
-    elif cmd == 'config':
-        # git config --list is safe, but --set/--add modify config
-        dangerous.append((cmd, "can modify with --set/--add"))
-    elif cmd in ('worktree',):
-        # worktree can create/remove worktrees
-        dangerous.append((cmd, "can add/move/remove worktrees"))
-    elif cmd in ('notes',):
-        # notes can add/append data
-        dangerous.append((cmd, "can write notes"))
-    elif cmd in ('pack-refs', 'prune', 'replace'):
-        # These are inherently write operations
-        dangerous.append((cmd, "inherently writes to git database"))
-
-print("Subcommands that can write data:")
-for cmd, reason in dangerous:
-    print(f"  - {cmd}: {reason}")
-
-</parameter>
-<parameter=fix_paths>
-false
-</parameter>
-</function>
-</tool_call>
-2026-07-18 06:28:10 [DEBUG]
- 0.55.925.066 W srv          stop: cancel task, id_task = 1318
-2026-07-18 06:28:10 [ERROR]
- [agents-a1-35b-mtp] Engine protocol predict stream returned an error: {"code":500,"message":"The model produced output that does not match the expected peg-native format","type":"server_error"}. Error Data: n/a, Additional Data: n/a
+        if next_indent > current_indent and 'with' in next_stripped:
+            nested_found.append((i, j, line.strip(), next_line.strip()))
+        # If we hit a dedent, stop looking
+        if next_indent <= current_indent and next_stripped and not next_stripped.startswith('#'):
+            break
+print(f"Found {len(nested_found)} potential nesting cases")
+for outer, inner, outer_txt, inner_txt in nested_found:
+print(f"Line {outer}: {outer_txt}")
+print(f" Line {inner}: {inner_txt}")
  ```
+
+# Auto continue repeat limit is not respected / not detecting empty response? - terminate agent fails to properly shut this down, had to restart server
+2026-07-18 23:58:05,415 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 26901, Available tokens: 124320
+2026-07-18 23:58:11,138 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 27757, Available tokens: 124320
+2026-07-18 23:58:25,472 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 28468, Available tokens: 124320
+2026-07-18 23:58:33,999 - execution_engine.py - 2947 - INFO - Detected incomplete state (reasoning-only) for reviewer_fixes. Auto-continuing.
+2026-07-18 23:58:33,999 - execution_engine.py - 1208 - DEBUG - [AUTO-CONTINUE] Turn counter reset for reviewer_fixes: 250 turns remaining (consecutive resets: 1).
+2026-07-18 23:58:34,008 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 28475, Available tokens: 124320
+2026-07-18 23:58:39,855 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 28475, Available tokens: 124320
+2026-07-18 23:58:45,204 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 28475, Available tokens: 124320
+2026-07-18 23:58:51,063 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 28475, Available tokens: 124320
+2026-07-18 23:58:57,219 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 28475, Available tokens: 124320
+2026-07-18 23:59:00,821 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 28475, Available tokens: 124320
+2026-07-18 23:59:05,663 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 28475, Available tokens: 124320
