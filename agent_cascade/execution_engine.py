@@ -4258,16 +4258,38 @@ class ExecutionEngine:
             self._create_completed = True  # Mark for finally-block EXIT log reason tracking
 
             if AUTO_SKILL_ENABLED and skill_manager:
-                skill_manager.trigger_auto_skill_reflection(
+                # Snapshot current conversation length for rollback
+                _conv_len = len(inst.conversation)
+                # Snapshot current registered skill names for delta detection
+                _skills_before = set(skill_manager._skills_registry.keys())
+
+                # Create single iterator for all extra turns
+                _extra_turn_iter = self.run(inst)
+
+                created_skills = skill_manager.trigger_auto_skill_reflection(
                     inst=inst,
                     total_tool_calls=total_tool_calls,
                     task_text=task_text,
                     instance_name=instance_name,
                     append_fn=lambda msg: self._append_and_log(inst, self._make_user_message(msg)),
                     run_turn_fn=lambda: setattr(
-                        self, '_extra_resp', next(self.run(inst), None)),
+                        self, '_extra_resp', next(_extra_turn_iter, None)),
                     state_idle_fn=lambda: inst.state == AgentState.IDLE,
+                    snapshot_fn=lambda: _conv_len,
+                    rollback_fn=lambda snap: self.pool._rollback_instance(
+                        instance_name, target_length=snap),
+                    check_skill_created_fn=lambda: list(
+                        set(skill_manager._skills_registry.keys()) - _skills_before),
                 )
+
+                # Inject notice into the last assistant message (not a separate msg)
+                if created_skills and inst.conversation:
+                    notice = (f"\n\n[Auto-skill created: {', '.join(created_skills)}]")
+                    last = inst.conversation[-1]
+                    if isinstance(last, dict):
+                        last["content"] = str(last.get("content", "")) + notice
+                    else:
+                        last.content = str(getattr(last, 'content', '')) + notice
 
             # Item 12: Always emit final sub-agent state after loop completes
             # (Fix

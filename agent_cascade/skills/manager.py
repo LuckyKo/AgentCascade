@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from agent_cascade.log import logger
 from agent_cascade.settings import (
     AUTO_SKILL_AUTO_PROMOTE,
+    AUTO_SKILL_EXTRA_TURNS,
     AUTO_SKILL_MAX_PER_SESSION,
     AUTO_SKILL_MIN_TOOL_CALLS,
     LOAD_SKILL_AUTO,
@@ -410,10 +411,19 @@ class SkillManager:
         append_fn,
         run_turn_fn,
         state_idle_fn,
-    ) -> bool:
-        """Check conditions and fire an auto-skill reflection turn.
+        snapshot_fn=None,
+        rollback_fn=None,
+        check_skill_created_fn=None,
+    ) -> List[str]:
+        """Check conditions and fire auto-skill reflection turns with rollback.
 
         Shared trigger hook used by both execution_engine and run_agent_unified.
+
+        Flow:
+          1. Snapshot conversation state
+          2. Run AUTO_SKILL_EXTRA_TURNS turns freely
+          3. Rollback conversation to snapshot
+          4. Return the names of any skills created on disk
 
         Args:
             inst: The agent instance.
@@ -423,26 +433,33 @@ class SkillManager:
             append_fn: Callable(msg) -> None to append a user message.
             run_turn_fn: Callable() -> Optional[result] to execute one extra turn.
             state_idle_fn: Callable() -> bool to check if the instance is IDLE.
+            snapshot_fn: Callable() -> snapshot of current conversation state
+                         (message counts). Returns None if not supported.
+            rollback_fn: Callable(snapshot) -> None to truncate conversation
+                         back to the snapshot state. No-op if not supported.
+            check_skill_created_fn: Callable() -> List[str] returning names of
+                                    newly registered skills since snapshot.
 
         Returns:
-            True if a reflection turn was executed.
+            List of skill names created during the reflection turns.
+            Empty list if no reflection was triggered or no skills were created.
         """
         if getattr(inst, '_auto_skill_proposed', False):
-            return False
+            return []
 
         proposed_count = getattr(inst, '_auto_skill_proposed_count', 0)
         if proposed_count >= AUTO_SKILL_MAX_PER_SESSION:
-            return False
+            return []
 
         matches = self.match_skills(task_text) if task_text else []
         logger.debug("[AUTO-SKILL] Check: tool_count=%d, matches=%d",
                      total_tool_calls, len(matches))
         if total_tool_calls < AUTO_SKILL_MIN_TOOL_CALLS or matches or not state_idle_fn():
-            return False
+            return []
 
         creator = self.load_full_instructions("skill-creator")
         if not creator:
-            return False
+            return []
 
         logger.info("[AUTO-SKILL] Trigger fired for %s (%d tools)", instance_name, total_tool_calls)
         prompt = (f"## Skill Reflection\n\n{creator}\n\n"
@@ -450,12 +467,38 @@ class SkillManager:
                   f"If the approach could help future similar tasks, "
                   f"propose a reusable skill by calling propose_skill.")
 
+        # Snapshot conversation state before extra turns
+        snapshot = snapshot_fn() if snapshot_fn else None
+
         try:
             append_fn(prompt)
-            run_turn_fn()
+            for turn_i in range(AUTO_SKILL_EXTRA_TURNS):
+                run_turn_fn()
+                logger.debug("[AUTO-SKILL] Extra turn %d/%d for %s",
+                             turn_i + 1, AUTO_SKILL_EXTRA_TURNS, instance_name)
         except Exception as e:
             logger.debug("[AUTO-SKILL] Extra turn error for %s: %s", instance_name, e)
 
+        # Rollback conversation to snapshot
+        if snapshot is not None and rollback_fn is not None:
+            try:
+                rollback_fn(snapshot)
+                logger.debug("[AUTO-SKILL] Conversation rolled back for %s", instance_name)
+            except Exception as e:
+                logger.warning("[AUTO-SKILL] Rollback error for %s: %s", instance_name, e)
+
+        # Discover which skills were created
+        created_skills = []
+        if check_skill_created_fn is not None:
+            try:
+                created_skills = check_skill_created_fn()
+            except Exception as e:
+                logger.debug("[AUTO-SKILL] Skill check error for %s: %s", instance_name, e)
+
         inst._auto_skill_proposed = True
         inst._auto_skill_proposed_count = proposed_count + 1
-        return True
+
+        if created_skills:
+            logger.info("[AUTO-SKILL] Created skills: %s", created_skills)
+
+        return created_skills

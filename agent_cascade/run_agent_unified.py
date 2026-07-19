@@ -219,16 +219,39 @@ def run_agent_thread_unified(
                             task_text = content[:500]
                             break
             if skill_manager:
-                skill_manager.trigger_auto_skill_reflection(
+                # Snapshot current conversation length for rollback
+                _conv_len = len(inst.conversation)
+                # Snapshot current registered skill names for delta detection
+                _skills_before = set(skill_manager._skills_registry.keys())
+
+                # Create a fresh engine iterator for single-turn execution
+                from .execution_engine import ExecutionEngine
+                _engine = ExecutionEngine(pool)
+                _turn_iter = _engine.run(inst)
+
+                created_skills = skill_manager.trigger_auto_skill_reflection(
                     inst=inst,
                     total_tool_calls=total_tool_calls,
                     task_text=task_text,
                     instance_name=instance_name,
                     append_fn=lambda msg: inst.append_message(Message(role=USER, content=msg)),
-                    run_turn_fn=lambda: list(run_agent_in_pool_with_recovery(
-                        pool=pool, instance_name=instance_name)),
+                    run_turn_fn=lambda: next(_turn_iter, None),
                     state_idle_fn=lambda: inst.state.name == 'IDLE',
+                    snapshot_fn=lambda: _conv_len,
+                    rollback_fn=lambda snap: pool._rollback_instance(
+                        instance_name, target_length=snap),
+                    check_skill_created_fn=lambda: list(
+                        set(skill_manager._skills_registry.keys()) - _skills_before),
                 )
+
+                # Inject notice into the last message (not a separate msg)
+                if created_skills and inst.conversation:
+                    notice = (f"\n\n[Auto-skill created: {', '.join(created_skills)}]")
+                    last = inst.conversation[-1]
+                    if isinstance(last, dict):
+                        last["content"] = str(last.get("content", "")) + notice
+                    else:
+                        last.content = str(getattr(last, 'content', '')) + notice
 
         # ── Final state broadcast ────────────────────────────────────────
         final_state = build_state_from_pool(
