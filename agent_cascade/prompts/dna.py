@@ -46,6 +46,7 @@ AVAILABLE_TOOLS: List[str] = [
     'calculate',        # Evaluate mathematical expressions
     'syntax_check',     # Check file syntax without execution
     'scan_skills',      # Scan registered skills and return matching skills with relevance scores
+    'propose_skill',    # Propose a new reusable skill for future tasks
 ]
 
 # Tools NOT in AVAILABLE_TOOLS (hidden from agents, used internally only):
@@ -521,6 +522,17 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'query': 'Search query or task description to match against available skills. Leave empty to list all registered skills.'
+        }
+    },
+    'propose_skill': {
+        'description': (
+            'Propose a new reusable skill for future tasks. '
+            'Provide the full SKILL.md content including YAML frontmatter '
+            'with name, description, and triggers fields.'
+        ),
+        'parameters': {
+            'skill_content': 'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body.',
+            'test_task': 'Optional task text for self-match validation. If provided, the skill must match this task to be promoted.'
         }
     }
 }

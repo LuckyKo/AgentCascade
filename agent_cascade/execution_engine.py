@@ -24,6 +24,7 @@ from enum import Enum, auto
 
 from agent_cascade.agent_instance import ArgumentCachePool  # Cache pool for {USE_CACHED_ENTRY_N}
 from agent_cascade.settings import (
+    AUTO_SKILL_ENABLED,
     COMPRESSION_DEFAULT_FRACTION,
     DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE,
     DEFAULT_MAX_TURNS,
@@ -4203,6 +4204,9 @@ class ExecutionEngine:
                     q.clear()
                 return inst, []
 
+            # Track cumulative tool calls across all turns
+            total_tool_calls = 0
+
             for resp in self.run(inst):
                 if self._is_stopped(instance_name):
                     break
@@ -4215,6 +4219,9 @@ class ExecutionEngine:
                     final_resp = resp[0]  # Extract just the message list
                 else:
                     final_resp = resp
+
+                # Count tool calls from FUNCTION role messages
+                total_tool_calls += sum(1 for m in final_resp if msg_field(m, 'role', '') == FUNCTION)
 
                 # Item 12: Throttled sub-agent WebUI state update (every 5
                 # turns) — Fix
@@ -4249,6 +4256,18 @@ class ExecutionEngine:
             # regardless. See: .agent_lessons/lessons_msg_count_bug.md for
             # detailed analysis.
             self._create_completed = True  # Mark for finally-block EXIT log reason tracking
+
+            if AUTO_SKILL_ENABLED and skill_manager:
+                skill_manager.trigger_auto_skill_reflection(
+                    inst=inst,
+                    total_tool_calls=total_tool_calls,
+                    task_text=task_text,
+                    instance_name=instance_name,
+                    append_fn=lambda msg: self._append_and_log(inst, self._make_user_message(msg)),
+                    run_turn_fn=lambda: setattr(
+                        self, '_extra_resp', next(self.run(inst), None)),
+                    state_idle_fn=lambda: inst.state == AgentState.IDLE,
+                )
 
             # Item 12: Always emit final sub-agent state after loop completes
             # (Fix

@@ -8,15 +8,24 @@ Handles:
   - Resolving load_skill arguments (list / AUTO / NONE)
 """
 
-import asyncio
+import threading
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from agent_cascade.log import logger
-from agent_cascade.settings import LOAD_SKILL_AUTO, LOAD_SKILL_NONE, SKILL_MATCH_THRESHOLD
+from agent_cascade.settings import (
+    AUTO_SKILL_AUTO_PROMOTE,
+    AUTO_SKILL_MAX_PER_SESSION,
+    AUTO_SKILL_MIN_TOOL_CALLS,
+    LOAD_SKILL_AUTO,
+    LOAD_SKILL_NONE,
+    SKILL_MATCH_THRESHOLD,
+)
 
 from .parser import parse_skill_file
 from .matcher import SkillMatcher
+from .validator import validate_skill
 
 
 # Priority levels for duplicate skill name resolution:
@@ -36,6 +45,7 @@ class SkillManager:
     def __init__(self):
         self._skills_registry: Dict[str, Dict[str, Any]] = {}  # name -> parsed skill data
         self._matcher = SkillMatcher()
+        self._write_lock = threading.Lock()
 
     # ── Discovery ────────────────────────────────────────────────────────────
 
@@ -74,8 +84,9 @@ class SkillManager:
             except OSError as e:
                 logger.warning("[SKILLS] Error scanning %s: %s", root, e)
 
-        # Rebuild the matcher index after registration
-        self._rebuild_index()
+        # Rebuild the matcher index after registration (under lock for concurrency safety)
+        with self._write_lock:
+            self._rebuild_index()
         logger.info(
             "[SKILLS] Discovery complete: %d skills registered, %d in registry",
             found_count, len(self._skills_registry),
@@ -119,6 +130,7 @@ class SkillManager:
             'name': name,
             'description': frontmatter.get('description', ''),
             'source': frontmatter.get('source', ''),
+            'triggers': frontmatter.get('triggers', []),
             'file_path': str(skill_file),
             '_priority': priority,
             # Keep a reference to the full parsed data for lazy loading
@@ -174,6 +186,7 @@ class SkillManager:
             result.append({
                 'name': data.get('name', name),
                 'description': data.get('description', ''),
+                'triggers': data.get('triggers', []),
             })
         return result
 
@@ -279,3 +292,170 @@ class SkillManager:
             return []
 
         return []
+
+    # ── Dynamic Registration ─────────────────────────────────────────────
+
+    def register_skill_from_content(
+        self,
+        skill_content: str,
+        source: str = "auto-generated",
+        task_text: str = "",
+        auto_promote: bool = True,
+    ) -> Tuple[bool, List[str]]:
+        """Register a skill from raw SKILL.md content.
+
+        Writes to a temp pending location, parses and validates, then promotes
+        to the final skills directory. Rebuilds the matcher index under lock.
+
+        Args:
+            skill_content: Full SKILL.md content string (frontmatter + body).
+            source: Provenance label (default "auto-generated").
+            task_text: Optional task text for self-match validation (Tier 2).
+            auto_promote: If True, move validated skill to .qwen/skills/.
+
+        Returns:
+            Tuple of (success, error_messages).
+        """
+        logger.info("[SKILLS] Registering skill from content (source=%s)", source)
+
+        skill_id = uuid.uuid4().hex
+        pending_dir = Path(f".qwen/pending-skills/{skill_id}")
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        pending_file = pending_dir / "SKILL.md"
+        pending_file.write_text(skill_content, encoding='utf-8')
+
+        try:
+            # 2. Parse
+            parsed = parse_skill_file(pending_file)
+            frontmatter = parsed.get('frontmatter', {})
+            name = frontmatter.get('name', '')
+            if not name:
+                name = pending_file.parent.name
+
+            # Extract generated_from_task for self-match validation (if task_text not provided)
+            validation_task = task_text or frontmatter.get('generated_from_task', '')
+
+            # 3. Validate BEFORE modifying registry
+            existing = set(self._skills_registry.keys())
+            passed, errors = validate_skill(skill_content, name, existing, validation_task)
+            if not passed:
+                logger.debug("[SKILLS] Validation failed for '%s': %s", name, errors)
+                # Clean up pending file
+                if pending_file.exists():
+                    pending_file.unlink()
+                if pending_dir.exists() and not any(pending_dir.iterdir()):
+                    pending_dir.rmdir()
+                return False, errors
+
+            # 4. Register + promote under lock (atomic write path)
+            with self._write_lock:
+                # Duplicate resolution (check again under lock)
+                existing_entry = self._skills_registry.get(name)
+                if existing_entry is not None:
+                    existing_priority = existing_entry.get('_priority', _PRIORITY_SYSTEM)
+                    if _PRIORITY_SYSTEM <= existing_priority:
+                        # Clean up pending file
+                        if pending_file.exists():
+                            pending_file.unlink()
+                        if pending_dir.exists() and not any(pending_dir.iterdir()):
+                            pending_dir.rmdir()
+                        return False, [f"Skill '{name}' already exists in registry"]
+
+                self._skills_registry[name] = {
+                    'name': name,
+                    'description': frontmatter.get('description', ''),
+                    'source': source,
+                    'triggers': frontmatter.get('triggers', []),
+                    'file_path': str(pending_file),
+                    '_priority': _PRIORITY_SYSTEM,
+                    '_parsed_data': parsed,
+                }
+
+                # Promote if validated
+                if auto_promote and AUTO_SKILL_AUTO_PROMOTE:
+                    target_dir = Path(f".qwen/skills/{name}")
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    target_file = target_dir / "SKILL.md"
+                    if target_file.exists():
+                        target_file.unlink()
+                    pending_file.rename(target_file)
+                    self._skills_registry[name]['file_path'] = str(target_file)
+                    logger.info("[SKILLS] Promoted skill '%s' to .qwen/skills/%s/", name, name)
+                else:
+                    logger.info("[SKILLS] Skill '%s' validated, staying in pending (auto_promote=%s)",
+                                name, auto_promote)
+
+                # Rebuild index
+                self._rebuild_index()
+
+            return True, []
+
+        except Exception as e:
+            logger.warning("[SKILLS] Failed to register skill from content: %s", e)
+            # Clean up pending file on error
+            if pending_file.exists():
+                pending_file.unlink()
+            if pending_dir.exists() and not any(pending_dir.iterdir()):
+                pending_dir.rmdir()
+            return False, [f"Registration failed: {e}"]
+
+    # ── Auto-skill trigger hook ──────────────────────────────────────────────
+
+    def trigger_auto_skill_reflection(
+        self,
+        inst,
+        total_tool_calls: int,
+        task_text: str,
+        instance_name: str,
+        append_fn,
+        run_turn_fn,
+        state_idle_fn,
+    ) -> bool:
+        """Check conditions and fire an auto-skill reflection turn.
+
+        Shared trigger hook used by both execution_engine and run_agent_unified.
+
+        Args:
+            inst: The agent instance.
+            total_tool_calls: Cumulative tool call count.
+            task_text: Task description text for skill matching.
+            instance_name: Human-readable instance label for logging.
+            append_fn: Callable(msg) -> None to append a user message.
+            run_turn_fn: Callable() -> Optional[result] to execute one extra turn.
+            state_idle_fn: Callable() -> bool to check if the instance is IDLE.
+
+        Returns:
+            True if a reflection turn was executed.
+        """
+        if getattr(inst, '_auto_skill_proposed', False):
+            return False
+
+        proposed_count = getattr(inst, '_auto_skill_proposed_count', 0)
+        if proposed_count >= AUTO_SKILL_MAX_PER_SESSION:
+            return False
+
+        matches = self.match_skills(task_text) if task_text else []
+        logger.debug("[AUTO-SKILL] Check: tool_count=%d, matches=%d",
+                     total_tool_calls, len(matches))
+        if total_tool_calls < AUTO_SKILL_MIN_TOOL_CALLS or matches or not state_idle_fn():
+            return False
+
+        creator = self.load_full_instructions("skill-creator")
+        if not creator:
+            return False
+
+        logger.info("[AUTO-SKILL] Trigger fired for %s (%d tools)", instance_name, total_tool_calls)
+        prompt = (f"## Skill Reflection\n\n{creator}\n\n"
+                  f"You completed a task using {total_tool_calls} tool calls. "
+                  f"If the approach could help future similar tasks, "
+                  f"propose a reusable skill by calling propose_skill.")
+
+        try:
+            append_fn(prompt)
+            run_turn_fn()
+        except Exception as e:
+            logger.debug("[AUTO-SKILL] Extra turn error for %s: %s", instance_name, e)
+
+        inst._auto_skill_proposed = True
+        inst._auto_skill_proposed_count = proposed_count + 1
+        return True

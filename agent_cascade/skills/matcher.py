@@ -49,7 +49,9 @@ class SkillMatcher:
                 continue
 
             description = meta.get('description', '')
-            text = f"{skill_name} {description}"
+            triggers = meta.get('triggers', [])
+            trigger_text = ' '.join(triggers) if isinstance(triggers, list) else ''
+            text = f"{skill_name} {description} {trigger_text}"
             keywords = _TOKEN_RE.findall(text.lower())
 
             for kw in set(keywords):  # Deduplicate per-skill to avoid index bloat

@@ -11,6 +11,7 @@ from .forget_last_tool import ForgetLast
 from .syntax_check import SyntaxCheck
 from .ddg_search import DDGSearch
 from .scan_skills import ScanSkills
+from .propose_skill import ProposeSkill
 
 __all__ = [
     'ReadFile',
@@ -32,4 +33,5 @@ __all__ = [
     'SyntaxCheck',
     'DDGSearch',
     'ScanSkills',
+    'ProposeSkill',
 ]

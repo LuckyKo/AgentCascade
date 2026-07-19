@@ -195,3 +195,15 @@ LOAD_SKILL_AUTO: str = "AUTO"     # Auto-match relevant skills from task context
 LOAD_SKILL_NONE: str = "NONE"     # No skill loading (saves tokens)
 DEFAULT_LOAD_SKILL_MODE: str = os.getenv('QWEN_AGENT_DEFAULT_LOAD_SKILL', 'AUTO')  # Default load_skill mode: AUTO or NONE
 SKILL_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_SKILL_MATCH_THRESHOLD', '0.15'))  # Minimum relevance score for AUTO mode skill loading
+
+# ── Auto-skill generation settings (Feature: Auto-Skill Generation Phase 1) ──
+AUTO_SKILL_ENABLED: bool = True                          # Toggle auto-skill generation on/off
+AUTO_SKILL_MIN_TOOL_CALLS: int = 5                       # Minimum tool calls before triggering reflection
+AUTO_SKILL_PROMOTION_THRESHOLD: float = 0.3              # Self-match score threshold for auto-promotion
+AUTO_SKILL_AUTO_PROMOTE: bool = True                     # Auto-promote validated skills to .qwen/skills/
+AUTO_SKILL_MAX_SIZE_KB: int = 15                         # Maximum SKILL.md file size in KB
+MAX_SKILL_INJECTION_TOKENS: int = 8000                   # Max tokens for skill injection per turn
+MAX_SKILLS_PER_CALL: int = 5                             # Max skills to propose per reflection call
+AUTO_SKILL_MAX_PER_SESSION: int = 1                      # Max skill proposals per agent instance per session
+MIN_SKILL_BODY_LENGTH: int = 100                         # Minimum body char count for skill validation
+MIN_DESCRIPTION_LENGTH: int = 20                         # Minimum description length for skill validation

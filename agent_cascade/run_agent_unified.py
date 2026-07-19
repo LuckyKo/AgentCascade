@@ -21,9 +21,10 @@ import time
 from typing import Any, Dict, List, Optional
 
 from agent_cascade.llm.schema import (
-    ASSISTANT, FUNCTION, ROLE, Message,
+    ASSISTANT, FUNCTION, ROLE, USER, Message,
 )
 from agent_cascade.log import logger
+from agent_cascade.settings import AUTO_SKILL_ENABLED
 
 from .agent_pool import AgentPool
 
@@ -125,6 +126,9 @@ def run_agent_thread_unified(
         # WebSocket connections each spawn their own execution thread.
         exec_state = {'last_resp_len': 0}
 
+        # Track cumulative tool calls for auto-skill trigger
+        total_tool_calls = 0
+
         for turn_output_raw in run_agent_in_pool_with_recovery(
             pool=pool,
             instance_name=instance_name,
@@ -194,6 +198,37 @@ def run_agent_thread_unified(
             )
 
             tick_num += 1
+
+            # Track cumulative tool calls
+            if turn_output:
+                total_tool_calls += sum(1 for m in turn_output if (
+                    m.get('role', '') == FUNCTION
+                    if isinstance(m, dict) else getattr(m, 'role', '') == FUNCTION
+                ))
+
+        inst = pool.get_instance(instance_name)
+        if inst and AUTO_SKILL_ENABLED:
+            skill_manager = getattr(pool, 'skill_manager', None)
+            task_text = ""
+            if inst.conversation:
+                for msg in inst.conversation:
+                    role = msg.get('role', '') if isinstance(msg, dict) else getattr(msg, 'role', '')
+                    if role == USER:
+                        content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                        if content:
+                            task_text = content[:500]
+                            break
+            if skill_manager:
+                skill_manager.trigger_auto_skill_reflection(
+                    inst=inst,
+                    total_tool_calls=total_tool_calls,
+                    task_text=task_text,
+                    instance_name=instance_name,
+                    append_fn=lambda msg: inst.append_message(Message(role=USER, content=msg)),
+                    run_turn_fn=lambda: list(run_agent_in_pool_with_recovery(
+                        pool=pool, instance_name=instance_name)),
+                    state_idle_fn=lambda: inst.state.name == 'IDLE',
+                )
 
         # ── Final state broadcast ────────────────────────────────────────
         final_state = build_state_from_pool(
