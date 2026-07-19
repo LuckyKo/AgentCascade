@@ -2905,7 +2905,8 @@ class ExecutionEngine:
         instance: AgentInstance,
         inst_name: str,
         messages: List[Message],
-        llm_messages: List[Message]
+        llm_messages: List[Message],
+        response: List[Message]
     ) -> bool:
         """Check for truncation or incomplete state and inject a continue message.
 
@@ -2916,6 +2917,7 @@ class ExecutionEngine:
             inst_name: Instance name for logging and halt checks.
             messages: Full message set to append continue message.
             llm_messages: LLM-formatted message set to append continue message.
+            response: Response buffer to clear on rollback.
 
         Returns:
             True if truncation or incomplete state detected and continue injected,
@@ -3427,7 +3429,7 @@ class ExecutionEngine:
                     break  # Only need to extract from first message with usage info
 
         # Extracted to _check_and_handle_truncation() - Phase 3.3
-        if self._check_and_handle_truncation(is_truncated, turn_output, instance, inst_name, messages, llm_messages):
+        if self._check_and_handle_truncation(is_truncated, turn_output, instance, inst_name, messages, llm_messages, response):
             return True  # Continue to next LLM call
 
         # Extracted to _execute_detected_tools() - Phase 3.3
