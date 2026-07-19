@@ -5,12 +5,11 @@ Writes full SKILL.md content (including YAML frontmatter) and registers it
 via SkillManager. Supports optional self-match validation against a test task.
 """
 
-import json
 import logging
-from typing import Any, Dict
 
 from agent_cascade.skills.parser import parse_frontmatter
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.utils import parse_tool_params
 
 logger = logging.getLogger(__name__)
 
@@ -55,16 +54,7 @@ class ProposeSkill(BaseTool):
         Returns:
             Result message indicating success or failure.
         """
-        # Parse params
-        if isinstance(params, str):
-            try:
-                parsed: Dict[str, Any] = json.loads(params) if params.strip() else {}
-            except json.JSONDecodeError:
-                parsed = {}
-        elif isinstance(params, dict):
-            parsed = params
-        else:
-            parsed = {}
+        parsed = parse_tool_params(params)
 
         skill_content = parsed.get('skill_content', '')
         test_task = parsed.get('test_task', '')

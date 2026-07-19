@@ -38,7 +38,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] approval timeout occurs even when explicitly disabled in options, when it was set on auto-ask mode — DONE: Security advisor used hard-coded 180s timeout constant instead of reading from operation_manager settings. Fixed `security_handler.run_check()` to dynamically read `enable_timeout` and `approval_timeout_seconds` from operation manager. Timeout message now shows actual configured value. Added None guards for safety.
 - [ ] I dont want truncation of the user messages in the que (UI user que display)
 - [ ] scan_skills and propose_skill return `Error: Object of type coroutine is not JSON serializable`
-- [ ] auto-skill interferes with agent's final reply. once the auto-skill portion is done we should revert the skill creation portion of the history and release original output back to caller. (revert should be easier than doing a special stealth execution mode that is not logged) 
+- [x] auto-skill interferes with agent's final reply — DONE: multi-turn execution (AUTO_SKILL_EXTRA_TURNS=3), conversation rollback after skill creation, notice injected into last message 
 
 # Errors to investigate:
 

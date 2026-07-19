@@ -222,7 +222,7 @@ def run_agent_thread_unified(
                 # Snapshot current conversation length for rollback
                 _conv_len = len(inst.conversation)
                 # Snapshot current registered skill names for delta detection
-                _skills_before = set(skill_manager._skills_registry.keys())
+                _skills_before = set(skill_manager.get_skill_names())
 
                 # Create a fresh engine iterator for single-turn execution
                 from .execution_engine import ExecutionEngine

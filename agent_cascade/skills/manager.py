@@ -161,6 +161,14 @@ class SkillManager:
         """
         return self._skills_registry.get(skill_name)
 
+    def get_skill_names(self) -> List[str]:
+        """Return a list of all registered skill names.
+
+        Returns:
+            List of skill name strings.
+        """
+        return list(self._skills_registry.keys())
+
     def match_skills(self, query: str) -> List[Tuple[str, float]]:
         """Public interface for matching skills against a query.
 
@@ -454,7 +462,12 @@ class SkillManager:
         matches = self.match_skills(task_text) if task_text else []
         logger.debug("[AUTO-SKILL] Check: tool_count=%d, matches=%d",
                      total_tool_calls, len(matches))
-        if total_tool_calls < AUTO_SKILL_MIN_TOOL_CALLS or matches or not state_idle_fn():
+
+        if total_tool_calls < AUTO_SKILL_MIN_TOOL_CALLS:
+            return []
+        if matches:
+            return []
+        if not state_idle_fn():
             return []
 
         creator = self.load_full_instructions("skill-creator")
@@ -477,7 +490,7 @@ class SkillManager:
                 logger.debug("[AUTO-SKILL] Extra turn %d/%d for %s",
                              turn_i + 1, AUTO_SKILL_EXTRA_TURNS, instance_name)
         except Exception as e:
-            logger.debug("[AUTO-SKILL] Extra turn error for %s: %s", instance_name, e)
+            logger.warning("[AUTO-SKILL] Extra turn error for %s: %s", instance_name, e)
 
         # Rollback conversation to snapshot
         if snapshot is not None and rollback_fn is not None:
@@ -495,10 +508,9 @@ class SkillManager:
             except Exception as e:
                 logger.debug("[AUTO-SKILL] Skill check error for %s: %s", instance_name, e)
 
-        inst._auto_skill_proposed = True
-        inst._auto_skill_proposed_count = proposed_count + 1
-
         if created_skills:
+            inst._auto_skill_proposed = True
+            inst._auto_skill_proposed_count = proposed_count + 1
             logger.info("[AUTO-SKILL] Created skills: %s", created_skills)
 
         return created_skills

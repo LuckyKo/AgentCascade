@@ -16,7 +16,6 @@ from agent_cascade.settings import (
 )
 
 from .parser import parse_frontmatter
-from .matcher import SkillMatcher
 
 
 # Snake-case pattern: starts with lowercase letter, allows lowercase digits, underscore, hyphen
@@ -88,15 +87,18 @@ def validate_skill(
         return False, errors
 
     if task_text:
-        matcher = SkillMatcher()
-        matcher.build_index([{
-            'name': name,
-            'description': description,
-            'triggers': triggers,
-        }])
-        results = matcher.match(task_text)
-        if not results or results[0][1] < AUTO_SKILL_PROMOTION_THRESHOLD:
-            score = results[0][1] if results else 0.0
+        # Lightweight self-match: check if enough skill keywords appear in the task text.
+        # Reuses the same tokenization as SkillMatcher without building a full index.
+        _token_re = re.compile(r'[a-zA-Z0-9_]+(?:[-][a-zA-Z0-9_]+)*')
+        skill_text = f"{name} {description} {' '.join(triggers)}"
+        skill_keywords = set(_token_re.findall(skill_text.lower()))
+        query_tokens = set(_token_re.findall(task_text.lower()))
+        if skill_keywords and query_tokens:
+            overlap = len(skill_keywords & query_tokens)
+            score = min(overlap / max(len(query_tokens), 1), 1.0)
+        else:
+            score = 0.0
+        if score < AUTO_SKILL_PROMOTION_THRESHOLD:
             errors.append(
                 f"Self-match score {score:.3f} below threshold "
                 f"{AUTO_SKILL_PROMOTION_THRESHOLD} — skill may not match its generating task"

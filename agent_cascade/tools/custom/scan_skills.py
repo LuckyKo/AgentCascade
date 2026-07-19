@@ -8,6 +8,7 @@ This is the primary way orchestrators decide which skills to load via call_agent
 import logging
 
 from agent_cascade.tools.base import BaseTool, register_tool
+from agent_cascade.tools.utils import parse_tool_params
 
 logger = logging.getLogger(__name__)
 
@@ -51,18 +52,7 @@ class ScanSkills(BaseTool):
         Returns:
             Formatted markdown list of matching skills.
         """
-        # Parse params
-        if isinstance(params, str):
-            import json
-            try:
-                parsed = json.loads(params) if params.strip() else {}
-            except json.JSONDecodeError:
-                parsed = {}
-        elif isinstance(params, dict):
-            parsed = params
-        else:
-            parsed = {}
-
+        parsed = parse_tool_params(params)
         query = parsed.get('query', '')
 
         # Get SkillManager from pool
