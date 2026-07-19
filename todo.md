@@ -23,6 +23,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] implement a live scratchpad tool that injects text/image data into the last few FUNCTION/USER messages. the tool can load a live view of a file's content, console output of a program by PID, interface capture data of a program by PID, set persistence distance (nr of messages in tail agent pool retaining the data, older messages get the data trimmed). agent can call this tool to enable disable this scratchpad (disable by setting persistence to 0, defaults on 2) 
 [ ] add a stop button to shell_cmd messages so user can terminate them early
 [ ] investigate possible use of `https://github.com/eugeniughelbur/obsidian-second-brain`for our lessons file management
+[ ] research how to do auto skill generation so we can advise our agents to build useful skills once they have successfully completed their task (a skill how to make skills?)
 
 # BUGS:
 
@@ -36,27 +37,11 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] inner loop detector is almost unusable how many false positives generates, `char run` is the only good mode...
 - [x] approval timeout occurs even when explicitly disabled in options, when it was set on auto-ask mode — DONE: Security advisor used hard-coded 180s timeout constant instead of reading from operation_manager settings. Fixed `security_handler.run_check()` to dynamically read `enable_timeout` and `approval_timeout_seconds` from operation manager. Timeout message now shows actual configured value. Added None guards for safety.
 - [ ] I dont want truncation of the user messages in the que (UI user que display)
+- [ ] scan_skills and propose_skill return `Error: Object of type coroutine is not JSON serializable`
+- [ ] auto-skill interferes with agent's final reply. once the auto-skill portion is done we should revert the skill creation portion of the history and release original output back to caller. (revert should be easier than doing a special stealth execution mode that is not logged) 
 
 # Errors to investigate:
 
-# Auto continue error — FIXED: `_check_and_handle_truncation` called `response.clear()` but `response` was not in scope. Added `response` as a parameter to the method and updated the call site.
-```
-2026-07-19 04:07:46,147 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 6340, Available tokens: 124336
-2026-07-19 04:07:47,780 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 7137, Available tokens: 124336
-2026-07-19 04:07:49,791 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 8516, Available tokens: 124336
-2026-07-19 04:07:51,895 - execution_engine.py - 2932 - INFO - Detected incomplete state (reasoning-only) for SoulLoaderReview. Auto-continuing.
-2026-07-19 04:07:51,916 - execution_engine.py - 1964 - DEBUG - Rebuilt working sets for SoulLoaderReview: messages=26, llm_messages=26
-2026-07-19 04:07:51,916 - execution_engine.py - 1281 - ERROR - EXCEPTION - SoulLoaderReview: NameError: name 'response' is not defined
-2026-07-19 04:07:51,917 - execution_engine.py - 1365 - DEBUG - EXIT - SoulLoaderReview RUNNING→IDLE
-2026-07-19 04:07:51,922 - execution_engine.py - 4282 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=SoulLoaderReview, reason=completed, inst_type=AgentInstance, conv_len=2, final_resp_len=1
-2026-07-19 04:07:51,927 - tool_dispatcher.py - 405 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'SoulLoaderReview' completed in 30.58s
-2026-07-19 04:07:51,928 - tool_dispatcher.py - 418 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'Maine' after sync child
-2026-07-19 04:07:51,928 - agent_pool.py - 2085 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
-2026-07-19 04:07:51,929 - tool_dispatcher.py - 427 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 30.58s
-2026-07-19 04:07:51,929 - tool_dispatcher.py - 124 - DEBUG - handle_call_agent returned type=str
-2026-07-19 04:07:51,997 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 37446, Available tokens: 88442
-2026-07-19 04:09:01,508 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 37493, Available tokens: 88442
-```
 
 # Maine instance tab got closed by some child agents at some point
 
@@ -208,3 +193,45 @@ Instance 'timeout_review_helper_child1' started new turn with fingerprint d5864b
 2026-07-19 04:33:25,608 - ws_handlers.py - 696 - INFO - [USER] Approving request: op_fd53b179
 2026-07-19 04:33:25,643 - base.py - 994 - INFO - Agent [Coder] - ALL tokens: 272, Available tokens: 124411
 2026-07-19 04:33:28,444 - base.py - 994 - INFO - Agent [Coder] - ALL tokens: 591, Available tokens: 124411
+
+[x] Going async path on concurrency=0 endpoints — Fixed: added Sequential Endpoint Guard in tool_dispatcher.py. When caller or child uses a sequential endpoint (concurrency_limit=0), the call_agent now forces SYNC path to prevent async children from competing with the caller for the shared slot. This prevents 30s timeouts when multiple parallel agents are launched on the same endpoint.
+2026-07-19 07:29:03,306 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 15645, Available tokens: 124330
+2026-07-19 07:29:05,848 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 17345, Available tokens: 124330
+2026-07-19 07:29:08,768 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 19188, Available tokens: 124330
+2026-07-19 07:29:13,833 - grep.py - 428 - DEBUG - grep: subprocess found no matches for 'Plan 1|Plan 2|Plan 3', trying Python fallback
+2026-07-19 07:29:13,833 - grep.py - 465 - DEBUG - grep: subprocess fast path unavailable (rg=True, grep=False), falling back to Python
+2026-07-19 07:29:13,973 - grep.py - 562 - DEBUG - grep: Python fallback also found no matches for 'Plan 1|Plan 2|Plan 3' (subprocess already confirmed)
+2026-07-19 07:29:14,000 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 19247, Available tokens: 124330
+2026-07-19 07:29:25,755 - agent_pool.py - 2631 - INFO - [idle_checker] Auto-dismissing idle system agent (Security) 'Security_op_d633978a' (idle for 72s, threshold=60s)
+2026-07-19 07:29:25,755 - agent_pool.py - 603 - DEBUG - Instance conversation cleanup key missing (expected): 'Security_op_d633978a'
+2026-07-19 07:29:25,758 - agent_pool.py - 2556 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_d633978a
+2026-07-19 07:29:29,140 - tool_dispatcher.py - 570 - DEBUG - call_agent nesting - plan-selector depth=1/10
+2026-07-19 07:29:29,141 - tool_dispatcher.py - 451 - DEBUG - Taking ASYNC path - plan-selector calls plan_reviewer_final/reviewer at depth 1
+2026-07-19 07:29:29,144 - tool_dispatcher.py - 465 - DEBUG - ASYNC - plan_reviewer_final launched by plan-selector
+2026-07-19 07:29:29,144 - execution_engine.py - 4109 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target=plan_reviewer_final, class=reviewer, caller=plan-selector, nest_depth=1, force_fresh=False
+2026-07-19 07:29:29,144 - tool_dispatcher.py - 124 - DEBUG - handle_call_agent returned type=str
+2026-07-19 07:29:29,144 - lifecycle_manager.py - 193 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for plan_reviewer_final
+2026-07-19 07:29:29,146 - matcher.py - 102 - DEBUG - [SKILLS] Match query 'Analyze the three plans for auto-skill generation by comparing them against the ' → 1 results (top=version-control)
+2026-07-19 07:29:29,159 - execution_engine.py - 4191 - DEBUG - starting engine.run() for plan_reviewer_final
+2026-07-19 07:29:29,160 - execution_engine.py - 870 - DEBUG - engine.run() ENTRY - instance=plan_reviewer_final
+2026-07-19 07:29:29,160 - agent_pool.py - 2085 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=reviewer, instance_name=plan_reviewer_final, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
+2026-07-19 07:29:29,180 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 19389, Available tokens: 124330
+2026-07-19 07:29:54,828 - ws_handlers.py - 707 - INFO - [USER] Rejecting request: op_cc8b0a28. Reason: you dont need to do this, you can just end and you will go in sleeping state
+2026-07-19 07:29:54,860 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 19446, Available tokens: 124330
+2026-07-19 07:29:59,175 - agent_pool.py - 2094 - ERROR - Failed to acquire endpoint slot for plan_reviewer_final: Timed out after 30s waiting for endpoint slot on http://127.0.0.1:1234/v1. Current active count: 1, max allowed: 1. Currently held by: plan-selector (reviewer)
+2026-07-19 07:29:59,175 - execution_engine.py - 688 - ERROR - [SLOT_ACQUIRE_FAILED] initial for plan_reviewer_final: Timed out after 30s waiting for endpoint slot on http://127.0.0.1:1234/v1. Current active count: 1, max allowed: 1. Currently held by: plan-selector (reviewer)
+2026-07-19 07:29:59,180 - execution_engine.py - 4284 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=plan_reviewer_final, reason=aborted, inst_type=AgentInstance, conv_len=2, final_resp_len=0
+2026-07-19 07:30:25,765 - agent_pool.py - 2631 - INFO - [idle_checker] Auto-dismissing idle system agent (Security) 'Security_op_7a2c8ff1' (idle for 92s, threshold=60s)
+2026-07-19 07:30:25,766 - agent_pool.py - 603 - DEBUG - Instance conversation cleanup key missing (expected): 'Security_op_7a2c8ff1'
+2026-07-19 07:30:25,769 - agent_pool.py - 2556 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_7a2c8ff1
+2026-07-19 07:30:30,320 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 21503, Available tokens: 124330
+2026-07-19 07:30:54,884 - execution_engine.py - 1367 - DEBUG - EXIT - plan-selector already TERMINATED
+2026-07-19 07:30:54,884 - execution_engine.py - 4284 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=plan-selector, reason=completed, inst_type=AgentInstance, conv_len=2, final_resp_len=74
+2026-07-19 07:30:54,889 - tool_dispatcher.py - 405 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'plan-selector' completed in 496.94s
+2026-07-19 07:30:54,889 - tool_dispatcher.py - 418 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'Maine' after sync child
+2026-07-19 07:30:54,890 - agent_pool.py - 2085 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
+2026-07-19 07:30:54,890 - tool_dispatcher.py - 427 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 496.94s
+2026-07-19 07:30:54,891 - tool_dispatcher.py - 124 - DEBUG - handle_call_agent returned type=str
+2026-07-19 07:30:54,908 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 9157, Available tokens: 89123
+2026-07-19 07:31:13,878 - config_handlers.py - 285 - DEBUG - [update_config] LLM config unchanged
+2026-07-19 07:31:13,879 - config_handlers.py - 285 - DEBUG - [update_config] LLM config unchanged

@@ -5,13 +5,9 @@ Allows agents to discover available skills and their relevance scores for a give
 This is the primary way orchestrators decide which skills to load via call_agent(load_skill=[...]).
 """
 
-import asyncio
 import logging
-from pathlib import Path
-from typing import Dict, Any, List, Optional
 
 from agent_cascade.tools.base import BaseTool, register_tool
-from agent_cascade.prompts.dna import TOOL_METADATA
 
 logger = logging.getLogger(__name__)
 
@@ -41,18 +37,11 @@ class ScanSkills(BaseTool):
         super().__init__(**kwargs)
         self.agent_pool = agent_pool
 
-    async def _ensure_discovered(self, skill_manager) -> None:
-        """Trigger real-time discovery to pick up newly added skills."""
-        # Find the .qwen/skills/ directory relative to project root
-        _project_root = Path(__file__).resolve().parent.parent.parent.parent
-        _skills_dir = _project_root / '.qwen' / 'skills'
-        if not _skills_dir.exists():
-            logger.debug("[SKILLS] Skills directory not found at %s", _skills_dir)
-            return
+    def _ensure_index(self, skill_manager) -> None:
+        """Rebuild the matcher index so newly registered skills are immediately discoverable."""
+        skill_manager._rebuild_index()
 
-        await skill_manager.discover([_skills_dir])
-
-    async def call(self, params: str, **kwargs) -> str:
+    def call(self, params: str, **kwargs) -> str:
         """Execute the scan_skills tool.
 
         Args:
@@ -81,8 +70,8 @@ class ScanSkills(BaseTool):
         if skill_manager is None:
             return "No skills system available. Skills may not have been initialized."
 
-        # Trigger real-time discovery (picks up newly added skills without restart)
-        await self._ensure_discovered(skill_manager)
+        # Rebuild matcher index so newly registered skills are immediately discoverable
+        self._ensure_index(skill_manager)
 
         all_skills = skill_manager.get_all_metadata()
         if not all_skills:
