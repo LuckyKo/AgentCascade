@@ -548,3 +548,214 @@ class TestHotReload:
         assert len(results) > 0
         top_name = results[0][0]
         assert top_name == name
+
+
+# ===========================================================================
+# 8. Integration: call_agent return path — rollback + notice injection
+# ===========================================================================
+
+class TestCallAgentReturn:
+    """Verify that auto-skill rollback and notice injection work correctly
+    on the call_agent return path (execution_engine._create_and_run_agent)."""
+
+    def _make_conversation(self, length: int):
+        """Build a conversation list of *length* dict messages."""
+        return [
+            {"role": "assistant" if i % 2 else "user", "content": f"msg {i}"}
+            for i in range(length)
+        ]
+
+    def _setup(self, fresh_manager):
+        """Create a mock instance with 5 messages and preload skill-creator."""
+        inst = MagicMock()
+        inst.conversation = self._make_conversation(5)
+        inst._auto_skill_proposed = False
+        inst._auto_skill_proposed_count = 0
+        inst.state = "IDLE"
+        # Preload skill-creator so trigger_auto_skill_reflection doesn't
+        # return early. load_full_instructions checks _parsed_data['body']
+        # first before falling back to disk reads.
+        fresh_manager._skills_registry["skill-creator"] = {
+            "name": "skill-creator",
+            "file_path": ".qwen/skills/skill-creator/SKILL.md",
+            "_parsed_data": {"body": "Create a reusable skill."},
+        }
+        return inst
+
+    def test_rollback_restores_conversation_length(self, fresh_manager):
+        """Conversation length returns to original after rollback."""
+        inst = self._setup(fresh_manager)
+        original_len = len(inst.conversation)
+
+        def snapshot_fn():
+            return len(inst.conversation)
+
+        def rollback_fn(snap):
+            inst.conversation = inst.conversation[:snap]
+
+        created = fresh_manager.trigger_auto_skill_reflection(
+            inst=inst,
+            total_tool_calls=10,
+            task_text="Write a test",
+            instance_name="worker",
+            append_fn=lambda msg: inst.conversation.append(
+                {"role": "user", "content": msg}),
+            run_turn_fn=lambda: inst.conversation.append(
+                {"role": "assistant", "content": "reply"}),
+            state_idle_fn=lambda: True,
+            snapshot_fn=snapshot_fn,
+            rollback_fn=rollback_fn,
+            check_skill_created_fn=lambda: [],
+        )
+
+        assert len(inst.conversation) == original_len, (
+            f"Expected {original_len}, got {len(inst.conversation)}")
+        assert created == []
+
+    def test_notice_injected_into_last_message(self, fresh_manager):
+        """Notice is appended to the last message; no new message added."""
+        inst = self._setup(fresh_manager)
+        original_len = len(inst.conversation)
+
+        def snapshot_fn():
+            return len(inst.conversation)
+
+        def rollback_fn(snap):
+            inst.conversation = inst.conversation[:snap]
+
+        created_skills = ["test-skill-a"]
+        created = fresh_manager.trigger_auto_skill_reflection(
+            inst=inst,
+            total_tool_calls=10,
+            task_text="Write a test",
+            instance_name="worker",
+            append_fn=lambda msg: inst.conversation.append(
+                {"role": "user", "content": msg}),
+            run_turn_fn=lambda: inst.conversation.append(
+                {"role": "assistant", "content": "reply"}),
+            state_idle_fn=lambda: True,
+            snapshot_fn=snapshot_fn,
+            rollback_fn=rollback_fn,
+            check_skill_created_fn=lambda: created_skills,
+        )
+
+        # Inject notice (same logic as execution_engine lines 285-292)
+        if created and inst.conversation:
+            notice = f"\n\n[Auto-skill created: {', '.join(created)}]"
+            inst.conversation[-1]["content"] = (
+                str(inst.conversation[-1].get("content", "")) + notice)
+
+        assert len(inst.conversation) == original_len, (
+            "Notice injection should not add a new message")
+        assert "[Auto-skill created:" in inst.conversation[-1]["content"]
+        assert "test-skill-a" in inst.conversation[-1]["content"]
+
+    def test_no_notice_when_no_skills_created(self, fresh_manager):
+        """When no skills are created, last message content is unchanged."""
+        inst = self._setup(fresh_manager)
+        original_last_content = inst.conversation[-1]["content"]
+
+        def snapshot_fn():
+            return len(inst.conversation)
+
+        def rollback_fn(snap):
+            inst.conversation = inst.conversation[:snap]
+
+        created = fresh_manager.trigger_auto_skill_reflection(
+            inst=inst,
+            total_tool_calls=10,
+            task_text="Write a test",
+            instance_name="worker",
+            append_fn=lambda msg: inst.conversation.append(
+                {"role": "user", "content": msg}),
+            run_turn_fn=lambda: inst.conversation.append(
+                {"role": "assistant", "content": "reply"}),
+            state_idle_fn=lambda: True,
+            snapshot_fn=snapshot_fn,
+            rollback_fn=rollback_fn,
+            check_skill_created_fn=lambda: [],
+        )
+
+        assert created == []
+        assert inst.conversation[-1]["content"] == original_last_content
+
+    def test_return_conversation_includes_notice(self, fresh_manager):
+        """Full return path: trigger → rollback → notice → return list(conv)."""
+        inst = self._setup(fresh_manager)
+        original_len = len(inst.conversation)
+
+        def snapshot_fn():
+            return len(inst.conversation)
+
+        def rollback_fn(snap):
+            inst.conversation = inst.conversation[:snap]
+
+        created_skills = ["my-new-skill"]
+        created = fresh_manager.trigger_auto_skill_reflection(
+            inst=inst,
+            total_tool_calls=10,
+            task_text="Write a test",
+            instance_name="worker",
+            append_fn=lambda msg: inst.conversation.append(
+                {"role": "user", "content": msg}),
+            run_turn_fn=lambda: inst.conversation.append(
+                {"role": "assistant", "content": "reply"}),
+            state_idle_fn=lambda: True,
+            snapshot_fn=snapshot_fn,
+            rollback_fn=rollback_fn,
+            check_skill_created_fn=lambda: created_skills,
+        )
+
+        # Inject notice (same logic as execution_engine lines 285-292)
+        if created and inst.conversation:
+            notice = f"\n\n[Auto-skill created: {', '.join(created)}]"
+            last = inst.conversation[-1]
+            last["content"] = str(last.get("content", "")) + notice
+
+        # Simulate return value: list(inst.conversation)
+        returned_conv = list(inst.conversation)
+
+        assert len(returned_conv) == original_len
+        assert "[Auto-skill created:" in returned_conv[-1]["content"]
+        assert "my-new-skill" in returned_conv[-1]["content"]
+
+    def test_rollback_does_not_stale_final_resp(self, fresh_manager):
+        """Rollback only affects inst.conversation, not the final_resp variable."""
+        inst = self._setup(fresh_manager)
+
+        def snapshot_fn():
+            return len(inst.conversation)
+
+        def rollback_fn(snap):
+            inst.conversation = inst.conversation[:snap]
+
+        # Simulate final_resp: deep copy of last response from the main loop
+        final_resp = [dict(m) for m in inst.conversation]
+
+        created = fresh_manager.trigger_auto_skill_reflection(
+            inst=inst,
+            total_tool_calls=10,
+            task_text="Write a test",
+            instance_name="worker",
+            append_fn=lambda msg: inst.conversation.append(
+                {"role": "user", "content": msg}),
+            run_turn_fn=lambda: inst.conversation.append(
+                {"role": "assistant", "content": "reply"}),
+            state_idle_fn=lambda: True,
+            snapshot_fn=snapshot_fn,
+            rollback_fn=rollback_fn,
+            check_skill_created_fn=lambda: ["test-skill"],
+        )
+
+        # Inject notice into inst.conversation (same as execution_engine)
+        if created and inst.conversation:
+            notice = f"\n\n[Auto-skill created: {', '.join(created)}]"
+            inst.conversation[-1]["content"] = (
+                str(inst.conversation[-1].get("content", "")) + notice)
+
+        # final_resp should be unaffected — no notice, same length
+        assert len(final_resp) == 5
+        assert "[Auto-skill created:" not in final_resp[-1]["content"]
+
+        # inst.conversation should have the notice
+        assert "[Auto-skill created:" in inst.conversation[-1]["content"]
