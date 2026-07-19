@@ -43,7 +43,7 @@ class ProposeSkill(BaseTool):
         super().__init__(**kwargs)
         self.agent_pool = agent_pool
 
-    async def call(self, params: str, **kwargs) -> str:
+    def call(self, params: str, **kwargs) -> str:
         """Execute propose_skill.
 
         Args:
