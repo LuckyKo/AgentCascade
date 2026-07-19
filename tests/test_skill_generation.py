@@ -781,3 +781,335 @@ class TestCallAgentReturn:
 
         assert len(inst.conversation) >= 1
         assert inst.conversation[-1]["content"] == original_content
+
+
+# ===========================================================================
+# Rollback Tail Sync — pool/JSONL consistency after rollback
+# ===========================================================================
+
+class TestRollbackTailSync:
+    """Verify that _rollback_instance keeps pool conversation and JSONL logger
+    in sync — both in the simple case and after compression markers exist.
+
+    Covers the auto-skill rollback flow:
+      1. Build conversation of known length  →  snapshot
+      2. Append extra messages               →  more turns
+      3. Rollback to snapshot                →  truncation
+      4. Inject notice into last message     →  content-only modification
+    """
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+
+    def _build_conv(self, n: int):
+        """Build a conversation with SYSTEM + n alternating USER/ASSISTANT pairs."""
+        from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
+
+        conv = [Message(role=SYSTEM, content="You are a test agent")]
+        for i in range(n):
+            conv.append(Message(role=USER, content=f"User message {i}"))
+            conv.append(Message(role=ASSISTANT, content=f"Assistant reply {i}"))
+        return conv
+
+    def _write_jsonl(self, path: str, messages):
+        """Write a JSONL file with metadata header + message lines."""
+        import json
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(json.dumps({
+                "metadata": {
+                    "agent_class": "coder",
+                    "instance_name": "test-sync",
+                    "start_timestamp": "2026-01-01T00:00:00",
+                    "current_log_path": path,
+                }
+            }) + '\n')
+            for m in messages:
+                d = m.model_dump() if hasattr(m, 'model_dump') else dict(role=m.role, content=m.content)
+                f.write(json.dumps(d, ensure_ascii=False) + '\n')
+
+    def _read_jsonl_messages(self, path: str) -> list:
+        """Read message dicts from a JSONL file (skip metadata/events)."""
+        import json
+        msgs = []
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(item, dict) and "metadata" not in item and "event" not in item:
+                    msgs.append(item)
+        return msgs
+
+    def _count_jsonl_tail(self, path: str) -> int:
+        """Count messages after the last compression marker in a JSONL file."""
+        from agent_cascade.logger.tail_sync_check import _count_jsonl_tail
+        tail_count, _, _ = _count_jsonl_tail(path)
+        return tail_count
+
+    def _count_pool_tail(self, conv: list) -> int:
+        """Count messages after the last compression marker in a pool conversation."""
+        from agent_cascade.agent_pool import AgentPool
+        from agent_cascade.logger.tail_sync_check import _count_pool_tail
+        last_marker = AgentPool.find_last_marker(conv)
+        return _count_pool_tail(conv, last_marker)
+
+    # ------------------------------------------------------------------ #
+    # Tests
+    # ------------------------------------------------------------------ #
+
+    def test_rollback_truncates_jsonl_logger(self, tmp_path):
+        """Rollback with sync_logger=True truncates JSONL to match pool length.
+
+        Flow:
+          1. Create pool + logger with known conversation
+          2. Append extra messages to both pool and JSONL
+          3. Rollback to original length
+          4. Verify JSONL message count == pool conversation count
+        """
+        from agent_cascade.agent_pool import AgentPool
+        from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
+
+        # Step 1: Build initial conversation (SYS + 4 pairs = 9 messages)
+        conv = self._build_conv(4)  # 9 messages
+        assert len(conv) == 9
+
+        # Create a real AgentPool (minimal)
+        pool = AgentPool(llm_cfg={})
+        inst = pool.create_instance("test-sync", "coder")
+        inst.conversation = list(conv)
+
+        # Get logger and sync it
+        log_inst = pool.get_logger("test-sync", "coder")
+        assert log_inst.log_path
+
+        # Use the actual logger path (not our temp one) for the test
+        test_jsonl = log_inst.log_path
+
+        # Write initial state to logger
+        self._write_jsonl(test_jsonl, conv)
+
+        # Load history into logger's internal state so truncate_to works correctly
+        log_inst.load_history_from_file()
+
+        # Step 2: Append 3 extra messages to pool
+        extra = [
+            Message(role=USER, content="Extra user 1"),
+            Message(role=ASSISTANT, content="Extra assistant 1"),
+            Message(role=USER, content="Extra user 2"),
+        ]
+        inst.conversation.extend(extra)
+        assert len(inst.conversation) == 12
+
+        # Append same to JSONL logger
+        log_inst.update_history(extra)
+
+        # Verify JSONL has 12 messages
+        jsonl_msgs = self._read_jsonl_messages(test_jsonl)
+        assert len(jsonl_msgs) == 12
+
+        # Step 3: Rollback to original length (9)
+        removed = pool._rollback_instance(
+            "test-sync",
+            target_length=9,
+            sync_logger=True,
+            tail_sync_check=True,
+        )
+        assert removed == 3, f"Expected 3 removed, got {removed}"
+
+        # Step 4: Verify pool has 9 messages
+        assert len(inst.conversation) == 9
+
+        # Step 5: Verify JSONL also has 9 messages
+        jsonl_msgs_after = self._read_jsonl_messages(test_jsonl)
+        assert len(jsonl_msgs_after) == 9, \
+            f"JSONL has {len(jsonl_msgs_after)} messages, expected 9"
+
+        # Step 6: Verify tail sync holds
+        from agent_cascade.logger.tail_sync_check import check_tail_sync
+        in_sync, pool_tail, jsonl_tail = check_tail_sync(
+            "test-sync", inst.conversation, test_jsonl
+        )
+        assert in_sync, f"Tail sync failed: pool_tail={pool_tail}, jsonl_tail={jsonl_tail}"
+
+    def test_rollback_tail_sync_after_compression(self, tmp_path):
+        """Rollback after compression: tail counts match between pool and JSONL.
+
+        Flow:
+          1. Build conversation with a compression marker
+          2. Append extra messages past the marker
+          3. Rollback to before the extra messages
+          4. Verify pool tail == JSONL tail (both count messages after marker)
+        """
+        from agent_cascade.agent_pool import AgentPool
+        from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
+        from agent_cascade.prompts.dna import COMPRESSION_MARKER
+
+        jsonl_path = str(tmp_path / "test_rollback_comp.jsonl")
+
+        # Step 1: Build conversation with compression marker
+        # SYS + COMP + 3 pairs + 2 extra pairs = 10 messages
+        conv = [
+            Message(role=SYSTEM, content="You are a test agent"),
+            Message(role=USER, content=COMPRESSION_MARKER + " [compressed]"),
+            Message(role=USER, content="User 0"),
+            Message(role=ASSISTANT, content="Reply 0"),
+            Message(role=USER, content="User 1"),
+            Message(role=ASSISTANT, content="Reply 1"),
+            Message(role=USER, content="User 2"),
+            Message(role=ASSISTANT, content="Reply 2"),
+            # Extra messages to be rolled back
+            Message(role=USER, content="Extra 1"),
+            Message(role=ASSISTANT, content="Extra reply 1"),
+        ]
+        assert len(conv) == 10
+
+        # Write JSONL
+        self._write_jsonl(jsonl_path, conv)
+
+        # Create pool + instance
+        pool = AgentPool(llm_cfg={})
+        inst = pool.create_instance("test-sync-comp", "coder")
+        inst.conversation = list(conv)
+
+        # Get logger
+        log_inst = pool.get_logger("test-sync-comp", "coder")
+        test_jsonl = log_inst.log_path
+
+        # Write initial state
+        self._write_jsonl(test_jsonl, conv)
+
+        # Load history into logger's internal state so truncate_to works correctly
+        log_inst.load_history_from_file()
+
+        # Verify: pool tail (after marker) = 8, JSONL tail = 8
+        pool_tail_before = self._count_pool_tail(inst.conversation)
+        jsonl_tail_before = self._count_jsonl_tail(test_jsonl)
+        assert pool_tail_before == 8, f"pool_tail_before={pool_tail_before}"
+        assert jsonl_tail_before == 8, f"jsonl_tail_before={jsonl_tail_before}"
+
+        # Step 2: Rollback to remove the 2 extra messages (target_length=8)
+        removed = pool._rollback_instance(
+            "test-sync-comp",
+            target_length=8,
+            sync_logger=True,
+            tail_sync_check=True,
+        )
+        assert removed == 2, f"Expected 2 removed, got {removed}"
+
+        # Step 3: Verify pool has 8 messages
+        assert len(inst.conversation) == 8
+
+        # Step 4: Verify JSONL has 8 messages and marker is preserved
+        jsonl_msgs = self._read_jsonl_messages(test_jsonl)
+        assert len(jsonl_msgs) == 8, f"JSONL has {len(jsonl_msgs)}, expected 8"
+        marker_present = any(
+            isinstance(m.get('content', ''), str) and m['content'].startswith(COMPRESSION_MARKER)
+            for m in jsonl_msgs
+        )
+        assert marker_present, "Compression marker missing from JSONL after rollback"
+
+        # Step 5: Verify tail counts match (both should be 6 = 8 - 1 marker - 1 SYS)
+        pool_tail_after = self._count_pool_tail(inst.conversation)
+        jsonl_tail_after = self._count_jsonl_tail(test_jsonl)
+        assert pool_tail_after == 6, f"pool_tail_after={pool_tail_after}"
+        assert jsonl_tail_after == 6, f"jsonl_tail_after={jsonl_tail_after}"
+
+        # Step 6: Tail sync check passes
+        from agent_cascade.logger.tail_sync_check import check_tail_sync
+        in_sync, pt, jt = check_tail_sync(
+            "test-sync-comp", inst.conversation, test_jsonl
+        )
+        assert in_sync, f"Tail sync failed: pool_tail={pt}, jsonl_tail={jt}"
+
+    def test_notice_injection_preserves_tail_sync(self, tmp_path):
+        """Full auto-skill rollback flow: notice injection doesn't break tail sync.
+
+        Flow:
+          1. Build conversation → snapshot length
+          2. Append extra messages
+          3. Rollback to snapshot
+          4. Inject notice into last message (content modification, no new messages)
+          5. Verify tail sync still holds
+        """
+        from agent_cascade.agent_pool import AgentPool
+        from agent_cascade.llm.schema import SYSTEM, USER, ASSISTANT, Message
+
+        # Step 1: Build conversation (SYS + 3 pairs = 7 messages)
+        conv = self._build_conv(3)  # 7 messages
+        snapshot_len = len(conv)
+        assert snapshot_len == 7
+
+        # Create pool + instance
+        pool = AgentPool(llm_cfg={})
+        inst = pool.create_instance("test-sync-notice", "coder")
+        inst.conversation = list(conv)
+
+        # Get logger
+        log_inst = pool.get_logger("test-sync-notice", "coder")
+        test_jsonl = log_inst.log_path
+
+        # Write initial state
+        self._write_jsonl(test_jsonl, conv)
+
+        # Load history into logger's internal state so truncate_to works correctly
+        log_inst.load_history_from_file()
+
+        # Step 2: Append 4 extra messages
+        extra = [
+            Message(role=USER, content="Extra user"),
+            Message(role=ASSISTANT, content="Extra assistant"),
+            Message(role=USER, content="Extra user 2"),
+            Message(role=ASSISTANT, content="Extra assistant 2"),
+        ]
+        inst.conversation.extend(extra)
+        log_inst.update_history(extra)
+        assert len(inst.conversation) == 11
+
+        # Step 3: Rollback to snapshot
+        removed = pool._rollback_instance(
+            "test-sync-notice",
+            target_length=snapshot_len,
+            sync_logger=True,
+            tail_sync_check=True,
+        )
+        assert removed == 4, f"Expected 4 removed, got {removed}"
+        assert len(inst.conversation) == snapshot_len
+
+        # Verify tail sync before notice injection
+        from agent_cascade.logger.tail_sync_check import check_tail_sync
+        in_sync_before, pt_before, jt_before = check_tail_sync(
+            "test-sync-notice", inst.conversation, test_jsonl
+        )
+        assert in_sync_before, \
+            f"Tail sync failed before notice: pool_tail={pt_before}, jsonl_tail={jt_before}"
+
+        # Step 4: Inject notice into last message (content-only modification)
+        notice = "\n\n[Auto-skill created: test-skill]"
+        inst.conversation[-1].content += notice
+
+        # Step 5: Verify message count unchanged in pool
+        assert len(inst.conversation) == snapshot_len
+
+        # Verify JSONL message count also unchanged (no new messages appended)
+        jsonl_after_notice = self._read_jsonl_messages(test_jsonl)
+        assert len(jsonl_after_notice) == snapshot_len, \
+            f"JSONL has {len(jsonl_after_notice)} messages after notice, expected {snapshot_len}"
+
+        # Step 6: Verify tail sync still holds (no new messages added)
+        in_sync_after, pt_after, jt_after = check_tail_sync(
+            "test-sync-notice", inst.conversation, test_jsonl
+        )
+        assert in_sync_after, \
+            f"Tail sync failed after notice injection: pool_tail={pt_after}, jsonl_tail={jt_after}"
+
+        # Counts should be identical before and after notice injection
+        assert pt_before == pt_after, "Pool tail count changed after notice injection"
+        assert jt_before == jt_after, "JSONL tail count changed after notice injection"
+
+        # Verify notice is actually in the last message
+        assert "[Auto-skill created:" in inst.conversation[-1].content
