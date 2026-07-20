@@ -609,7 +609,9 @@ class SkillManager:
         rollback_ok = True
         if snapshot_length >= 0:
             try:
-                current_len = len(inst.conversation)
+                # Read current_len under lock to prevent race with compression
+                with inst._compression_lock:
+                    current_len = len(inst.conversation)
                 pop_count = max(0, current_len - snapshot_length)
                 if pop_count > 0:
                     rollback_fn(pop_count)
