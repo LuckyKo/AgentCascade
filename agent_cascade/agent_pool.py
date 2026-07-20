@@ -1082,6 +1082,9 @@ class AgentPool:
         # Step 1: Set stopped event to signal threads to halt (use property setter for side effects)
         self.stopped = True
 
+        # Also clear pause flag so agents don't hang in pause wait loops
+        self._paused.set()
+
         # ── Step 2: Release concurrency slots for all active instances ──────────────
         # This ensures API endpoints are freed immediately, even if execution threads
         # haven't noticed the stop signal yet. Prevents "stuck slot" issues where
