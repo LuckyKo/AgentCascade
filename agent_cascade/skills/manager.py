@@ -605,26 +605,22 @@ class SkillManager:
         except Exception as e:
             logger.warning("[AUTO-SKILL] Extra turn error for %s: %s", instance_name, e)
 
-        # Rollback conversation to snapshot length (cleaner than marker-based scanning)
-        if rollback_fn is not None and snapshot_length > 0:
+        # Rollback conversation to snapshot length
+        if rollback_fn is not None and snapshot_length >= 0:
             try:
                 rollback_fn(snapshot_length)
                 logger.debug("[AUTO-SKILL] Conversation rolled back to length %d for %s",
                              snapshot_length, instance_name)
+                # Reset agent state to IDLE if in SLEEPING or COMPLETING (after successful rollback)
+                current_state = getattr(inst, 'state', None)
+                if current_state is not None:
+                    state_name = getattr(current_state, 'name', None)
+                    if state_name in ('SLEEPING', 'COMPLETING'):
+                        from agent_cascade.agent_instance import AgentState
+                        inst._transition(AgentState.IDLE)
+                        logger.debug("[AUTO-SKILL] State reset to IDLE for %s", instance_name)
             except Exception as e:
                 logger.warning("[AUTO-SKILL] Rollback error for %s: %s", instance_name, e)
-
-        # Reset agent state to IDLE if in SLEEPING or COMPLETING
-        try:
-            current_state = getattr(inst, 'state', None)
-            if current_state is not None:
-                state_name = getattr(current_state, 'name', None)
-                if state_name in ('SLEEPING', 'COMPLETING'):
-                    from agent_cascade.agent_instance import AgentState
-                    inst._transition(AgentState.IDLE)
-                    logger.debug("[AUTO-SKILL] State reset to IDLE for %s", instance_name)
-        except Exception as e:
-            logger.debug("[AUTO-SKILL] State reset skipped for %s: %s", instance_name, e)
 
         # Discover which skills were created
         created_skills = []
