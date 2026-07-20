@@ -185,6 +185,13 @@ def _handle_default_load_skill_mode(ui_cfg: dict, agent_pool: Optional[Any], age
         val = str(ui_cfg.get('default_load_skill_mode', 'AUTO')).upper()
         if val in ('AUTO', 'NONE'):
             agent_pool.settings.default_load_skill_mode = val
+            if val == 'NONE':
+                # Clear registry to free memory (under lock for thread safety)
+                if hasattr(agent_pool, 'skill_manager'):
+                    sm = agent_pool.skill_manager
+                    with sm._write_lock:
+                        sm._skills_registry.clear()
+                        sm._rebuild_index()
 
 
 @register_config_handler('loop_min_chars')

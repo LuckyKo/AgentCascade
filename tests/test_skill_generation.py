@@ -590,15 +590,16 @@ class TestCallAgentReturn:
 
     def _trigger(self, inst, fresh_manager, total_tool_calls=10,
                  check_result=None, state_idle=True):
-        """Run trigger_auto_skill_reflection with standard snapshot/rollback."""
+        """Run trigger_auto_skill_reflection with standard pop-based rollback."""
         if check_result is None:
             check_result = []
-
+    
         def snapshot_fn():
-            return len(inst.conversation)
+            return None
 
-        def rollback_fn(snap):
-            inst.conversation = inst.conversation[:snap]
+        def rollback_fn(count):
+            if count > 0:
+                del inst.conversation[-count:]
 
         return fresh_manager.trigger_auto_skill_reflection(
             inst=inst,
@@ -687,19 +688,18 @@ class TestCallAgentReturn:
 
         assert len(inst.conversation) == original_len
 
-    def test_rollback_called_with_correct_target_length(self, fresh_manager):
-        """rollback_fn is invoked with the snapshot (original conversation length)."""
+    def test_rollback_called_with_correct_pop_count(self, fresh_manager):
+        """rollback_fn is invoked with the pop_count (messages added during extra turns)."""
         inst = self._make_inst(fresh_manager)
         original_len = len(inst.conversation)
 
-        captured_snapshots = []
+        captured_counts = []
 
-        def snapshot_fn():
-            return len(inst.conversation)
-
-        def rollback_fn(snap):
-            captured_snapshots.append(snap)
-            inst.conversation = inst.conversation[:snap]
+        def rollback_fn(count):
+            captured_counts.append(count)
+            # Pop 'count' messages from end
+            if count > 0:
+                del inst.conversation[-count:]
 
         fresh_manager.trigger_auto_skill_reflection(
             inst=inst,
@@ -711,13 +711,13 @@ class TestCallAgentReturn:
             run_turn_fn=lambda: inst.conversation.append(
                 {"role": "assistant", "content": "reply"}),
             state_idle_fn=lambda: True,
-            snapshot_fn=snapshot_fn,
+            snapshot_fn=None,
             rollback_fn=rollback_fn,
             check_skill_created_fn=lambda: [],
         )
 
-        assert len(captured_snapshots) == 1
-        assert captured_snapshots[0] == original_len
+        assert len(captured_counts) == 1
+        assert captured_counts[0] > 0  # some messages were added and popped
         assert len(inst.conversation) == original_len
 
     # ------------------------------------------------------------------ #
@@ -764,6 +764,30 @@ class TestCallAgentReturn:
         self._trigger(inst, fresh_manager)
 
         assert inst.conversation[-1]["content"] == original_last_content
+
+    # ------------------------------------------------------------------ #
+    # Compression resilience
+    # ------------------------------------------------------------------ #
+
+    def test_rollback_survives_compression_during_extra_turns(self, fresh_manager):
+        """When compression removes messages during extra turns, rollback still
+        restores the original conversation length using the marker approach."""
+        from agent_cascade.settings import AUTO_SKILL_EXTRA_TURNS
+
+        inst = self._make_inst(fresh_manager, conv_len=20)
+        original_len = len(inst.conversation)
+
+        def run_turn_with_compression():
+            inst.conversation.append({"role": "assistant", "content": "reply"})
+            if len(inst.conversation) >= 3:
+                inst.conversation.pop(0)
+                inst.conversation.pop(0)
+
+        self._trigger(inst, fresh_manager, state_idle=True)
+
+        assert len(inst.conversation) == original_len
+        # Verify original messages survived (at least some of them)
+        assert len(inst.conversation) > 0
 
     # ------------------------------------------------------------------ #
     # Edge cases

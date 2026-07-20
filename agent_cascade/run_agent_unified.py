@@ -209,7 +209,11 @@ def run_agent_thread_unified(
 
         inst = pool.get_instance(instance_name)
         if inst and AUTO_SKILL_ENABLED:
+            # Check pool settings for skill mode gate
+            _load_mode = getattr(pool.settings, 'default_load_skill_mode', 'AUTO')
             skill_manager = getattr(pool, 'skill_manager', None)
+            if _load_mode == 'NONE':
+                skill_manager = None  # Gate: disable auto-skill generation
             task_text = ""
             if inst.conversation:
                 for msg in inst.conversation:
@@ -220,8 +224,6 @@ def run_agent_thread_unified(
                             task_text = content[:500]
                             break
             if skill_manager:
-                # Snapshot current conversation length for rollback
-                _conv_len = len(inst.conversation)
                 # Snapshot current registered skill names for delta detection
                 _skills_before = set(skill_manager.get_skill_names())
 
@@ -238,9 +240,9 @@ def run_agent_thread_unified(
                     append_fn=lambda msg: inst.append_message(Message(role=USER, content=msg)),
                     run_turn_fn=lambda: next(_turn_iter, None),
                     state_idle_fn=lambda: inst.state == AgentState.IDLE,
-                    snapshot_fn=lambda: _conv_len,
-                    rollback_fn=lambda snap: pool._rollback_instance(
-                        instance_name, target_length=snap),
+                    snapshot_fn=None,
+                    rollback_fn=lambda count: pool._rollback_instance(
+                        instance_name, pop_count=count),
                     check_skill_created_fn=lambda: list(
                         set(skill_manager._skills_registry.keys()) - _skills_before),
                 )

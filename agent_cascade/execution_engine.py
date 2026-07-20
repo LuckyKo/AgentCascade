@@ -4257,9 +4257,7 @@ class ExecutionEngine:
             # detailed analysis.
             self._create_completed = True  # Mark for finally-block EXIT log reason tracking
 
-            if AUTO_SKILL_ENABLED and skill_manager:
-                # Snapshot current conversation length for rollback
-                _conv_len = len(inst.conversation)
+            if AUTO_SKILL_ENABLED and skill_manager and load_skill_value_upper != LOAD_SKILL_NONE:
                 # Snapshot current registered skill names for delta detection
                 _skills_before = set(skill_manager.get_skill_names())
 
@@ -4275,9 +4273,9 @@ class ExecutionEngine:
                     run_turn_fn=lambda: setattr(
                         self, '_extra_resp', next(_extra_turn_iter, None)),
                     state_idle_fn=lambda: inst.state == AgentState.IDLE,
-                    snapshot_fn=lambda: _conv_len,
-                    rollback_fn=lambda snap: self.pool._rollback_instance(
-                        instance_name, target_length=snap),
+                    snapshot_fn=None,
+                    rollback_fn=lambda count: self.pool._rollback_instance(
+                        instance_name, pop_count=count),
                     check_skill_created_fn=lambda: list(
                         set(skill_manager._skills_registry.keys()) - _skills_before),
                 )
