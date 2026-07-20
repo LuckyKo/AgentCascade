@@ -61,6 +61,9 @@ class ScanSkills(BaseTool):
         if skill_manager is None:
             return "No skills system available. Skills may not have been initialized."
 
+        # Trigger a fresh discovery (cache-respecting) so new skills appear
+        skill_manager._ensure_discovered()
+
         all_skills = skill_manager.get_all_metadata()
         if not all_skills:
             return "No skills are currently registered in the system."

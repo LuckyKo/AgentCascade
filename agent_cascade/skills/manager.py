@@ -82,8 +82,18 @@ class SkillManager:
         self._cache_timestamp: float = 0.0
         self._cache_ttl: float = SKILL_CACHE_TTL_SECONDS  # from settings
         self._disabled_names: set = set(SKILLS_DISABLED)
+        self._skill_paths: List[Path] = []  # stored for _ensure_discovered()
 
     # ── Discovery ────────────────────────────────────────────────────────────
+
+    def _ensure_discovered(self) -> None:
+        """Trigger discovery if cache expired or paths changed (cache-respecting).
+
+        Safe to call from tools — skips if within TTL. Does nothing if no paths configured.
+        """
+        if not self._skill_paths:
+            return
+        self.discover(self._skill_paths)
 
     def discover(self, skill_paths: List[Path]) -> None:
         """Scan directories for SKILL.md files and register their metadata.
@@ -101,12 +111,17 @@ class SkillManager:
         now = time.monotonic()
         if (current_sig == self._cache_signature
                 and (now - self._cache_timestamp) < self._cache_ttl):
-            logger.info("[SKILLS] Cache hit — skipping discovery (age=%.1fs)",
-                        now - self._cache_timestamp)
+            logger.debug("[SKILLS] Cache hit — skipping discovery (age=%.1fs)",
+                         now - self._cache_timestamp)
             return
 
         logger.info("[SKILLS] Starting skill discovery across %d paths", len(skill_paths))
 
+        # Store paths for _ensure_discovered() hot-reload support
+        self._skill_paths = list(skill_paths)
+
+        # Phase 1: Scan and parse outside lock (I/O bound)
+        collected: list = []
         found_count = 0
         skipped_count = 0
 
@@ -115,7 +130,6 @@ class SkillManager:
                 logger.debug("[SKILLS] Skill directory does not exist, skipping: %s", root)
                 continue
 
-            # Walk for SKILL.md files (look one level deep: root/*/SKILL.md)
             try:
                 for skill_dir in root.iterdir():
                     if not skill_dir.is_dir():
@@ -124,7 +138,6 @@ class SkillManager:
                     if not skill_file.exists():
                         continue
 
-                    # Disabled check (before full registration)
                     try:
                         parsed = parse_skill_file(skill_file)
                     except (FileNotFoundError, OSError) as e:
@@ -132,28 +145,36 @@ class SkillManager:
                                        skill_file, e)
                         skipped_count += 1
                         continue
+
                     frontmatter = parsed.get('frontmatter', {})
                     name = frontmatter.get('name', skill_dir.name)
+
                     if name.lower() in self._disabled_names:
                         logger.debug("[SKILLS] Skill '%s' is disabled, skipping", name)
                         skipped_count += 1
                         continue
 
-                    # Platform check
                     if not _skill_matches_platform(frontmatter):
                         logger.debug("[SKILLS] Skill '%s' not compatible with platform %s, skipping",
                                      name, _sys.platform)
                         skipped_count += 1
                         continue
 
-                    self._register_single(skill_file, priority=_PRIORITY_SYSTEM, parsed=parsed)
+                    collected.append((skill_file, parsed))
                     found_count += 1
             except OSError as e:
                 logger.warning("[SKILLS] Error scanning %s: %s", root, e)
 
-        # Rebuild the matcher index after registration (under lock for concurrency safety)
+        # Phase 2: Clear stale + register + rebuild atomically under lock
         with self._write_lock:
+            self._skills_registry.clear()
+            self._matcher._inverted_index.clear()
+
+            for skill_file, parsed in collected:
+                self._register_single(skill_file, priority=_PRIORITY_SYSTEM, parsed=parsed)
+
             self._rebuild_index()
+
         logger.info(
             "[SKILLS] Discovery complete: %d found, %d skipped, %d in registry",
             found_count, skipped_count, len(self._skills_registry),
