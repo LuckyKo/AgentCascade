@@ -23,7 +23,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] implement a live scratchpad tool that injects text/image data into the last few FUNCTION/USER messages. the tool can load a live view of a file's content, console output of a program by PID, interface capture data of a program by PID, set persistence distance (nr of messages in tail agent pool retaining the data, older messages get the data trimmed). agent can call this tool to enable disable this scratchpad (disable by setting persistence to 0, defaults on 2) 
 [ ] add a stop button to shell_cmd messages so user can terminate them early
 [ ] investigate possible use of `https://github.com/eugeniughelbur/obsidian-second-brain`for our lessons file management
-[x] research how to do auto skill generation so we can advise our agents to build useful skills once they have successfully completed their task (a skill how to make skills?) — DONE: full auto-skill generation system with two-tier validation, mtime cache, platform filtering, prompt injection detection, disabled skills config, propose_skill/scan_skills tools, trigger hook with rollback
+[x] research how to do auto skill generation so we can advise our agents to build useful skills once they have successfully completed their task (a skill how to make skills?) — DONE: full auto-skill generation system with two-tier validation, mtime cache, platform filtering, prompt injection detection, disabled skills config, propose_skill/scan_skills tools, trigger hook with rollback, hot-reload via scan_skills, atomic discovery under RLock
 
 # BUGS:
 
@@ -39,6 +39,8 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] I dont want truncation of the user messages in the que (UI user que display)
 - [x] scan_skills and propose_skill return `Error: Object of type coroutine is not JSON serializable`
 - [x] auto-skill interferes with agent's final reply — DONE: multi-turn execution (AUTO_SKILL_EXTRA_TURNS=25), conversation rollback after skill creation, notice injected into last message 
+- [ ] something fucks up the agent jsonl log file and syncs it with the agent pool, submitting a version without messages between markers - it should NOT be in full sync, as per design doc. is it the auto-skill rollback?
+- [ ] max char limit on inner loop detector fails to trigger   (also move the max char limit to the right inner loop section, or add a different one from the sampler options in global)
 
 # Errors to investigate:
 
