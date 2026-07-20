@@ -606,12 +606,13 @@ class SkillManager:
             logger.warning("[AUTO-SKILL] Extra turn error for %s: %s", instance_name, e)
 
         # Rollback conversation to snapshot length
+        rollback_ok = True
         if rollback_fn is not None and snapshot_length >= 0:
             try:
                 rollback_fn(snapshot_length)
                 logger.debug("[AUTO-SKILL] Conversation rolled back to length %d for %s",
                              snapshot_length, instance_name)
-                # Reset agent state to IDLE if in SLEEPING or COMPLETING (after successful rollback)
+                # Reset agent state to IDLE if in SLEEPING or COMPLETING
                 current_state = getattr(inst, 'state', None)
                 if current_state is not None:
                     state_name = getattr(current_state, 'name', None)
@@ -621,10 +622,11 @@ class SkillManager:
                         logger.debug("[AUTO-SKILL] State reset to IDLE for %s", instance_name)
             except Exception as e:
                 logger.warning("[AUTO-SKILL] Rollback error for %s: %s", instance_name, e)
+                rollback_ok = False
 
-        # Discover which skills were created
+        # Discover which skills were created (only if rollback succeeded)
         created_skills = []
-        if check_skill_created_fn is not None:
+        if rollback_ok and check_skill_created_fn is not None:
             try:
                 created_skills = check_skill_created_fn()
             except Exception as e:

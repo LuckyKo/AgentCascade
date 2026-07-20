@@ -4264,8 +4264,9 @@ class ExecutionEngine:
                 # Create single iterator for all extra turns
                 _extra_turn_iter = self.run(inst)
 
-                # Snapshot conversation length before extra turns
-                _conv_length = len(inst.conversation)
+                # Snapshot conversation length before extra turns (under lock for thread safety)
+                with inst._compression_lock:
+                    _conv_length = len(inst.conversation)
 
                 created_skills = skill_manager.trigger_auto_skill_reflection(
                     inst=inst,

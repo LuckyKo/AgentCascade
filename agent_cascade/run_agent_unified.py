@@ -232,8 +232,9 @@ def run_agent_thread_unified(
                 _engine = ExecutionEngine(pool)
                 _turn_iter = _engine.run(inst)
 
-                # Snapshot conversation length before extra turns
-                _conv_length = len(inst.conversation)
+                # Snapshot conversation length before extra turns (under lock for thread safety)
+                with inst._compression_lock:
+                    _conv_length = len(inst.conversation)
 
                 created_skills = skill_manager.trigger_auto_skill_reflection(
                     inst=inst,
