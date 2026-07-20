@@ -1225,7 +1225,7 @@ function handleServerMessage(data) {
         if (firstLoad) state.viewingAgentIndex = state.agentIndex;
         renderAgentSelect();
       }
-      if (data.session_name) state.sessionName = data.session_name;
+      if (data.session_name && state.sessionName !== data.session_name) { state.sessionName = data.session_name; localStorage.setItem('agent-cascade-session-name', state.sessionName); }
       if (data.agent_index !== undefined) state.agentIndex = data.agent_index;
       // FIX: Use Array.isArray check to update approvals (including empty array to clear all)
       if (Array.isArray(data.approvals)) {
