@@ -201,6 +201,13 @@ def _handle_loop_min_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list
         agent_pool.settings.loop_min_chars = max(500, int(ui_cfg.get('loop_min_chars', 4000)))
 
 
+@register_config_handler('loop_max_chars')
+def _handle_loop_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update maximum character limit for inner loop detection."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_max_chars = max(1000, int(ui_cfg.get('loop_max_chars', 40960)))
+
+
 @register_config_handler('loop_score_threshold')
 def _handle_loop_score_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update cumulative score threshold for loop detection."""

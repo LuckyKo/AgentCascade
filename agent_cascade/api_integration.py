@@ -781,7 +781,8 @@ def build_state_from_pool(
         ps = pool.settings
         pool_settings.update({
             'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False),
-            'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
+'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
+            'loop_max_chars': getattr(ps, 'loop_max_chars', 40960),
             'loop_score_threshold': getattr(ps, 'loop_score_threshold', 300),
             'loop_max_retries': getattr(ps, 'loop_max_retries', 2),
             'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),
@@ -916,6 +917,7 @@ def build_stream_update_from_pool(
         pool_settings.update({
             'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False),
             'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
+            'loop_max_chars': getattr(ps, 'loop_max_chars', 40960),
             'loop_score_threshold': getattr(ps, 'loop_score_threshold', 300),
             'loop_max_retries': getattr(ps, 'loop_max_retries', 2),
             'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),

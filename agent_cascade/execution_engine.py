@@ -2179,6 +2179,7 @@ class ExecutionEngine:
                 _ps = self.pool.settings
                 _inner_settings = _InnerLoopSettings(
                     default_min_chars=getattr(_ps, 'loop_min_chars', 4000),
+                    default_max_chars=getattr(_ps, 'loop_max_chars', 40960),
                     score_threshold=getattr(_ps, 'loop_score_threshold', 300),
                     char_run_enabled=getattr(_ps, 'loop_char_run_enabled', True),
                     sentence_rep_enabled=getattr(_ps, 'loop_sentence_rep_enabled', True),

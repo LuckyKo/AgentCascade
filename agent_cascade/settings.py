@@ -147,6 +147,7 @@ class InnerLoopSettings:
     # Activation thresholds
     default_min_chars: int = 4000          # Min chars to accumulate before full detection
     default_batch_interval: int = 1        # Run heavy checks every N-th feed call
+    default_max_chars: int = 40960         # Hard character limit — force-trigger detection if exceeded (~8K tokens)
 
     # Structural parameters (passed to InnerLoopDetector constructor)
     ngram_size: int = 64                   # Token window size for n-gram repetition

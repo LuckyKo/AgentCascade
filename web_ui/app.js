@@ -128,6 +128,7 @@ function clearAutoSecurityTimers() {
 const POOL_SETTINGS_MAP = [
   { id: 'setting-inner-loop-detect', prop: 'checked', key: 'inner_loop_detect_enabled' },
   { id: 'setting-loop-min-chars', prop: 'value', key: 'loop_min_chars' },
+  { id: 'setting-loop-max-chars', prop: 'value', key: 'loop_max_chars' },
   { id: 'setting-loop-score-threshold', prop: 'value', key: 'loop_score_threshold' },
   { id: 'setting-loop-max-retries', prop: 'value', key: 'loop_max_retries' },
   { id: 'setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled' },
@@ -794,6 +795,7 @@ function saveSettings(sendToServer) {
 
   // Loop detection tuning settings
   if ($('#setting-loop-min-chars')) s['loop-min-chars'] = $('#setting-loop-min-chars').value;
+  if ($('#setting-loop-max-chars')) s['loop-max-chars'] = $('#setting-loop-max-chars').value;
   if ($('#setting-loop-score-threshold')) s['loop-score-threshold'] = $('#setting-loop-score-threshold').value;
   if ($('#setting-loop-max-retries')) s['loop-max-retries'] = $('#setting-loop-max-retries').value;
   if ($('#setting-loop-char-run')) s['loop-char-run-enabled'] = $('#setting-loop-char-run').checked;
@@ -893,6 +895,7 @@ function loadSettings() {
     if (s['enable_agent_budgeting'] !== undefined) $('#setting-agent-budgeting').checked = s['enable_agent_budgeting'];
     // Loop detection tuning settings restore
     if (s['loop-min-chars'] !== undefined) $('#setting-loop-min-chars').value = s['loop-min-chars'];
+    if (s['loop-max-chars'] !== undefined) $('#setting-loop-max-chars').value = s['loop-max-chars'];
     if (s['loop-score-threshold'] !== undefined) $('#setting-loop-score-threshold').value = s['loop-score-threshold'];
     if (s['loop-max-retries'] !== undefined) $('#setting-loop-max-retries').value = s['loop-max-retries'];
     if (s['loop-char-run-enabled'] !== undefined) $('#setting-loop-char-run').checked = s['loop-char-run-enabled'];
@@ -4074,6 +4077,7 @@ function getGenerateCfg() {
   if ($('#setting-inner-loop-detect')) cfg.inner_loop_detect_enabled = $('#setting-inner-loop-detect').checked;
   // Loop detection tuning settings
   if ($('#setting-loop-min-chars')) cfg.loop_min_chars = parseInt($('#setting-loop-min-chars').value) || 4000;
+  if ($('#setting-loop-max-chars')) cfg.loop_max_chars = parseInt($('#setting-loop-max-chars').value) || 40960;
   if ($('#setting-loop-score-threshold')) cfg.loop_score_threshold = parseInt($('#setting-loop-score-threshold').value) || 300;
   if ($('#setting-loop-max-retries')) cfg.loop_max_retries = parseInt($('#setting-loop-max-retries').value) || 2;
   if ($('#setting-loop-char-run')) cfg.loop_char_run_enabled = $('#setting-loop-char-run').checked;

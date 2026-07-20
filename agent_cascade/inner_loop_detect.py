@@ -33,6 +33,7 @@ class InnerLoopDetector:
         char_run_limit: int | None = None,
         score_threshold: int | None = None,
         min_chars: int | None = None,
+        max_chars: int | None = None,
         batch_interval: int | None = None,
         settings: InnerLoopSettings | None = None,
     ):
@@ -60,6 +61,8 @@ class InnerLoopDetector:
 
         # Minimum characters to accumulate before running heavy checks.
         self.min_chars = min_chars if min_chars is not None else settings.default_min_chars
+        # Maximum characters — hard limit that force-triggers detection.
+        self.max_chars = max_chars if max_chars is not None else settings.default_max_chars
         # Run full detection only every batch_interval-th feed call.
         self.batch_interval = max(1, batch_interval if batch_interval is not None else settings.default_batch_interval)
 
@@ -214,6 +217,14 @@ class InnerLoopDetector:
         self.text += chunk
         self._chars_fed += len(chunk)
         self._feed_count += 1
+
+        # Max char guard: force-trigger if output exceeds limit
+        if self._chars_fed >= self.max_chars:
+            return {
+                "loop": True,
+                "reason": f"max chars exceeded ({self._chars_fed}/{self.max_chars})",
+                "score": round(self.score + 100, 1),
+            }
 
         # Normalize file extension dots before sentence splitting to avoid
         # "execution_engine.py" being split into separate fragments.
