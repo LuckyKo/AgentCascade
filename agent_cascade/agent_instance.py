@@ -290,6 +290,8 @@ class AgentInstance:
     # ── Auto-Continue State Tracking ──────────────────────────────────────────
     _auto_continue_triggered: bool = field(default=False)  # Set when auto-continue fires, signals caller to reset turn counter
     _auto_continue_count: int = field(default=0)  # Consecutive auto-continue reset counter (capped to prevent infinite loops)
+    _continue_extra_appended: bool = field(default=False)  # Set when continue-saved fallback append happens, for rollback accounting
+    _continue_fallback_append: bool = field(default=False)  # Set when continue fallback append occurs, for rollback accounting
 
     # ── Compression-Specific Notification Queue ───────────────────────────────
     # Used by compression/handler.py to queue notifications during forced compression.

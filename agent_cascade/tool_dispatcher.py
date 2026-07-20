@@ -220,7 +220,7 @@ class ToolDispatcher:
         # When the caller holds a concurrency slot, using ASYNC path causes deadlock:
         # 1. Caller holds the slot and continues making LLM calls
         # 2. Child is submitted to ThreadPoolExecutor but can't acquire the slot
-        # 3. Child's engine.run() tries to acquire the slot at line 348, but same thread 
+        # 3. Child's engine.run() tries to acquire the slot at line 348, but same thread
         #    already holds it via run_child_agent() (agent_pool.py:1284) → DEADLOCK with Semaphore(1)
         #
         # Fix: Check if caller holds a slot. If so, use SYNC mode — run child directly
@@ -235,6 +235,18 @@ class ToolDispatcher:
             with caller_slot_holder._state_lock:
                 if caller_slot_holder._slot_release is not None:
                     caller_holds_slot = True
+        
+        # ── Sequential Endpoint Guard ────────────────────────────────────────
+        # For concurrency_limit=0 endpoints, ALL agent classes share the same slot.
+        # Taking ASYNC path causes the child to compete with the caller for the
+        # single shared slot, leading to 30s timeouts. Force SYNC path for
+        # sequential endpoints to avoid this race condition.
+        if caller_slot_holder:
+            router = self.pool.api_router
+            if router:
+                child_concurrency = router.get_effective_concurrency(agent_class)
+                if child_concurrency == 0:
+                    caller_holds_slot = True  # Force SYNC for sequential child
         
         if caller_holds_slot:
             # Extracted to _run_child_sync() - Phase 4.3

@@ -195,11 +195,18 @@ LOAD_SKILL_AUTO: str = "AUTO"     # Auto-match relevant skills from task context
 LOAD_SKILL_NONE: str = "NONE"     # No skill loading (saves tokens)
 DEFAULT_LOAD_SKILL_MODE: str = os.getenv('QWEN_AGENT_DEFAULT_LOAD_SKILL', 'AUTO')  # Default load_skill mode: AUTO or NONE
 SKILL_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_SKILL_MATCH_THRESHOLD', '0.15'))  # Minimum relevance score for AUTO mode skill loading
+SKILL_CACHE_TTL_SECONDS: float = float(os.getenv(
+    'QWEN_AGENT_SKILL_CACHE_TTL', 30.0))  # Cache TTL for mtime-based discovery cache
+
+_SKILLS_DISABLED_RAW: str = os.getenv('QWEN_AGENT_SKILLS_DISABLED', '')
+SKILLS_DISABLED: List[str] = [
+    s.strip().lower() for s in _SKILLS_DISABLED_RAW.split(',') if s.strip()
+] if _SKILLS_DISABLED_RAW else []
 
 # ── Auto-skill generation settings (Feature: Auto-Skill Generation Phase 1) ──
 AUTO_SKILL_ENABLED: bool = True                          # Toggle auto-skill generation on/off
 AUTO_SKILL_EXTRA_TURNS: int = int(os.getenv(
-    'QWEN_AGENT_AUTO_SKILL_EXTRA_TURNS', 3))            # Extra turns for auto-skill execution before rollback
+    'QWEN_AGENT_AUTO_SKILL_EXTRA_TURNS', 25))            # Extra turns for auto-skill execution before rollback
 AUTO_SKILL_MIN_TOOL_CALLS: int = 5                       # Minimum tool calls before triggering reflection
 AUTO_SKILL_PROMOTION_THRESHOLD: float = 0.3              # Self-match score threshold for auto-promotion
 AUTO_SKILL_AUTO_PROMOTE: bool = True                     # Auto-promote validated skills to .qwen/skills/

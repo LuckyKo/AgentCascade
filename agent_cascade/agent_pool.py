@@ -335,28 +335,7 @@ class AgentPool:
         _project_root = Path(__file__).resolve().parent.parent
         _skills_dir = _project_root / '.qwen' / 'skills'
         if _skills_dir.exists():
-            import asyncio as _asyncio
-            try:
-                _loop = _asyncio.get_running_loop()
-            except RuntimeError:
-                _loop = None
-            if _loop is not None:
-                # Event loop running — schedule discovery as a background task
-                _task = self.skill_manager.discover([_skills_dir])
-                _created_task = _loop.create_task(_task)
-                # Store reference to prevent GC and allow awaiting later
-                self._skill_discovery_task = _created_task
-                def _on_done(fut):
-                    if fut.cancelled():
-                        logger.debug("[SKILLS] Skill discovery task was cancelled")
-                    elif fut.exception():
-                        logger.warning("[SKILLS] Skill discovery raised: %s", fut.exception())
-                    else:
-                        logger.debug("[SKILLS] Background skill discovery completed")
-                _created_task.add_done_callback(_on_done)
-            else:
-                # No event loop yet — run synchronously via new loop
-                _asyncio.run(self.skill_manager.discover([_skills_dir]))
+            self.skill_manager.discover([_skills_dir])
 
         # ── Agent discovery (unchanged) ──────────────────────────────────────
         self.agents_dir = Path(agents_dir)

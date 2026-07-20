@@ -27,6 +27,7 @@ from agent_cascade.log import logger
 from agent_cascade.settings import AUTO_SKILL_ENABLED
 
 from .agent_pool import AgentPool
+from .agent_instance import AgentState
 
 
 
@@ -236,7 +237,7 @@ def run_agent_thread_unified(
                     instance_name=instance_name,
                     append_fn=lambda msg: inst.append_message(Message(role=USER, content=msg)),
                     run_turn_fn=lambda: next(_turn_iter, None),
-                    state_idle_fn=lambda: inst.state.name == 'IDLE',
+                    state_idle_fn=lambda: inst.state == AgentState.IDLE,
                     snapshot_fn=lambda: _conv_len,
                     rollback_fn=lambda snap: pool._rollback_instance(
                         instance_name, target_length=snap),

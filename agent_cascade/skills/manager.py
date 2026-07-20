@@ -8,7 +8,9 @@ Handles:
   - Resolving load_skill arguments (list / AUTO / NONE)
 """
 
+import sys as _sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -21,12 +23,15 @@ from agent_cascade.settings import (
     AUTO_SKILL_MIN_TOOL_CALLS,
     LOAD_SKILL_AUTO,
     LOAD_SKILL_NONE,
+    SKILL_CACHE_TTL_SECONDS,
     SKILL_MATCH_THRESHOLD,
+    SKILLS_DISABLED,
 )
 
 from .parser import parse_skill_file
 from .matcher import SkillMatcher
 from .validator import validate_skill
+from .cache_helper import compute_scan_signature
 
 
 # Priority levels for duplicate skill name resolution:
@@ -34,6 +39,32 @@ from .validator import validate_skill
 _PRIORITY_SYSTEM = 1       # System-level skills (.qwen/skills/)
 _PRIORITY_AGENT = 2        # Agent-specific skills (agents/*/skills/)
 _PRIORITY_USER = 3         # User-defined skills (workspace/skills/)
+
+# Platform filtering: maps frontmatter platform names to sys.platform values
+_PLATFORM_MAP = {
+    "macos": "darwin",
+    "linux": "linux",
+    "windows": "win32",
+}
+
+
+def _skill_matches_platform(frontmatter: dict) -> bool:
+    """Check if a skill is compatible with the current OS.
+
+    If 'platforms' field is absent or empty, skill is compatible with all.
+    """
+    platforms = frontmatter.get("platforms")
+    if not platforms:
+        return True
+    if not isinstance(platforms, list):
+        platforms = [platforms]
+    current = _sys.platform
+    for platform in platforms:
+        normalized = str(platform).lower().strip()
+        mapped = _PLATFORM_MAP.get(normalized, normalized)
+        if current.startswith(mapped):
+            return True
+    return False
 
 
 class SkillManager:
@@ -46,11 +77,15 @@ class SkillManager:
     def __init__(self):
         self._skills_registry: Dict[str, Dict[str, Any]] = {}  # name -> parsed skill data
         self._matcher = SkillMatcher()
-        self._write_lock = threading.Lock()
+        self._write_lock = threading.RLock()
+        self._cache_signature: Tuple = None
+        self._cache_timestamp: float = 0.0
+        self._cache_ttl: float = SKILL_CACHE_TTL_SECONDS  # from settings
+        self._disabled_names: set = set(SKILLS_DISABLED)
 
     # ── Discovery ────────────────────────────────────────────────────────────
 
-    async def discover(self, skill_paths: List[Path]) -> None:
+    def discover(self, skill_paths: List[Path]) -> None:
         """Scan directories for SKILL.md files and register their metadata.
 
         Walks each provided directory looking for `*/SKILL.md` patterns.
@@ -61,8 +96,17 @@ class SkillManager:
         Args:
             skill_paths: List of root directories to scan for skills.
         """
+        # Cache check (use monotonic clock for reliability)
+        current_sig = compute_scan_signature(skill_paths, frozenset(self._disabled_names))
+        now = time.monotonic()
+        if (current_sig == self._cache_signature
+                and (now - self._cache_timestamp) < self._cache_ttl):
+            logger.info("[SKILLS] Cache hit — skipping discovery (age=%.1fs)",
+                        now - self._cache_timestamp)
+            return
+
         logger.info("[SKILLS] Starting skill discovery across %d paths", len(skill_paths))
-        
+
         found_count = 0
         skipped_count = 0
 
@@ -80,7 +124,29 @@ class SkillManager:
                     if not skill_file.exists():
                         continue
 
-                    await self._register_single(skill_file, priority=_PRIORITY_SYSTEM)
+                    # Disabled check (before full registration)
+                    try:
+                        parsed = parse_skill_file(skill_file)
+                    except (FileNotFoundError, OSError) as e:
+                        logger.warning("[SKILLS] Failed to read skill file %s: %s",
+                                       skill_file, e)
+                        skipped_count += 1
+                        continue
+                    frontmatter = parsed.get('frontmatter', {})
+                    name = frontmatter.get('name', skill_dir.name)
+                    if name.lower() in self._disabled_names:
+                        logger.debug("[SKILLS] Skill '%s' is disabled, skipping", name)
+                        skipped_count += 1
+                        continue
+
+                    # Platform check
+                    if not _skill_matches_platform(frontmatter):
+                        logger.debug("[SKILLS] Skill '%s' not compatible with platform %s, skipping",
+                                     name, _sys.platform)
+                        skipped_count += 1
+                        continue
+
+                    self._register_single(skill_file, priority=_PRIORITY_SYSTEM, parsed=parsed)
                     found_count += 1
             except OSError as e:
                 logger.warning("[SKILLS] Error scanning %s: %s", root, e)
@@ -89,22 +155,33 @@ class SkillManager:
         with self._write_lock:
             self._rebuild_index()
         logger.info(
-            "[SKILLS] Discovery complete: %d skills registered, %d in registry",
-            found_count, len(self._skills_registry),
+            "[SKILLS] Discovery complete: %d found, %d skipped, %d in registry",
+            found_count, skipped_count, len(self._skills_registry),
         )
 
-    async def _register_single(self, skill_file: Path, priority: int = _PRIORITY_SYSTEM) -> None:
+        self._cache_signature = current_sig
+        self._cache_timestamp = now
+
+    def _register_single(
+        self,
+        skill_file: Path,
+        priority: int = _PRIORITY_SYSTEM,
+        parsed: Optional[dict] = None,
+    ) -> None:
         """Parse and register a single SKILL.md file.
 
         Args:
             skill_file: Path to the SKILL.md file.
             priority: Priority level for duplicate resolution.
+            parsed: Pre-parsed skill data (optional; skips re-parsing if provided).
         """
-        try:
-            parsed = parse_skill_file(skill_file)
-        except (FileNotFoundError, OSError) as e:
-            logger.warning("[SKILLS] Failed to read skill file %s: %s", skill_file, e)
-            return
+        if parsed is None:
+            try:
+                parsed = parse_skill_file(skill_file)
+            except (FileNotFoundError, OSError) as e:
+                logger.warning("[SKILLS] Failed to read skill file %s: %s",
+                               skill_file, e)
+                return
 
         frontmatter = parsed.get('frontmatter', {})
         name = frontmatter.get('name')
@@ -113,6 +190,19 @@ class SkillManager:
             name = skill_file.parent.name
             logger.debug("[SKILLS] Skill file %s has no 'name' in frontmatter, using dir: %s",
                          skill_file, name)
+
+        # Platform & disabled checks — skip when caller already filtered
+        if parsed is not None:
+            pass  # discover() already checked these before calling us
+        else:
+            if not _skill_matches_platform(frontmatter):
+                logger.debug("[SKILLS] Skill '%s' not compatible with platform %s, skipping",
+                             name, _sys.platform)
+                return
+
+            if name.lower() in self._disabled_names:
+                logger.debug("[SKILLS] Skill '%s' is disabled, skipping", name)
+                return
 
         existing = self._skills_registry.get(name)
         if existing is not None:
@@ -159,7 +249,8 @@ class SkillManager:
         Returns:
             Metadata dict or None if not found.
         """
-        return self._skills_registry.get(skill_name)
+        with self._write_lock:
+            return self._skills_registry.get(skill_name)
 
     def get_skill_names(self) -> List[str]:
         """Return a list of all registered skill names.
@@ -180,9 +271,10 @@ class SkillManager:
         Returns:
             List of (skill_name, relevance_score) tuples sorted by score descending.
         """
-        if not self._skills_registry and not self._matcher._inverted_index:
-            self._rebuild_index()
-        return self._matcher.match(query)
+        with self._write_lock:
+            if not self._skills_registry and not self._matcher._inverted_index:
+                self._rebuild_index()
+            return self._matcher.match(query)
 
     def get_all_metadata(self) -> List[Dict[str, Any]]:
         """Return all Tier 1 metadata (for scan_skills tool).
@@ -190,14 +282,16 @@ class SkillManager:
         Returns a list of dicts with 'name' and 'description' keys, suitable
         for display or matching. Internal fields (_priority, _parsed_data) are excluded.
         """
-        result = []
-        for name, data in self._skills_registry.items():
-            result.append({
-                'name': data.get('name', name),
-                'description': data.get('description', ''),
-                'triggers': data.get('triggers', []),
-            })
-        return result
+        with self._write_lock:
+            result = []
+            for name, data in self._skills_registry.items():
+                result.append({
+                    'name': data.get('name', name),
+                    'description': data.get('description', ''),
+                    'triggers': data.get('triggers', []),
+                    'source': data.get('source', 'system'),
+                })
+            return result
 
     # ── Tier 2 Loading (Full Instructions) ───────────────────────────────────
 
@@ -346,7 +440,7 @@ class SkillManager:
 
             # 3. Validate BEFORE modifying registry
             existing = set(self._skills_registry.keys())
-            passed, errors = validate_skill(skill_content, name, existing, validation_task)
+            passed, errors = validate_skill(skill_content, name, existing, validation_task, check_injection=True)
             if not passed:
                 logger.debug("[SKILLS] Validation failed for '%s': %s", name, errors)
                 # Clean up pending file
@@ -465,7 +559,7 @@ class SkillManager:
 
         if total_tool_calls < AUTO_SKILL_MIN_TOOL_CALLS:
             return []
-        if matches:
+        if matches and matches[0][1] > SKILL_MATCH_THRESHOLD:
             return []
         if not state_idle_fn():
             return []

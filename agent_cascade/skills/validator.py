@@ -12,6 +12,7 @@ from agent_cascade.log import logger
 from agent_cascade.settings import (
     AUTO_SKILL_MAX_SIZE_KB,
     AUTO_SKILL_PROMOTION_THRESHOLD,
+    MIN_DESCRIPTION_LENGTH,
     MIN_SKILL_BODY_LENGTH,
 )
 
@@ -21,12 +22,26 @@ from .parser import parse_frontmatter
 # Snake-case pattern: starts with lowercase letter, allows lowercase digits, underscore, hyphen
 _SNAKE_CASE_RE = re.compile(r'^[a-z][a-z0-9_-]*$')
 
+# Prompt injection patterns (borrowed from Hermes)
+_INJECTION_PATTERNS: list = [
+    "ignore previous instructions",
+    "ignore all previous",
+    "you are now",
+    "disregard your",
+    "forget your instructions",
+    "new instructions:",
+    "system prompt:",
+    "<system>",
+    "]]>",
+]
+
 
 def validate_skill(
     skill_content: str,
     skill_name: str,
     existing_names: set,
     task_text: str = "",
+    check_injection: bool = True,
 ) -> Tuple[bool, List[str]]:
     """Validate a proposed skill. Returns (passed, error_messages).
 
@@ -35,6 +50,7 @@ def validate_skill(
         skill_name: The skill name to validate.
         existing_names: Set of already-registered skill names.
         task_text: Optional task text for Tier 2 self-match validation.
+        check_injection: If True (default), run prompt injection check.
 
     Returns:
         Tuple of (passed, error_list). If passed is True, error_list is empty.
@@ -64,8 +80,8 @@ def validate_skill(
     description = frontmatter.get('description', '')
     if not description:
         errors.append("Missing required field: 'description'")
-    elif len(description) < 20:
-        errors.append(f"Description too short ({len(description)} chars, minimum 20)")
+    elif len(description) < MIN_DESCRIPTION_LENGTH:
+        errors.append(f"Description too short ({len(description)} chars, minimum {MIN_DESCRIPTION_LENGTH})")
 
     # Triggers check
     triggers = frontmatter.get('triggers', [])
@@ -81,6 +97,13 @@ def validate_skill(
         errors.append("Skill body is empty")
     elif len(body) < MIN_SKILL_BODY_LENGTH:
         errors.append(f"Skill body too short ({len(body)} chars, minimum {MIN_SKILL_BODY_LENGTH})")
+
+    # Prompt injection check (require 2+ matches to avoid false positives)
+    if check_injection:
+        content_lower = skill_content.lower()
+        injections = [p for p in _INJECTION_PATTERNS if p in content_lower]
+        if len(injections) >= 2:
+            errors.append(f"Prompt injection detected (patterns: {', '.join(injections[:3])})")
 
     if errors:
         logger.debug("[SKILLS] Tier 1 validation failed for '%s': %s", skill_name, errors)
