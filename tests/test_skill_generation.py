@@ -76,7 +76,12 @@ def _make_skill_content(
 
 
 def _cleanup_test_artifacts():
-    """Remove any pending-skills and promoted skills left by tests."""
+    """Remove any pending-skills and promoted skills left by tests.
+
+    Keeps canonical skill-creator and version-control skills intact.
+    """
+    _CANONICAL = {"skill-creator", "version-control"}
+
     pending_root = Path(".qwen/pending-skills")
     if pending_root.exists():
         for entry in list(pending_root.iterdir()):
@@ -90,7 +95,7 @@ def _cleanup_test_artifacts():
     skills_root = Path(".qwen/skills")
     if skills_root.exists():
         for entry in list(skills_root.iterdir()):
-            if entry.is_dir():
+            if entry.is_dir() and entry.name not in _CANONICAL:
                 skill_file = entry / "SKILL.md"
                 if skill_file.exists():
                     skill_file.unlink()
