@@ -853,7 +853,7 @@ class ExecutionEngine:
     #  Main Execution Loop — Core turn loop orchestration and phase dispatch
     # ═══════════════════════════════════════════════════════════════════════
 
-    def run(self, instance: AgentInstance) -> Iterator[Union[List[Message], tuple[List[Message], bool]]]:
+    def run(self, instance: AgentInstance) -> Iterator[Union[List[Message], tuple[List[Message], bool], None]]:
         """Execute the agent's turn loop as a generator yielding state updates.
 
         This is THE execution entry point for ALL agents. No separate paths
@@ -2370,6 +2370,12 @@ class ExecutionEngine:
                             self._update_streaming_responses(instance, last_output)
                             last_streaming_update_time = current_time
 
+                    # Cooperatively wait if paused — yield to keep UI alive
+                    if self.pool.is_paused():
+                        self.pool.wait_if_paused(timeout=0.1)
+                        yield None
+                        continue
+
                     # Re-check stop/halt after UI update (defense in depth —
                     # catches stop during slow streaming)
                     if self._is_stopped(inst_name):
@@ -3011,9 +3017,10 @@ class ExecutionEngine:
                 continue
 
             # Cooperatively wait if paused — don't skip tool execution, just
-            # wait
+            # wait; yield periodically to keep UI streaming alive
             while self.pool.is_paused():
-                self.pool.wait_if_paused(timeout=1.0)
+                self.pool.wait_if_paused(timeout=0.1)
+                yield None
 
             # Stop/halt check BEFORE tool execution (check before setting
             # used_any_tool)
