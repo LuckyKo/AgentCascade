@@ -590,16 +590,13 @@ class TestCallAgentReturn:
 
     def _trigger(self, inst, fresh_manager, total_tool_calls=10,
                  check_result=None, state_idle=True):
-        """Run trigger_auto_skill_reflection with standard pop-based rollback."""
+        """Run trigger_auto_skill_reflection with snapshot-based rollback."""
         if check_result is None:
             check_result = []
-    
-        def snapshot_fn():
-            return None
 
-        def rollback_fn(count):
-            if count > 0:
-                del inst.conversation[-count:]
+        def rollback_fn(target_length):
+            if target_length > 0 and len(inst.conversation) > target_length:
+                del inst.conversation[target_length:]
 
         return fresh_manager.trigger_auto_skill_reflection(
             inst=inst,
@@ -611,7 +608,7 @@ class TestCallAgentReturn:
             run_turn_fn=lambda: inst.conversation.append(
                 {"role": "assistant", "content": "reply"}),
             state_idle_fn=lambda: state_idle,
-            snapshot_fn=snapshot_fn,
+            snapshot_length=len(inst.conversation),
             rollback_fn=rollback_fn,
             check_skill_created_fn=lambda: check_result,
         )
@@ -695,12 +692,11 @@ class TestCallAgentReturn:
 
         captured_counts = []
 
-        def rollback_fn(count):
-            captured_counts.append(count)
-            # Pop 'count' messages from end
-            if count > 0:
-                del inst.conversation[-count:]
-
+        def rollback_fn(target_length):
+            captured_counts.append(target_length)
+            # Truncate to target_length
+            if target_length > 0 and len(inst.conversation) > target_length:
+                del inst.conversation[target_length:]
         fresh_manager.trigger_auto_skill_reflection(
             inst=inst,
             total_tool_calls=10,
@@ -711,7 +707,7 @@ class TestCallAgentReturn:
             run_turn_fn=lambda: inst.conversation.append(
                 {"role": "assistant", "content": "reply"}),
             state_idle_fn=lambda: True,
-            snapshot_fn=None,
+            snapshot_length=len(inst.conversation),
             rollback_fn=rollback_fn,
             check_skill_created_fn=lambda: [],
         )

@@ -534,7 +534,7 @@ class SkillManager:
         append_fn,
         run_turn_fn,
         state_idle_fn,
-        snapshot_fn=None,
+        snapshot_length: int = -1,
         rollback_fn=None,
         check_skill_created_fn=None,
     ) -> List[str]:
@@ -543,10 +543,11 @@ class SkillManager:
         Shared trigger hook used by both execution_engine and run_agent_unified.
 
         Flow:
-          1. Snapshot conversation state
+          1. Snapshot conversation length (passed as snapshot_length)
           2. Run AUTO_SKILL_EXTRA_TURNS turns freely
-          3. Rollback conversation to snapshot
-          4. Return the names of any skills created on disk
+          3. Rollback conversation to snapshot length
+          4. Reset agent state to IDLE if in SLEEPING/COMPLETING
+          5. Return the names of any skills created on disk
 
         Args:
             inst: The agent instance.
@@ -556,10 +557,10 @@ class SkillManager:
             append_fn: Callable(msg) -> None to append a user message.
             run_turn_fn: Callable() -> Optional[result] to execute one extra turn.
             state_idle_fn: Callable() -> bool to check if the instance is IDLE.
-            snapshot_fn: Callable() -> snapshot of current conversation state
-                         (message counts). Returns None if not supported.
-            rollback_fn: Callable(snapshot) -> None to truncate conversation
-                         back to the snapshot state. No-op if not supported.
+            snapshot_length: Conversation length before extra turns.
+                             Rollback uses target_length for clean truncation.
+            rollback_fn: Callable(target_length) -> None to truncate conversation
+                         to the given length. No-op if not supported.
             check_skill_created_fn: Callable() -> List[str] returning names of
                                     newly registered skills since snapshot.
 
@@ -595,9 +596,6 @@ class SkillManager:
                   f"If the approach could help future similar tasks, "
                   f"propose a reusable skill by calling propose_skill.")
 
-        # Snapshot conversation state before extra turns
-        snapshot = snapshot_fn() if snapshot_fn else None
-
         try:
             append_fn(prompt)
             for turn_i in range(AUTO_SKILL_EXTRA_TURNS):
@@ -607,13 +605,26 @@ class SkillManager:
         except Exception as e:
             logger.warning("[AUTO-SKILL] Extra turn error for %s: %s", instance_name, e)
 
-        # Rollback conversation to snapshot
-        if snapshot is not None and rollback_fn is not None:
+        # Rollback conversation to snapshot length (cleaner than marker-based scanning)
+        if rollback_fn is not None and snapshot_length > 0:
             try:
-                rollback_fn(snapshot)
-                logger.debug("[AUTO-SKILL] Conversation rolled back for %s", instance_name)
+                rollback_fn(snapshot_length)
+                logger.debug("[AUTO-SKILL] Conversation rolled back to length %d for %s",
+                             snapshot_length, instance_name)
             except Exception as e:
                 logger.warning("[AUTO-SKILL] Rollback error for %s: %s", instance_name, e)
+
+        # Reset agent state to IDLE if in SLEEPING or COMPLETING
+        try:
+            current_state = getattr(inst, 'state', None)
+            if current_state is not None:
+                state_name = getattr(current_state, 'name', None)
+                if state_name in ('SLEEPING', 'COMPLETING'):
+                    from agent_cascade.agent_instance import AgentState
+                    inst._transition(AgentState.IDLE)
+                    logger.debug("[AUTO-SKILL] State reset to IDLE for %s", instance_name)
+        except Exception as e:
+            logger.debug("[AUTO-SKILL] State reset skipped for %s: %s", instance_name, e)
 
         # Discover which skills were created
         created_skills = []

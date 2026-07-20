@@ -4264,6 +4264,9 @@ class ExecutionEngine:
                 # Create single iterator for all extra turns
                 _extra_turn_iter = self.run(inst)
 
+                # Snapshot conversation length before extra turns
+                _conv_length = len(inst.conversation)
+
                 created_skills = skill_manager.trigger_auto_skill_reflection(
                     inst=inst,
                     total_tool_calls=total_tool_calls,
@@ -4273,9 +4276,9 @@ class ExecutionEngine:
                     run_turn_fn=lambda: setattr(
                         self, '_extra_resp', next(_extra_turn_iter, None)),
                     state_idle_fn=lambda: inst.state == AgentState.IDLE,
-                    snapshot_fn=None,
-                    rollback_fn=lambda count: self.pool._rollback_instance(
-                        instance_name, pop_count=count),
+                    snapshot_length=_conv_length,
+                    rollback_fn=lambda target_length: self.pool._rollback_instance(
+                        instance_name, target_length=target_length),
                     check_skill_created_fn=lambda: list(
                         set(skill_manager._skills_registry.keys()) - _skills_before),
                 )

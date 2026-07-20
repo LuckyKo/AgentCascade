@@ -232,6 +232,9 @@ def run_agent_thread_unified(
                 _engine = ExecutionEngine(pool)
                 _turn_iter = _engine.run(inst)
 
+                # Snapshot conversation length before extra turns
+                _conv_length = len(inst.conversation)
+
                 created_skills = skill_manager.trigger_auto_skill_reflection(
                     inst=inst,
                     total_tool_calls=total_tool_calls,
@@ -240,9 +243,9 @@ def run_agent_thread_unified(
                     append_fn=lambda msg: inst.append_message(Message(role=USER, content=msg)),
                     run_turn_fn=lambda: next(_turn_iter, None),
                     state_idle_fn=lambda: inst.state == AgentState.IDLE,
-                    snapshot_fn=None,
-                    rollback_fn=lambda count: pool._rollback_instance(
-                        instance_name, pop_count=count),
+                    snapshot_length=_conv_length,
+                    rollback_fn=lambda target_length: pool._rollback_instance(
+                        instance_name, target_length=target_length),
                     check_skill_created_fn=lambda: list(
                         set(skill_manager._skills_registry.keys()) - _skills_before),
                 )
