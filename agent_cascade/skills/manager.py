@@ -545,9 +545,10 @@ class SkillManager:
         Flow:
           1. Snapshot conversation length (passed as snapshot_length)
           2. Run AUTO_SKILL_EXTRA_TURNS turns freely
-          3. Rollback conversation to snapshot length
-          4. Reset agent state to IDLE if in SLEEPING/COMPLETING
-          5. Return the names of any skills created on disk
+          3. Compute pop_count from delta (robust against compression)
+          4. Rollback using pop_count via existing _rollback_instance logic
+          5. Reset agent state to IDLE if in SLEEPING/COMPLETING
+          6. Return the names of any skills created on disk
 
         Args:
             inst: The agent instance.
@@ -558,9 +559,8 @@ class SkillManager:
             run_turn_fn: Callable() -> Optional[result] to execute one extra turn.
             state_idle_fn: Callable() -> bool to check if the instance is IDLE.
             snapshot_length: Conversation length before extra turns.
-                             Rollback uses target_length for clean truncation.
-            rollback_fn: Callable(target_length) -> None to truncate conversation
-                         to the given length. No-op if not supported.
+            rollback_fn: Callable(pop_count) -> None to remove N messages
+                         from end using existing _rollback_instance logic.
             check_skill_created_fn: Callable() -> List[str] returning names of
                                     newly registered skills since snapshot.
 
@@ -605,13 +605,19 @@ class SkillManager:
         except Exception as e:
             logger.warning("[AUTO-SKILL] Extra turn error for %s: %s", instance_name, e)
 
-        # Rollback conversation to snapshot length
+        # Compute pop_count from delta (robust against compression during extra turns)
         rollback_ok = True
-        if rollback_fn is not None and snapshot_length >= 0:
+        if snapshot_length >= 0:
             try:
-                rollback_fn(snapshot_length)
-                logger.debug("[AUTO-SKILL] Conversation rolled back to length %d for %s",
-                             snapshot_length, instance_name)
+                current_len = len(inst.conversation)
+                pop_count = max(0, current_len - snapshot_length)
+                if pop_count > 0:
+                    rollback_fn(pop_count)
+                    logger.debug("[AUTO-SKILL] Rolled back %d messages for %s",
+                                 pop_count, instance_name)
+                elif current_len < snapshot_length:
+                    logger.debug("[AUTO-SKILL] Compression removed %d messages during extra turns for %s",
+                                 snapshot_length - current_len, instance_name)
                 # Reset agent state to IDLE if in SLEEPING or COMPLETING
                 current_state = getattr(inst, 'state', None)
                 if current_state is not None:

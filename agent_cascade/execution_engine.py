@@ -4258,15 +4258,13 @@ class ExecutionEngine:
             self._create_completed = True  # Mark for finally-block EXIT log reason tracking
 
             if AUTO_SKILL_ENABLED and skill_manager and load_skill_value_upper != LOAD_SKILL_NONE:
-                # Snapshot current registered skill names for delta detection
+                # Snapshot under lock: conversation length + skills registry
+                with inst._compression_lock:
+                    _conv_length = len(inst.conversation)
                 _skills_before = set(skill_manager.get_skill_names())
 
                 # Create single iterator for all extra turns
                 _extra_turn_iter = self.run(inst)
-
-                # Snapshot conversation length before extra turns (under lock for thread safety)
-                with inst._compression_lock:
-                    _conv_length = len(inst.conversation)
 
                 created_skills = skill_manager.trigger_auto_skill_reflection(
                     inst=inst,
@@ -4278,8 +4276,8 @@ class ExecutionEngine:
                         self, '_extra_resp', next(_extra_turn_iter, None)),
                     state_idle_fn=lambda: inst.state == AgentState.IDLE,
                     snapshot_length=_conv_length,
-                    rollback_fn=lambda target_length: self.pool._rollback_instance(
-                        instance_name, target_length=target_length),
+                    rollback_fn=lambda pop_count: self.pool._rollback_instance(
+                        instance_name, pop_count=pop_count),
                     check_skill_created_fn=lambda: list(
                         set(skill_manager._skills_registry.keys()) - _skills_before),
                 )

@@ -224,17 +224,15 @@ def run_agent_thread_unified(
                             task_text = content[:500]
                             break
             if skill_manager:
-                # Snapshot current registered skill names for delta detection
+                # Snapshot under lock: conversation length + skills registry
+                with inst._compression_lock:
+                    _conv_length = len(inst.conversation)
                 _skills_before = set(skill_manager.get_skill_names())
 
                 # Create a fresh engine iterator for single-turn execution
                 from .execution_engine import ExecutionEngine
                 _engine = ExecutionEngine(pool)
                 _turn_iter = _engine.run(inst)
-
-                # Snapshot conversation length before extra turns (under lock for thread safety)
-                with inst._compression_lock:
-                    _conv_length = len(inst.conversation)
 
                 created_skills = skill_manager.trigger_auto_skill_reflection(
                     inst=inst,
@@ -245,8 +243,8 @@ def run_agent_thread_unified(
                     run_turn_fn=lambda: next(_turn_iter, None),
                     state_idle_fn=lambda: inst.state == AgentState.IDLE,
                     snapshot_length=_conv_length,
-                    rollback_fn=lambda target_length: pool._rollback_instance(
-                        instance_name, target_length=target_length),
+                    rollback_fn=lambda pop_count: pool._rollback_instance(
+                        instance_name, pop_count=pop_count),
                     check_skill_created_fn=lambda: list(
                         set(skill_manager._skills_registry.keys()) - _skills_before),
                 )

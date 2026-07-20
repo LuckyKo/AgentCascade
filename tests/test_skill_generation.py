@@ -594,9 +594,9 @@ class TestCallAgentReturn:
         if check_result is None:
             check_result = []
 
-        def rollback_fn(target_length):
-            if target_length > 0 and len(inst.conversation) > target_length:
-                del inst.conversation[target_length:]
+        def rollback_fn(pop_count):
+            if pop_count > 0:
+                del inst.conversation[-pop_count:]
 
         return fresh_manager.trigger_auto_skill_reflection(
             inst=inst,
@@ -692,11 +692,10 @@ class TestCallAgentReturn:
 
         captured_counts = []
 
-        def rollback_fn(target_length):
-            captured_counts.append(target_length)
-            # Truncate to target_length
-            if target_length > 0 and len(inst.conversation) > target_length:
-                del inst.conversation[target_length:]
+        def rollback_fn(pop_count):
+            captured_counts.append(pop_count)
+            if pop_count > 0:
+                del inst.conversation[-pop_count:]
         fresh_manager.trigger_auto_skill_reflection(
             inst=inst,
             total_tool_calls=10,
