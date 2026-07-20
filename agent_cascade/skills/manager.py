@@ -615,8 +615,18 @@ class SkillManager:
                 pop_count = max(0, current_len - snapshot_length)
                 if pop_count > 0:
                     rollback_fn(pop_count)
-                    logger.debug("[AUTO-SKILL] Rolled back %d messages for %s",
-                                 pop_count, instance_name)
+                    # Verify rollback actually worked
+                    with inst._compression_lock:
+                        actual_len = len(inst.conversation)
+                    # Allow +1 tolerance for function boundary refinement
+                    if actual_len > snapshot_length + 1:
+                        logger.warning("[AUTO-SKILL] Rollback verification failed for %s: "
+                                       "expected <=%d, got %d",
+                                       instance_name, snapshot_length, actual_len)
+                        rollback_ok = False
+                    else:
+                        logger.debug("[AUTO-SKILL] Rolled back %d messages for %s",
+                                     pop_count, instance_name)
                 elif current_len < snapshot_length:
                     logger.debug("[AUTO-SKILL] Compression removed %d messages during extra turns for %s",
                                  snapshot_length - current_len, instance_name)
