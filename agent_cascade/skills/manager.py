@@ -106,12 +106,15 @@ class SkillManager:
         Args:
             skill_paths: List of root directories to scan for skills.
         """
-        # Cache check (use monotonic clock for reliability)
-        current_sig = compute_scan_signature(skill_paths, frozenset(self._disabled_names))
+        # Cache check: TTL first (cheap), then signature (expensive)
         now = time.monotonic()
-        if (current_sig == self._cache_signature
-                and (now - self._cache_timestamp) < self._cache_ttl):
+        if (now - self._cache_timestamp) < self._cache_ttl:
             logger.debug("[SKILLS] Cache hit — skipping discovery (age=%.1fs)",
+                         now - self._cache_timestamp)
+            return
+        current_sig = compute_scan_signature(skill_paths, frozenset(self._disabled_names))
+        if current_sig == self._cache_signature:
+            logger.debug("[SKILLS] Cache hit — signature unchanged (age=%.1fs)",
                          now - self._cache_timestamp)
             return
 
@@ -327,7 +330,8 @@ class SkillManager:
         """
         reg = self._skills_registry.get(skill_name)
         if reg is None:
-            logger.warning("[SKILLS] Requested full instructions for unknown skill: %s", skill_name)
+            logger.debug("[SKILLS] load_full_instructions: skill '%s' not in registry (registry has %d skills)",
+                         skill_name, len(self._skills_registry))
             return None
 
         # Try lazy load from parsed data first
@@ -374,6 +378,9 @@ class SkillManager:
         Returns:
             List of full instruction strings (one per loaded skill).
         """
+        # Ensure skills have been discovered before resolving
+        self._ensure_discovered()
+
         # Handle NONE / empty (case-insensitive, whitespace-tolerant)
         if load_skill_value is None or (isinstance(load_skill_value, str) and load_skill_value.strip().upper() == LOAD_SKILL_NONE):
             return []
