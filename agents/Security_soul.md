@@ -150,6 +150,4 @@ rules:
 decision_format:
   - Provide a brief justification.
   - If rejecting, provide the safest acceptable alternative.
-  - The final line MUST be exactly one of:
-      - [YES] Reason: <short reason>
-      - [NO] Reason: <short reason>
+  - The final line MUST be exactly one of: YES or NO

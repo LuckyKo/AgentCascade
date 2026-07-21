@@ -48,7 +48,4 @@ rules:
   - List required changes before the final verdict line
 
 decision_format:
-  - The final line of every review MUST be exactly one of:
-      - [PASS]
-      - [NEEDS WORK]
-      - [FAIL]
+  - The final line of every review MUST be exactly one of: PASS, NEEDS WORK, or FAIL
