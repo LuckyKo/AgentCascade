@@ -997,6 +997,58 @@ class AgentPool:
         if hasattr(self, '_instance_conversations'):
             self._instance_conversations.clear()
 
+    def _save_instance_state(self, names: set) -> dict:
+        """Save state for a set of instance names before bulk dismissal.
+
+        Returns a dict with keys: state, terminated, children, summaries,
+        halted, compression_halted, conversations.
+        """
+        saved = {
+            'state': {n: self.instance_state.get(n) for n in names},
+            'terminated': {n for n in names if n in self.terminated_instances},
+            'children': {n: self.children.get(n) for n in names},
+            'summaries': {n: self.instance_summaries.get(n) for n in names},
+            'halted': {n for n in names if n in self._halted_instances},
+            'compression_halted': {n for n in names if n in self._compression_halted},
+            'conversations': {},
+        }
+        for n in names:
+            inst = self.instances.get(n)
+            if inst:
+                saved['conversations'][n] = list(inst.conversation)
+        return saved
+
+    def _restore_instance_state(self, saved: dict) -> None:
+        """Restore previously saved instance state after _clear_all_state_dicts()."""
+        # Restore pool-level state dicts
+        for n, s in saved['state'].items():
+            if s is not None:
+                self.instance_state[n] = s
+        self.terminated_instances.update(saved['terminated'])
+        for n, c in saved['children'].items():
+            if c is not None:
+                self.children[n] = c
+        for n, s in saved['summaries'].items():
+            if s is not None:
+                self.instance_summaries[n] = s
+        self._halted_instances.update(saved['halted'])
+        self._compression_halted.update(saved['compression_halted'])
+
+        # Restore conversations using proper API for cache invalidation
+        for n, conv in saved['conversations'].items():
+            inst = self.instances.get(n)
+            if inst is not None:
+                if hasattr(self, '_instance_conversations'):
+                    self._instance_conversations[n] = conv
+                else:
+                    inst.rebuild_conversation(conv)
+
+        # Sync per-instance _child_instances with restored pool.children
+        for n in saved['conversations']:
+            inst = self.instances.get(n)
+            if inst is not None and n in self.children:
+                inst._child_instances = list(self.children[n])
+
     def _dismiss_all_instances(self, exclude: Optional[set] = None):
         """Dismiss ALL instances from the pool, including root orchestrator(s).
 
@@ -1031,21 +1083,8 @@ class AgentPool:
 
         try:
             # Save state of excluded instances BEFORE the dismissal loop
-            # so that children lists are not yet modified.
             if exclude:
-                saved_state = {n: self.instance_state.get(n) for n in exclude}
-                saved_terminated = {n for n in exclude if n in self.terminated_instances}
-                saved_children = {n: self.children.get(n) for n in exclude}
-                saved_instance_summaries = {n: self.instance_summaries.get(n) for n in exclude}
-                saved_halted = {n for n in exclude if n in self._halted_instances}
-                saved_compression_halted = {n for n in exclude if n in self._compression_halted}
-                # Save the actual conversation lists (not just the mapping reference)
-                # because _clear_all_state_dicts calls reset_conversation() on ALL instances
-                saved_conversations = {}
-                for n in exclude:
-                    inst = self.instances.get(n)
-                    if inst:
-                        saved_conversations[n] = list(inst.conversation)
+                saved = self._save_instance_state(exclude)
 
             for name in list(self.instances.keys()):
                 if name in exclude:
@@ -1053,7 +1092,6 @@ class AgentPool:
                 inst = self.instances.get(name)
                 if inst is None:
                     continue
-                # Double-dismiss guard: instance may have been cascade-dismissed by child
                 if name not in self.instances:
                     continue
                 self.dismiss_instance(name)
@@ -1061,36 +1099,7 @@ class AgentPool:
             # Clean up per-instance state dicts to prevent stale entries.
             if exclude:
                 self._clear_all_state_dicts()
-
-                # Restore saved state
-                for n, s in saved_state.items():
-                    if s is not None:
-                        self.instance_state[n] = s
-                self.terminated_instances.update(saved_terminated)
-                for n, c in saved_children.items():
-                    if c is not None:
-                        self.children[n] = c
-                for n, s in saved_instance_summaries.items():
-                    if s is not None:
-                        self.instance_summaries[n] = s
-                self._halted_instances.update(saved_halted)
-                self._compression_halted.update(saved_compression_halted)
-                # Restore conversations using proper API for cache invalidation
-                for n, conv in saved_conversations.items():
-                    inst = self.instances.get(n)
-                    if inst is not None:
-                        if hasattr(self, '_instance_conversations'):
-                            # Use mapping for cache sync (calls rebuild_conversation internally)
-                            self._instance_conversations[n] = conv
-                        else:
-                            # Fallback: manually restore with proper cache invalidation
-                            inst.rebuild_conversation(conv)
-
-                # Sync per-instance _child_instances with restored pool.children
-                for n in exclude:
-                    inst = self.instances.get(n)
-                    if inst is not None and n in self.children:
-                        inst._child_instances = list(self.children[n])
+                self._restore_instance_state(saved)
             else:
                 self._clear_all_state_dicts()
 
