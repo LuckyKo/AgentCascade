@@ -79,13 +79,19 @@ class ShellMixin:
     # (some consume the next token: -c, -C, --git-dir, --work-tree)
     _GIT_FLAGS: set = {'--no-pager', '-c', '-p', '--paginate', '-C', '--git-dir', '--work-tree'}
 
-    # Dangerous arguments per subcommand — renaming for clarity
-    _DANGEROUS_STASH_ARGS: set = {'drop', 'pop', 'apply', 'clear'}
-    _DANGEROUS_BRANCH_ARGS: set = {'-d', '-D', '-m', '-M', '-r', '--delete', '--move', '--set-upstream-to'}
-    _DANGEROUS_TAG_ARGS: set = {'-d', '-D', '--delete', '-f', '-F', '-a', '-s'}
-    _DANGEROUS_REMOTE_ARGS: set = {'set-url', 'add', 'rm', 'rename', 'set-branches', 'set-head'}
-    _DANGEROUS_CONFIG_ARGS: set = {'--set', '--add', '--unset', '--unset-all', '-e', '--list-all'}
-    _DANGEROUS_WORKTREE_ARGS: set = {'add', 'remove', 'checkout', 'prune'}
+    # Async shell control commands (used for validation in both shell.py and shell_cmd.py)
+    _CONTROL_COMMANDS: tuple = ('__status', '__kill', '__ctrl_c')
+    _CONTROL_HEARTBEAT_PREFIX: str = '__heartbeat='
+
+    # Dangerous arguments per git subcommand
+    _DANGEROUS_GIT_ARGS: dict[str, set[str]] = {
+        'stash': {'drop', 'pop', 'apply', 'clear'},
+        'branch': {'-d', '-D', '-m', '-M', '-r', '--delete', '--move', '--set-upstream-to'},
+        'tag': {'-d', '-D', '--delete', '-f', '-F', '-a', '-s'},
+        'remote': {'set-url', 'add', 'rm', 'rename', 'set-branches', 'set-head'},
+        'config': {'--set', '--add', '--unset', '--unset-all', '-e', '--list-all'},
+        'worktree': {'add', 'remove', 'checkout', 'prune'},
+    }
 
     # Safe pipe/filter commands for pipelines (e.g. git diff | grep 'changed')
     _SAFE_PIPE_COMMANDS: set = {
@@ -117,7 +123,7 @@ class ShellMixin:
             return False
 
         # Async shell control commands are always safe
-        if cmd in ('__status', '__kill', '__ctrl_c') or cmd.startswith('__heartbeat='):
+        if cmd in ShellMixin._CONTROL_COMMANDS or cmd.startswith(ShellMixin._CONTROL_HEARTBEAT_PREFIX):
             return True
 
         # Subshell execution: $(...) or backticks
@@ -263,17 +269,7 @@ class ShellMixin:
         args = [w.lower() for w in words[idx + 1:]]
 
         # Validate subcommand-specific arguments
-        if subcommand == 'stash' and args and args[0] in ShellMixin._DANGEROUS_STASH_ARGS:
-            return False
-        if subcommand == 'branch' and args and args[0] in ShellMixin._DANGEROUS_BRANCH_ARGS:
-            return False
-        if subcommand == 'tag' and args and args[0] in ShellMixin._DANGEROUS_TAG_ARGS:
-            return False
-        if subcommand == 'remote' and args and args[0] in ShellMixin._DANGEROUS_REMOTE_ARGS:
-            return False
-        if subcommand == 'config' and args and args[0] in ShellMixin._DANGEROUS_CONFIG_ARGS:
-            return False
-        if subcommand == 'worktree' and args and args[0] in ShellMixin._DANGEROUS_WORKTREE_ARGS:
+        if args and args[0] in ShellMixin._DANGEROUS_GIT_ARGS.get(subcommand, set()):
             return False
 
         # Validate pipe stages are safe

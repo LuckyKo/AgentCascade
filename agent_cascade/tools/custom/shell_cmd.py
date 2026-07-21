@@ -1,4 +1,5 @@
 import subprocess
+from agent_cascade.operation_manager.shell import ShellMixin
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 
@@ -98,7 +99,7 @@ class ShellCmd(BaseTool):
         # ── Async mode: launch new background shell ────────────────
         if async_mode:
             # Validate control commands aren't used without tool_id
-            if command in ('__status', '__kill', '__ctrl_c') or command.startswith('__heartbeat='):
+            if command in ShellMixin._CONTROL_COMMANDS or command.startswith(ShellMixin._CONTROL_HEARTBEAT_PREFIX):
                 return f"[shell_cmd] Control command '{command}' requires a tool_id. Launch a shell first, then use the returned tool_id."
             return self._launch_async(
                 agent_name=agent_name,
