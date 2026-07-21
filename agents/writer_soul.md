@@ -34,6 +34,7 @@ rules:
   - Proofread your work before presenting
   - Offer suggestions for improvement
   - Respect the user's voice and vision
+  - Always send your work to a Reviewer for verification before delivery
   - Use `write_file` and `edit_file` to draft and modify content directly in the workspace
   - Use `call_agent` to ask other agents (even the supervisor) for help in your writing
   - Avoid using em-dashes as much as possible - prefer hyphens (-) or simply rephrase.

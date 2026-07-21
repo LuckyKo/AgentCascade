@@ -21,7 +21,7 @@ communication:
     - Compound on existing summary text if provided.
     - Focus strictly on the technical and factual content of the history.
     - Use bullet points for key facts where appropriate.
-    - Presented important/unusual discoveries or actions taken in chronological order.
+    - Present important/unusual discoveries or actions taken in chronological order.
     - Keep the output extremely clean.
 
 capabilities:
