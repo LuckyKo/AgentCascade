@@ -103,17 +103,22 @@ class ShellMixin:
 
     @staticmethod
     def _is_safe_readonly_shell_command(command: str) -> bool:
-        """Check if a shell command is purely read-only (directory listing/search/git).
+        """Check if a shell command is purely read-only (directory listing/search/git/control).
 
         Handles:
           - Basic commands: ls, find, dir, tree, pwd, stat, etc.
           - Git commands: git diff, git status, git log, etc.
           - cd && git pattern: cd <path> && git <command>
           - Pipes: git diff --stat | grep 'changed'
+          - Async shell control commands: __status, __kill, __ctrl_c, __heartbeat=N
         """
         cmd = command.strip()
         if not cmd:
             return False
+
+        # Async shell control commands are always safe
+        if cmd in ('__status', '__kill', '__ctrl_c') or cmd.startswith('__heartbeat='):
+            return True
 
         # Subshell execution: $(...) or backticks
         if '$(' in cmd or '`' in cmd:

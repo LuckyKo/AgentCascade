@@ -14,7 +14,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 # TODO:
 
-[ ] Add skills (custom agent loading?). there are some pre-existing modules from Qwen agent that deal with skills that havent been integrated, investigate hw they could be incorporated in AC, alternatives or improvements to that.
+[x] Add skills (custom agent loading?). there are some pre-existing modules from Qwen agent that deal with skills that havent been integrated, investigate hw they could be incorporated in AC, alternatives or improvements to that.
 [ ] Add an Overseer agent that periodically checks on the health of the system, reads logs and telemetry, check if running agents got stuck in undetectable loops or migrated goals towards something that the user never asked for, suggests fixes and improvements into a suggestion box. Main agent will pull from the suggestion box during idle times when user is AFK to self improve the agents or the framework during our daily operation - do the whole DNA A/B testing thing. Overseer agent will always get its full working queue compressed when it finishes and save it into the suggestion box (no chat messages) - should be persistent across sessions. We'll set the interval at which it activates, it will silently interrupt running agents when it activates and resume them like it never happens when its done (unless it decides to kill an agent), or work in parallel using a different API endpoint. - big task, will do it after we stabilize the framework
 [ ] need a memory consolidation task ran periodically - takes all summaries in log and arranges them in a neat continuous package like long term memory -> replaces last summary
 [x] implement async shell_cmd launch (immediate tool response that it was launched, runs in background while agent keeps running and return final output as user message when done, can have heartbeat value that will periodically send console output back to caller agent) — DONE: AsyncShellTracker module with per-agent ID counters, max 5 concurrent shells, heartbeat injection via message queue, process tree cleanup on dismiss
@@ -44,10 +44,12 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] the auto-skill rollback leaves behind some leftover truncated message at the end in the UI tab history — DONE: replaced marker-based rollback with snapshot-based (target_length), added state reset to IDLE for SLEEPING/COMPLETING states
 - [ ] every time we want to test some AC modules in code_intepretet (fresh docker instance) the agents painstakingly fail and install each required package one by one wasting a LOT of time and tokens. we need to improve this somehow as it it a significant time sink that could be easily solved.
 - [ ] Auto-skill interferes with `Stop` command
-- [x] resurrecting an agent from log does not bring up its agent tab in UI, on refresh I even lose the root agent tab. calling an agent with the same name as the caller (child spawning) also generates this issue. (FIX: _dismiss_all_instances preserves caller via exclude set, renderSubAgents uses direct DOM activation instead of switchMainTab to avoid double-render)
+- [x] resurrecting an agent from log does not bring up its agent tab in UI, on refresh I even lose the root agent tab. calling an agent with the same name as the caller (child spawning) also generates this issue. (FIX: _dismiss_all_instances preserves caller via exclude set, renderSubAgents uses direct DOM activation, call_agent skips dismiss-all step)
 - [ ] UI streaming stops on `pause`. it should not, pause should ONLY stop the tool response logic.
 - [ ] some of the UI setting are getting reset on browser restart (they stick on refresh though)
-- [ ] grep char limit truncation does not provide the spillover file `[TRUNCATED — Character limit exceeded. You can read it with read_file if needed.]` <- this is not useful at all, pls reuse truncation function from read file (make it a helper if possible)
+- [x] grep char limit truncation now provides spillover files — shared `truncate_with_spillover()` helper created in tool_utils.py, used by grep (4 sites) and shell_cmd (1 site). Backward compat `spill_file_path` parameter preserved.
+- [x] async shell follow-up commands (`__status`, `__kill`, `__ctrl_c`, `__heartbeat=N`, stdin input) now auto-approved via `__` prefix check in `_is_safe_readonly_shell_command()`
+- [ ] make view_image tool take in special arguments in path like `__screen_capture`, `__window_capture:PID` - self explanatory
 
 # Errors to investigate:
 
@@ -346,3 +348,86 @@ Traceback: Traceback (most recent call last):
 agent_cascade.llm.base.ModelServiceError: Error code: 400 - {'error': {'message': 'Failed to load model "qwen3.6-35b-a3b". Error: Engine protocol runtime llama-server for quir/h7AJK6Mh7fPrN51udXb exited before becoming healthy. exitCode=3221226505, signal=null', 'type': 'invalid_request_error', 'param': 'model', 'code': None}}
 
 2026-07-21 05:09:21,793 - base.py - 994 - INFO - Agent [Researcher] - ALL tokens: 36965, Available tokens: 124010
+
+
+# view_image is kinna breaking stuff if called on a wrong file type (it tried to capture an app.js ... not a bad idea to make it capture app screens though...):
+2026-07-21 09:47:29,742 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 53611, Available tokens: 89175
+2026-07-21 09:47:41,864 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 54172, Available tokens: 89175
+2026-07-21 09:47:49,457 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 54916, Available tokens: 89175
+2026-07-21 09:47:55,637 - log.py - 41 - WARNING - [APIRouter] Failed to generate image caption: get_chat_model() takes from 0 to 1 positional arguments but 2 were given
+[APIRouter] Failed to generate image caption: get_chat_model() takes from 0 to 1 positional arguments but 2 were given
+2026-07-21 09:47:55,651 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 54977, Available tokens: 89175
+2026-07-21 09:47:56,004 - log.py - 41 - WARNING - [APIRouter] Endpoint 'qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved' @ http://127.0.0.1:1234/v1 attempt 1/3: cannot identify image file 'N:/work/WD/AgentCascade/web_ui/app.js'
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1127, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1073, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 524, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 384, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 508, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 1053, in retry_model_service_iterator
+    for rsp in it_fn():
+               ^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 366, in _chat_stream
+    messages = self.convert_messages_to_dicts(messages)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\qwenvl_oai.py", line 58, in convert_messages_to_dicts
+    v = conv_multimodel_value(t, v)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\qwenvl_oai.py", line 131, in conv_multimodel_value
+    v = encode_image_as_base64(v, max_short_side_length=1080)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\utils\utils.py", line 962, in encode_image_as_base64
+    image = Image.open(path)
+            ^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\PIL\Image.py", line 3580, in open
+    raise UnidentifiedImageError(msg)
+PIL.UnidentifiedImageError: cannot identify image file 'N:/work/WD/AgentCascade/web_ui/app.js'
+[APIRouter] Endpoint 'qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved' @ http://127.0.0.1:1234/v1 attempt 1/3: cannot identify image file 'N:/work/WD/AgentCascade/web_ui/app.js'
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1127, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1073, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 524, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 384, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 508, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 1053, in retry_model_service_iterator
+    for rsp in it_fn():
+               ^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 366, in _chat_stream
+    messages = self.convert_messages_to_dicts(messages)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\qwenvl_oai.py", line 58, in convert_messages_to_dicts
+    v = conv_multimodel_value(t, v)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\qwenvl_oai.py", line 131, in conv_multimodel_value
+    v = encode_image_as_base64(v, max_short_side_length=1080)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\utils\utils.py", line 962, in encode_image_as_base64
+    image = Image.open(path)
+            ^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\PIL\Image.py", line 3580, in open
+    raise UnidentifiedImageError(msg)
+PIL.UnidentifiedImageError: cannot identify image file 'N:/work/WD/AgentCascade/web_ui/app.js'
+
+2026-07-21 09:47:57,024 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 54977, Available tokens: 89175
+2026-07-21 09:47:57,036 - log.py - 41 - WARNING - [APIRouter] Endpoint 'qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved' @ http://127.0.0.1:1234/v1 attempt 2/3: cannot identify image file 'N:/work/WD/AgentCascade/web_ui/app.js'
+Traceback: Traceback (most recent call last):

@@ -97,6 +97,9 @@ class ShellCmd(BaseTool):
 
         # ── Async mode: launch new background shell ────────────────
         if async_mode:
+            # Validate control commands aren't used without tool_id
+            if command in ('__status', '__kill', '__ctrl_c') or command.startswith('__heartbeat='):
+                return f"[shell_cmd] Control command '{command}' requires a tool_id. Launch a shell first, then use the returned tool_id."
             return self._launch_async(
                 agent_name=agent_name,
                 command=command,

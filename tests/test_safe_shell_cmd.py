@@ -340,6 +340,20 @@ if __name__ == "__main__":
     print("\n=== SUMMARY ===")
     total_issues = len(safe_failures) + len(unsafe_failures) + len(prefix_failures)
 
+    # ── Test async control commands ──────────────────────────────────
+    async_safe = ["__status", "__kill", "__ctrl_c", "__heartbeat=5", "__heartbeat=0", "__heartbeat=10.5", "__heartbeat=", "__heartbeat=abc"]
+    async_unsafe = ["__heartbeat", "__status_extra", "__kill_me"]
+    async_failures = []
+    for cmd in async_safe:
+        result = OperationManager._is_safe_readonly_shell_command(cmd)
+        if not result:
+            async_failures.append((cmd, True, result))
+    for cmd in async_unsafe:
+        result = OperationManager._is_safe_readonly_shell_command(cmd)
+        if result:
+            async_failures.append((cmd, False, result))
+    total_issues += len(async_failures)
+
     if safe_failures:
         print(f"\n✗ {len(safe_failures)} safe commands were incorrectly rejected:")
         for cmd in safe_failures:
@@ -354,6 +368,11 @@ if __name__ == "__main__":
         print(f"\n✗ {len(prefix_failures)} cd prefix tests failed:")
         for cmd, expected, got in prefix_failures:
             print(f"    '{cmd}' → expected '{expected}', got '{got}'")
+
+    if async_failures:
+        print(f"\n✗ {len(async_failures)} async control command tests failed:")
+        for cmd, expected, got in async_failures:
+            print(f"    '{cmd}' → expected {expected}, got {got}")
 
     if total_issues == 0:
         print("✓ All tests passed!")
