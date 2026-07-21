@@ -1089,11 +1089,6 @@ class AgentPool:
             for name in list(self.instances.keys()):
                 if name in exclude:
                     continue
-                inst = self.instances.get(name)
-                if inst is None:
-                    continue
-                if name not in self.instances:
-                    continue
                 self.dismiss_instance(name)
 
             # Clean up per-instance state dicts to prevent stale entries.
@@ -1520,25 +1515,27 @@ class AgentPool:
             caller_name: Optional instance name to preserve during dismissal (prevents
                 the caller from being dismissed, which would cause UI tab loss).
         """
-        # --- 1. Dismiss ALL instances (sub-agents + roots) -------------------
-        if clear_sub_agents_before_load:
-            # _dismiss_all_instances handles everything: dismisses every instance
-            # via dismiss_instance(), then clears all per-instance state dicts.
-            if caller_name is not None:
-                self._dismiss_all_instances(exclude={caller_name})
-            else:
-                self._dismiss_all_instances()
-
+        # --- 1. Parse log early to determine target_instance name -------------
         log_input = log_input.strip()
         if not log_input:
             return "Error: Empty log input."
 
-        # --- 2. Parse JSONL (_parse_json_input already applies _extract_last_session) --
         messages, metadata = self._parse_json_input(log_input)
         if not messages:
             return "Error: No valid messages found in log input."
 
-        # --- 3. Filter to valid conversation messages (skip events/metadata) --
+        # --- 2b. Determine instance name early for exclusion check ----------
+        instance_name = target_instance if target_instance is not None else metadata.get("instance_name") or "RecoveredSession"
+
+        # --- 3. Dismiss ALL instances (sub-agents + roots) -------------------
+        if clear_sub_agents_before_load:
+            # Exclude caller only if it exists and isn't the target being loaded
+            if caller_name is not None and caller_name != instance_name and caller_name in self.instances:
+                self._dismiss_all_instances(exclude={caller_name})
+            else:
+                self._dismiss_all_instances()
+
+        # --- 4. Filter to valid conversation messages (skip events/metadata) --
         from agent_cascade.llm.schema import CONTENT as MSG_CONTENT
         cleaned = [
             msg for msg in messages
@@ -1548,8 +1545,7 @@ class AgentPool:
         if not cleaned:
             return "Error: No valid conversation messages found."
 
-        # --- 4b. Determine instance name and agent class (needed for summaries) -
-        instance_name = target_instance if target_instance is not None else metadata.get("instance_name") or "RecoveredSession"
+        # --- 4b. Determine agent class (instance_name already determined above) -
         agent_class = (metadata.get("agent_class") or "Orchestrator").strip().lower()
 
         # --- 5. Build working set per design spec §5.2: [SYS][U0][COMP...][tail] -
