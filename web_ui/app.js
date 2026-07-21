@@ -2902,14 +2902,34 @@ function renderSubAgents() {
 
   // Ensure a tab is active: if no tab is selected yet (e.g., after session load,
   // refresh, or cleanupStaleSubAgents reset), activate the session primary agent.
+  // Use direct DOM activation here instead of switchMainTab() to avoid a second
+  // full render of all sub-agent tabs.
   if (!state.activeSubTab && namesArr.length > 0) {
     const primaryName = state.sessionName;
-    if (namesArr.includes(primaryName)) {
-      switchMainTab('sub-' + primaryName);
-    } else {
-      // Fallback: activate the first available agent tab
-      switchMainTab('sub-' + namesArr[0]);
+    const tabName = namesArr.includes(primaryName) ? primaryName : namesArr[0];
+    const tabId = 'sub-' + tabName;
+    state.activeSubTab = tabId;
+
+    // Activate tab button
+    const tabBtn = mainTabBar.querySelector(`.main-tab[data-tab="${tabId}"]`);
+    if (tabBtn) tabBtn.classList.add('active');
+
+    // Activate panel
+    const panel = document.getElementById('panelSub-' + tabName);
+    if (panel) {
+      panel.classList.add('active');
+      // Scroll to bottom if near bottom or agent is actively generating (matches switchMainTab)
+      const scroll = panel.querySelector('.messages');
+      if (scroll) {
+        const distFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
+        const isGenerating = state.subAgents[tabName]?.active || state.generating;
+        if (distFromBottom < 50 || isGenerating) {
+          scroll.scrollTop = scroll.scrollHeight;
+        }
+      }
     }
+
+    ActivityBar.setActiveTab(tabId);
   }
   
   // Diagnostic: warn on slow renders
