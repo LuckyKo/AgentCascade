@@ -152,6 +152,95 @@ def generate_spillover_filename(instance_name: str, tool_name: str, base_dir: Pa
     raise ValueError(f"Spillover filename collision exceeded 1000 attempts for {instance_name}/{tool_name}")
 
 
+def _write_spillover(
+    text: str,
+    spill_path: Path,
+    base_dir: Path,
+) -> str:
+    """Write text to a spillover file and return its workspace-relative path.
+
+    Args:
+        text: Full text content to write.
+        spill_path: Absolute path for the spillover file.
+        base_dir: Base directory for computing relative path.
+
+    Returns:
+        Workspace-relative path string (forward slashes).
+    """
+    spill_path.parent.mkdir(parents=True, exist_ok=True)
+    spill_path.write_text(text, encoding='utf-8')
+    try:
+        return str(spill_path.relative_to(base_dir)).replace('\\', '/')
+    except ValueError:
+        return str(spill_path).replace('\\', '/')
+
+
+def truncate_with_spillover(
+    text: str,
+    char_limit: int,
+    instance_name: str,
+    tool_name: str,
+    base_dir: Path,
+    operation_mode: str = "head",
+    spill_path: Optional[Path] = None,
+) -> str:
+    """Truncate text to char_limit and write full content to a spillover file.
+
+    Returns the truncated text with a truncation notice appended.
+    If text is not over the limit, returns it unchanged.
+
+    Args:
+        text: The full text to potentially truncate.
+        char_limit: Maximum character count before truncating (-1 means no limit).
+        instance_name: Agent instance name (for spillover filename).
+        tool_name: Tool name (for spillover filename).
+        base_dir: Base directory for resolving spillover paths.
+        operation_mode: What part of the text to keep:
+            - "head": Keep the beginning, drop the end (default, used by grep, read_file).
+            - "mid": Keep the beginning and end, drop the middle (used by shell, heartbeats).
+            - "tail": Keep the end, drop the beginning.
+        spill_path: Optional custom spillover file path. If provided, the full text
+            is written there instead of the default auto-generated path.
+
+    Returns:
+        Truncated text with notice, or original text if under limit.
+    """
+    if char_limit == -1 or len(text) <= char_limit:
+        return text
+
+    original_len = len(text)
+
+    # Cap output size before writing
+    if len(text) > MAX_SPILL_SIZE:
+        text = text[:MAX_SPILL_SIZE] + "\n\n[SPILL FILE TRUNCATED — exceeded maximum size]"
+
+    # Resolve spillover path
+    if spill_path is not None:
+        rel_spill = _write_spillover(text, spill_path, base_dir)
+    else:
+        log_dir = base_dir / 'logs' / 'spillover'
+        log_dir.mkdir(parents=True, exist_ok=True)
+        spill_filename = generate_spillover_filename(instance_name, tool_name, log_dir)
+        try:
+            rel_spill = _write_spillover(text, log_dir / spill_filename, base_dir)
+        except (OSError, ValueError):
+            rel_spill = f"logs/spillover/{spill_filename}"
+
+    # Apply truncation based on operation_mode
+    if operation_mode == "tail":
+        truncated = text[-char_limit:]
+    elif operation_mode == "mid":
+        half = char_limit // 2
+        omitted = len(text) - char_limit
+        truncated = text[:half] + f"\n\n[... {omitted} chars omitted ...]\n\n" + text[-half:]
+    else:
+        truncated = text[:char_limit]
+
+    mark_tool_call_truncated(instance_name, tool_name)
+
+    return f"{truncated}\n\n[TRUNCATED — Character limit exceeded. Full output ({original_len} chars) saved to: {rel_spill}]"
+
+
 def resolve_prev_arg_placeholders(
     tool_args: Any,
     instance_scope: str,

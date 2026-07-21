@@ -7,8 +7,15 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from agent_cascade.tool_utils import truncate_with_spillover
+
 
 # ─── Module-level cached helpers ──────────────────────────────────────────
+
+def _resolve_spill_path(spill_file_path: Optional[str]) -> Optional[Path]:
+    """Convert optional string spill path to Path, or None."""
+    return Path(spill_file_path) if spill_file_path else None
+
 
 @lru_cache(maxsize=256)
 def _compile_grep_pattern(pattern: str, *, flags: int = 0):
@@ -69,6 +76,7 @@ class GrepMixin:
     ]
 
     def _try_subprocess_grep(self, pattern: str, path: Path, include: str, char_limit: int, timeout: float,
+                             agent_name: str = "unknown",
                              exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True,
                              spill_file_path: Optional[str] = None):
         """Fast-path grep using system ripgrep or grep via subprocess.
@@ -256,15 +264,18 @@ class GrepMixin:
                     output_size = sum(len(l) for l in formatted) + count
                     if output_size > char_limit:
                         _original_output_size = output_size
-                        if spill_file_path is not None:
-                            try:
-                                full_text = '\n'.join(formatted)
-                                spill_abs = self.base_dir / spill_file_path
-                                spill_abs.parent.mkdir(parents=True, exist_ok=True)
-                                with open(spill_abs, 'w', encoding='utf-8') as f:
-                                    f.write(full_text)
-                            except Exception as e:
-                                logger.warning(f"Failed to write grep spill file {spill_file_path}: {e}")
+
+                        # Write spillover file for full output (side effect only;
+                        # truncation is done below with line-aware byte budget)
+                        full_text = '\n'.join(formatted)
+                        truncate_with_spillover(
+                            full_text, char_limit,
+                            instance_name=agent_name,
+                            tool_name='grep',
+                            base_dir=self.base_dir,
+                            operation_mode='head',
+                            spill_path=_resolve_spill_path(spill_file_path),
+                        )  # return value intentionally ignored — we do line-based truncation below
 
                         byte_budget = char_limit
                         truncated = []
@@ -293,6 +304,7 @@ class GrepMixin:
 
     def _grep_single_file(self, file_path: Path, pattern: str, char_limit: int,
                           include: str = "*", exclude: str = "", context: int = 0, smart_case: bool = True,
+                          agent_name: str = "unknown",
                           spill_file_path: Optional[str] = None, timeout: float = 30.0) -> str:
         """Search a single file for a regex pattern. Used when path is a file instead of directory."""
         import fnmatch
@@ -373,25 +385,17 @@ class GrepMixin:
         elif hit_result_limit:
             summary += " [TRUNCATED at 5000 results]"
 
-        if char_limit != -1 and len(output_text) > char_limit:
-            full_output = output_text
-            output_text = output_text[:char_limit]
+        result = truncate_with_spillover(
+            output_text, char_limit,
+            instance_name=agent_name,
+            tool_name='grep',
+            base_dir=self.base_dir,
+            operation_mode='head',
+            spill_path=_resolve_spill_path(spill_file_path),
+        )
+        if result is not output_text:
+            output_text = result
             summary += " [TRUNCATED]"
-
-            if spill_file_path is not None:
-                try:
-                    spill_abs = self.base_dir / spill_file_path
-                    spill_abs.parent.mkdir(parents=True, exist_ok=True)
-                    with open(spill_abs, 'w', encoding='utf-8') as f:
-                        f.write(full_output)
-                except Exception as e:
-                    from agent_cascade.log import logger
-                    logger.warning(f"Failed to write grep spill file {spill_file_path}: {e}")
-
-            output_text += f"\n\n[TRUNCATED — Character limit exceeded."
-            if spill_file_path is not None:
-                output_text += f" Full output ({len(full_output)} chars) saved to: {spill_file_path}"
-            output_text += "\nYou can read it with read_file if needed.]"
 
         return f"{summary}:\n\n" + output_text
 
@@ -414,12 +418,14 @@ class GrepMixin:
             if resolved.is_file():
                 return self._grep_single_file(resolved, pattern, char_limit, include=include,
                                              exclude=exclude, context=context, smart_case=smart_case,
+                                             agent_name=agent_name,
                                              spill_file_path=spill_file_path, timeout=timeout)
             
             # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
             results, count, was_timed_out, _sub_truncated, _orig_output_size = self._try_subprocess_grep(
                 pattern=pattern, path=resolved, include=include,
                 char_limit=char_limit, timeout=timeout,  # Use configurable timeout
+                agent_name=agent_name,
                 exclude=exclude, ignore_vcs=ignore_vcs, context=context, smart_case=smart_case,
                 spill_file_path=spill_file_path
             )
@@ -437,26 +443,19 @@ class GrepMixin:
                     if was_timed_out:
                         summary += f" [TIMED OUT after {int(timeout)}s]"
 
-                    if char_limit != -1 and len(output_text) > char_limit:
-                        full_output = output_text
-                        output_text = output_text[:char_limit]
-
-                        if spill_file_path is not None:
-                            try:
-                                spill_abs = self.base_dir / spill_file_path
-                                spill_abs.parent.mkdir(parents=True, exist_ok=True)
-                                with open(spill_abs, 'w', encoding='utf-8') as f:
-                                    f.write(full_output)
-                            except Exception as e:
-                                logger.warning(f"Failed to write grep spill file {spill_file_path}: {e}")
-
-                        output_text += f"\n\n[TRUNCATED — Character limit exceeded."
-                        if spill_file_path is not None:
-                            output_text += f" Full output ({len(full_output)} chars) saved to: {spill_file_path}"
-                        output_text += "\nYou can read it with read_file if needed.]"
-                    elif _sub_truncated and spill_file_path is not None:
+                    result = truncate_with_spillover(
+                        output_text, char_limit,
+                        instance_name=agent_name,
+                        tool_name='grep',
+                        base_dir=self.base_dir,
+                        operation_mode='head',
+                        spill_path=_resolve_spill_path(spill_file_path),
+                    )
+                    if result is not output_text:
+                        output_text = result
                         summary += " [TRUNCATED]"
-                        output_text += f"\n\n[TRUNCATED — Character limit exceeded. Full output ({_orig_output_size} chars) saved to: {spill_file_path}\nYou can read it with read_file if needed.]"
+                    elif _sub_truncated:
+                        summary += " [TRUNCATED]"
 
                     return f"{summary}:\n\n" + output_text
 
@@ -578,24 +577,17 @@ class GrepMixin:
             elif hit_result_limit:
                 summary += " [TRUNCATED at 5000 results]"
 
-            if char_limit != -1 and len(output_text) > char_limit:
-                full_output = output_text
-                output_text = output_text[:char_limit]
+            result = truncate_with_spillover(
+                output_text, char_limit,
+                instance_name=agent_name,
+                tool_name='grep',
+                base_dir=self.base_dir,
+                operation_mode='head',
+                spill_path=_resolve_spill_path(spill_file_path),
+            )
+            if result is not output_text:
+                output_text = result
                 summary += " [TRUNCATED]"
-
-                if spill_file_path is not None:
-                    try:
-                        spill_abs = self.base_dir / spill_file_path
-                        spill_abs.parent.mkdir(parents=True, exist_ok=True)
-                        with open(spill_abs, 'w', encoding='utf-8') as f:
-                            f.write(full_output)
-                    except Exception as e:
-                        logger.warning(f"Failed to write grep spill file {spill_file_path}: {e}")
-
-                output_text += f"\n\n[TRUNCATED — Character limit exceeded."
-                if spill_file_path is not None:
-                    output_text += f" Full output ({len(full_output)} chars) saved to: {spill_file_path}"
-                output_text += "\nYou can read it with read_file if needed.]"
 
             return f"{summary}:\n\n" + output_text
         except Exception as e:

@@ -15,7 +15,7 @@ from agent_cascade.shell_utils import (
     drain_pipe_chunks,
     configure_windows_utf8,
 )
-from agent_cascade.tool_utils import MAX_SPILL_SIZE, generate_spillover_filename
+from agent_cascade.tool_utils import truncate_with_spillover
 
 # ─── Named constants (avoid magic numbers) ──────────────────────────────
 TASKKILL_RETRY_DELAY = 0.5              # Seconds between taskkill passes on timeout
@@ -502,29 +502,14 @@ class ShellMixin:
                     else:
                         output = "No output produced."
 
-                final_output = output
-                if char_limit != -1 and len(output) > char_limit:
-                    log_dir = self.base_dir / 'logs' / 'spillover'
-                    log_dir.mkdir(parents=True, exist_ok=True)
-
-                    if len(output) > MAX_SPILL_SIZE:
-                        output_copy = output[:MAX_SPILL_SIZE] + "\n\n[SPILL FILE TRUNCATED — exceeded maximum size]"
-                    else:
-                        output_copy = output
-
-                    spill_filename = generate_spillover_filename(agent_name, 'shell', log_dir)
-                    spill_path = log_dir / spill_filename
-
-                    try:
-                        spill_path.write_text(output_copy, encoding='utf-8')
-                        try:
-                            rel_spill = str(spill_path.relative_to(self.base_dir))
-                        except ValueError:
-                            rel_spill = str(spill_path)
-                    except Exception as e:
-                        rel_spill = f"ERROR SAVING SPILL: {e}"
-
-                    final_output = output[:char_limit] + f"\n\n[TRUNCATED — Character limit exceeded. Full output saved to: {rel_spill}]"
+                final_output = truncate_with_spillover(
+                    output, char_limit,
+                    instance_name=agent_name,
+                    tool_name='shell',
+                    base_dir=self.base_dir,
+                    operation_mode='mid',
+                )
+                if final_output is not output:
                     status += " [TRUNCATED]"
 
                 if is_safe:
