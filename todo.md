@@ -276,3 +276,73 @@ Instance 'timeout_review_helper_child1' started new turn with fingerprint d5864b
 2026-07-19 07:30:54,908 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 9157, Available tokens: 89123
 2026-07-19 07:31:13,878 - config_handlers.py - 285 - DEBUG - [update_config] LLM config unchanged
 2026-07-19 07:31:13,879 - config_handlers.py - 285 - DEBUG - [update_config] LLM config unchanged
+
+
+# Errors on fallback
+2026-07-21 05:08:56,575 - config_handlers.py - 299 - DEBUG - [update_config] LLM config unchanged
+2026-07-21 05:08:56,577 - config_handlers.py - 299 - DEBUG - [update_config] LLM config unchanged
+2026-07-21 05:08:56,577 - config_handlers.py - 299 - DEBUG - [update_config] LLM config unchanged
+2026-07-21 05:08:56,578 - config_handlers.py - 164 - WARNING - [THREAD_POOL] resize_executor skipped — executor is None (pool just initialized?)
+2026-07-21 05:08:56,579 - matcher.py - 44 - DEBUG - [SKILLS] Building inverted index from 0 skills
+2026-07-21 05:08:56,580 - matcher.py - 64 - DEBUG - [SKILLS] Inverted index built: 0 unique keywords
+2026-07-21 05:08:56,580 - config_handlers.py - 76 - DEBUG - [update_config] Extra work folders unchanged (RO=0, RW=1)
+2026-07-21 05:08:56,581 - config_handlers.py - 76 - DEBUG - [update_config] Extra work folders unchanged (RO=0, RW=1)
+2026-07-21 05:08:56,582 - config_handlers.py - 97 - DEBUG - [update_config] Base workspace unchanged
+2026-07-21 05:09:19,740 - log.py - 41 - WARNING - [APIRouter] Endpoint 'qwen3.6-35b-a3b' @ http://127.0.0.1:1234/v1 attempt 2/3: Error code: 400 - {'error': {'message': 'Failed to load model "qwen3.6-35b-a3b". Error: Engine protocol runtime llama-server for quir/h7AJK6Mh7fPrN51udXb exited before becoming healthy. exitCode=3221226505, signal=null', 'type': 'invalid_request_error', 'param': 'model', 'code': None}}
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1127, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1073, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 524, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 384, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 508, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 1058, in retry_model_service_iterator
+    num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 1081, in _raise_or_delay
+    raise e from None
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 1053, in retry_model_service_iterator
+    for rsp in it_fn():
+               ^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 544, in _chat_stream
+    raise ModelServiceError(exception=ex, code=code if code else None)
+agent_cascade.llm.base.ModelServiceError: Error code: 400 - {'error': {'message': 'Failed to load model "qwen3.6-35b-a3b". Error: Engine protocol runtime llama-server for quir/h7AJK6Mh7fPrN51udXb exited before becoming healthy. exitCode=3221226505, signal=null', 'type': 'invalid_request_error', 'param': 'model', 'code': None}}
+[APIRouter] Endpoint 'qwen3.6-35b-a3b' @ http://127.0.0.1:1234/v1 attempt 2/3: Error code: 400 - {'error': {'message': 'Failed to load model "qwen3.6-35b-a3b". Error: Engine protocol runtime llama-server for quir/h7AJK6Mh7fPrN51udXb exited before becoming healthy. exitCode=3221226505, signal=null', 'type': 'invalid_request_error', 'param': 'model', 'code': None}}
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1127, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1073, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 524, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 384, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 508, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 1058, in retry_model_service_iterator
+    num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 1081, in _raise_or_delay
+    raise e from None
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 1053, in retry_model_service_iterator
+    for rsp in it_fn():
+               ^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 544, in _chat_stream
+    raise ModelServiceError(exception=ex, code=code if code else None)
+agent_cascade.llm.base.ModelServiceError: Error code: 400 - {'error': {'message': 'Failed to load model "qwen3.6-35b-a3b". Error: Engine protocol runtime llama-server for quir/h7AJK6Mh7fPrN51udXb exited before becoming healthy. exitCode=3221226505, signal=null', 'type': 'invalid_request_error', 'param': 'model', 'code': None}}
+
+2026-07-21 05:09:21,793 - base.py - 994 - INFO - Agent [Researcher] - ALL tokens: 36965, Available tokens: 124010

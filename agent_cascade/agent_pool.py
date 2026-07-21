@@ -1039,9 +1039,13 @@ class AgentPool:
                 saved_instance_summaries = {n: self.instance_summaries.get(n) for n in exclude}
                 saved_halted = {n for n in exclude if n in self._halted_instances}
                 saved_compression_halted = {n for n in exclude if n in self._compression_halted}
+                # Save the actual conversation lists (not just the mapping reference)
+                # because _clear_all_state_dicts calls reset_conversation() on ALL instances
                 saved_conversations = {}
-                if hasattr(self, '_instance_conversations'):
-                    saved_conversations = {n: self._instance_conversations.get(n) for n in exclude}
+                for n in exclude:
+                    inst = self.instances.get(n)
+                    if inst:
+                        saved_conversations[n] = list(inst.conversation)
 
             for name in list(self.instances.keys()):
                 if name in exclude:
@@ -1071,9 +1075,16 @@ class AgentPool:
                         self.instance_summaries[n] = s
                 self._halted_instances.update(saved_halted)
                 self._compression_halted.update(saved_compression_halted)
-                for n, c in saved_conversations.items():
-                    if c is not None:
-                        self._instance_conversations[n] = c
+                # Restore conversations using proper API for cache invalidation
+                for n, conv in saved_conversations.items():
+                    inst = self.instances.get(n)
+                    if inst is not None:
+                        if hasattr(self, '_instance_conversations'):
+                            # Use mapping for cache sync (calls rebuild_conversation internally)
+                            self._instance_conversations[n] = conv
+                        else:
+                            # Fallback: manually restore with proper cache invalidation
+                            inst.rebuild_conversation(conv)
 
                 # Sync per-instance _child_instances with restored pool.children
                 for n in exclude:
