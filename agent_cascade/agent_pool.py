@@ -2043,10 +2043,11 @@ class AgentPool:
         """
         with self._queue_lock:
             queue = list(self.message_queues.get(instance_name, []))
-        return [
-            msg[:max_length] + ('...' if len(msg) > max_length else '')
-            for msg in queue
-        ]
+        results = []
+        for msg in queue:
+            s = str(msg)
+            results.append(s[:max_length] + ('...' if len(s) > max_length else ''))
+        return results
 
     def dismiss_queue_message(self, instance_name: str, message_index: int) -> bool:
         """Remove a specific message from the queue by index.

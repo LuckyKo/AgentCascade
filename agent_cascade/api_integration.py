@@ -1283,7 +1283,11 @@ def serialize_message(
                 if 'text' in item:
                     parts.append(item['text'])
                 elif 'image' in item:
-                    parts.append(f"![image]({item['image']})")
+                    cap = item.get('caption')
+                    if cap:
+                        parts.append(f"![image]({item['image']})\nCaption: {cap}")
+                    else:
+                        parts.append(f"![image]({item['image']})")
                 elif 'audio' in item:
                     parts.append(f"[Audio: {item['audio']}]")
                 elif 'video' in item:
@@ -1295,7 +1299,11 @@ def serialize_message(
             elif hasattr(item, 'text') and item.text:
                 parts.append(item.text)
             elif hasattr(item, 'image') and item.image:
-                parts.append(f"![image]({item.image})")
+                cap = getattr(item, 'caption', None)
+                if cap:
+                    parts.append(f"![image]({item.image})\nCaption: {cap}")
+                else:
+                    parts.append(f"![image]({item.image})")
         content = '\n'.join(parts)
 
     # Keep content intact — frontend handles truncation via renderToolResult()

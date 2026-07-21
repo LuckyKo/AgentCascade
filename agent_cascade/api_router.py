@@ -1230,28 +1230,39 @@ class APIRouter:
                 return cfg
         return None
 
+    def _get_vision_endpoint_for_agent(self, agent_type: str) -> Optional[dict]:
+        """Return the first vision-capable endpoint from the agent's own endpoint chain.
+
+        Falls back to any vision endpoint if none in the chain has vision.
+        """
+        chain = self.get_endpoint_chain(agent_type)
+        for cfg in chain:
+            if cfg.get('vision_enabled', True):
+                return cfg
+        # Fallback: any vision endpoint
+        return self._get_any_vision_endpoint()
+
     def caption_images(
         self, messages, agent_type: str = 'generalist'
     ) -> List:
         """
         Generate captions for uncaptioned images in the message list.
-        
-        Uses any available vision-capable endpoint to produce a short text
-        description for each image that doesn't already have one. The caption
-        is stored as metadata on the ContentItem so it survives text-only fallback.
-        
+
+        Uses the agent's own endpoint chain to find a vision-capable endpoint
+        for captioning, preserving the agent's configured endpoint order.
+
         Args:
             messages: List of Message objects (may contain images)
             agent_type: Agent type used for endpoint resolution
-            
+
         Returns:
             Modified message list with captions attached to images.
         """
         if not self._has_uncaptioned_images(messages):
             return messages
 
-        from agent_cascade.llm.schema import ContentItem
-        vision_cfg = self._get_any_vision_endpoint()
+        from agent_cascade.llm.schema import ContentItem, Message
+        vision_cfg = self._get_vision_endpoint_for_agent(agent_type)
         if not vision_cfg:
             # Replace uncaptioned images with placeholder text to ensure safe fallback
             logger.warning("[APIRouter] No vision-capable endpoint found for image captioning — replacing with placeholders")
@@ -1288,10 +1299,9 @@ class APIRouter:
         all_captions = {}  # key = (msg_idx, item_idx) -> caption text
         
         # Batch: send prompt + one image at a time to get per-image captions
-        model_type = vision_cfg.get('model_type', 'qwenvl_oai')  # Use endpoint's actual model type
         for msg_idx, item_idx, img_val in uncaptioned_items:
             try:
-                chat_model = get_chat_model(model_type, vision_cfg)
+                chat_model = get_chat_model(vision_cfg)
                 cap_msg = Message(
                     role='user',
                     content=[

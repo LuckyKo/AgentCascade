@@ -2098,7 +2098,7 @@ class ExecutionEngine:
                     return True
         return False
 
-    def _ensure_image_captions(self, messages):
+    def _ensure_image_captions(self, messages, agent_type=None):
         """Generate captions for uncaptioned images using any vision-capable endpoint.
 
         Captions are stored as metadata on ContentItem so they survive when falling
@@ -2107,7 +2107,6 @@ class ExecutionEngine:
         """
         router = getattr(self.pool, 'api_router', None)
         if router and hasattr(router, 'caption_images'):
-            agent_type = 'generalist'  # Use generalist for captioning to avoid circular routing
             return router.caption_images(messages, agent_type=agent_type)
         return messages
 
@@ -2154,7 +2153,8 @@ class ExecutionEngine:
         # Captions are generated ONCE and cached on ContentItem objects, so
         # subsequent retries reuse them.
         if self._has_images(llm_messages):
-            llm_messages = self._ensure_image_captions(llm_messages)
+            agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'generalist'
+            llm_messages = self._ensure_image_captions(llm_messages, agent_type=agent_type)
 
         while retry_count <= _loop_max:
             try:

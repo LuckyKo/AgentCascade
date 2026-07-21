@@ -417,6 +417,11 @@ class ReadFile(BaseTool):
 class ViewImage(BaseTool):
     """View an image file from the workspace."""
 
+    IMAGE_EXTENSIONS = {
+        '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg',
+        '.tiff', '.tif', '.ico', '.avif', '.heic', '.heif',
+    }
+
     name = 'view_image'
     description = TOOL_METADATA['view_image']['description']
     parameters = {
@@ -534,6 +539,10 @@ class ViewImage(BaseTool):
 
             if not resolved.exists():
                 return f"Image not found: {path}"
+
+            # Validate it's actually an image file
+            if resolved.suffix.lower() not in ViewImage.IMAGE_EXTENSIONS:
+                return f"'{path}' is not a recognized image file (supported: {', '.join(e.lstrip('.').upper() for e in sorted(ViewImage.IMAGE_EXTENSIONS))})"
 
             # SVG files need conversion to PNG (PIL/Pillow can't read SVG natively)
             if resolved.suffix.lower() == '.svg':
