@@ -1339,11 +1339,6 @@ function handleServerMessage(data) {
       // Reset throttle timer after full state render so subsequent stream_updates aren't throttled
       state.genStats.lastSubAgentRender = performance.now();
       state.genStats.lastSubAgentRenderDuration = 0;
-      
-      // Ensure the session primary agent's tab is active on initial load or if no tab is selected.
-      if (!state.activeSubTab) {
-        switchMainTab(getAgentTabId(state.sessionName));
-      }
 
       // Ensure API endpoints and assignments are rendered after full state update.
       // Only re-render here if api_router wasn't in this message (already handled above).
@@ -2902,6 +2897,18 @@ function renderSubAgents() {
     chatInput.selectionEnd = savedSelEnd;
     if (document.activeElement !== chatInput) {
       chatInput.focus();
+    }
+  }
+
+  // Ensure a tab is active: if no tab is selected yet (e.g., after session load,
+  // refresh, or cleanupStaleSubAgents reset), activate the session primary agent.
+  if (!state.activeSubTab && namesArr.length > 0) {
+    const primaryName = state.sessionName;
+    if (namesArr.includes(primaryName)) {
+      switchMainTab('sub-' + primaryName);
+    } else {
+      // Fallback: activate the first available agent tab
+      switchMainTab('sub-' + namesArr[0]);
     }
   }
   

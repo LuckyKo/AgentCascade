@@ -866,10 +866,13 @@ class WsMessageHandler:
             logger.debug(f"Failed to read metadata from {path}: {e}, using default instance name")
 
         with self._session_lock:
+            # Preserve the current session (caller) so its UI tab isn't lost
+            caller_name = self.session.get('session_name')
             status = self.agent_pool.load_session_from_log(
                 str(path),
                 target_instance=instance_name,
-                clear_sub_agents_before_load=True
+                clear_sub_agents_before_load=True,
+                caller_name=caller_name
             )
         if status.startswith("Error"):
             await self.broadcast_fn({'type': 'error', 'message': status})

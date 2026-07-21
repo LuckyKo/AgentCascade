@@ -986,7 +986,18 @@ class AgentPool:
             # Restore dismissal callbacks
             self._on_dismissed_callbacks = _callbacks
 
-    def _dismiss_all_instances(self):
+    def _clear_all_state_dicts(self):
+        """Clear all per-instance state dictionaries."""
+        self.instance_state.clear()
+        self.terminated_instances.clear()
+        self.children.clear()
+        self.instance_summaries.clear()
+        self._halted_instances.clear()
+        self._compression_halted.clear()
+        if hasattr(self, '_instance_conversations'):
+            self._instance_conversations.clear()
+
+    def _dismiss_all_instances(self, exclude: Optional[set] = None):
         """Dismiss ALL instances from the pool, including root orchestrator(s).
 
         Unlike clear_sub_agents() which preserves roots, this wipes everything clean.
@@ -1002,15 +1013,39 @@ class AgentPool:
           4. Increment _instances_version to signal the change
           5. Restore dismissal callbacks
 
+        Thread safety: Suppresses dismissal callbacks; safe to call from any thread.
+
         Does NOT reset async infrastructure or performance caches — those are left alone
         so that the loaded session can reuse existing executors and idle checkers.
+
+        Args:
+            exclude: Optional set of instance names to skip during dismissal.
+                     Excluded instances have their state saved, cleared, and restored.
         """
+        if exclude is None:
+            exclude = set()
+
         # Suppress callbacks during bulk cleanup (same pattern as clear_sub_agents)
         _callbacks = self._on_dismissed_callbacks.copy()
         self._on_dismissed_callbacks = []
 
         try:
+            # Save state of excluded instances BEFORE the dismissal loop
+            # so that children lists are not yet modified.
+            if exclude:
+                saved_state = {n: self.instance_state.get(n) for n in exclude}
+                saved_terminated = {n for n in exclude if n in self.terminated_instances}
+                saved_children = {n: self.children.get(n) for n in exclude}
+                saved_instance_summaries = {n: self.instance_summaries.get(n) for n in exclude}
+                saved_halted = {n for n in exclude if n in self._halted_instances}
+                saved_compression_halted = {n for n in exclude if n in self._compression_halted}
+                saved_conversations = {}
+                if hasattr(self, '_instance_conversations'):
+                    saved_conversations = {n: self._instance_conversations.get(n) for n in exclude}
+
             for name in list(self.instances.keys()):
+                if name in exclude:
+                    continue
                 inst = self.instances.get(name)
                 if inst is None:
                     continue
@@ -1019,15 +1054,34 @@ class AgentPool:
                     continue
                 self.dismiss_instance(name)
 
-            # Clean up per-instance state dicts to prevent stale entries
-            self.instance_state.clear()
-            self.terminated_instances.clear()
-            self.children.clear()
-            self.instance_summaries.clear()
-            self._halted_instances.clear()
-            self._compression_halted.clear()
-            if hasattr(self, '_instance_conversations'):
-                self._instance_conversations.clear()
+            # Clean up per-instance state dicts to prevent stale entries.
+            if exclude:
+                self._clear_all_state_dicts()
+
+                # Restore saved state
+                for n, s in saved_state.items():
+                    if s is not None:
+                        self.instance_state[n] = s
+                self.terminated_instances.update(saved_terminated)
+                for n, c in saved_children.items():
+                    if c is not None:
+                        self.children[n] = c
+                for n, s in saved_instance_summaries.items():
+                    if s is not None:
+                        self.instance_summaries[n] = s
+                self._halted_instances.update(saved_halted)
+                self._compression_halted.update(saved_compression_halted)
+                for n, c in saved_conversations.items():
+                    if c is not None:
+                        self._instance_conversations[n] = c
+
+                # Sync per-instance _child_instances with restored pool.children
+                for n in exclude:
+                    inst = self.instances.get(n)
+                    if inst is not None and n in self.children:
+                        inst._child_instances = list(self.children[n])
+            else:
+                self._clear_all_state_dicts()
 
             # Clear pending approvals to unblock threads waiting for user input.
             # Mirrors the pattern in reset() / stop_session().
@@ -1430,6 +1484,7 @@ class AgentPool:
         log_input: str,
         target_instance: Optional[str] = None,
         clear_sub_agents_before_load: bool = True,
+        caller_name: Optional[str] = None,
     ) -> str:
         """Load session history from a JSONL log file.
 
@@ -1442,12 +1497,17 @@ class AgentPool:
             log_input: Path to the JSONL log file (or JSON string).
             target_instance: Name for the instance (default: from metadata or 'RecoveredSession').
             clear_sub_agents_before_load: If True, dismiss stale sub-agents first.
+            caller_name: Optional instance name to preserve during dismissal (prevents
+                the caller from being dismissed, which would cause UI tab loss).
         """
         # --- 1. Dismiss ALL instances (sub-agents + roots) -------------------
         if clear_sub_agents_before_load:
             # _dismiss_all_instances handles everything: dismisses every instance
             # via dismiss_instance(), then clears all per-instance state dicts.
-            self._dismiss_all_instances()
+            if caller_name is not None:
+                self._dismiss_all_instances(exclude={caller_name})
+            else:
+                self._dismiss_all_instances()
 
         log_input = log_input.strip()
         if not log_input:

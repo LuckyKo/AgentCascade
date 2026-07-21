@@ -30,23 +30,62 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] no agent tab refresh during tool call streaming causes `Activity` bar to be still during tool writing process
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent info once it reached conclusion, only happens on [YES]
 - [ ] telemetry `Output Tokens (est)` severely undercounts
-- [ ] we are pushing wrong summary from the inner loop detector if the compressor fails and gets stuck in a loop `[SYSTEM ERROR: Empty LLM response]` 
+- [ ] we are pushing wrong summary from the inner loop detector if the compressor fails and gets stuck in a loop `[SYSTEM ERROR: Empty LLM response]`. it should try another API endpoint instead 
 - [x] `Auto-continue` option fixed — extended detection beyond token truncation to catch incomplete states (mid-reasoning, mid-tool_call with unclosed JSON). Turn counter resets on auto-continue. Hover tooltip added explaining the feature.
 - [x] agents get stopped randomly in the middle of streaming long reasoning — fixed: max-output-token guard + LLM backend defaults raised from 2048 → 8192 across all layers (execution_engine, transformers_llm, openvino, UI, JS fallback, API server). Template fallback bug fixed. Log level raised to INFO.
 - [x] Add shell_cmd calls with `cd <path> && git diff` and similar safe read-only git operations to auto approval. — DONE: Extended _is_safe_readonly_shell_command to auto-approve safe read-only git operations (diff, status, log, etc.) including 'cd && git' patterns, while blocking chained commands and dangerous git subcommands/arguments. Handles -C/--git-dir flags. Note: does not handle git aliases.
-- [ ] inner loop detector is almost unusable how many false positives generates, `char run` is the only good mode...
+- [ ] inner loop detector is almost unusable how many false positives generates, `char run` is the only good mode. pls make tests that simulate streaming as it happens normally, use rel existing logs to check for false positives.
 - [x] approval timeout occurs even when explicitly disabled in options, when it was set on auto-ask mode — DONE: Security advisor used hard-coded 180s timeout constant instead of reading from operation_manager settings. Fixed `security_handler.run_check()` to dynamically read `enable_timeout` and `approval_timeout_seconds` from operation manager. Timeout message now shows actual configured value. Added None guards for safety.
 - [ ] I dont want truncation of the user messages in the que (UI user que display)
 - [x] scan_skills and propose_skill return `Error: Object of type coroutine is not JSON serializable`
 - [x] auto-skill interferes with agent's final reply — DONE: multi-turn execution (AUTO_SKILL_EXTRA_TURNS=25), conversation rollback after skill creation, notice injected into last message 
-- [ ] something fucks up the agent jsonl log file and syncs it with the agent pool, submitting a version without messages between markers - it should NOT be in full sync, as per design doc. is it the auto-skill rollback?
-- [ ] max char limit on inner loop detector fails to trigger   (also move the max char limit to the right inner loop section, or add a different one from the sampler options in global)
+- [x] something fucks up the agent jsonl log file and syncs it with the agent pool, submitting a version without messages between markers - it should NOT be in full sync, as per design doc. is it the auto-skill rollback?
+- [x] max char limit on inner loop detector fails to trigger (also move the max char limit to the right inner loop section, or add a different one from the sampler options in global)
+- [x] the auto-skill rollback leaves behind some leftover truncated message at the end in the UI tab history — DONE: replaced marker-based rollback with snapshot-based (target_length), added state reset to IDLE for SLEEPING/COMPLETING states
+- [ ] every time we want to test some AC modules in code_intepretet (fresh docker instance) the agents painstakingly fail and install each required package one by one wasting a LOT of time and tokens. we need to improve this somehow as it it a significant time sink that could be easily solved.
+- [ ] Auto-skill interferes with `Stop` command
+- [x] resurrecting an agent from log does not bring up its agent tab in UI, on refresh I even lose the root agent tab. calling an agent with the same name as the caller (child spawning) also generates this issue. (FIX: _dismiss_all_instances now preserves caller via exclude set, renderSubAgents activates tab when none selected)
+- [ ] UI streaming stops on `pause`. it should not, pause should ONLY stop the tool response logic.
+- [ ] some of the UI setting are getting reset on browser restart (they stick on refresh though)
+- [ ] grep char limit truncation does not provide the spillover file `[TRUNCATED — Character limit exceeded. You can read it with read_file if needed.]` <- this is not useful at all, pls reuse truncation function from read file (make it a helper if possible)
 
 # Errors to investigate:
 
+# adding extra turns one by one? wasteful logic
+2026-07-20 06:20:57,073 - execution_engine.py - 1439 - DEBUG - [CACHE_HIT] Reusing cached messages=143, llm_messages=143
+2026-07-20 06:20:57,074 - execution_engine.py - 984 - DEBUG - [TURN_DONE] Got messages=143, llm_messages=143
+2026-07-20 06:20:57,085 - base.py - 994 - INFO - Agent [Reviewer] - ALL tokens: 49445, Available tokens: 124994
+2026-07-20 06:21:01,022 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 1/25 for rollback_rv
+2026-07-20 06:21:01,048 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 2/25 for rollback_rv
+2026-07-20 06:21:01,067 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 3/25 for rollback_rv
+2026-07-20 06:21:01,081 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 4/25 for rollback_rv
+2026-07-20 06:21:01,096 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 5/25 for rollback_rv
+2026-07-20 06:21:01,112 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 6/25 for rollback_rv
+2026-07-20 06:21:01,127 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 7/25 for rollback_rv
+2026-07-20 06:21:01,141 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 8/25 for rollback_rv
+2026-07-20 06:21:01,155 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 9/25 for rollback_rv
+2026-07-20 06:21:01,169 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 10/25 for rollback_rv
+2026-07-20 06:21:01,182 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 11/25 for rollback_rv
+2026-07-20 06:21:01,196 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 12/25 for rollback_rv
+2026-07-20 06:21:01,210 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 13/25 for rollback_rv
+2026-07-20 06:21:01,225 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 14/25 for rollback_rv
+2026-07-20 06:21:01,239 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 15/25 for rollback_rv
+2026-07-20 06:21:01,253 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 16/25 for rollback_rv
+2026-07-20 06:21:01,266 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 17/25 for rollback_rv
+2026-07-20 06:21:01,279 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 18/25 for rollback_rv
+2026-07-20 06:21:01,294 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 19/25 for rollback_rv
+2026-07-20 06:21:01,308 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 20/25 for rollback_rv
+2026-07-20 06:21:01,321 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 21/25 for rollback_rv
+2026-07-20 06:21:01,335 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 22/25 for rollback_rv
+2026-07-20 06:21:01,349 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 23/25 for rollback_rv
+2026-07-20 06:21:01,364 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 24/25 for rollback_rv
+2026-07-20 06:21:01,377 - manager.py - 605 - DEBUG - [AUTO-SKILL] Extra turn 25/25 for rollback_rv
+2026-07-20 06:21:01,400 - manager.py - 614 - DEBUG - [AUTO-SKILL] Conversation rolled back for rollback_rv
+2026-07-20 06:21:01,411 - execution_engine.py - 4325 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=rollback_rv, reason=completed, inst_type=AgentInstance, conv_len=142, final_resp_len=10
+2026-07-20 06:21:01,433 - execution_engine.py - 1366 - DEBUG - EXIT - rollback_rv RUNNING→IDLE
+
 
 # Maine instance tab got closed by some child agents at some point
-
 2026-07-19 04:28:53,596 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 29293, Available tokens: 89129
 2026-07-19 04:29:11,478 - ws_handlers.py - 696 - INFO - [USER] Approving request: op_fdabb567
 2026-07-19 04:29:11,639 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 29381, Available tokens: 89129
