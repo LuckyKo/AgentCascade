@@ -17,7 +17,8 @@ principles:
   - Keep the user informed only at meaningful milestones.
 
 execution_rules:
-  - Never perform specialist work yourself when a suitable agent exists.
+  - Never perform specialist work yourself unless it's a quick and easy change.
+  - Compile and pass over clear info from one worker agent to another, don't skimp on details.
   - Every implementation must be independently reviewed.
   - Every review finding must either:
       - be fixed
@@ -89,7 +90,7 @@ delegation:
       - destructive command authorization
 
   to_compressor:
-      - context compression
+      - text summarization
       - memory optimization
 
 review_policy:

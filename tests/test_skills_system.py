@@ -291,40 +291,40 @@ class TestSkillManager:
 
     def test_discover_from_real_skills_dir(self):
         """Discover skills from the real .qwen/skills/ directory."""
-        asyncio.run(self.manager.discover([_SKILLS_DIR]))
+        self.manager.discover([_SKILLS_DIR])
         assert len(self.manager._skills_registry) >= 2
         assert "httpx-connection-pooling" in self.manager._skills_registry
         assert "startup-error-audit" in self.manager._skills_registry
 
     def test_discover_from_nonexistent_dir(self):
         """Should not crash on missing directory."""
-        asyncio.run(self.manager.discover([Path("/tmp/no_such_dir_123")]))
+        self.manager.discover([Path("/tmp/no_such_dir_123")])
         assert len(self.manager._skills_registry) == 0
 
     def test_discover_empty_dir(self):
         """Empty dir should register zero skills without error."""
         tmp = Path("/tmp/empty_skills_test")
         tmp.mkdir(exist_ok=True)
-        asyncio.run(self.manager.discover([tmp]))
+        self.manager.discover([tmp])
         assert len(self.manager._skills_registry) == 0
 
     # -- Tier 1 Metadata Queries --
 
     def test_get_skill_metadata_known_name(self):
-        asyncio.run(self.manager.discover([_SKILLS_DIR]))
+        self.manager.discover([_SKILLS_DIR])
         meta = self.manager.get_skill_metadata("httpx-connection-pooling")
         assert meta is not None
         assert meta["name"] == "httpx-connection-pooling"
         assert len(meta["description"]) > 10
 
     def test_get_skill_metadata_unknown_name(self):
-        asyncio.run(self.manager.discover([_SKILLS_DIR]))
+        self.manager.discover([_SKILLS_DIR])
         meta = self.manager.get_skill_metadata("nonexistent-skill")
         assert meta is None
 
     def test_get_all_metadata_excludes_internal_fields(self):
         """get_all_metadata should not leak _priority or _parsed_data."""
-        asyncio.run(self.manager.discover([_SKILLS_DIR]))
+        self.manager.discover([_SKILLS_DIR])
         all_meta = self.manager.get_all_metadata()
         for m in all_meta:
             assert "_priority" not in m
@@ -333,7 +333,7 @@ class TestSkillManager:
             assert "description" in m
 
     def test_get_all_metadata_returns_list(self):
-        asyncio.run(self.manager.discover([_SKILLS_DIR]))
+        self.manager.discover([_SKILLS_DIR])
         all_meta = self.manager.get_all_metadata()
         assert isinstance(all_meta, list)
         assert len(all_meta) >= 2
@@ -341,7 +341,7 @@ class TestSkillManager:
     # -- Tier 2 Loading --
 
     def test_load_full_instructions_known_skill(self):
-        asyncio.run(self.manager.discover([_SKILLS_DIR]))
+        self.manager.discover([_SKILLS_DIR])
         body = self.manager.load_full_instructions("httpx-connection-pooling")
         assert body is not None
         assert len(body) > 100
@@ -349,7 +349,7 @@ class TestSkillManager:
         assert "##" in body or "#" in body
 
     def test_load_full_instructions_unknown_skill(self):
-        asyncio.run(self.manager.discover([_SKILLS_DIR]))
+        self.manager.discover([_SKILLS_DIR])
         body = self.manager.load_full_instructions("nonexistent-skill")
         assert body is None
 
@@ -357,7 +357,7 @@ class TestSkillManager:
 
     def _setup_manager_with_skills(self):
         """Helper to discover real skills before resolution tests."""
-        asyncio.run(self.manager.discover([_SKILLS_DIR]))
+        self.manager.discover([_SKILLS_DIR])
 
     def test_resolve_list_value_returns_loaded_skills(self):
         """resolve_load_skill with a list should return instruction strings."""

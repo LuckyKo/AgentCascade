@@ -210,7 +210,8 @@ class AgentLifecycleManager:
         # BUG FIX (Bug 2): Load session from log_file if provided
         session_was_loaded = False
         if log_file:
-            status = self.pool.load_session_from_log(log_file, target_instance=instance_name, caller_name=caller)
+            # Don't dismiss all instances — we're just loading history into an existing instance
+            status = self.pool.load_session_from_log(log_file, target_instance=instance_name, clear_sub_agents_before_load=False, caller_name=caller)
             if status.startswith("Error"):
                 logger.warning(f"[LOG_FILE_LOAD] Failed to load session for '{instance_name}': {status}")
             else:

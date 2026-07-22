@@ -590,7 +590,10 @@ class TestCallAgentReturn:
 
     def _trigger(self, inst, fresh_manager, total_tool_calls=10,
                  check_result=None, state_idle=True):
-        """Run trigger_auto_skill_reflection with snapshot-based rollback."""
+        """Run auto-skill reflection with snapshot-based rollback.
+
+        Uses the new two-function API: check_and_inject → simulate turns → finalize.
+        """
         if check_result is None:
             check_result = []
 
@@ -598,17 +601,30 @@ class TestCallAgentReturn:
             if pop_count > 0:
                 del inst.conversation[-pop_count:]
 
-        return fresh_manager.trigger_auto_skill_reflection(
+        snapshot_length = len(inst.conversation)
+
+        # Check trigger and inject prompt
+        injected = fresh_manager.check_and_inject_auto_skill_prompt(
             inst=inst,
             total_tool_calls=total_tool_calls,
             task_text="Write a test",
             instance_name="worker",
             append_fn=lambda msg: inst.conversation.append(
                 {"role": "user", "content": msg}),
-            run_turn_fn=lambda: inst.conversation.append(
-                {"role": "assistant", "content": "reply"}),
-            state_idle_fn=lambda: state_idle,
-            snapshot_length=len(inst.conversation),
+        )
+
+        if not injected:
+            return []
+
+        # Simulate a few turns (the engine loop handles this in production)
+        for _ in range(3):
+            inst.conversation.append({"role": "assistant", "content": "reply"})
+
+        # Finalize: rollback and discover created skills
+        return fresh_manager.finalize_auto_skill(
+            inst=inst,
+            instance_name="worker",
+            snapshot_length=snapshot_length,
             rollback_fn=rollback_fn,
             check_skill_created_fn=lambda: check_result,
         )
@@ -696,17 +712,24 @@ class TestCallAgentReturn:
             captured_counts.append(pop_count)
             if pop_count > 0:
                 del inst.conversation[-pop_count:]
-        fresh_manager.trigger_auto_skill_reflection(
+        snapshot_length = len(inst.conversation)
+
+        fresh_manager.check_and_inject_auto_skill_prompt(
             inst=inst,
             total_tool_calls=10,
             task_text="Write a test",
             instance_name="worker",
             append_fn=lambda msg: inst.conversation.append(
                 {"role": "user", "content": msg}),
-            run_turn_fn=lambda: inst.conversation.append(
-                {"role": "assistant", "content": "reply"}),
-            state_idle_fn=lambda: True,
-            snapshot_length=len(inst.conversation),
+        )
+        # Simulate turns
+        for _ in range(3):
+            inst.conversation.append({"role": "assistant", "content": "reply"})
+
+        fresh_manager.finalize_auto_skill(
+            inst=inst,
+            instance_name="worker",
+            snapshot_length=snapshot_length,
             rollback_fn=rollback_fn,
             check_skill_created_fn=lambda: [],
         )

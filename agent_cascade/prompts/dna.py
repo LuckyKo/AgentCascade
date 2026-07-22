@@ -114,7 +114,7 @@ SECURITY_ADVISOR_PROMPT = (
     "- Operating System: {os_info}\n"
     "- Working directory and any file paths must be within the allowed workspaces.\n"
     "Allowed folders:\n{workspace_info}\n\n"
-    "Evaluate this command against your security rules. You may use your tools to investigate further if needed.\n"
+    "Evaluate this command against your security rules. You may use your tools to investigate further if needed but keep it short, you are NOT a reviewer.\n"
     "CRITICAL: Once you have made a decision, the final line of your output MUST be formatted as follows:\n"
     "[YES] Reason: ...\n"
     "[NO] Reason: ..."

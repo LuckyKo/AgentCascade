@@ -535,6 +535,7 @@ class AgentPool:
         Returns:
             The newly created AgentInstance.
         """
+        instance_name = instance_name.strip()
         now = time.monotonic()
         instance = AgentInstance(
             instance_name=instance_name,
@@ -561,7 +562,7 @@ class AgentPool:
         Returns None if the instance doesn't exist (instead of raising KeyError).
         This is intentional — callers often check existence before acting.
         """
-        return self.instances.get(instance_name)
+        return self.instances.get(instance_name.strip())
 
     def remove_instance(self, instance_name: str):
         """Remove an agent instance from the pool.
@@ -569,6 +570,7 @@ class AgentPool:
         Used by IdleManager for auto-dismissal and by dismiss_agent tool execution.
         Fires dismissal callbacks and cleans up message queues.
         """
+        instance_name = instance_name.strip()
         self._instances_version += 1  # Fix #3: signal that instances changed
         inst = self.instances.pop(instance_name, None)
         self.terminated_instances.discard(instance_name)  # Issue #4 fix: prevent memory leaks
@@ -672,6 +674,7 @@ class AgentPool:
                               via the global event. Bug5 Fix: Dismissal uses False to avoid
                               affecting other agents mid-execution.
         """
+        instance_name = instance_name.strip()
         # First cascade-terminate all children (recursive, Fix Bug41, thread-safe read)
         with self._children_lock:
             child_list = list(self.children.get(instance_name, []))
@@ -756,6 +759,7 @@ class AgentPool:
         Bug5 Fix #1: Dismissal should NOT set global _stopped_event to avoid affecting
         other agents mid-execution. Only this specific instance is terminated.
         """
+        instance_name = instance_name.strip()
         # First dismiss all children (recursive cascade, Fix Bug41, thread-safe read)
         with self._children_lock:
             child_list = list(self.children.get(instance_name, []))
@@ -1318,6 +1322,7 @@ class AgentPool:
         Used by agent_orchestrator.py at lines 1781 and 2245 for class mismatch
         cleanup and terminated instance cleanup respectively.
         """
+        instance_name = instance_name.strip()
         inst = self.instances.get(instance_name)
         if inst:
             inst.reset_conversation()  # PR3: centralized API handles full reset with cache sync
@@ -1525,7 +1530,7 @@ class AgentPool:
             return "Error: No valid messages found in log input."
 
         # --- 2b. Determine instance name early for exclusion check ----------
-        instance_name = target_instance if target_instance is not None else metadata.get("instance_name") or "RecoveredSession"
+        instance_name = (target_instance if target_instance is not None else metadata.get("instance_name") or "RecoveredSession").strip()
 
         # --- 3. Dismiss ALL instances (sub-agents + roots) -------------------
         if clear_sub_agents_before_load:
@@ -1828,6 +1833,7 @@ class AgentPool:
         This is the single point of truth for adding messages — all writes go
         directly to instances[name].conversation.
         """
+        instance_name = instance_name.strip()
         inst = self.instances.get(instance_name)
         if inst:
             inst.append_message(message)  # PR2: centralized mutation API handles cache sync
@@ -1864,6 +1870,7 @@ class AgentPool:
 
     def get_conversation(self, instance_name: str) -> List[Message]:
         """Get the conversation list for an agent. Returns empty list if not found."""
+        instance_name = instance_name.strip()
         inst = self.instances.get(instance_name)
         if inst is None:
             return []
@@ -2252,6 +2259,7 @@ class AgentPool:
 
     def _mark_activity(self, instance_name: str):
         """Update last_activity timestamp for an instance."""
+        instance_name = instance_name.strip()
         inst = self.instances.get(instance_name)
         if inst:
             inst.last_activity = time.monotonic()
@@ -2260,6 +2268,7 @@ class AgentPool:
 
     def is_active(self, instance_name: str) -> bool:
         """Check if an instance is currently executing (derived from state machine)."""
+        instance_name = instance_name.strip()
         inst = self.instances.get(instance_name)
         return inst.is_running if inst else False
 
@@ -2269,6 +2278,7 @@ class AgentPool:
         Per-instance termination check — does NOT affect other agents (unlike _stopped_event).
         Checks terminated_instances set first (authoritative), then falls back to inst.is_terminated flag.
         """
+        instance_name = instance_name.strip()
         if instance_name in self.terminated_instances:
             return True
         inst = self.instances.get(instance_name)

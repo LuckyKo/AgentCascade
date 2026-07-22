@@ -200,7 +200,7 @@ class ToolDispatcher:
 
         # P5: Class mismatch detection — clear history if class differs on existing instance
         existing_class = self.pool.instance_classes.get(instance_name)
-        if existing_class and agent_class and existing_class != agent_class:
+        if existing_class and agent_class and existing_class.lower() != agent_class:
             logger.warning("call_agent class mismatch - %s/%s exists as %s, requested %s", 
                           caller_name, instance_name, existing_class, agent_class)
             return (f"Error: Agent '{instance_name}' already exists as '{existing_class}'. "
@@ -278,7 +278,7 @@ class ToolDispatcher:
             # JSON parsing failed in _resolve_placeholders — return error
             return "[status=error] Invalid JSON arguments."
 
-        target_name = args.get('instance_name', '')
+        target_name = (args.get('instance_name') or '').strip()
         all_idle = args.get('all_idle', False)
 
         # ── Helper: capture log_path before dismissal removes the logger ──
@@ -551,7 +551,7 @@ class ToolDispatcher:
             logger.warning("call_agent early exit - %s (args is None)", caller_name)
             return None, None, 'Error: Invalid JSON arguments.'
 
-        instance_name = args.get('instance_name', '')
+        instance_name = (args.get('instance_name') or '').strip()
         agent_class = (args.get('agent_class') or '').strip().lower()
 
         if not instance_name or not agent_class:

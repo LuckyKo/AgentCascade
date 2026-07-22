@@ -16,7 +16,19 @@ RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
     Pillow \
     seaborn \
     sympy \
-    openpyxl
+    openpyxl \
+    pyyaml \
+    "pydantic>=2.3.0" \
+    tiktoken \
+    regex \
+    json5 \
+    jsonlines \
+    jsonschema \
+    python-dotenv \
+    openai \
+    "dashscope>=1.11.0" \
+    aiohttp \
+    eval_type_backport
 
 # fix font issue in matplotlib
 COPY AlibabaPuHuiTi-3-45-Light.ttf /usr/share/fonts/truetype/

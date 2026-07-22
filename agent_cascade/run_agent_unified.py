@@ -24,7 +24,7 @@ from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, ROLE, USER, Message,
 )
 from agent_cascade.log import logger
-from agent_cascade.settings import AUTO_SKILL_ENABLED
+from agent_cascade.settings import AUTO_SKILL_ENABLED, AUTO_SKILL_EXTRA_TURNS
 
 from .agent_pool import AgentPool
 from .agent_instance import AgentState
@@ -130,6 +130,12 @@ def run_agent_thread_unified(
         # Track cumulative tool calls for auto-skill trigger
         total_tool_calls = 0
 
+        # Shared stop-check helper (used by main loop and auto-skill)
+        def is_stopped():
+            return (pool.stopped or current_generation != pool._run_generation
+                    or instance_name in pool._halted_instances
+                    or pool.is_instance_terminated(instance_name))
+
         for turn_output_raw in run_agent_in_pool_with_recovery(
             pool=pool,
             instance_name=instance_name,
@@ -143,9 +149,7 @@ def run_agent_thread_unified(
                 turn_output, is_streaming_tick = turn_output_raw, False
 
             # FIX TODO #41: Check all stop conditions including per-instance halt and termination
-            if pool.stopped or current_generation != pool._run_generation \
-                    or instance_name in pool._halted_instances \
-                    or pool.is_instance_terminated(instance_name):
+            if is_stopped():
                 break
 
             now = time.monotonic()
@@ -229,34 +233,54 @@ def run_agent_thread_unified(
                     _conv_length = len(inst.conversation)
                 _skills_before = set(skill_manager.get_skill_names())
 
-                # Create a fresh engine iterator for single-turn execution
-                from .execution_engine import ExecutionEngine
-                _engine = ExecutionEngine(pool)
-                _turn_iter = _engine.run(inst)
-
-                created_skills = skill_manager.trigger_auto_skill_reflection(
+                # Check trigger and inject prompt
+                _append_fn = lambda msg: inst.append_message(Message(role=USER, content=msg))
+                if skill_manager.check_and_inject_auto_skill_prompt(
                     inst=inst,
                     total_tool_calls=total_tool_calls,
                     task_text=task_text,
                     instance_name=instance_name,
-                    append_fn=lambda msg: inst.append_message(Message(role=USER, content=msg)),
-                    run_turn_fn=lambda: next(_turn_iter, None),
-                    state_idle_fn=lambda: inst.state == AgentState.IDLE,
-                    snapshot_length=_conv_length,
-                    rollback_fn=lambda pop_count: pool._rollback_instance(
-                        instance_name, pop_count=pop_count),
-                    check_skill_created_fn=lambda: list(
-                        set(skill_manager._skills_registry.keys()) - _skills_before),
-                )
+                    append_fn=_append_fn,
+                ):
+                    # Set turn limit and let the engine loop handle extra turns
+                    _orig_max_turns = inst.max_turns
+                    inst.max_turns = AUTO_SKILL_EXTRA_TURNS
+                    try:
+                        from .execution_engine import ExecutionEngine
+                        _engine = ExecutionEngine(pool)
+                        for turn_output_raw in _engine.run(inst):
+                            if is_stopped():
+                                break
+                            # Unpack (turn_output, is_streaming) tuple
+                            if isinstance(turn_output_raw, tuple) and len(turn_output_raw) == 2:
+                                turn_output = turn_output_raw[0]
+                            else:
+                                turn_output = turn_output_raw
+                            # Count tool calls from FUNCTION role messages
+                            total_tool_calls += sum(1 for m in turn_output if (
+                                m.get('role', '') == FUNCTION
+                                if isinstance(m, dict) else getattr(m, 'role', '') == FUNCTION
+                            ))
+                    except Exception as e:
+                        logger.warning("[AUTO-SKILL] Extra turn error for %s: %s", instance_name, e)
+                    finally:
+                        inst.max_turns = _orig_max_turns
 
-                # Inject notice into the last message (not a separate msg)
-                if created_skills and inst.conversation:
-                    notice = (f"\n\n[Auto-skill created: {', '.join(created_skills)}]")
-                    last = inst.conversation[-1]
-                    if isinstance(last, dict):
-                        last["content"] = str(last.get("content", "")) + notice
-                    else:
-                        last.content = str(getattr(last, 'content', '')) + notice
+                    created_skills = skill_manager.finalize_auto_skill(
+                        inst=inst,
+                        instance_name=instance_name,
+                        snapshot_length=_conv_length,
+                        rollback_fn=lambda pop_count: pool._rollback_instance(
+                            instance_name, pop_count=pop_count),
+                        check_skill_created_fn=lambda: list(
+                            set(skill_manager._skills_registry.keys()) - frozenset(_skills_before)),
+                    )
+                else:
+                    created_skills = []
+
+                # Inject notice into the last message
+                from agent_cascade.skills.manager import inject_skill_notice
+                inject_skill_notice(inst, created_skills)
 
         # ── Final state broadcast ────────────────────────────────────────
         final_state = build_state_from_pool(
