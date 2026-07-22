@@ -175,7 +175,7 @@ class WsMessageHandler:
         if 'agent_index' in data:
             self.session['agent_index'] = int(data['agent_index'])
         if 'session_name' in data:
-            self.session['session_name'] = data['session_name']
+            self.session['session_name'] = data['session_name'].strip()
         if 'generate_cfg' in data:
             _validate_disabled_tools(data['generate_cfg'])
             self.session['generate_cfg'] = data['generate_cfg']
@@ -834,7 +834,7 @@ class WsMessageHandler:
     async def handle_set_session_name(self, data: dict) -> None:
         """Handle 'set_session_name' — rename session and migrate summaries."""
         old_name = self.session['session_name']
-        new_name = data.get('name', 'Maine')
+        new_name = data.get('name', 'Maine').strip()
         self.session['session_name'] = new_name
         if self.agent_pool:
             if old_name in self.agent_pool.instance_summaries:
@@ -860,7 +860,7 @@ class WsMessageHandler:
                         meta = first_data.get("metadata", {})
                         extracted = meta.get("instance_name") if isinstance(meta, dict) else None
                         if extracted:
-                            instance_name = str(extracted)
+                            instance_name = str(extracted).strip()
         except (OSError, json.JSONDecodeError, KeyError) as e:
             from agent_cascade.log import logger
             logger.debug(f"Failed to read metadata from {path}: {e}, using default instance name")
