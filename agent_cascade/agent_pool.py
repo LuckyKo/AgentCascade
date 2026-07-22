@@ -515,6 +515,35 @@ class AgentPool:
 
     # ── Instance lifecycle ───────────────────────────────────────────────────
 
+    def _resolve_instance_name(
+        self,
+        instance_name: str,
+        exclude: Optional[str] = None,
+    ) -> str:
+        """Resolve instance name to avoid case-insensitive duplicates.
+
+        Returns the canonical name (the one already in the pool if it matches,
+        otherwise the original name). Raises ValueError if name is empty after strip.
+
+        Args:
+            instance_name: The proposed instance name.
+            exclude: If provided, skip this name when searching for duplicates.
+                Used when loading a session — the target instance should be excluded
+                so it can be replaced by the loaded data.
+        """
+        if not instance_name:
+            raise ValueError("Instance name cannot be empty")
+
+        instance_name = instance_name.strip()
+        if not instance_name:
+            raise ValueError("Instance name cannot be whitespace only")
+
+        # Check for case-insensitive match
+        for name in self.instances:
+            if name != exclude and name.lower() == instance_name.lower():
+                return name  # Reuse the existing canonical name
+        return instance_name
+
     def create_instance(
         self,
         instance_name: str,
@@ -535,7 +564,7 @@ class AgentPool:
         Returns:
             The newly created AgentInstance.
         """
-        instance_name = instance_name.strip()
+        instance_name = self._resolve_instance_name(instance_name)
         now = time.monotonic()
         instance = AgentInstance(
             instance_name=instance_name,
@@ -1530,7 +1559,9 @@ class AgentPool:
             return "Error: No valid messages found in log input."
 
         # --- 2b. Determine instance name early for exclusion check ----------
-        instance_name = (target_instance if target_instance is not None else metadata.get("instance_name") or "RecoveredSession").strip()
+        instance_name = self._resolve_instance_name(
+            target_instance if target_instance is not None else metadata.get("instance_name") or "RecoveredSession"
+        )
 
         # --- 3. Dismiss ALL instances (sub-agents + roots) -------------------
         if clear_sub_agents_before_load:

@@ -293,6 +293,7 @@ def create_main_agent_instance(
         sys_msg = Message(role=SYSTEM, content=system_message_content)
         conversation = [sys_msg]
 
+    instance_name = pool._resolve_instance_name(instance_name)
     instance = pool.create_instance(
         instance_name=instance_name,
         agent_class='orchestrator',

@@ -123,6 +123,7 @@ class AgentLifecycleManager:
             if existing was reused and session_was_loaded indicates that conversation
             history was loaded from a log file
         """
+        instance_name = self.pool._resolve_instance_name(instance_name)
         now = time.monotonic()
         existing = self.pool.instances.get(instance_name)
         is_reuse = False
