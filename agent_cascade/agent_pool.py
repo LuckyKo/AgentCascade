@@ -2069,23 +2069,18 @@ class AgentPool:
         with self._queue_lock:
             return bool(self.message_queues.get(instance_name))
 
-    def get_queue_previews(self, instance_name: str, max_length: int = 100) -> list:
-        """Get truncated previews of queued messages for an instance.
+    def get_queue_messages(self, instance_name: str) -> List[str]:
+        """Get queued messages for an instance.
 
         Args:
             instance_name: The agent instance name to query.
-            max_length: Maximum character length per preview string.
 
         Returns:
-            List of truncated message strings (empty if no queue).
+            List of full message strings (empty if no queue).
         """
         with self._queue_lock:
             queue = list(self.message_queues.get(instance_name, []))
-        results = []
-        for msg in queue:
-            s = str(msg)
-            results.append(s[:max_length] + ('...' if len(s) > max_length else ''))
-        return results
+        return [str(msg) for msg in queue]
 
     def dismiss_queue_message(self, instance_name: str, message_index: int) -> bool:
         """Remove a specific message from the queue by index.

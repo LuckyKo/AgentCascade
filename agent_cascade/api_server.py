@@ -459,7 +459,7 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
                 'max_tokens': fallback_max_tokens,
                 'summary': '',
                 'has_queued_messages': has_queued,
-                'queued_messages': agent_pool.get_queue_previews(instance_name) or [],
+                'queued_messages': agent_pool.get_queue_messages(instance_name) or [],
                 'stopped': stopped,
                 'paused': agent_pool.is_paused() if agent_pool else False,
                 'agents': agents_list,
