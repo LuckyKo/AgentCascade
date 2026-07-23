@@ -901,6 +901,14 @@ function loadSettings() {
     if (s['inner-loop-detect'] !== undefined) $('#setting-inner-loop-detect').checked = s['inner-loop-detect'];
     // Restore Agent Budgeting toggle state
     if (s['enable_agent_budgeting'] !== undefined) $('#setting-agent-budgeting').checked = s['enable_agent_budgeting'];
+    // Restore Log API POST Dump toggle
+    if (s['log_api_post'] !== undefined) $('#setting-log-api-post').checked = s['log_api_post'];
+    // Restore Max Auto-Rollbacks value
+    if (s['max_auto_rollbacks'] !== undefined) $('#setting-max-rollbacks').value = s['max_auto_rollbacks'];
+    // Restore Max Parallel Agents value
+    if (s['max_parallel_agents'] !== undefined) $('#setting-max-parallel').value = s['max_parallel_agents'];
+    // Restore Auto-Rollback on Loop toggle
+    if (s['auto_rollback_on_loop'] !== undefined) $('#setting-auto-rollback').checked = s['auto_rollback_on_loop'];
     // Loop detection tuning settings restore
     if (s['loop-min-chars'] !== undefined) $('#setting-loop-min-chars').value = s['loop-min-chars'];
     if (s['loop-max-chars'] !== undefined) $('#setting-loop-max-chars').value = s['loop-max-chars'];
