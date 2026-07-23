@@ -813,18 +813,23 @@ class ListDir(BaseTool):
 
         # Get the truncation limit from agent/tool options
         char_limit = 3000
-        if hasattr(self, 'agent_pool') and self.agent_pool:
+        if self.agent_pool:
             llm_cfg = getattr(self.agent_pool, 'llm_cfg', {})
-            char_limit = llm_cfg.get('list_dir_char_limit', char_limit)
-        elif self.cfg.get('list_dir_char_limit'):
-            char_limit = self.cfg.get('list_dir_char_limit')
+            if isinstance(llm_cfg, dict):
+                val = llm_cfg.get('list_dir_char_limit')
+                if val is not None:
+                    char_limit = int(val)
+        elif isinstance(self.cfg, dict):
+            val = self.cfg.get('list_dir_char_limit')
+            if val is not None:
+                char_limit = int(val)
 
         agent_name = kwargs.get('agent_instance_name', 'unknown')
         return self.agent_pool.operation_manager.list_directory(
             path, recursive=recursive, max_depth=max_depth,
             include=include, exclude=exclude, sort_by=sort_by,
             show_summary=show_summary, max_entries=max_entries,
-            char_limit=int(char_limit), agent_name=agent_name
+            char_limit=char_limit, agent_name=agent_name
         )
 
 

@@ -360,7 +360,10 @@ class FileOpsMixin:
         char_limit: int = 3000,
         agent_name: str = "unknown",
     ) -> str:
-        """List contents of a directory with optional recursive traversal, filtering, sorting, and summary."""
+        """List contents of a directory with optional recursive traversal, filtering, sorting, and summary.
+        
+        Truncates output to *char_limit* characters via spillover files for the given *agent_name*.
+        """
         try:
             resolved = self._resolve_path(path)
             if not resolved.exists():

@@ -1679,8 +1679,10 @@ class ExecutionEngine:
 
         Extracted from _pre_llm_checks() - Phase 3.8
 
-        Always uses current conversation token count (via _count_history_tokens)
-        for proactive compression checking. Injects warning at lower thresholds.
+        Uses cached ground-truth token count from last LLM call as baseline,
+        then estimates delta tokens for messages added since then (tool results,
+        user messages, async injections). Falls back to full recount on first
+        turn. Injects warning at lower thresholds.
 
         Args:
             instance: Current agent instance
@@ -1692,17 +1694,33 @@ class ExecutionEngine:
         """
         max_tokens = self._get_max_tokens(instance)
 
-        # Always use current conversation token count for proactive compression
-        # checking. Cached values become stale after messages are added between
-        # LLM calls (tool results, user messages, etc.), causing compression
-        # to trigger too late. _count_history_tokens has its own caching
-        # (checks conversation length) so performance is not a concern.
-        #
-        # Count tokens on FULL conversation (messages), not sliced llm_messages.
-        # llm_messages is already trimmed by slice_history_for_llm(), so it
-        # doesn't reflect actual context accumulation.
-        current_tokens = self._count_history_tokens(messages, instance)
-        max_tokens_for_check = max_tokens
+        # Use cached ground-truth token count from last LLM call as baseline,
+        # then estimate delta for messages added since then (tool results,
+        # user messages, async injections). This is proactive without the
+        # performance cost of recounting the entire conversation.
+        actual_tokens = instance._last_actual_token_count
+        allocated_max = instance._allocated_max_input_tokens
+
+        if actual_tokens > 0 and allocated_max > 0:
+            # Calculate delta: messages added since last token count
+            delta_start = instance._last_token_count_conversation_length
+            delta_tokens = 0
+            if delta_start >= 0 and len(messages) > delta_start:
+                # Use a fresh dummy object to avoid corrupting the instance's
+                # token count cache (_count_history_tokens updates
+                # _last_token_count_conversation_length to len(messages))
+                from types import SimpleNamespace
+                dummy = SimpleNamespace(
+                    _last_token_count_conversation_length=-1,
+                    _cached_token_count=0
+                )
+                delta_tokens = self._count_history_tokens(messages[delta_start:], dummy)
+            current_tokens = actual_tokens + delta_tokens
+            max_tokens_for_check = allocated_max
+        else:
+            # Fallback: first turn or no cached data yet
+            current_tokens = self._count_history_tokens(messages, instance)
+            max_tokens_for_check = max_tokens
 
         usage_pct = (current_tokens / max_tokens_for_check * 100) if max_tokens_for_check > 0 else 0
 
