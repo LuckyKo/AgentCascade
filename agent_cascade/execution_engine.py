@@ -1679,8 +1679,8 @@ class ExecutionEngine:
 
         Extracted from _pre_llm_checks() - Phase 3.8
 
-        Also injects warning at lower thresholds. Uses ground-truth token counts
-        from last LLM call when available for accurate compression triggering.
+        Always uses current conversation token count (via _count_history_tokens)
+        for proactive compression checking. Injects warning at lower thresholds.
 
         Args:
             instance: Current agent instance
@@ -1692,31 +1692,17 @@ class ExecutionEngine:
         """
         max_tokens = self._get_max_tokens(instance)
 
-        # Ground-truth token counts from last LLM call (fixes force compression
-        # loop bug)
-        # This fixes the force compression loop bug where manual counting was
-        # ~5x higher than actual
-        # Atomic snapshot pattern: read both values into locals before check
-        # (thread-safe under GIL)
-        actual_tokens = instance._last_actual_token_count
-        allocated_max = instance._allocated_max_input_tokens
-
-        if actual_tokens > 0 and allocated_max > 0:
-            # Use cached ground-truth values from last LLM API call
-            current_tokens = actual_tokens
-            max_tokens_for_check = allocated_max
-        else:
-            # Fallback to manual counting when ground-truth not available
-            # (e.g., first turn)
-            # CRITICAL FIX: Count tokens on FULL conversation (messages), not
-            # sliced llm_messages
-            # llm_messages is already trimmed by slice_history_for_llm(), so it
-            # doesn't reflect
-            # actual context accumulation. We need to measure the full working
-            # set to determine
-            # when compression should trigger.
-            current_tokens = self._count_history_tokens(messages, instance)
-            max_tokens_for_check = max_tokens
+        # Always use current conversation token count for proactive compression
+        # checking. Cached values become stale after messages are added between
+        # LLM calls (tool results, user messages, etc.), causing compression
+        # to trigger too late. _count_history_tokens has its own caching
+        # (checks conversation length) so performance is not a concern.
+        #
+        # Count tokens on FULL conversation (messages), not sliced llm_messages.
+        # llm_messages is already trimmed by slice_history_for_llm(), so it
+        # doesn't reflect actual context accumulation.
+        current_tokens = self._count_history_tokens(messages, instance)
+        max_tokens_for_check = max_tokens
 
         usage_pct = (current_tokens / max_tokens_for_check * 100) if max_tokens_for_check > 0 else 0
 
