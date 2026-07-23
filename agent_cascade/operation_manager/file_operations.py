@@ -8,7 +8,7 @@ import zipfile
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from agent_cascade.tool_utils import truncate_with_spillover
 
