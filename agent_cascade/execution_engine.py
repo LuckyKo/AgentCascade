@@ -1,8 +1,5 @@
 """
 Execution Engine — Orchestration coordinator for the AgentCascade Architecture.
-
-Coordinates execution of ALL agent instances through a single unified loop.
-Replaces both api_server.run_agent_thread() and the old sub-agent execution path,
 eliminating the structural duality. Delegates lifecycle, compression, tool dispatch,
 and streaming to specialized handler classes.
 
@@ -4644,5 +4641,3 @@ class ExecutionEngine:
             )
             if not has_notification:
                 content.append({'type': 'text', 'text': notification_text})
-
-    # Note: truncate_tool_result removed — tools handle their own truncation.

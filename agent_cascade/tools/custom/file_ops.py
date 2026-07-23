@@ -818,11 +818,17 @@ class ListDir(BaseTool):
             if isinstance(llm_cfg, dict):
                 val = llm_cfg.get('list_dir_char_limit')
                 if isinstance(val, (int, float, str)):
-                    char_limit = int(val)
+                    try:
+                        char_limit = int(val)
+                    except (ValueError, TypeError):
+                        pass
         elif isinstance(self.cfg, dict):
             val = self.cfg.get('list_dir_char_limit')
             if isinstance(val, (int, float, str)):
-                char_limit = int(val)
+                try:
+                    char_limit = int(val)
+                except (ValueError, TypeError):
+                    pass
 
         agent_name = kwargs.get('agent_instance_name', 'unknown')
         return self.agent_pool.operation_manager.list_directory(
