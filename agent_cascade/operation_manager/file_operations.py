@@ -371,8 +371,6 @@ class FileOpsMixin:
             if not resolved.is_dir():
                 return f"Not a directory: {path}"
 
-            if max_depth < 0:
-                max_depth = -1
             if recursive and max_depth == 0:
                 recursive = False
 

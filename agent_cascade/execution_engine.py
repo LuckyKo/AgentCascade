@@ -19,6 +19,7 @@ import os
 import re
 import random
 import time
+from types import SimpleNamespace
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 from enum import Enum, auto
 
@@ -1709,7 +1710,6 @@ class ExecutionEngine:
                 # Use a fresh dummy object to avoid corrupting the instance's
                 # token count cache (_count_history_tokens updates
                 # _last_token_count_conversation_length to len(messages))
-                from types import SimpleNamespace
                 dummy = SimpleNamespace(
                     _last_token_count_conversation_length=-1,
                     _cached_token_count=0

@@ -817,11 +817,11 @@ class ListDir(BaseTool):
             llm_cfg = getattr(self.agent_pool, 'llm_cfg', {})
             if isinstance(llm_cfg, dict):
                 val = llm_cfg.get('list_dir_char_limit')
-                if val is not None:
+                if isinstance(val, (int, float, str)):
                     char_limit = int(val)
         elif isinstance(self.cfg, dict):
             val = self.cfg.get('list_dir_char_limit')
-            if val is not None:
+            if isinstance(val, (int, float, str)):
                 char_limit = int(val)
 
         agent_name = kwargs.get('agent_instance_name', 'unknown')
