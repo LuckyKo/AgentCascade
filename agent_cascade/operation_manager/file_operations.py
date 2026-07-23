@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from agent_cascade.tool_utils import truncate_with_spillover
 
 # ─── Mixin: File operations for OperationManager ─────────────────────────
 
@@ -356,6 +357,8 @@ class FileOpsMixin:
         sort_by: str = "name",
         show_summary: bool = False,
         max_entries: int = 500,
+        char_limit: int = 3000,
+        agent_name: str = "unknown",
     ) -> str:
         """List contents of a directory with optional recursive traversal, filtering, sorting, and summary."""
         try:
@@ -399,7 +402,14 @@ class FileOpsMixin:
                 output += f"  Total files:       {total_files}\n"
                 output += f"  Total size:        {self._format_size(total_size)}\n"
 
-            return header + output
+            result = header + output
+            return truncate_with_spillover(
+                result, char_limit,
+                instance_name=agent_name,
+                tool_name='list_dir',
+                base_dir=self.base_dir,
+                operation_mode='head',
+            )
         except Exception as e:
             from agent_cascade.log import logger
             logger.debug(f"Error listing directory: {e}")
