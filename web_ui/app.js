@@ -126,31 +126,39 @@ function clearAutoSecurityTimers() {
  * Each entry: { id, prop, transform? } — prop is 'checked' or 'value'.
  * transform(value) is called to convert the server value before assignment. */
 const POOL_SETTINGS_MAP = [
-  { id: 'setting-inner-loop-detect', prop: 'checked', key: 'inner_loop_detect_enabled' },
-  { id: 'setting-loop-min-chars', prop: 'value', key: 'loop_min_chars' },
-  { id: 'setting-loop-max-chars', prop: 'value', key: 'loop_max_chars' },
-  { id: 'setting-loop-score-threshold', prop: 'value', key: 'loop_score_threshold' },
-  { id: 'setting-loop-max-retries', prop: 'value', key: 'loop_max_retries' },
-  { id: 'setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled' },
-  { id: 'setting-loop-sentence-rep', prop: 'checked', key: 'loop_sentence_rep_enabled' },
-  { id: 'setting-loop-ngram-rep', prop: 'checked', key: 'loop_ngram_rep_enabled' },
-  { id: 'setting-loop-block-rep', prop: 'checked', key: 'loop_block_rep_enabled' },
-  { id: 'setting-loop-entropy', prop: 'checked', key: 'loop_entropy_enabled' },
-  { id: 'setting-cache-pool-enabled', prop: 'checked', key: 'cache_pool_enabled' },
-  { id: 'setting-cache-pool-size', prop: 'value', key: 'cache_pool_size' },
-  { id: 'setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars' },
-  { id: 'setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode',
+  { id: 'setting-inner-loop-detect', prop: 'checked', key: 'inner_loop_detect_enabled', localKey: 'inner-loop-detect' },
+  { id: 'setting-loop-min-chars', prop: 'value', key: 'loop_min_chars', localKey: 'loop-min-chars' },
+  { id: 'setting-loop-max-chars', prop: 'value', key: 'loop_max_chars', localKey: 'loop-max-chars' },
+  { id: 'setting-loop-score-threshold', prop: 'value', key: 'loop_score_threshold', localKey: 'loop-score-threshold' },
+  { id: 'setting-loop-max-retries', prop: 'value', key: 'loop_max_retries', localKey: 'loop-max-retries' },
+  { id: 'setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled', localKey: 'loop-char-run-enabled' },
+  { id: 'setting-loop-sentence-rep', prop: 'checked', key: 'loop_sentence_rep_enabled', localKey: 'loop-sentence-rep-enabled' },
+  { id: 'setting-loop-ngram-rep', prop: 'checked', key: 'loop_ngram_rep_enabled', localKey: 'loop-ngram-rep-enabled' },
+  { id: 'setting-loop-block-rep', prop: 'checked', key: 'loop_block_rep_enabled', localKey: 'loop-block-rep-enabled' },
+  { id: 'setting-loop-entropy', prop: 'checked', key: 'loop_entropy_enabled', localKey: 'loop-entropy-enabled' },
+  { id: 'setting-cache-pool-enabled', prop: 'checked', key: 'cache_pool_enabled', localKey: 'cache-pool-enabled' },
+  { id: 'setting-cache-pool-size', prop: 'value', key: 'cache_pool_size', localKey: 'cache-pool-size' },
+  { id: 'setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars', localKey: 'cache-threshold-chars' },
+  { id: 'setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode', localKey: 'enable-skills',
     transform: (v) => v === 'AUTO' },
 ];
 
 /** Sync pool settings from server state to UI elements.
  * Called on every state/stream_update message to ensure UI matches server truth.
+ * Respects existing localStorage preferences — only syncs if the user has not set a value locally.
  * @param {Object} ps - Pool settings object (inner-loop detection tuning + cache pool) */
 function syncPoolSettings(ps) {
   if (!ps) return;
-  for (const { id, prop, key, transform } of POOL_SETTINGS_MAP) {
+  // Read localStorage once to check existing user preferences
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem('agent-cascade-settings')); } catch { saved = null; }
+  if (!saved) saved = {};
+
+  for (const { id, prop, key, transform, localKey } of POOL_SETTINGS_MAP) {
     const el = $(id);
     if (el && ps[key] !== undefined) {
+      // Respect existing local preference — only overwrite if not already set in localStorage
+      if (localKey && saved[localKey] !== undefined) continue;
       el[prop] = transform ? transform(ps[key]) : ps[key];
     }
   }
