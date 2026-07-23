@@ -14,8 +14,7 @@ Design Pattern: Lazy Initialization (same as AgentLifecycleManager, CompressionH
 
 import time
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
-import time
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple
+
 if TYPE_CHECKING:
     from agent_cascade.execution_engine import ExecutionEngine
     from agent_cascade.agent_instance import AgentInstance

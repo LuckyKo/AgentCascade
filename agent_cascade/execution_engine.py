@@ -1692,10 +1692,6 @@ class ExecutionEngine:
         """
         max_tokens = self._get_max_tokens(instance)
 
-        # Use cached ground-truth token count from last LLM call as baseline,
-        # then estimate delta for messages added since then (tool results,
-        # user messages, async injections). This is proactive without the
-        # performance cost of recounting the entire conversation.
         actual_tokens = instance._last_actual_token_count
         allocated_max = instance._allocated_max_input_tokens
 
