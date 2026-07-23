@@ -4,8 +4,7 @@ Performance benchmark for read_file through the full ToolDispatcher execution pa
 Compares:
   A) Standalone ReadFile.call() — direct tool invocation (baseline)
   B) Full dispatcher.execute_tool() path — what actually happens during agent runs
-  C) truncate_tool_result() latency (exempt vs non-exempt tools)
-  D) Compression handler drain calls (_drain_pending_into_tool_result, _drain_tool_warnings)
+  C) Compression handler drain calls (_drain_pending_into_tool_result, _drain_tool_warnings)
 
 Key question: Does the full dispatcher path add significant latency vs. calling ReadFile directly?
 
@@ -179,38 +178,7 @@ def benchmark_dispatcher_execute(dispatcher: ToolDispatcher, mock_template: Magi
     return times_ms
 
 
-def benchmark_truncate_exempt(dispatcher: ToolDispatcher, test_file: Path) -> List[float]:
-    """Time truncate_tool_result for read_file (exempt — fast path)."""
-    rel = str(test_file.relative_to(WORK_DIR))
-    full_result = ReadFile().call({"path": rel, "start_line": 1, "limit": TEST_FILE_LINES})
-
-    times_ms: List[float] = []
-    messages = [{"role": "system", "content": "You are helpful."}]
-
-    for _ in range(NUM_ITERATIONS):
-        t0 = time.perf_counter()
-        dispatcher.truncate_tool_result(full_result, "read_file", messages, "test_worker")
-        elapsed = (time.perf_counter() - t0) * 1000
-        times_ms.append(elapsed)
-
-    return times_ms
-
-
-def benchmark_truncate_non_exempt(dispatcher: ToolDispatcher, test_file: Path) -> List[float]:
-    """Time truncate_tool_result for a non-exempt tool (triggers token counting)."""
-    rel = str(test_file.relative_to(WORK_DIR))
-    full_result = ReadFile().call({"path": rel, "start_line": 1, "limit": TEST_FILE_LINES})
-
-    times_ms: List[float] = []
-    messages = [{"role": "system", "content": "You are helpful."}]
-
-    for _ in range(NUM_ITERATIONS):
-        t0 = time.perf_counter()
-        dispatcher.truncate_tool_result(full_result, "call_agent", messages, "test_worker")
-        elapsed = (time.perf_counter() - t0) * 1000
-        times_ms.append(elapsed)
-
-    return times_ms
+# Note: truncate_tool_result benchmarks removed — truncation now handled
 
 
 def benchmark_drain_methods(mock_instance: MagicMock, full_result: str) -> Dict[str, List[float]]:
@@ -299,13 +267,7 @@ def main():
         dispatcher_times = benchmark_dispatcher_execute(dispatcher, mock_template, test_file)
         stats("Full Dispatcher.execute_tool()", dispatcher_times)
 
-        # ── Test 3: truncate_tool_result() — exempt tool (read_file) ──────────
-        truncate_exempt_times = benchmark_truncate_exempt(dispatcher, test_file)
-        stats("truncate_tool_result() [exempt]", truncate_exempt_times)
-
-        # ── Test 4: truncate_tool_result() — non-exempt tool (call_agent) ─────
-        truncate_non_exempt_times = benchmark_truncate_non_exempt(dispatcher, test_file)
-        stats("truncate_tool_result() [non-exempt]", truncate_non_exempt_times)
+        # ── Test 3: Compression handler drain calls ───────────────────────────
 
         # ── Test 5: Compression handler drain calls ───────────────────────────
         full_result = readfile_tool.call({
@@ -326,15 +288,13 @@ def main():
         overhead = avg_dispatcher - avg_standalone
         overhead_pct = (overhead / avg_standalone * 100) if avg_standalone > 0 else 0
 
-        total_overhead = (overhead + statistics.mean(truncate_exempt_times) +
+        total_overhead = (overhead +
                          statistics.mean(drain_times["drain_pending_into_result"]) +
                          statistics.mean(drain_times["drain_tool_warnings"]))
 
         print(f"  Baseline (ReadFile.call())       : {avg_standalone:>8.3f} ms")
         print(f"  Dispatcher.execute_tool()         : {avg_dispatcher:>8.3f} ms  "
               f"(+{overhead:+.3f} ms, {overhead_pct:+.1f}%)")
-        print(f"  truncate_tool_result (exempt)     : {statistics.mean(truncate_exempt_times):>8.3f} ms")
-        print(f"  truncate_tool_result (non-exempt) : {statistics.mean(truncate_non_exempt_times):>8.3f} ms")
         print(f"  drain_pending_into_result         : {statistics.mean(drain_times['drain_pending_into_result']):>8.3f} ms")
         print(f"  drain_tool_warnings               : {statistics.mean(drain_times['drain_tool_warnings']):>8.3f} ms")
         print(f"\n  Estimated TOTAL dispatcher overhead per read_file call: {total_overhead:.3f} ms")

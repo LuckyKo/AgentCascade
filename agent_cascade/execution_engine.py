@@ -3124,25 +3124,12 @@ class ExecutionEngine:
                     tool_result = f"Error: {e}"
                     _tool_success = False
                     _tool_error = str(e)
-                    # Truncate if needed — track whether truncation actually
-                    # occurred.
-                # Non-string tool results bypass truncation and always report
-                # truncated=False.
-                _was_truncated = False
+                # Cache full output (if exceeds threshold)
                 if isinstance(tool_result, str):
-                    # Cache full output BEFORE truncation (if exceeds
-                    # threshold)
                     self._cache_tool_output(
                         inst_name, tool_name, tool_result,
                         threshold=self.pool.settings.cache_threshold_chars
                     )
-
-                    _pre_trunc_len = len(tool_result)
-                    # Phase 4.3: Delegate to ToolDispatcher
-                    tool_result = self.tool_dispatcher.truncate_tool_result(
-                        tool_result, tool_name, llm_messages, inst_name
-                    )
-                    _was_truncated = len(tool_result) < _pre_trunc_len
 
                 # ── Post-execution success detection
                 # ────────────────────────────────
@@ -3176,7 +3163,6 @@ class ExecutionEngine:
                             inst_name, tool_name,
                             success=_tool_success,
                             result_chars=len(tool_result) if isinstance(tool_result, str) else 0,
-                            truncated=_was_truncated,
                             error=_tool_error,
                             is_call_agent=(tool_name == 'call_agent'),
                         )
@@ -4659,5 +4645,4 @@ class ExecutionEngine:
             if not has_notification:
                 content.append({'type': 'text', 'text': notification_text})
 
-    # Note: _truncate_tool_result removed during refactoring.
-    # Callers should use self.tool_dispatcher.truncate_tool_result() directly.
+    # Note: truncate_tool_result removed — tools handle their own truncation.
