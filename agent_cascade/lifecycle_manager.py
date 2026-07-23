@@ -262,7 +262,8 @@ class AgentLifecycleManager:
     def build_task_message(
         self,
         args: dict,
-        caller: str
+        caller: str,
+        agent_class: Optional[str] = None
     ) -> Message:
         """Build task message with multimodal image propagation.
 
@@ -324,33 +325,36 @@ class AgentLifecycleManager:
                             idx = len([v for k, v in seen_images.items() if not k.startswith("image_")]) - 1
                             seen_images[f"image_{idx}"] = img_url
 
-        # Include images that are referenced in the task text (by basename or
-        # alias)
-        for img_url in seen_images.values():
-            basename = get_basename_from_url(img_url)  # Issue 2 fix: use utility function
-            if basename in task_text and img_url not in added_to_inst:
-                agent_msg_content.append({IMAGE: img_url})  # Match main AC branch format
-                added_to_inst.add(img_url)
+        # Skip image embedding for Compressor — it's text-only and already
+        # receives image captions in the summary prompt
+        if agent_class != 'Compressor':
+            # Include images that are referenced in the task text (by basename or
+            # alias)
+            for img_url in seen_images.values():
+                basename = get_basename_from_url(img_url)  # Issue 2 fix: use utility function
+                if basename in task_text and img_url not in added_to_inst:
+                    agent_msg_content.append({IMAGE: img_url})  # Match main AC branch format
+                    added_to_inst.add(img_url)
 
-        # Also check the last user message for images even if not referenced in
-        # text
-        # Note: No tool_name guard needed here since build_task_message() is
-        # exclusively called from call_agent path
-        if caller_conv:
-            last_user_msg = None
-            for m in reversed(caller_conv):
-                if msg_field(m, 'role') == USER:
-                    last_user_msg = m
-                    break
-            if last_user_msg:
-                content = msg_field(last_user_msg, 'content')
-                if isinstance(content, list):
-                    for item in content:
-                        item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
-                        item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
-                        if item_type == IMAGE and item_value not in added_to_inst:  # Issue 1 fix: use constant
-                            agent_msg_content.append({IMAGE: item_value})  # Match main AC branch format
-                            added_to_inst.add(item_value)
+            # Also check the last user message for images even if not referenced in
+            # text
+            # Note: No tool_name guard needed here since build_task_message() is
+            # exclusively called from call_agent path
+            if caller_conv:
+                last_user_msg = None
+                for m in reversed(caller_conv):
+                    if msg_field(m, 'role') == USER:
+                        last_user_msg = m
+                        break
+                if last_user_msg:
+                    content = msg_field(last_user_msg, 'content')
+                    if isinstance(content, list):
+                        for item in content:
+                            item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
+                            item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
+                            if item_type == IMAGE and item_value not in added_to_inst:  # Issue 1 fix: use constant
+                                agent_msg_content.append({IMAGE: item_value})  # Match main AC branch format
+                                added_to_inst.add(item_value)
 
         # Fallback for empty message (match main AC branch behavior)
         # Note: This is technically dead code since the formatted string above

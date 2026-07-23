@@ -4139,7 +4139,7 @@ class ExecutionEngine:
             sys_msg.content += skills_block
 
         # Build task message using lifecycle manager
-        task_msg = self.lifecycle.build_task_message(args, caller)
+        task_msg = self.lifecycle.build_task_message(args, caller, agent_class=inst.agent_class)
 
         # Phase 4.1: Delegate to lifecycle manager for conversation
         # initialization
@@ -4382,7 +4382,7 @@ class ExecutionEngine:
         sys_msg = self.lifecycle.build_system_message(inst.agent_class, instance_name)
 
         # Build task message using lifecycle manager
-        task_msg = self.lifecycle.build_task_message(args, caller)
+        task_msg = self.lifecycle.build_task_message(args, caller, agent_class=inst.agent_class)
 
         # Initialize conversation using lifecycle manager (pass actual is_reuse
         # value)

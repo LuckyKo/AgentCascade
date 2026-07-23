@@ -212,19 +212,6 @@ def invoke_compression_agent(
             caller=caller_name,
         )
 
-        # Strip image embeds from the compressor conversation — it's text-only
-        # and already receives image captions in the summary prompt
-        if comp_instance.conversation:
-            for msg in comp_instance.conversation:
-                if isinstance(msg.content, list):
-                    msg.content = [
-                        item for item in msg.content
-                        if not (isinstance(item, dict) and 'image' in item)
-                    ]
-                # Flatten empty content lists to empty string
-                if isinstance(msg.content, list) and not msg.content:
-                    msg.content = ''
-
         # Configure Compressor settings using centralized constants and utilities.
         # Note: propagate_settings() already ran inside _create_system_agent(), but we intentionally replace its
         # disabled_tools result with ui_cfg + defense-in-depth defaults to ensure auto-launched agents never get

@@ -42,7 +42,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] forced compression seems lazy, waits for a agent call to already happen when over the limit instead of triggering before that (fixed - always use _count_history_tokens for proactive check)
 - [x] remove context window limit truncation of tool response, we already have wild read truncation for extremes and with the fix from above it should be unnecessary (removed truncate_tool_result + dead code cleanup)
 - [x] inner loop API fallback should only apply if we hit the `char run` detect specifically, not for the others types (refactored — created CharacterRunDetected/MaxTokenExceeded exception types in new exceptions.py, replaced all string matching with isinstance checks)
-- [ ] compression task message included in image embeds of a message that is was not even in the compressed range of messages. the image embeds should not be sent at all to compressor, it already receives the caption data.
+- [x] compression task message included in image embeds of a message that is was not even in the compressed range of messages. the image embeds should not be sent at all to compressor, it already receives the caption data (fixed — added agent_class param to build_task_message, skip image embedding for Compressor, removed post-hoc stripping code)
 - [x] add truncation with helper to list_dir, keep head mode. (done - uses truncate_with_spillover, head mode, char_limit=3000 default)
 
 
