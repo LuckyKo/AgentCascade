@@ -33,34 +33,22 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent info once it reached conclusion, only happens on [YES]
 - [ ] telemetry `Output Tokens (est)` severely undercounts
 - [ ] we are pushing wrong summary from the inner loop detector if the compressor fails and gets stuck in a loop `[SYSTEM ERROR: Empty LLM response]`. it should try another API endpoint instead 
-- [x] `Auto-continue` option fixed — extended detection beyond token truncation to catch incomplete states (mid-reasoning, mid-tool_call with unclosed JSON). Turn counter resets on auto-continue. Hover tooltip added explaining the feature.
-- [x] agents get stopped randomly in the middle of streaming long reasoning — fixed: max-output-token guard + LLM backend defaults raised from 2048 → 8192 across all layers (execution_engine, transformers_llm, openvino, UI, JS fallback, API server). Template fallback bug fixed. Log level raised to INFO.
-- [x] Add shell_cmd calls with `cd <path> && git diff` and similar safe read-only git operations to auto approval. — DONE: Extended _is_safe_readonly_shell_command to auto-approve safe read-only git operations (diff, status, log, etc.) including 'cd && git' patterns, while blocking chained commands and dangerous git subcommands/arguments. Handles -C/--git-dir flags. Note: does not handle git aliases.
 - [ ] inner loop detector is almost unusable how many false positives generates, `char run` is the only good mode. pls make tests that simulate streaming as it happens normally, use rel existing logs to check for false positives.
 - [x] approval timeout occurs even when explicitly disabled in options, when it was set on auto-ask mode — DONE: Security advisor used hard-coded 180s timeout constant instead of reading from operation_manager settings. Fixed `security_handler.run_check()` to dynamically read `enable_timeout` and `approval_timeout_seconds` from operation manager. Timeout message now shows actual configured value. Added None guards for safety.
 - [ ] I dont want truncation of the user messages in the que (UI user que display)
-- [x] scan_skills and propose_skill return `Error: Object of type coroutine is not JSON serializable`
-- [x] auto-skill interferes with agent's final reply — DONE: multi-turn execution (AUTO_SKILL_EXTRA_TURNS=25), conversation rollback after skill creation, notice injected into last message 
-- [x] something fucks up the agent jsonl log file and syncs it with the agent pool, submitting a version without messages between markers - it should NOT be in full sync, as per design doc. is it the auto-skill rollback?
-- [x] max char limit on inner loop detector fails to trigger (also move the max char limit to the right inner loop section, or add a different one from the sampler options in global)
-- [x] the auto-skill rollback leaves behind some leftover truncated message at the end in the UI tab history — DONE: replaced marker-based rollback with snapshot-based (target_length), added state reset to IDLE for SLEEPING/COMPLETING states
-- [x] every time we want to test some AC modules in code_intepretet (fresh docker instance) the agents painstakingly fail and install each required package one by one wasting a LOT of time and tokens. FIXED: updated Dockerfile to pre-install AC core dependencies (pyyaml, pydantic, tiktoken, json5, jsonlines, jsonschema, python-dotenv, openai, dashscope, aiohttp, regex, eval_type_backport) alongside existing data science packages. Image rebuilt and verified.
-- [x] Auto-skill interferes with `Stop` command — DONE: added optional `check_stop_fn` parameter to `trigger_auto_skill_reflection()`, both callers (execution_engine.py, run_agent_unified.py) pass stop check lambdas. Extra-turn loop breaks early before executing a turn if stopped.
-- [x] resurrecting an agent from log does not bring up its agent tab in UI, on refresh I even lose the root agent tab. calling an agent with the same name as the caller (child spawning) also generates this issue. (FIX: _dismiss_all_instances preserves caller via exclude set, renderSubAgents uses direct DOM activation, call_agent skips dismiss-all step)
 - [ ] UI streaming stops on `pause`. it should not, pause should ONLY stop the tool response logic.
 - [ ] some of the UI setting are getting reset on browser/system restart (they stick on refresh though)
-- [x] grep char limit truncation now provides spillover files — shared `truncate_with_spillover()` helper created in tool_utils.py, used by grep (4 sites) and shell_cmd (1 site). Backward compat `spill_file_path` parameter preserved.
-- [x] async shell follow-up commands (`__status`, `__kill`, `__ctrl_c`, `__heartbeat=N`, stdin input) now auto-approved via `__` prefix check in `_is_safe_readonly_shell_command()`
 - [x] After changes to Security agent soul shell_cmd fails with this: `REJECTED: Security check error: No template for agent class Security`
-- [ ] forced compression seems lazy, waits for a agent call to already happen when over the limit instead of triggering before that
-- [ ] remove context window limit truncation of tool response, we already have wild read truncation for extremes and with the fix from above it should be unnecessary
-- [ ] inner loop API fallback should only apply if we hit the `char run` detect specifically, not for the others types (its a fix for a particular local LLM lock issue)
-- [ ] check agent recall by instance name (existing agents on idle), i think it has been broken recently, change back whatever dub shit broke it
+- [x] forced compression seems lazy, waits for a agent call to already happen when over the limit instead of triggering before that (fixed - always use _count_history_tokens for proactive check)
+- [x] remove context window limit truncation of tool response, we already have wild read truncation for extremes and with the fix from above it should be unnecessary (removed truncate_tool_result + dead code cleanup)
+- [x] inner loop API fallback should only apply if we hit the `char run` detect specifically, not for the others types (refactored — created CharacterRunDetected/MaxTokenExceeded exception types in new exceptions.py, replaced all string matching with isinstance checks)
+- [ ] compression task message included in image embeds of a message that is was not even in the compressed range of messages. the image embeds should not be sent at all to compressor, it already receives the caption data.
+- [x] add truncation with helper to list_dir, keep head mode. (done - uses truncate_with_spillover, head mode, char_limit=3000 default)
 
 
 # Errors to investigate:
 
-
+ 
 # API endpoint errors
 Endpoint 'deepseek-v4-flash-free' @ https://opencode.ai/zen/v1 attempt 1/2: Messages can not be empty.
 Traceback: Traceback (most recent call last):

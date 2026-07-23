@@ -38,6 +38,7 @@ from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
 )
 from agent_cascade.log import logger
+from agent_cascade.exceptions import CharacterRunDetected, MaxTokenExceeded
 from agent_cascade.tool_utils import (
     MAX_SPILL_SIZE,  # Use shared constant for consistency
     mark_tool_call_truncated,
@@ -2289,11 +2290,11 @@ class ExecutionEngine:
                                         # Check dedicated loop retry budget
                                         # (gated by _loop_max from UI setting)
                                         if loop_retry_count >= _loop_max:
-                                            raise Exception(
+                                            raise CharacterRunDetected(
                                                 f"inner_loop_exhausted: retried {_loop_max} times, "
                                                 f"giving up — last reason: {_ev['reason']}"
                                             )
-                                        raise Exception(f"inner_loop: {_ev['reason']}")
+                                        raise CharacterRunDetected(f"inner_loop: {_ev['reason']}")
 
                             # Max-output-token guard: safety net — if LLM
                             # exceeds token budget it's likely looping
@@ -2311,13 +2312,12 @@ class ExecutionEngine:
                                     if _sample_path:
                                         logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
                                     _token_guard_triggered = True
-                                    raise Exception(f"max_tokens: ~{_est_tokens} tokens")
+                                    raise MaxTokenExceeded(f"max_tokens: ~{_est_tokens} tokens")
                     except Exception as e:
                         logger.debug(f"[INNER_LOOP] Detection error for {inst_name}: {e}")
                         # Re-raise if this is an explicit inner-loop or
                         # max-tokens detection exception
-                        err_str = str(e)
-                        if (err_str.startswith('inner_loop:') or err_str.startswith('max_tokens:')):
+                        if isinstance(e, (CharacterRunDetected, MaxTokenExceeded)):
                             raise
 
                     # Telemetry: record Time To First Token (TTFT) on the first
@@ -2492,11 +2492,11 @@ class ExecutionEngine:
                             pass
                     error_msg = str(e).split('\n')[0] if e else "Unknown error"
                     # Give clearer message for loop detection failures
-                    if 'inner_loop_exhausted' in error_msg:
+                    if isinstance(e, CharacterRunDetected) and 'inner_loop_exhausted' in error_msg:
                         display_msg = f"LLM generation loop detected (exceeded {_loop_max} loop retries)"
-                    elif 'inner_loop' in error_msg:
+                    elif isinstance(e, CharacterRunDetected):
                         display_msg = f"LLM generation loop detected (tried {_loop_max} times)"
-                    elif 'max_tokens' in error_msg:
+                    elif isinstance(e, MaxTokenExceeded):
                         display_msg = f"LLM exceeded token limit (tried {_loop_max} times)"
                     else:
                         display_msg = f"LLM call failed after {_loop_max} retries — {error_msg}"
@@ -2512,30 +2512,27 @@ class ExecutionEngine:
                     retry_count += 1
                 else:
                     # Already incremented by _abort_stream OR previous round —
-                    # check if
-                    # we need another increment (only if _abort_stream didn't
-                    # do it).
-                    # We know _abort_stream incremented if error message
+                    # check if we need another increment (only if _abort_stream
+                    # didn't do it).
+                    # We know _abort_stream incremented if the error message
                     # contains our markers.
-                    if 'inner_loop' not in str(e) and 'max_tokens' not in str(e):
+                    if not isinstance(e, (CharacterRunDetected, MaxTokenExceeded)):
                         retry_count += 1
 
                     # Check dedicated loop retry budget — fail fast if
                     # exhausted (_loop_max from UI setting)
-                    error_str = str(e)
-                    if ('inner_loop' in error_str) and loop_retry_count >= _loop_max:
-                        raise Exception(
+                    if isinstance(e, CharacterRunDetected) and loop_retry_count >= _loop_max:
+                        raise CharacterRunDetected(
                             f"inner_loop_exhausted: retried {_loop_max} times, "
-                            f"giving up — last reason: {error_str.split(':')[-1].strip()}"
+                            f"giving up — {e}"
                         )
 
-                # Advance endpoint cursor on inner-loop or max-token detection so the
-                # next retry starts from a different endpoint in the chain. This is the
-                # "kick to next endpoint" mechanism — without this, retries would try
-                # the same (failing) endpoint again because call_with_fallback builds
-                # a fresh chain each time.
-                error_str = str(e)
-                if 'inner_loop' in error_str or 'max_tokens' in error_str:
+                # Advance endpoint cursor on character-run or max-token detection
+                # so the next retry starts from a different endpoint in the
+                # chain. This is the "kick to next endpoint" mechanism — without
+                # this, retries would try the same (failing) endpoint again
+                # because call_with_fallback builds a fresh chain each time.
+                if isinstance(e, (CharacterRunDetected, MaxTokenExceeded)):
                     self.pool.api_router.advance_instance_endpoint(inst_name)
 
                 # Classify error type
