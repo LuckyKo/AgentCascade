@@ -97,6 +97,56 @@ class PathSecurityMixin:
         """Check if *path* is inside *container* using the cached containment check."""
         return _path_is_contained_cached(str(path), str(container))
 
+    @staticmethod
+    def _parse_extra_prefix(path: str, suffix: str, prefix_label: str, folders: list) -> tuple:
+        """Parse and validate an extra prefix path (e.g., /extra_rw_0/foo or /extra_ro_1/bar).
+
+        Args:
+            path: Original path string, used in error messages.
+            suffix: Portion after the prefix (e.g., "0/foo").
+            prefix_label: Human-readable label for error messages (e.g., "/extra_rw_").
+            folders: List of folders to index into.
+
+        Returns:
+            Tuple of (folder_path, remaining_subpath) where remaining_subpath is
+            always relative (leading separators stripped).
+
+        Raises:
+            ValueError: If the path is malformed or index is out of range.
+        """
+        if not suffix:
+            raise ValueError(f"Path '{path}' is incomplete: '{prefix_label}' requires an index and subpath")
+
+        # Find first separator after the index component
+        sep_pos = suffix.find('/')
+        alt_sep_pos = suffix.find('\\')
+        if sep_pos == -1:
+            sep_pos = alt_sep_pos
+        elif alt_sep_pos != -1 and alt_sep_pos < sep_pos:
+            sep_pos = alt_sep_pos
+        if sep_pos == -1:
+            raise ValueError(f"Path '{path}' is incomplete: '{prefix_label}' requires an index and subpath")
+
+        first_comp = suffix[:sep_pos]
+        remaining = suffix[sep_pos + 1:]
+
+        try:
+            idx = int(first_comp)
+        except ValueError:
+            raise ValueError(f"Path '{path}' contains an invalid index for {prefix_label} prefix")
+
+        if idx < 0 or idx >= len(folders):
+            raise ValueError(
+                f"Path '{path}' uses {prefix_label.strip('/_')} index {idx}, but only "
+                f"{len(folders)} extra {'RW' if 'rw' in prefix_label else 'RO'} folder(s) are configured"
+            )
+
+        # Strip leading separators from remaining to prevent absolute path escape
+        while remaining and remaining[0] in ('/', '\\'):
+            remaining = remaining[1:]
+
+        return folders[idx], remaining
+
     def _resolve_path(self, path: str, mode: str = "ro", instance_name: Optional[str] = None) -> Path:
         """Resolve a path to be within the allowed directories (security).
 
@@ -114,14 +164,31 @@ class PathSecurityMixin:
         if instance_name is None:
             instance_name = _get_current_instance_name()
 
-        # Handle virtual /workspace/ prefix
+        # Handle virtual /workspace/ prefix and Docker extra path prefixes (/extra_rw_N, /extra_ro_N)
         clean_path = path
+        extra_prefix_resolved = None
+
         if clean_path.startswith('/workspace/'):
             clean_path = clean_path[len('/workspace/'):]
         elif clean_path.startswith('workspace/'):
             clean_path = clean_path[len('workspace/'):]
         elif clean_path == '/workspace' or clean_path == 'workspace':
             clean_path = '.'
+        elif clean_path.startswith('/extra_rw_'):
+            # Map /extra_rw_N → extra_work_folders_rw[N]
+            suffix = clean_path[len('/extra_rw_'):]
+            extra_folder, clean_path = self._parse_extra_prefix(path, suffix, '/extra_rw_', self.extra_work_folders_rw)
+            extra_prefix_resolved = extra_folder
+        elif clean_path.startswith('/extra_ro_'):
+            # Map /extra_ro_N → extra_work_folders_ro[N]
+            if mode != "ro":
+                raise ValueError(
+                    f"Path '{path}' refers to a read-only extra folder but was requested with mode='rw'. "
+                    f"Use mode='ro' for paths under /extra_ro_*"
+                )
+            suffix = clean_path[len('/extra_ro_'):]
+            extra_folder, clean_path = self._parse_extra_prefix(path, suffix, '/extra_ro_', self.extra_work_folders_ro)
+            extra_prefix_resolved = extra_folder
 
         # If the path is already absolute (e.g., an agent passing
         # "N:\work\WD\AgentCascade" to access an extra work folder), use it directly
@@ -129,6 +196,9 @@ class PathSecurityMixin:
         # replaces base entirely, which can cause security check mismatches.
         if Path(clean_path).is_absolute():
             resolved = Path(clean_path).resolve()
+        elif extra_prefix_resolved is not None:
+            # Path came from /extra_rw_N or /extra_ro_N prefix — join with the mapped folder
+            resolved = (extra_prefix_resolved / clean_path).resolve()
         else:
             # Try base_dir first
             resolved = (self.base_dir / clean_path).resolve()
@@ -138,14 +208,12 @@ class PathSecurityMixin:
                 for extra in self.extra_work_folders_rw:
                     candidate = (extra / clean_path).resolve()
                     if candidate.exists():
-                        _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' was not found in workspace. Resolved from extra RW folder ({extra}): {candidate}")
                         resolved = candidate
                         break
                 else:
                     for extra in self.extra_work_folders_ro:
                         candidate = (extra / clean_path).resolve()
                         if candidate.exists():
-                            _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' was not found in workspace. Resolved from extra RO folder ({extra}): {candidate}")
                             resolved = candidate
                             break
 
@@ -156,12 +224,14 @@ class PathSecurityMixin:
         # 2. Check extra RW folders (allowed for both RO and RW)
         for extra in self.extra_work_folders_rw:
             if self._path_is_contained(resolved, extra):
+                _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' resolved to extra RW folder: {resolved}")
                 return resolved
 
         # 3. Check extra RO folders (allowed only if mode is "ro")
         if mode == "ro":
             for extra in self.extra_work_folders_ro:
                 if self._path_is_contained(resolved, extra):
+                    _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' resolved to extra RO folder: {resolved}")
                     return resolved
 
         raise ValueError(f"Path '{path}' is outside the allowed {mode.upper()} directories")

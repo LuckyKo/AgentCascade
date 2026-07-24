@@ -12,6 +12,7 @@ Design Pattern: Lazy Initialization (same as AgentLifecycleManager)
 
 import json
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional
 
 if TYPE_CHECKING:
@@ -27,6 +28,10 @@ from agent_cascade.settings import (
 )
 from agent_cascade.utils.pool_validation import validate_message_pool
 from agent_cascade.utils.utils import msg_field
+from agent_cascade.tool_utils import (
+    was_tool_call_truncated,
+    truncate_with_spillover,
+)
 
 
 # ── Token Cache Helper (local copy to avoid circular import with execution_engine) ──
@@ -268,6 +273,113 @@ class CompressionHandler:
     ) -> str:
         """Drain cache pool notifications into a text string."""
         return self._drain_notification_queue(instance, '_cache_notifications', '[CACHE INFO]', text, prepend)
+
+    # ── Unified Tool Result Assembly ───────────────────────────────────────────
+
+    def _legacy_drain_tool_result(
+        self,
+        instance: 'AgentInstance',
+        raw_tool_result: Any,
+    ) -> str:
+        """Fallback drain chain used when _assemble_tool_result fails.
+
+        Ensures notifications and warnings are still drained even if the
+        main assembly logic encounters an error.
+
+        Args:
+            instance: Agent instance holding notification queues.
+            raw_tool_result: Tool output (any type).
+
+        Returns:
+            Drained result string.
+        """
+        if raw_tool_result is None:
+            raw_tool_result = ""
+        elif not isinstance(raw_tool_result, str):
+            raw_tool_result = str(raw_tool_result)
+        raw_tool_result = self._drain_cache_notifications(instance, raw_tool_result, prepend=True)
+        raw_tool_result = self._drain_tool_warnings(instance, raw_tool_result, prepend=True)
+        raw_tool_result = self._drain_pending_into_tool_result(instance, raw_tool_result)
+        return raw_tool_result
+
+    def _assemble_tool_result(
+        self,
+        instance: 'AgentInstance',
+        raw_tool_result: str,
+        char_limit: Optional[int],
+        instance_name: str,
+        tool_name: str,
+        base_dir: Path,
+    ) -> str:
+        """Assemble a final tool result with consistent layout of warnings, output, and truncation.
+
+        Layout (in order):
+          1. [TOOL WARNINGS] block (if any) — prepended
+          2. [CACHE INFO] block (if any) — prepended after warnings
+          3. Pending compression notifications (if any) — appended after body
+          4. Main tool output (possibly truncated to char_limit)
+          5. [TRUNCATED ...] footer (if truncation occurred)
+
+        This ensures that:
+          - Warnings/cache notices are never cut off by truncation.
+          - Only the tool output body is subject to character-limit truncation.
+          - The truncation footer uses a single consistent format.
+
+        Args:
+            instance: Agent instance holding notification queues.
+            raw_tool_result: Raw tool output string (may already contain inline markers
+                             like "[TRUNCATED]" headers from read_file, or a pre-existing
+                             truncation footer).
+            char_limit: Maximum chars for the output body before additional truncation.
+                        None or -1 means no additional truncation.
+            instance_name: Agent instance name.
+            tool_name: Name of the tool.
+            base_dir: Base directory for spillover path resolution.
+
+        Returns:
+            Assembled tool result string.
+        """
+        # Step 1: Ensure we have a string; handle None explicitly
+        if raw_tool_result is None:
+            raw_tool_result = ""
+        elif not isinstance(raw_tool_result, str):
+            raw_tool_result = str(raw_tool_result)
+
+        # Step 2: Check if truncation was already marked via thread-local state.
+        # This is the primary signal; we trust the tool's truncation flag.
+        was_truncated = was_tool_call_truncated(instance_name, tool_name)
+
+        # Step 3: If char_limit is set and exceeded, truncate now.
+        # truncate_with_spillover adds its own [TRUNCATED ...] footer, so we don't
+        # need to track that separately.
+        if char_limit is not None and char_limit > 0 and len(raw_tool_result) > char_limit:
+            raw_tool_result = truncate_with_spillover(
+                raw_tool_result,
+                char_limit=char_limit,
+                instance_name=instance_name,
+                tool_name=tool_name,
+                base_dir=base_dir,
+                operation_mode='head',
+            )
+            was_truncated = True
+
+        # Step 4: Drain cache notifications first (will be second from top)
+        raw_tool_result = self._drain_cache_notifications(instance, raw_tool_result, prepend=True)
+
+        # Step 5: Drain tool warnings second (ends up on top due to prepend)
+        raw_tool_result = self._drain_tool_warnings(instance, raw_tool_result, prepend=True)
+
+        # Step 6: Drain pending compression notifications (append after body)
+        raw_tool_result = self._drain_pending_into_tool_result(instance, raw_tool_result)
+
+        # Step 7: Add a simple fallback footer only if truncation happened and no
+        # [TRUNCATED marker is present. truncate_with_spillover already adds its own
+        # footer; this is a safety net for tools that set the truncation flag but
+        # forget to append the marker themselves.
+        if was_truncated and "[TRUNCATED" not in raw_tool_result:
+            raw_tool_result += "\n\n[TRUNCATED — Character limit exceeded.]"
+
+        return raw_tool_result
 
     # ── Logger Sync Helper (unified for all compression paths) ────────────────
 

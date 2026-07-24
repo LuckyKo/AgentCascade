@@ -16,6 +16,7 @@ import os
 import re
 import random
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 from enum import Enum, auto
@@ -27,6 +28,7 @@ from agent_cascade.settings import (
     COMPRESSION_DEFAULT_FRACTION,
     DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE,
     DEFAULT_MAX_TURNS,
+    DEFAULT_TOOL_RESULT_MAX_CHARS,
     MAX_AUTO_CONTINUE_ATTEMPTS,
     LLM_MAX_RETRIES,
     LLM_RETRY_BASE_DELAY,
@@ -42,6 +44,7 @@ from agent_cascade.exceptions import CharacterRunDetected, MaxTokenExceeded
 from agent_cascade.tool_utils import (
     MAX_SPILL_SIZE,  # Use shared constant for consistency
     mark_tool_call_truncated,
+    was_tool_call_truncated,
     clear_truncation_state,
     generate_spillover_filename,
     resolve_cached_entry_refs,
@@ -3167,17 +3170,47 @@ class ExecutionEngine:
                     except Exception:
                         pass
 
-                # Drain pending compression notifications and tool warnings
-                # (always runs even on exceptions)
-                # Only drain when tool_result is defined to avoid errors from
-                # early failures
+                # Assemble final tool result with consistent layout of warnings,
+                # output, and truncation (always runs even on exceptions).
+                # Only assemble when tool_result is defined to avoid errors from
+                # early failures.
                 if self.compression_handler:
                     try:
-                        tool_result = self.compression_handler._drain_pending_into_tool_result(instance, tool_result)
-                        tool_result = self.compression_handler._drain_tool_warnings(instance, tool_result)
-                        tool_result = self.compression_handler._drain_cache_notifications(instance, tool_result)
-                    except Exception:
-                        pass  # Don't let drain failures interfere with normal flow
+                        # Determine char_limit from config or default
+                        char_limit = (self.pool.llm_cfg or {}).get(
+                            'tool_result_max_chars', DEFAULT_TOOL_RESULT_MAX_CHARS
+                        )
+
+                        # Get base_dir from operation_manager for spillover path resolution
+                        om = getattr(self.pool, 'operation_manager', None)
+                        base_dir = getattr(om, 'base_dir', Path('.')) if om else Path('.')
+
+                        tool_result = self.compression_handler._assemble_tool_result(
+                            instance,
+                            tool_result,
+                            char_limit=char_limit,
+                            instance_name=inst_name,
+                            tool_name=tool_name,
+                            base_dir=base_dir,
+                        )
+                    except Exception as e:
+                        # Log the failure (was previously silent), then fall back
+                        # to a thin drain chain that still ensures warnings and
+                        # notifications are delivered.
+                        logger.error(
+                            f"assemble_tool_result failed for '{inst_name}' (tool={tool_name}): {e}"
+                        )
+                        try:
+                            tool_result = self.compression_handler._legacy_drain_tool_result(
+                                instance, tool_result
+                            )
+                        except Exception as drain_err:
+                            logger.error(
+                                f"Legacy drain also failed for '{inst_name}' (tool={tool_name}): {drain_err}"
+                            )
+                            # Ensure we have something non-None to return
+                            if not isinstance(tool_result, str):
+                                tool_result = str(tool_result) if tool_result is not None else ""
 
                 # Clear thread-local instance name after draining to prevent
                 # stale references across concurrent calls
