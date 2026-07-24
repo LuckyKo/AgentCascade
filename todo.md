@@ -30,72 +30,24 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 # BUGS:
 
 - [ ] no agent tab refresh during tool call streaming causes `Activity` bar to be still during tool writing process
-- [ ] manually asking for security agent opinion does not fill it in and stop the security agent info once it reached conclusion, only happens on [YES]
+- [ ] manually asking for security agent opinion does not fill it in and stop the security agent info once it reached conclusion
 - [ ] telemetry `Output Tokens (est)` severely undercounts
 - [ ] we are pushing wrong summary from the inner loop detector if the compressor fails and gets stuck in a loop `[SYSTEM ERROR: Empty LLM response]`. it should try another API endpoint instead 
 - [ ] inner loop detector is almost unusable how many false positives generates, `char run` is the only good mode. pls make tests that simulate streaming as it happens normally, use rel existing logs to check for false positives.
 - [x] approval timeout occurs even when explicitly disabled in options, when it was set on auto-ask mode — DONE: Security advisor used hard-coded 180s timeout constant instead of reading from operation_manager settings. Fixed `security_handler.run_check()` to dynamically read `enable_timeout` and `approval_timeout_seconds` from operation manager. Timeout message now shows actual configured value. Added None guards for safety.
-- [ ] I dont want truncation of the user messages in the que (UI user que display)
+- [x] I dont want truncation of the user messages in the que (UI user que display) — DONE: Renamed `get_queue_previews` → `get_queue_messages`, removed `max_length` truncation (100 chars). Method now returns full message strings. Updated all 4 call sites.
 - [ ] UI streaming stops on `pause`. it should not, pause should ONLY stop the tool response logic.
 - [ ] some of the UI setting are getting reset on browser/system restart (they stick on refresh though)
 - [x] After changes to Security agent soul shell_cmd fails with this: `REJECTED: Security check error: No template for agent class Security`
 - [x] forced compression seems lazy, waits for a agent call to already happen when over the limit instead of triggering before that (fixed - always use _count_history_tokens for proactive check)
 - [x] remove context window limit truncation of tool response, we already have wild read truncation for extremes and with the fix from above it should be unnecessary (removed truncate_tool_result + dead code cleanup)
-- [x] inner loop API fallback should only apply if we hit the `char run` detect specifically, not for the others types (refactored — created CharacterRunDetected/MaxTokenExceeded exception types in new exceptions.py, replaced all string matching with isinstance checks)
+- [x] inner loop API fallback should only apply if we hit the `char run` detect specifically, not for the others types of detection hits
 - [x] compression task message included in image embeds of a message that is was not even in the compressed range of messages. the image embeds should not be sent at all to compressor, it already receives the caption data (fixed — added agent_class param to build_task_message, skip image embedding for Compressor, removed post-hoc stripping code)
 - [x] add truncation with helper to list_dir, keep head mode. (done - uses truncate_with_spillover, head mode, char_limit=3000 default)
+- [ ] security agent fails to timeout if it keeps failing to acquire API endpoint.
 
 
 # Errors to investigate:
 
- 
-# API endpoint errors
-Endpoint 'deepseek-v4-flash-free' @ https://opencode.ai/zen/v1 attempt 1/2: Messages can not be empty.
-Traceback: Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1127, in call_with_fallback
-    result = execute_with_sem(current_agent_name)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1068, in execute_with_sem
-    result = call_fn(llm_cfg, *args, **kwargs)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 2774, in _do_call
-    return llm.chat(
-           ^^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 235, in chat
-    raise ValueError('Messages can not be empty.')
-ValueError: Messages can not be empty.
 
-Endpoint 'deepseek-v4-flash-free' @ https://opencode.ai/zen/v1 attempt 2/2: Messages can not be empty.
-Traceback: Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1127, in call_with_fallback
-    result = execute_with_sem(current_agent_name)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1068, in execute_with_sem
-    result = call_fn(llm_cfg, *args, **kwargs)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 2774, in _do_call
-    return llm.chat(
-           ^^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 235, in chat
-    raise ValueError('Messages can not be empty.')
-ValueError: Messages can not be empty.
 
-Endpoint 'grok-4.1-fast' @ http://127.0.0.1:4315/v1 attempt 1/2: Messages can not be empty.
-Traceback: Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1127, in call_with_fallback
-    result = execute_with_sem(current_agent_name)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1068, in execute_with_sem
-    result = call_fn(llm_cfg, *args, **kwargs)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 2774, in _do_call
-    return llm.chat(
-           ^^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 235, in chat
-    raise ValueError('Messages can not be empty.')
-ValueError: Messages can not be empty.
-
-Endpoint 'grok-4.1-fast' @ http://127.0.0.1:4315/v1 attempt 2/2: Messages can not be empty.
-Traceback: Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1127, in call_with_fallback
-    result = execute_with_sem(current_agent_name)

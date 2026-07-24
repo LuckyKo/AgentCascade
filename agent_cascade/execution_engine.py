@@ -2292,9 +2292,13 @@ class ExecutionEngine:
                                         if loop_retry_count >= _loop_max:
                                             raise CharacterRunDetected(
                                                 f"inner_loop_exhausted: retried {_loop_max} times, "
-                                                f"giving up — last reason: {_ev['reason']}"
+                                                f"giving up — last reason: {_ev['reason']}",
+                                                detection_reason=_ev['reason'],
                                             )
-                                        raise CharacterRunDetected(f"inner_loop: {_ev['reason']}")
+                                        raise CharacterRunDetected(
+                                            f"inner_loop: {_ev['reason']}",
+                                            detection_reason=_ev['reason'],
+                                        )
 
                             # Max-output-token guard: safety net — if LLM
                             # exceeds token budget it's likely looping
@@ -2524,15 +2528,19 @@ class ExecutionEngine:
                     if isinstance(e, CharacterRunDetected) and loop_retry_count >= _loop_max:
                         raise CharacterRunDetected(
                             f"inner_loop_exhausted: retried {_loop_max} times, "
-                            f"giving up — {e}"
+                            f"giving up — {e}",
+                            detection_reason=getattr(e, 'detection_reason', 'unknown'),
                         )
 
-                # Advance endpoint cursor on character-run or max-token detection
-                # so the next retry starts from a different endpoint in the
-                # chain. This is the "kick to next endpoint" mechanism — without
-                # this, retries would try the same (failing) endpoint again
-                # because call_with_fallback builds a fresh chain each time.
-                if isinstance(e, (CharacterRunDetected, MaxTokenExceeded)):
+                # Advance endpoint cursor only on character-run or max-token
+                # detection so the next retry starts from a different endpoint
+                # in the chain. Other detection types (sentence, ngram, block,
+                # entropy, max-chars) should retry the same endpoint — they are
+                # weaker signals. This is the "kick to next endpoint" mechanism
+                # — without this, retries would try the same (failing) endpoint
+                # again because call_with_fallback builds a fresh chain each time.
+                _reason = getattr(e, 'detection_reason', '')
+                if isinstance(e, MaxTokenExceeded) or _reason.startswith('character run'):
                     self.pool.api_router.advance_instance_endpoint(inst_name)
 
                 # Classify error type
