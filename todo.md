@@ -25,7 +25,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] investigate possible use of `https://github.com/eugeniughelbur/obsidian-second-brain`for our lessons file management
 [ ] full audit of the API endpoint allocation logic/async agent calls, with full testing coverage
 [ ] make view_image tool take in special arguments in path like `__screen_capture`, `__window_capture:PID` - self explanatory
-[ ] make out path helper that tools use resolve extra_rw/ro paths just like code_intepreter does
+[x] make out path helper that tools use resolve extra_rw/ro paths just like code_intepreter does
 
 # BUGS:
 

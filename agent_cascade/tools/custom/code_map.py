@@ -43,22 +43,12 @@ class CodeMap(BaseTool):
         rel_path = params['path']
         force_as = params.get('force_as', '').lower()
 
-        # Resolve absolute path with validation (same pattern as file_ops.py)
-        if self.agent_pool and hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
-            try:
-                abs_path = self.agent_pool.operation_manager._resolve_path(rel_path, mode="ro")
-            except ValueError as e:
-                return f"Error: {str(e)}"
-        else:
-            # Fallback if no agent_pool (same pattern as read_file)
-            from agent_cascade.settings import DEFAULT_WORKSPACE
-            base_dir = Path(DEFAULT_WORKSPACE)
-            if Path(rel_path).is_absolute():
-                abs_path = Path(rel_path).resolve()
-            else:
-                abs_path = (base_dir / rel_path).resolve()
-            if not str(abs_path).startswith(str(base_dir.resolve())):
-                return f"Path '{rel_path}' is outside the allowed directory"
+        # Resolve absolute path with validation
+        from agent_cascade.utils.tool_path_resolver import resolve_tool_path
+        try:
+            abs_path = resolve_tool_path(rel_path, mode="ro", agent_pool=self.agent_pool)
+        except ValueError as e:
+            return f"Error: {str(e)}"
 
         if not abs_path.exists():
             return f"Error: File not found at {rel_path}"

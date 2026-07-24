@@ -108,21 +108,11 @@ class ReadLogs(BaseTool):
         range_str = params.get('range', None)
 
         # Resolve file path via agent_pool or fallback
-        if self.agent_pool and hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
-            try:
-                file_path = self.agent_pool.operation_manager._resolve_path(log_file, mode="ro")
-            except ValueError as e:
-                return f"Error: {str(e)}"
-        else:
-            # Fallback if no agent_pool (same pattern as read_file)
-            from agent_cascade.settings import DEFAULT_WORKSPACE
-            base_dir = Path(DEFAULT_WORKSPACE)
-            if Path(log_file).is_absolute():
-                file_path = Path(log_file).resolve()
-            else:
-                file_path = (base_dir / log_file).resolve()
-            if not str(file_path).startswith(str(base_dir.resolve())):
-                return f"Path '{log_file}' is outside the allowed directory"
+        from agent_cascade.utils.tool_path_resolver import resolve_tool_path
+        try:
+            file_path = resolve_tool_path(log_file, mode="ro", agent_pool=self.agent_pool)
+        except ValueError as e:
+            return f"Error: {str(e)}"
 
         if not file_path.exists() or not file_path.is_file():
             return f"Error: Log file '{log_file}' not found."
