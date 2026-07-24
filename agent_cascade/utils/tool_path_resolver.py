@@ -27,8 +27,7 @@ def resolve_tool_path(
 
     Delegates to ``operation_manager._resolve_path`` when an agent_pool is
     available. Falls back to a minimal resolution against ``DEFAULT_WORKSPACE``
-    otherwise (used by standalone tools and tests). Note: fallback mode
-    does not check extra work folders — only the base workspace directory.
+    otherwise (used by standalone tools and tests).
 
     Args:
         path: The path string to resolve. Can be relative (resolved against

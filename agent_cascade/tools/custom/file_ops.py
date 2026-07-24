@@ -13,6 +13,15 @@ import json
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.utils.utils import json_loads
 
+
+class PathResolutionMixin:
+    """Mixin providing _resolve_path() for all file-op tool classes."""
+
+    def _resolve_path(self, path: str, mode: str = "ro") -> Path:
+        from agent_cascade.utils.tool_path_resolver import resolve_tool_path
+        return resolve_tool_path(path, mode=mode, agent_pool=self.agent_pool)
+
+
 # --- Module-level cairosvg DLL state (Windows only) --------------------------- #
 _cairosvg_dll_handles: list = []          # handles returned by os.add_dll_directory()
 _cairosvg_setup_done: bool = False        # ensures DLL setup runs exactly once
@@ -74,7 +83,7 @@ def _format_hex_dump(data: bytes) -> str:
 
 
 @register_tool('read_file', allow_overwrite=True)
-class ReadFile(BaseTool):
+class ReadFile(BaseTool, PathResolutionMixin):
     """Reads and returns the content of a specified file.
 
     Handles text files natively with streaming line-by-line reading. For binary
@@ -110,13 +119,6 @@ class ReadFile(BaseTool):
             super().__init__()
         self.agent_pool = kwargs.get('agent_pool')
         self.agent_name = kwargs.get('agent_name')
-
-    # ------------------------------------------------------------------ #
-    #  Helper: resolve path using shared resolver (aligns with all tools)
-    # ------------------------------------------------------------------ #
-    def _resolve_path(self, path: str, mode: str = "ro") -> Path:
-        from agent_cascade.utils.tool_path_resolver import resolve_tool_path
-        return resolve_tool_path(path, mode=mode, agent_pool=self.agent_pool)
 
     # ------------------------------------------------------------------ #
     #  Helper: safely extract max_input_tokens from a config dict         #
@@ -394,7 +396,7 @@ class ReadFile(BaseTool):
 
 
 @register_tool('view_image', allow_overwrite=True)
-class ViewImage(BaseTool):
+class ViewImage(BaseTool, PathResolutionMixin):
     """View an image file from the workspace."""
 
     IMAGE_EXTENSIONS = {
@@ -421,13 +423,6 @@ class ViewImage(BaseTool):
         except (ValueError, TypeError):
             super().__init__()
         self.agent_pool = kwargs.get('agent_pool')
-
-    # ------------------------------------------------------------------ #
-    #  Helper: resolve path using shared resolver (aligns with all tools)
-    # ------------------------------------------------------------------ #
-    def _resolve_path(self, path: str, mode: str = "ro") -> Path:
-        from agent_cascade.utils.tool_path_resolver import resolve_tool_path
-        return resolve_tool_path(path, mode=mode, agent_pool=self.agent_pool)
 
     # ------------------------------------------------------------------ #
     #  SVG → PNG conversion helpers                                       #
@@ -509,8 +504,8 @@ class ViewImage(BaseTool):
         try:
             try:
                 resolved = self._resolve_path(path)
-            except ValueError:
-                return f"Path '{path}' is outside the allowed RO directories"
+            except ValueError as e:
+                return f"ERROR: {str(e)}"
 
             if not resolved.exists():
                 return f"Image not found: {path}"
@@ -532,9 +527,9 @@ class ViewImage(BaseTool):
             ]
         except (ValueError, TypeError) as e:
             # SVG parse errors from cairosvg come through as ValueError/TypeError
-            return f"SVG parse error in '{path}': {e}"
+            return f"ERROR: SVG parse error in '{path}': {e}"
         except Exception as e:
-            return f"Error viewing image: {str(e)}"
+            return f"ERROR: Error viewing image: {str(e)}"
         finally:
             # Clean up the temp PNG file after serving (best-effort)
             if temp_png and os.path.exists(temp_png):
@@ -545,7 +540,7 @@ class ViewImage(BaseTool):
 
 
 @register_tool('write_file', allow_overwrite=True)
-class WriteFile(BaseTool):
+class WriteFile(BaseTool, PathResolutionMixin):
     """Writes content to a specified file in the local filesystem."""
 
     name = 'write_file'
@@ -577,13 +572,6 @@ class WriteFile(BaseTool):
         self.agent_pool = kwargs.get('agent_pool')
         self.agent_name = kwargs.get('agent_name')
 
-    # ------------------------------------------------------------------ #
-    #  Helper: resolve path using shared resolver (aligns with all tools)
-    # ------------------------------------------------------------------ #
-    def _resolve_path(self, path: str, mode: str = "ro") -> Path:
-        from agent_cascade.utils.tool_path_resolver import resolve_tool_path
-        return resolve_tool_path(path, mode=mode, agent_pool=self.agent_pool)
-
     def call(self, params: str, **kwargs) -> str:
         import re
         from agent_cascade.utils.utils import extract_code
@@ -595,10 +583,6 @@ class WriteFile(BaseTool):
             if match:
                 path = match.group(1).strip()
                 content = match.group(2)
-                try:
-                    self._resolve_path(path, mode="rw")
-                except ValueError as e:
-                    return f"ERROR: {str(e)}"
                 return self.agent_pool.operation_manager.write_file(
                     path=path,
                     content=content,
@@ -618,12 +602,6 @@ class WriteFile(BaseTool):
         if isinstance(content, str) and content.strip().startswith('```'):
             content = extract_code(content)
 
-        # Validate path is within allowed directories
-        try:
-            self._resolve_path(path, mode="rw")
-        except ValueError as e:
-            return f"ERROR: {str(e)}"
-
         return self.agent_pool.operation_manager.write_file(
             path=path,
             content=content,
@@ -633,7 +611,7 @@ class WriteFile(BaseTool):
 
 
 @register_tool('edit_file', allow_overwrite=True)
-class EditFile(BaseTool):
+class EditFile(BaseTool, PathResolutionMixin):
     """Replaces text within a file."""
 
     name = 'edit_file'
@@ -674,13 +652,6 @@ class EditFile(BaseTool):
             super().__init__()
         self.agent_pool = kwargs.get('agent_pool')
         self.agent_name = kwargs.get('agent_name')
-
-    # ------------------------------------------------------------------ #
-    #  Helper: resolve path using shared resolver (aligns with all tools)
-    # ------------------------------------------------------------------ #
-    def _resolve_path(self, path: str, mode: str = "ro") -> Path:
-        from agent_cascade.utils.tool_path_resolver import resolve_tool_path
-        return resolve_tool_path(path, mode=mode, agent_pool=self.agent_pool)
 
     def call(self, params: str, **kwargs) -> str:
         from agent_cascade.utils.utils import extract_code
@@ -730,12 +701,6 @@ class EditFile(BaseTool):
                 new_content = ''
         elif new_content is None:
             return "ERROR: Missing 'new_content'. Please provide the text you want to replace old_content with."
-
-        # Validate path is within allowed directories
-        try:
-            self._resolve_path(path, mode="rw")
-        except ValueError as e:
-            return f"ERROR: {str(e)}"
 
         return self.agent_pool.operation_manager.edit_file(
             path=path,
