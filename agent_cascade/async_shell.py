@@ -499,7 +499,12 @@ class AsyncShellTracker:
             f"{line_count} line{'s' if line_count != 1 else ''} since last tick\n"
             f"{output_text}"
         )
-        self._enqueue(agent_name, msg)
+        # Put heartbeat into async result buffer so it wakes sleeping agents
+        if self._pool and hasattr(self._pool, '_async_results'):
+            self._pool._async_results.put(agent_name, msg, function_id=f"heartbeat_{tool_id}")
+        else:
+            # Fallback to normal enqueue if pool not available
+            self._enqueue(agent_name, msg)
 
     # ────────────────────────────────────────────────────────────────
     def _send_remaining_output(self, agent_name: str, tool_id: int, timed_out: bool):

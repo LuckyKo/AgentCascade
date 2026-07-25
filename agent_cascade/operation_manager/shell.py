@@ -80,7 +80,7 @@ class ShellMixin:
     _GIT_FLAGS: set = {'--no-pager', '-c', '-p', '--paginate', '-C', '--git-dir', '--work-tree'}
 
     # Async shell control commands (used for validation in both shell.py and shell_cmd.py)
-    _CONTROL_COMMANDS: tuple = ('__status', '__kill', '__ctrl_c')
+    _CONTROL_COMMANDS: tuple = ('__status', '__kill', '__ctrl_c', '__wait')
     _CONTROL_HEARTBEAT_PREFIX: str = '__heartbeat='
 
     # Dangerous arguments per git subcommand

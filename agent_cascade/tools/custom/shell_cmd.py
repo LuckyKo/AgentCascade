@@ -48,7 +48,7 @@ class ShellCmd(BaseTool):
                 'description': TOOL_METADATA['shell_cmd']['parameters']['tool_id']
             }
         },
-        'required': ['command', 'justification'],
+        'required': ['command'],
     }
 
     def __init__(self, cfg=None, **kwargs):
@@ -92,6 +92,13 @@ class ShellCmd(BaseTool):
                 tool_id_ref = int(tool_id_ref)
             except (ValueError, TypeError):
                 pass
+
+        # Validate justification is required for non-control commands
+        justification = params.get('justification')
+        is_control_command = async_mode and tool_id_ref is not None
+
+        if not is_control_command and not justification:
+            raise ValueError("'justification' is required for shell_cmd unless using control commands with tool_id")
 
         agent_name = kwargs.get('agent_instance_name') or self.agent_name
 
@@ -218,6 +225,57 @@ class ShellCmd(BaseTool):
                 return f"[shell_cmd] Invalid heartbeat value in command: {command}"
         elif command == '__ctrl_c':
             return tracker.send_ctrl_c(agent_name, tool_id) or "No action taken."
+        elif command == '__wait':
+            import time
+            task = tracker._get_task(agent_name, tool_id)
+            if task is None:
+                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No running shell found."
+            
+            # Read heartbeat_interval under lock for consistency
+            with task._lock:
+                hb_interval = task.heartbeat_interval
+                if task.completed:
+                    return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process already completed."
+            
+            # Record starting position
+            with task._lock:
+                combined = list(task.stdout_lines) + list(task.stderr_lines)
+                start_pos = len(combined)
+            
+            # Wait for new output or completion (timeout based on heartbeat interval, capped at 60s)
+            poll_interval = 0.5
+            timeout = min(max(hb_interval, 30.0), 60.0) if hb_interval > 0 else 30.0
+            deadline = time.time() + timeout
+            
+            while time.time() < deadline:
+                with task._lock:
+                    combined = list(task.stdout_lines) + list(task.stderr_lines)
+                    new_lines = combined[start_pos:]
+                    completed = task.completed
+                if new_lines or completed:
+                    break
+                
+                time.sleep(poll_interval)
+            
+            # Read final state
+            with task._lock:
+                combined = list(task.stdout_lines) + list(task.stderr_lines)
+                new_lines = combined[start_pos:]
+                completed = task.completed
+                return_code = task.return_code
+            
+            if completed:
+                rc = return_code if return_code is not None else "?"
+                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process completed (exit code {rc})."
+            
+            if new_lines:
+                line_count = len(new_lines)
+                output_text = '\n'.join(new_lines[:20])  # Limit to first 20 lines
+                if len(new_lines) > 20:
+                    output_text += f"\n... ({len(new_lines) - 20} more lines)"
+                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} | {line_count} new line{'s' if line_count != 1 else ''}\n{output_text}"
+            
+            return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No new output ({timeout:.0f}s timeout)."
         else:
             # Send as stdin input to the running process
             return tracker.send_input(agent_name, tool_id, command) or f"Input sent [Tool ID: {tool_id}]."

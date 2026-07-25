@@ -849,6 +849,9 @@ class ExecutionEngine:
     def _make_async_result_message(tuple_data: Tuple[str, Optional[str]]) -> Message:
         """Create a USER message from an async result tuple (content, function_id)."""
         result_content, function_id = tuple_data
+        # Don't wrap heartbeat messages—they already have their own prefix
+        if result_content.strip().startswith('⟨shell_cmd heartbeat⟩'):
+            return Message(role=USER, content=result_content)
         prefix = f"[BACKGROUND TOOL RESULT for {function_id}]" if function_id else "[BACKGROUND TOOL RESULT]"
         return Message(role=USER, content=f"{prefix}: {result_content}")
 
