@@ -805,8 +805,8 @@ class ExecutionEngine:
                 if isinstance(first_msg.content, str):
                     first_msg.content = self.compression_handler._drain_pending_into_user_message(instance, first_msg.content)
                     # Also drain generic tool warnings into USER messages
-                    # (prepended)
-                    first_msg.content = self.compression_handler._drain_tool_warnings(instance, first_msg.content, prepend=True)
+                    # (appended)
+                    first_msg.content = self.compression_handler._drain_tool_warnings(instance, first_msg.content, prepend=False)
                     # Also drain cache notifications into USER messages
                     # (prepended)
                     first_msg.content = self.compression_handler._drain_cache_notifications(instance, first_msg.content, prepend=True)

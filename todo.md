@@ -53,5 +53,8 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 # Errors to investigate:
 
-
-
+- [x] redundant tool warning for normal path resolution, also appended to the start of the message, should be at the end — DONE: Removed unconditional warnings at validation time; warnings now only fire when a relative path falls back from base_dir to an extra folder. Changed all _drain_tool_warnings calls from prepend=True to prepend=False so warnings appear at the end of tool responses.
+```
+[TOOL WARNINGS]
+Path 'N:\work\WD\AgentCascade\agent_cascade\execution_engine.py' resolved to extra RW folder: N:\work\WD\AgentCascade\agent_cascade\execution_engine.py
+```

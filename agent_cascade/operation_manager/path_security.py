@@ -209,12 +209,14 @@ class PathSecurityMixin:
                     candidate = (extra / clean_path).resolve()
                     if candidate.exists():
                         resolved = candidate
+                        _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' resolved to extra RW folder: {resolved}")
                         break
                 else:
                     for extra in self.extra_work_folders_ro:
                         candidate = (extra / clean_path).resolve()
                         if candidate.exists():
                             resolved = candidate
+                            _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' resolved to extra RO folder: {resolved}")
                             break
 
         # 1. Base directory is always RW (and thus RO)
@@ -224,14 +226,12 @@ class PathSecurityMixin:
         # 2. Check extra RW folders (allowed for both RO and RW)
         for extra in self.extra_work_folders_rw:
             if self._path_is_contained(resolved, extra):
-                _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' resolved to extra RW folder: {resolved}")
                 return resolved
 
         # 3. Check extra RO folders (allowed only if mode is "ro")
         if mode == "ro":
             for extra in self.extra_work_folders_ro:
                 if self._path_is_contained(resolved, extra):
-                    _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' resolved to extra RO folder: {resolved}")
                     return resolved
 
         raise ValueError(f"Path '{path}' is outside the allowed {mode.upper()} directories")

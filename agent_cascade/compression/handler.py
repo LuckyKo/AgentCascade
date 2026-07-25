@@ -298,7 +298,7 @@ class CompressionHandler:
         elif not isinstance(raw_tool_result, str):
             raw_tool_result = str(raw_tool_result)
         raw_tool_result = self._drain_cache_notifications(instance, raw_tool_result, prepend=True)
-        raw_tool_result = self._drain_tool_warnings(instance, raw_tool_result, prepend=True)
+        raw_tool_result = self._drain_tool_warnings(instance, raw_tool_result, prepend=False)
         raw_tool_result = self._drain_pending_into_tool_result(instance, raw_tool_result)
         return raw_tool_result
 
@@ -314,10 +314,10 @@ class CompressionHandler:
         """Assemble a final tool result with consistent layout of warnings, output, and truncation.
 
         Layout (in order):
-          1. [TOOL WARNINGS] block (if any) — prepended
-          2. [CACHE INFO] block (if any) — prepended after warnings
-          3. Pending compression notifications (if any) — appended after body
-          4. Main tool output (possibly truncated to char_limit)
+          1. [CACHE INFO] block (if any) — prepended (appears at top)
+          2. Main tool output (possibly truncated to char_limit)
+          3. [TOOL WARNINGS] block (if any) — appended after body
+          4. Pending compression notifications (if any) — appended after warnings
           5. [TRUNCATED ...] footer (if truncation occurred)
 
         This ensures that:
@@ -366,8 +366,8 @@ class CompressionHandler:
         # Step 4: Drain cache notifications first (will be second from top)
         raw_tool_result = self._drain_cache_notifications(instance, raw_tool_result, prepend=True)
 
-        # Step 5: Drain tool warnings second (ends up on top due to prepend)
-        raw_tool_result = self._drain_tool_warnings(instance, raw_tool_result, prepend=True)
+        # Step 5: Drain tool warnings at the end (appended)
+        raw_tool_result = self._drain_tool_warnings(instance, raw_tool_result, prepend=False)
 
         # Step 6: Drain pending compression notifications (append after body)
         raw_tool_result = self._drain_pending_into_tool_result(instance, raw_tool_result)
