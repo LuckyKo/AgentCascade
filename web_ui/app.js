@@ -55,6 +55,8 @@ const THROTTLE = Object.freeze({
   AUTO_SECURITY_TOGGLE_GUARD: 150,  // Guard window blocking toggle clicks during incoming server sync (ms)
 });
 
+const AUTO_SCROLL_THRESHOLD = 50; // Distance from bottom (px) to consider user "at bottom" for auto-scroll
+
 // Pre-compiled regexes for thinking blocks (consistent with backend)
 const _TAG_THINK = 'think';
 const _TAG_THOUGHT = 'thought';
@@ -146,6 +148,8 @@ const POOL_SETTINGS_MAP = [
 /** Sync pool settings from server state to UI elements.
  * Called on every state/stream_update message to ensure UI matches server truth.
  * Respects existing localStorage preferences — only syncs if the user has not set a value locally.
+ * Only saves to localStorage if something actually changed.
+ * Preserves frontend-only settings (e.g., log-api-post) that are not in backend pool_settings.
  * @param {Object} ps - Pool settings object (inner-loop detection tuning + cache pool) */
 function syncPoolSettings(ps) {
   if (!ps) return;
@@ -154,20 +158,99 @@ function syncPoolSettings(ps) {
   try { saved = JSON.parse(localStorage.getItem('agent-cascade-settings')); } catch { saved = null; }
   if (!saved) saved = {};
 
+  let changed = false;
   for (const { id, prop, key, transform, localKey } of POOL_SETTINGS_MAP) {
     const el = $(id);
     if (el && ps[key] !== undefined) {
       // Respect existing local preference — only overwrite if not already set in localStorage
       if (localKey && saved[localKey] !== undefined) continue;
       el[prop] = transform ? transform(ps[key]) : ps[key];
+      changed = true;
     }
   }
-  // Persist synced settings to localStorage only (skip server broadcast to avoid feedback loop).
-  saveSettings(false);
+  // Preserve frontend-only settings that aren't in backend pool_settings
+  const logApiPostEl = $('#setting-log-api-post');
+  if (logApiPostEl && saved['log-api-post'] !== undefined) {
+    logApiPostEl.checked = saved['log-api-post'];
+  }
+  // Persist synced settings to localStorage only if something changed (skip server broadcast to avoid feedback loop).
+  if (changed) saveSettings(false);
 }
 
 // Per-panel scroll lock state for ALL panels including root (managed via subAgentScrollLocks)
 const subAgentScrollLocks = {};
+
+/** Initialize scroll lock state and attach scroll listener for a panel.
+ * @param {string} name - The panel/agent name
+ * @param {HTMLElement} [scrollContainer] - Optional: the scroll container element (if already available)
+ */
+function initSubAgentScrollLock(name, scrollContainer = null) {
+  if (subAgentScrollLocks[name] && subAgentScrollLocks[name].listenerAdded) return;
+
+  // Initialize state if not present
+  if (!subAgentScrollLocks[name]) {
+    subAgentScrollLocks[name] = {
+      locked: true,
+      listenerAdded: false,
+      scrollDebounceTimer: null,
+      programmaticScrollCount: 0
+    };
+  }
+
+  // Attach listener only once
+  if (!subAgentScrollLocks[name].listenerAdded) {
+    // If no container provided, try to find it by ID
+    if (!scrollContainer) {
+      scrollContainer = document.querySelector(`#panelSub-${name} .messages`);
+    }
+    if (scrollContainer) {
+      scrollContainer.addEventListener('scroll', () => {
+        const lock = subAgentScrollLocks[name];
+        // Use counter instead of boolean to handle rapid successive programmatic scrolls.
+        // Decrement here because scroll events queue after call stack completes.
+        if (lock.programmaticScrollCount > 0) {
+          lock.programmaticScrollCount--;
+          return;
+        }
+
+        // Debounce: during rapid content changes/streaming, only respond after scroll settles.
+        if (lock.scrollDebounceTimer) clearTimeout(lock.scrollDebounceTimer);
+        lock.scrollDebounceTimer = setTimeout(() => {
+          const distFromBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
+          lock.locked = (distFromBottom < AUTO_SCROLL_THRESHOLD);
+        }, 100);
+      });
+      subAgentScrollLocks[name].listenerAdded = true;
+    }
+  }
+}
+
+/** Scroll a panel to bottom, using lock system if available.
+ * @param {HTMLElement} panel - The panel element
+ * @param {string} name - The panel/agent name (for lock lookup)
+ * @param {boolean} force - If true, always scroll regardless of current position
+ * @param {boolean} isGenerating - Whether the agent is actively generating
+ */
+function scrollPanelToBottom(panel, name, force = false, isGenerating = false) {
+  const scroll = panel.querySelector('.messages');
+  if (!scroll) return;
+
+  const distFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
+  const atBottom = distFromBottom < AUTO_SCROLL_THRESHOLD;
+
+  // Determine if we should scroll: either forced (auto-scroll mode), or at bottom, or generating
+  if (force || atBottom || isGenerating) {
+    const lock = subAgentScrollLocks[name];
+    if (lock) {
+      lock.locked = true;
+      lock.programmaticScrollCount++;
+      scroll.scrollTop = scroll.scrollHeight;
+    } else {
+      // Fallback for panels without lock
+      scroll.scrollTop = scroll.scrollHeight;
+    }
+  }
+}
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
@@ -817,6 +900,13 @@ function saveSettings(sendToServer) {
   if ($('#setting-cache-pool-size')) s['cache-pool-size'] = $('#setting-cache-pool-size').value;
   if ($('#setting-cache-threshold-chars')) s['cache-threshold-chars'] = $('#setting-cache-threshold-chars').value;
 
+  // Log API POST Dump toggle (frontend-only, not in backend pool_settings)
+  if ($('#setting-log-api-post')) s['log-api-post'] = $('#setting-log-api-post').checked;
+
+  // Grep spillover toggle and char limit
+  if ($('#setting-grep-spillover')) s['grep-spillover'] = $('#setting-grep-spillover').checked;
+  if ($('#setting-grep-char-limit')) s['grep-char-limit'] = $('#setting-grep-char-limit').value;
+
   localStorage.setItem('agent-cascade-settings', JSON.stringify(s));
   
   if (sendToServer && state.connected) {
@@ -901,8 +991,9 @@ function loadSettings() {
     if (s['inner-loop-detect'] !== undefined) $('#setting-inner-loop-detect').checked = s['inner-loop-detect'];
     // Restore Agent Budgeting toggle state
     if (s['enable_agent_budgeting'] !== undefined) $('#setting-agent-budgeting').checked = s['enable_agent_budgeting'];
-    // Restore Log API POST Dump toggle
-    if (s['log_api_post'] !== undefined) $('#setting-log-api-post').checked = s['log_api_post'];
+    // Restore Log API POST Dump toggle (use consistent key; support old key for migration)
+    const logApiPost = s['log-api-post'] !== undefined ? s['log-api-post'] : s['log_api_post'];
+    if (logApiPost !== undefined) $('#setting-log-api-post').checked = logApiPost;
     // Restore Max Auto-Rollbacks value
     if (s['max_auto_rollbacks'] !== undefined) $('#setting-max-rollbacks').value = s['max_auto_rollbacks'];
     // Restore Max Parallel Agents value
@@ -929,11 +1020,21 @@ function loadSettings() {
     if (s['system-idle-timeout'] !== undefined) {
       $('#setting-system-idle-timeout').value = s['system-idle-timeout'];
     }
-    if (s['grep_char_limit'] !== undefined) {
-      $('#setting-grep-char-limit').value = s['grep_char_limit'];
+    const grepCharLimit = s['grep-char-limit'] !== undefined ? s['grep-char-limit'] : s['grep_char_limit'];
+    if (grepCharLimit !== undefined) {
+      $('#setting-grep-char-limit').value = grepCharLimit;
     }
-    if (s['grep_spillover'] !== undefined) {
-      $('#setting-grep-spillover').checked = s['grep_spillover'];
+    const grepSpillover = s['grep-spillover'] !== undefined ? s['grep-spillover'] : s['grep_spillover'];
+    if (grepSpillover !== undefined) {
+      $('#setting-grep-spillover').checked = grepSpillover;
+    }
+
+    // Shell and code char limits (saved via ranges array using DOM IDs as keys)
+    if (s['setting-shell-char-limit'] !== undefined) {
+      $('#setting-shell-char-limit').value = s['setting-shell-char-limit'];
+    }
+    if (s['setting-code-char-limit'] !== undefined) {
+      $('#setting-code-char-limit').value = s['setting-code-char-limit'];
     }
 
     if (settingImageDetail && s['setting-image-detail'] !== undefined) {
@@ -2786,7 +2887,10 @@ function renderSubAgents() {
       const panel = document.getElementById('panelSub-' + agentName);
       if (panel) panel.remove();
       // Clean up per-panel state when agent is removed
-      delete subAgentScrollLocks[agentName];
+      if (subAgentScrollLocks[agentName]) {
+        clearTimeout(subAgentScrollLocks[agentName].scrollDebounceTimer);
+        delete subAgentScrollLocks[agentName];
+      }
     }
   });
 
@@ -2934,15 +3038,7 @@ function renderSubAgents() {
     const panel = document.getElementById('panelSub-' + tabName);
     if (panel) {
       panel.classList.add('active');
-      // Scroll to bottom if near bottom or agent is actively generating (matches switchMainTab)
-      const scroll = panel.querySelector('.messages');
-      if (scroll) {
-        const distFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
-        const isGenerating = state.subAgents[tabName]?.active || state.generating;
-        if (distFromBottom < 50 || isGenerating) {
-          scroll.scrollTop = scroll.scrollHeight;
-        }
-      }
+      scrollPanelToBottom(panel, tabName, false, state.subAgents[tabName]?.active || state.generating);
     }
 
     ActivityBar.setActiveTab(tabId);
@@ -2974,32 +3070,17 @@ function renderSubAgentPanel(panel, agentData, name) {
   // 1. Ensure basic structure exists (once)
   if (!panel.dataset.initialized) {
     panel.dataset.initialized = "true";
-    
+
     // Scroll Container — unified class matches root chat panel
     const scrollContainer = document.createElement('div');
     scrollContainer.className = 'messages messages-scroll';
     panel.appendChild(scrollContainer);
-    
-    // Reset scroll lock state for fresh panel (prevents stale listenerAdded on session reset)
-    subAgentScrollLocks[name] = { locked: true, listenerAdded: false };
   }
 
   const scrollContainer = panel.querySelector('.messages');
-  
-  // Set up per-panel scroll lock state and listener (runs every call but guarded by listenerAdded).
-  // Placed OUTSIDE the dataset.initialized guard so that if a stream_update fires before
-  // initialization completes, the scroll listener is still attached — prevents Bug #1
-  // where scrolling decoupling breaks on newly-created panels.
-  if (!subAgentScrollLocks[name]) {
-    subAgentScrollLocks[name] = { locked: true, listenerAdded: false }; // Start locked at bottom
-  }
-  if (!subAgentScrollLocks[name].listenerAdded && scrollContainer) {
-    scrollContainer.addEventListener('scroll', () => {
-      const distFromBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
-      subAgentScrollLocks[name].locked = (distFromBottom < 50);
-    });
-    subAgentScrollLocks[name].listenerAdded = true;
-  }
+
+  // Initialize scroll lock state and attach listener (if not already done)
+  initSubAgentScrollLock(name, scrollContainer);
   
   // Update global activity bar if this is the active visible tab
   if (isVisible) {
@@ -3156,16 +3237,22 @@ function renderSubAgentPanel(panel, agentData, name) {
   }
   panel.dataset.lastRenderedCount = currentCount;
 
-  // Step 8: Unified auto-scroll using requestAnimationFrame and per-panel scroll lock state
-  requestAnimationFrame(() => {
-    const atBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 50;
-    
-    if (subAgentScrollLocks[name]?.locked) {
-      scrollContainer.scrollTop = scrollContainer.scrollHeight; // Scroll — scroll listener handles lock state
-    } else if (atBottom && subAgentScrollLocks[name]) {
-      subAgentScrollLocks[name].locked = true; // Re-lock if user scrolled back to bottom
+  // Step 8: Auto-scroll using unified helper
+  // requestAnimationFrame fires before all streaming content is rendered (stale scrollHeight),
+  // causing scroll position to lag behind during rapid tool output/reasoning. Immediate execution
+  // after DOM update ensures we use the current scrollHeight.
+  if (subAgentScrollLocks[name]) {
+    const lock = subAgentScrollLocks[name];
+    const atBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < AUTO_SCROLL_THRESHOLD;
+
+    if (lock.locked) {
+      // Force scroll to bottom
+      scrollPanelToBottom(panel, name, true);
+    } else if (atBottom) {
+      // User scrolled back to bottom — re-enable auto-scroll
+      lock.locked = true;
     }
-  });
+  }
 }
 
 function switchMainTab(tabId) {
@@ -3181,15 +3268,7 @@ function switchMainTab(tabId) {
   const panel = document.getElementById('panelSub-' + name);
   if (panel) {
     panel.classList.add('active');
-    const scroll = panel.querySelector('.messages');
-    if (scroll) {
-      // Only scroll to bottom if user was near the bottom or agent is actively generating
-      const distFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
-      const isGenerating = state.subAgents[name]?.active || state.generating;
-      if (distFromBottom < 50 || isGenerating) {
-        scroll.scrollTop = scroll.scrollHeight;
-      }
-    }
+    scrollPanelToBottom(panel, name, false, state.subAgents[name]?.active || state.generating);
   }
   
   state.activeSubTab = tabId;
