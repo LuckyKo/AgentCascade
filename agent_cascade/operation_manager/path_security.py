@@ -164,6 +164,19 @@ class PathSecurityMixin:
         if instance_name is None:
             instance_name = _get_current_instance_name()
 
+        # Track whether the original input was a direct absolute path.
+        # Only direct absolute paths (e.g., N:\work\WD\AgentCascade\file.py) are silent.
+        # Virtual prefixes (/workspace/, /extra_rw_N, /extra_ro_N) and relative paths
+        # that resolve outside base_dir get a warning, even if they start with "/".
+        # Must use precise prefix checks to avoid false positives like "/workspace_extra".
+        is_virtual_prefix = (
+            path == '/workspace' or
+            path.startswith('/workspace/') or
+            path.startswith('/extra_rw_') or
+            path.startswith('/extra_ro_')
+        )
+        direct_absolute = Path(path).is_absolute() and not is_virtual_prefix
+
         # Handle virtual /workspace/ prefix and Docker extra path prefixes (/extra_rw_N, /extra_ro_N)
         clean_path = path
         extra_prefix_resolved = None
@@ -209,29 +222,31 @@ class PathSecurityMixin:
                     candidate = (extra / clean_path).resolve()
                     if candidate.exists():
                         resolved = candidate
-                        _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' resolved to extra RW folder: {resolved}")
                         break
                 else:
                     for extra in self.extra_work_folders_ro:
                         candidate = (extra / clean_path).resolve()
                         if candidate.exists():
                             resolved = candidate
-                            _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' resolved to extra RO folder: {resolved}")
                             break
 
-        # 1. Base directory is always RW (and thus RO)
+        # 1. Base directory is always RW (and thus RO) — no warning needed
         if self._path_is_contained(resolved, self.base_dir):
             return resolved
 
         # 2. Check extra RW folders (allowed for both RO and RW)
         for extra in self.extra_work_folders_rw:
             if self._path_is_contained(resolved, extra):
+                if not direct_absolute:
+                    _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' resolved to extra RW folder: {resolved}")
                 return resolved
 
         # 3. Check extra RO folders (allowed only if mode is "ro")
         if mode == "ro":
             for extra in self.extra_work_folders_ro:
                 if self._path_is_contained(resolved, extra):
+                    if not direct_absolute:
+                        _queue_tool_warning(self.agent_pool, instance_name, f"Path '{path}' resolved to extra RO folder: {resolved}")
                     return resolved
 
         raise ValueError(f"Path '{path}' is outside the allowed {mode.upper()} directories")
