@@ -206,11 +206,10 @@ function initSubAgentScrollLock(name, scrollContainer = null) {
     if (scrollContainer) {
       scrollContainer.addEventListener('scroll', () => {
         const lock = subAgentScrollLocks[name];
-        // Use counter instead of boolean to handle rapid successive programmatic scrolls.
-        // Decrement here because scroll events queue after call stack completes.
+        // Always debounce to detect if user scrolled away from bottom, even during programmatic scrolls.
+        // The counter tracks programmatic scrolls but we must not block user scroll detection.
         if (lock.programmaticScrollCount > 0) {
           lock.programmaticScrollCount--;
-          return;
         }
 
         // Debounce: during rapid content changes/streaming, only respond after scroll settles.
@@ -218,7 +217,7 @@ function initSubAgentScrollLock(name, scrollContainer = null) {
         lock.scrollDebounceTimer = setTimeout(() => {
           const distFromBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
           lock.locked = (distFromBottom < AUTO_SCROLL_THRESHOLD);
-        }, 100);
+        }, 50);
       });
       subAgentScrollLocks[name].listenerAdded = true;
     }
@@ -229,17 +228,17 @@ function initSubAgentScrollLock(name, scrollContainer = null) {
  * @param {HTMLElement} panel - The panel element
  * @param {string} name - The panel/agent name (for lock lookup)
  * @param {boolean} force - If true, always scroll regardless of current position
- * @param {boolean} isGenerating - Whether the agent is actively generating
  */
-function scrollPanelToBottom(panel, name, force = false, isGenerating = false) {
+function scrollPanelToBottom(panel, name, force = false) {
   const scroll = panel.querySelector('.messages');
   if (!scroll) return;
 
   const distFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
   const atBottom = distFromBottom < AUTO_SCROLL_THRESHOLD;
 
-  // Determine if we should scroll: either forced (auto-scroll mode), or at bottom, or generating
-  if (force || atBottom || isGenerating) {
+  // Only scroll if explicitly forced (auto-scroll locked), or user is at bottom
+  // This respects user's intent when they scroll up during streaming
+  if (force || atBottom) {
     const lock = subAgentScrollLocks[name];
     if (lock) {
       lock.locked = true;
@@ -3038,7 +3037,7 @@ function renderSubAgents() {
     const panel = document.getElementById('panelSub-' + tabName);
     if (panel) {
       panel.classList.add('active');
-      scrollPanelToBottom(panel, tabName, false, state.subAgents[tabName]?.active || state.generating);
+      scrollPanelToBottom(panel, tabName, false);
     }
 
     ActivityBar.setActiveTab(tabId);
@@ -3268,7 +3267,7 @@ function switchMainTab(tabId) {
   const panel = document.getElementById('panelSub-' + name);
   if (panel) {
     panel.classList.add('active');
-    scrollPanelToBottom(panel, name, false, state.subAgents[name]?.active || state.generating);
+    scrollPanelToBottom(panel, name, false);
   }
   
   state.activeSubTab = tabId;
