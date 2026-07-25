@@ -230,6 +230,7 @@ class AgentInstance:
     # SLEEPING state tracking fields (for async tools) - part of Execution State
     sleeping_since: Optional[float] = None  # time.monotonic() when entered SLEEPING state
     _last_wakeup_log: float = field(default=0.0)  # Last time wakeup message was logged
+    _last_waiting_debug_log: float = field(default=0.0)  # Last time waiting debug message was logged (throttle)
 
     # ── Remaining Fields with defaults ──────────────────────────────────
     is_terminated: bool = False          # Set when terminate_instance() is called on this instance (Fix Bug41)

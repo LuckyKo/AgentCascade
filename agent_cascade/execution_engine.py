@@ -1285,7 +1285,7 @@ class ExecutionEngine:
 
         except Exception as e:
             # C4 fix: Catch unhandled exceptions — log and yield error state
-            logger.error("EXCEPTION - %s: %s: %s", instance.instance_name, type(e).__name__, e)
+            logger.error("EXCEPTION - %s: %s: %s", instance.instance_name, type(e).__name__, e, exc_info=True)
             # Telemetry: record turn end on exception (non-blocking)
             if (tel := self._telemetry()) is not None:
                 try:
@@ -3903,7 +3903,15 @@ class ExecutionEngine:
                             inst_name, sleeping_duration)
                 instance._last_wakeup_log = current_time
 
-            logger.debug("WAITING for background tools - %s (%.1fs)", inst_name, sleeping_duration)
+            try:
+                if (current_time - instance._last_waiting_debug_log) >= 5.0:
+                    logger.debug("WAITING for background tools - %s (%.1fs)", inst_name, sleeping_duration)
+                    instance._last_waiting_debug_log = current_time
+            except Exception:
+                # Debug log throttling must never crash the agent loop
+                pass
+            # Note: debug log throttling is safe without a lock since each
+            # agent instance is only executed by one thread at a time.
             # Yield empty list signals waiting state without consuming turn
             return SleepAction.CONTINUE_LOOP, []
 

@@ -2149,7 +2149,8 @@ class AgentPool:
     def has_pending(self, instance_name: str) -> bool:
         """Check if there are pending async tool calls for an instance.
 
-        Uses AsyncToolRegistry to track pending background tool entries.
+        Uses AsyncToolRegistry to track pending background tool entries,
+        and AsyncShellTracker for background shell commands.
 
         Args:
             instance_name: The agent instance to check.
@@ -2157,7 +2158,14 @@ class AgentPool:
         Returns:
             True if the instance has pending async tools, False otherwise.
         """
-        return self._async_registry.has_pending(instance_name)
+        # Check async tool registry (call_agent background tools)
+        if self._async_registry.has_pending(instance_name):
+            return True
+        # Also check async shell tasks (async_mode=true shell commands)
+        if hasattr(self, '_async_shell_tracker') and self._async_shell_tracker:
+            if self._async_shell_tracker.has_active_tasks(instance_name):
+                return True
+        return False
 
     def _acquire_slot(self, agent_class: str, instance_name: str):
         """Acquire an endpoint scheduling slot. Returns a release callback or None for unlimited endpoints."""

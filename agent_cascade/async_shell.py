@@ -134,6 +134,27 @@ class AsyncShellTracker:
             return len(self._tasks.get(agent_name, {}))
 
     # ────────────────────────────────────────────────────────────────
+    def has_active_tasks(self, agent_name: str) -> bool:
+        """Check if there are active (non-completed) async shell tasks for an agent.
+        
+        Used by AgentPool.has_pending() to determine if an agent should SLEEP
+        while waiting for background shell commands to complete.
+        
+        Thread safety: self._lock protects _tasks dict structure only.
+        Individual task state (task.completed) is protected by task._lock.
+        We snapshot the task dict reference under self._lock, then iterate
+        and read each task's state under its own lock.
+        """
+        with self._lock:
+            agent_tasks = dict(self._tasks.get(agent_name, {}))
+        # Read task.completed under task._lock for thread safety
+        for task in agent_tasks.values():
+            with task._lock:
+                if not task.completed:
+                    return True
+        return False
+
+    # ────────────────────────────────────────────────────────────────
     def launch(
         self,
         agent_name: str,
@@ -387,23 +408,29 @@ class AsyncShellTracker:
             # ── Send any remaining output as final heartbeat ─────────
             self._send_remaining_output(agent_name, tool_id, timed_out)
 
-            # ── Mark completed and send final result ─────────────────
+            # ── Send final result BEFORE marking completed ─────────────
+            # Order matters: send_completion_message puts into _async_results.
+            # If we mark completed first, has_pending() returns False and a
+            # sleeping agent might transition to COMPLETING before seeing the
+            # completion message. By sending first, the agent either sees the
+            # message in _async_results (wakes up) or has_pending() still
+            # returns True (keeps sleeping, will see message next iteration).
+            self._send_completion_message(agent_name, tool_id, original_command, timed_out)
+
             with task._lock:
                 task.completed = True
-
-            self._send_completion_message(agent_name, tool_id, original_command, timed_out)
 
         except Exception as e:
             logger.warning(
                 f"[AsyncShell] Track error for {agent_name} tool_id={tool_id}: {e}"
             )
-            with task._lock:
-                task.completed = True
-                task.return_code = -1
             self._send_completion_message(
                 agent_name, tool_id, original_command,
                 timed_out=False, error=str(e),
             )
+            with task._lock:
+                task.completed = True
+                task.return_code = -1
 
         finally:
             # Fix #2 & #3: Join drain threads before removing from _tasks
@@ -472,8 +499,20 @@ class AsyncShellTracker:
             task.last_heartbeat_sent_pos = len(combined)
 
         if not new_lines:
+            # Still running with no new output — send minimal heartbeat so sleeping
+            # agents wake up and know the process hasn't died.
+            logger.debug("[async_shell] heartbeat(no output) agent=%s tool_id=%s",
+                         agent_name, tool_id)
+            msg = f"⟨shell_cmd heartbeat⟩ Tool ID: {tool_id} | No new output (still running)"
+            pool = self._pool
+            if pool and hasattr(pool, '_async_results'):
+                pool._async_results.put(agent_name, msg, function_id=f"heartbeat_{tool_id}")
+            else:
+                self._enqueue(agent_name, msg)
             return
 
+        logger.debug("[async_shell] heartbeat with output agent=%s tool_id=%s lines=%d",
+                     agent_name, tool_id, len(new_lines))
         output_text = self._format_output_text(new_lines)
         if not output_text:
             return
@@ -500,8 +539,9 @@ class AsyncShellTracker:
             f"{output_text}"
         )
         # Put heartbeat into async result buffer so it wakes sleeping agents
-        if self._pool and hasattr(self._pool, '_async_results'):
-            self._pool._async_results.put(agent_name, msg, function_id=f"heartbeat_{tool_id}")
+        pool = self._pool
+        if pool and hasattr(pool, '_async_results'):
+            pool._async_results.put(agent_name, msg, function_id=f"heartbeat_{tool_id}")
         else:
             # Fallback to normal enqueue if pool not available
             self._enqueue(agent_name, msg)
@@ -538,7 +578,13 @@ class AsyncShellTracker:
                 f"{output_text}"
             )
 
-        self._enqueue(agent_name, msg)
+        # Put remaining output into async result buffer so it wakes sleeping agents
+        pool = self._pool
+        if pool and hasattr(pool, '_async_results'):
+            pool._async_results.put(agent_name, msg, function_id=f"shell_remaining_{tool_id}")
+        else:
+            # Fallback to normal enqueue if pool not available
+            self._enqueue(agent_name, msg)
 
     # ────────────────────────────────────────────────────────────────
     def _send_completion_message(
@@ -570,7 +616,13 @@ class AsyncShellTracker:
                 f"Command: `{command[:200]}`\n"
             )
 
-        self._enqueue(agent_name, msg)
+        # Put completion into async result buffer so it wakes sleeping agents
+        pool = self._pool
+        if pool and hasattr(pool, '_async_results'):
+            pool._async_results.put(agent_name, msg, function_id=f"shell_complete_{tool_id}")
+        else:
+            # Fallback to normal enqueue if pool not available
+            self._enqueue(agent_name, msg)
 
     # ────────────────────────────────────────────────────────────────
     def _enqueue(self, agent_name: str, text: str):
