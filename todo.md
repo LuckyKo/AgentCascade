@@ -26,7 +26,8 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [ ] full audit of the API endpoint allocation logic/async agent calls, with full testing coverage
 [ ] make view_image tool take in special arguments in path like `__screen_capture`, `__window_capture:PID` - self explanatory
 [x] make out path helper that tools use resolve extra_rw/ro paths just like code_intepreter does
-[ ] check put shell_cmd async commands. add a `__wait` command to simply wait for next heartbeat - a no reply tool call basically (needed because most LLMs dont understand the concept of shutting up to get in SLEEPING state). make sure all these commands dont need justification field.
+[x] make shell_cmd automatically launch on async mode if the agent sets timeout bigger than 60s and doesn't specify the mode as sync.
+[x] check put shell_cmd async commands. add a `__wait` command to simply wait for next heartbeat - a no reply tool call basically (needed because most LLMs dont understand the concept of shutting up to get in SLEEPING state). make sure all these commands dont need justification field.
 
 # BUGS:
 
@@ -47,6 +48,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] add truncation with helper to list_dir, keep head mode. (done - uses truncate_with_spillover, head mode, char_limit=3000 default)
 - [ ] security agent fails to timeout if it keeps failing to acquire API endpoint.
 - [x] UI issue: auto scroll to bottom keeps dropping after long tool outputs or reasoning (fixed — replaced requestAnimationFrame with immediate scroll, added programmaticScrollCount guard, debounce timer cleanup, tab switch lock reset)
+- [ ] add inner loop counter to telemetry's loop detected
 
 
 # Errors to investigate:
