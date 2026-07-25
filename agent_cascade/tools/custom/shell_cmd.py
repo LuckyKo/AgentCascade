@@ -1,7 +1,10 @@
+import logging
 import subprocess
 from agent_cascade.operation_manager.shell import ShellMixin
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
+
+logger = logging.getLogger(__name__)
 
 @register_tool('shell_cmd', allow_overwrite=True)
 class ShellCmd(BaseTool):
@@ -77,6 +80,11 @@ class ShellCmd(BaseTool):
         async_mode = bool(params.get('async_mode', False))
         heartbeat_interval = float(params.get('heartbeat_interval', -1))
         tool_id_ref = params.get('tool_id')  # Can be int, string, or None
+
+        # Auto-async mode: if timeout > 60s and async_mode not explicitly set
+        if timeout is not None and timeout > 60 and 'async_mode' not in params:
+            async_mode = True
+            logger.info(f"Auto-async mode triggered for shell_cmd: timeout={timeout}s")
 
         # Parse tool_id if provided as a string number
         if tool_id_ref is not None:
