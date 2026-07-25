@@ -1646,7 +1646,7 @@ class ExecutionEngine:
         llm_messages: List[Message],
         response: List[Message]
     ) -> bool:
-        """Drain and inject async results that arrived during LLM call.
+        """Drain and inject user messages and async results that arrived during LLM call.
 
         Extracted from _pre_llm_checks() - Phase 3.8
 
@@ -1661,6 +1661,7 @@ class ExecutionEngine:
         """
         inst_name = instance.instance_name
 
+        # Drain user messages from queue
         if self._drain_and_inject(
             instance, inst_name, messages, llm_messages, response,
             drain_fn=self.pool.drain_queue,
@@ -1668,7 +1669,16 @@ class ExecutionEngine:
         ):
             # Invalidate LLM preprocessing cache after queue injection for fresh processing
             self._clear_llm_preprocess_cache(instance, inst_name)
+            return True
 
+        # Drain async results (heartbeats, completions) that arrived during LLM call
+        if self._drain_and_inject(
+            instance, inst_name, messages, llm_messages, response,
+            drain_fn=self.pool.drain_async_results,
+            factory=self._make_async_result_message,
+        ):
+            # Invalidate LLM preprocessing cache after async result injection
+            self._clear_llm_preprocess_cache(instance, inst_name)
             return True
 
         return False
