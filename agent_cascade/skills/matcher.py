@@ -98,8 +98,9 @@ class SkillMatcher:
         results = [(name, min(score / max(len(query_tokens), 1), 1.0))
                    for name, score in scores.items() if score > 0]
 
-        # Sort by relevance score descending
-        results.sort(key=lambda x: x[1], reverse=True)
+        # Sort by relevance score descending, then by name ascending for stability
+        # (deterministic output ensures KV cache prefix identity across retries)
+        results.sort(key=lambda x: (-x[1], x[0]))
 
         logger.debug("[SKILLS] Match query '%s' → %d results (top=%s)",
                      query[:80], len(results),

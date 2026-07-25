@@ -165,7 +165,8 @@ def _get_active_functions_from_template(template, instance=None, pool=None) -> l
         logger.info(f"[{inst_name}] _get_active_functions_from_template: No function_map, returning empty list")
         return []
 
-    return [func.function for name, func in func_map.items() if name not in disabled]
+    # Sort by name to ensure deterministic output across retries (KV cache prefix)
+    return [func.function for name, func in sorted(func_map.items()) if name not in disabled]
 
 
 def _make_token_count_callback(instance):
@@ -521,8 +522,9 @@ def _build_session_metadata(pool, instance) -> str:
         om = getattr(pool, 'operation_manager', None)
         if om is not None:
             working_dir = str(getattr(om, 'base_dir', 'Unknown'))
-            extra_ro = [str(p) for p in getattr(om, 'extra_work_folders_ro', [])]
-            extra_rw = [str(p) for p in getattr(om, 'extra_work_folders_rw', [])]
+            # Sort paths for deterministic output (KV cache prefix across retries)
+            extra_ro = sorted([str(p) for p in getattr(om, 'extra_work_folders_ro', [])])
+            extra_rw = sorted([str(p) for p in getattr(om, 'extra_work_folders_rw', [])])
 
         # Get logger instance (needed for log_path; also used as fallback for
         # workspace config)
@@ -534,8 +536,8 @@ def _build_session_metadata(pool, instance) -> str:
             # metadata (may be stale)
             if om is None:
                 working_dir = log_inst.data['metadata'].get('working_dir', 'Unknown')
-                extra_ro = log_inst.data['metadata'].get('extra_paths_ro', [])
-                extra_rw = log_inst.data['metadata'].get('extra_paths_rw', [])
+                extra_ro = sorted(log_inst.data['metadata'].get('extra_paths_ro', []))
+                extra_rw = sorted(log_inst.data['metadata'].get('extra_paths_rw', []))
 
         except (AttributeError, KeyError) as e:
             logger.debug("Logger metadata access failed for %s: %s", inst_name, e)
@@ -571,17 +573,26 @@ def _replace_section(m0_content: str, heading_prefix: str, new_section: str) -> 
     """
     if not new_section:
         return m0_content  # Guard: don't delete the section if replacement is empty
-    # Build pattern that matches from the heading through everything until next
-    # blank-line + heading/--- or end
+
     # NOTE: Use string concatenation for regex to avoid f-string {1,6}
     # quantifier being evaluated as Python expression
     escaped = re.escape(heading_prefix)
     pattern = escaped + r'.*?(?=\n\n(?:#{1,6}|---)|\Z)'
+
+    # Find existing section to compare — if logically identical, skip
+    # replacement entirely to preserve byte-identical output for KV cache
+    # prefix identity across retries.
+    existing_match = re.search(pattern, m0_content, flags=re.DOTALL)
+    if existing_match:
+        existing_content = existing_match.group(0).strip()
+        new_content = new_section.strip()
+        if existing_content == new_content:
+            return m0_content  # No logical change — preserve exact bytes
+
     # Use lambda for replacement to prevent re.sub from interpreting
-    # backslashes in the text as regex escapes
-    # (critical on Windows where paths like N:\work\... contain \w which would
-    # crash)
-    return re.sub(pattern, lambda m: new_section.rstrip(), m0_content, count=1, flags=re.DOTALL)
+    # backslashes in the text as regex escapes (critical on Windows where
+    # paths contain \w etc.)
+    return re.sub(pattern, lambda m: new_section, m0_content, count=1, flags=re.DOTALL)
 
 
 def _replace_resources_block(m0_content: str, new_block: str) -> str:
@@ -1523,11 +1534,28 @@ class ExecutionEngine:
                     # Update the message ONLY if content actually changed
                     # (preserves LLM prefix caching)
                     if m0_content != original_content:
+                        # DEBUG: Show exactly what changed (for KV cache troubleshooting)
+                        diff_summary = []
+                        if len(m0_content) != len(original_content):
+                            diff_summary.append(f"len {len(original_content)}→{len(m0_content)}")
+                        if m0_content[-5:] != original_content[-5:]:
+                            diff_summary.append(f"tail_diff")
+                        # Find first diff position
+                        first_diff = None
+                        for i, (a, b) in enumerate(zip(original_content, m0_content)):
+                            if a != b:
+                                first_diff = i
+                                break
+                        if first_diff is not None:
+                            ctx_start = max(0, first_diff - 30)
+                            ctx_end = min(first_diff + 30, len(original_content))
+                            diff_summary.append(f"first_diff@{first_diff}: orig='{original_content[ctx_start:ctx_end]}' new='{m0_content[ctx_start:ctx_end]}'")
+
                         if isinstance(m0, dict):
                             m0['content'] = m0_content
                         else:
                             m0.content = m0_content
-                        logger.debug(f"[CACHE_REBUILD] System prompt content CHANGED for {inst_name}")
+                        logger.info(f"[CACHE_REBUILD] System prompt content CHANGED for {inst_name} ({', '.join(diff_summary)})")
 
                         # Persist updated system message to file so it survives
                         # restarts.
