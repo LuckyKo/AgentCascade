@@ -72,7 +72,7 @@ class ShellCmd(BaseTool):
 
         params = self._verify_json_format_args(params)
         command = params['command']
-        justification = params.get('justification', 'No justification provided.')
+        justification = params.get('justification')
         cwd = params.get('cwd', '.')
         timeout = params.get('timeout')  # None means use default (30s sync / 3600s async)
 
