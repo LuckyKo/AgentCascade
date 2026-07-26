@@ -143,6 +143,9 @@ const POOL_SETTINGS_MAP = [
   { id: 'setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars', localKey: 'cache-threshold-chars' },
   { id: 'setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode', localKey: 'enable-skills',
     transform: (v) => v === 'AUTO' },
+  { id: 'setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
+  { id: 'setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop', localKey: 'auto_rollback_on_loop' },
+  { id: 'setting-grep-spillover', prop: 'checked', key: 'grep_spillover', localKey: 'grep-spillover' },
 ];
 
 /** Sync pool settings from server state to UI elements.
@@ -5000,7 +5003,20 @@ if (btnAddEndpoint) {
   });
 }
 
-// ── Page unload: clear debounce timers to prevent memory leaks ──
+// ── Page unload: clear debounce timers and flush settings ──
 window.addEventListener('beforeunload', () => {
   clearAutoSecurityTimers();
+
+  // Flush any pending debounced save timer
+  if (_saveSettingsTimer) {
+    clearTimeout(_saveSettingsTimer);
+    _saveSettingsTimer = null;
+  }
+
+  // Force-save current settings to localStorage (no server sync needed on unload)
+  try {
+    saveSettings(false);
+  } catch (e) {
+    // Silently ignore errors during unload
+  }
 });
