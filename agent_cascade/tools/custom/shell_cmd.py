@@ -1,10 +1,12 @@
 import logging
-import subprocess
 from agent_cascade.operation_manager.shell import ShellMixin
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 
 logger = logging.getLogger(__name__)
+
+AUTO_ASYNC_TIMEOUT_THRESHOLD = 60      # Seconds: timeout above this triggers auto-async mode
+DEFAULT_AUTO_ASYNC_HEARTBEAT = 30      # Default heartbeat interval for auto-async shells
 
 @register_tool('shell_cmd', allow_overwrite=True)
 class ShellCmd(BaseTool):
@@ -79,34 +81,41 @@ class ShellCmd(BaseTool):
         # ── Parse new async parameters ──────────────────────────────
         async_mode = bool(params.get('async_mode', False))
         heartbeat_interval = float(params.get('heartbeat_interval', -1))
-        tool_id_ref = params.get('tool_id')  # Can be int, string, or None
+        tool_id = params.get('tool_id')
 
-        # Auto-async mode: if timeout > 60s and async_mode not explicitly set
-        if timeout is not None and timeout > 60 and 'async_mode' not in params:
+        # Auto-async mode: if timeout exceeds threshold and async_mode not explicitly set
+        if timeout is not None and timeout > AUTO_ASYNC_TIMEOUT_THRESHOLD and 'async_mode' not in params:
             async_mode = True
             logger.info(f"Auto-async mode triggered for shell_cmd: timeout={timeout}s")
+            # Default heartbeat for auto-async unless explicitly set
+            if 'heartbeat_interval' not in params:
+                heartbeat_interval = DEFAULT_AUTO_ASYNC_HEARTBEAT
 
-        # Parse tool_id if provided as a string number
-        if tool_id_ref is not None:
+        # Convert tool_id to int if provided as a string number
+        if tool_id is not None:
             try:
-                tool_id_ref = int(tool_id_ref)
+                tool_id = int(tool_id)
             except (ValueError, TypeError):
-                pass
+                raise ValueError(f"tool_id must be a numeric value, got: {tool_id!r}")
 
         # Validate justification is required for non-control commands
-        justification = params.get('justification')
-        is_control_command = async_mode and tool_id_ref is not None
+        # Note: Control commands are detected here and routed before auto-async logic applies.
+        # Even if a control command has timeout > 60, it won't trigger auto-async mode.
+        # Detect control command by tool_id + command pattern, independent of async_mode flag
+        is_control_command = (tool_id is not None and
+                              (command in ShellMixin._CONTROL_COMMANDS or
+                               command.startswith(ShellMixin._CONTROL_HEARTBEAT_PREFIX)))
 
         if not is_control_command and not justification:
             raise ValueError("'justification' is required for shell_cmd unless using control commands with tool_id")
 
         agent_name = kwargs.get('agent_instance_name') or self.agent_name
 
-        # ── Async mode: reference existing task via tool_id ─────────
-        if async_mode and tool_id_ref is not None:
+        # ── Handle control commands for existing async shells (takes priority) ──
+        if is_control_command:
             return self._handle_control_command(
                 agent_name=agent_name,
-                tool_id=tool_id_ref,
+                tool_id=tool_id,
                 command=command,
                 heartbeat_interval=heartbeat_interval,
             )

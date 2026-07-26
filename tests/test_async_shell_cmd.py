@@ -337,6 +337,20 @@ class TestOptionalJustification:
             shell_cmd_tool.call('{"command": "ls -la"}')
         assert 'justification' in str(exc_info.value).lower()
 
+    def test_tool_id_with_non_control_command_requires_justification(self, shell_cmd_tool):
+        """Having tool_id alone doesn't exempt a regular command from needing justification."""
+        _make_tool_with_tracker(shell_cmd_tool, MagicMock())
+        with pytest.raises(ValueError) as exc_info:
+            shell_cmd_tool.call('{"command": "echo test", "tool_id": 1}')
+        assert 'justification' in str(exc_info.value).lower()
+
+    def test_control_command_with_non_numeric_tool_id_raises(self, shell_cmd_tool):
+        """Control commands with non-numeric tool_id should raise a clear error."""
+        _make_tool_with_tracker(shell_cmd_tool, MagicMock())
+        with pytest.raises(ValueError) as exc_info:
+            shell_cmd_tool.call('{"command": "__status", "tool_id": "abc"}')
+        assert 'tool_id' in str(exc_info.value).lower() and 'numeric' in str(exc_info.value).lower()
+
     def test_regular_command_with_justification_works(self, shell_cmd_tool):
         with patch.object(shell_cmd_tool, '_execute_sync', return_value='file1\nfile2\n') as mock_exec:
             result = shell_cmd_tool.call('{"command": "ls -la", "justification": "listing files"}')
@@ -430,6 +444,25 @@ class TestAutoAsyncMode:
         result = shell_cmd_tool.call('{"command": "echo hello", "async_mode": true, "timeout": 1, "justification": "async"}')
         tracker.launch.assert_called_once()
         assert '⟨shell_cmd launched⟩' in result
+
+    def test_auto_async_defaults_heartbeat_to_30(self, shell_cmd_tool, mock_tracker):
+        """Auto-async mode should default heartbeat_interval to 30s when not explicitly set."""
+        tracker = self._tool_with_tracker(shell_cmd_tool, mock_tracker)
+        # No heartbeat_interval specified; auto-async should kick in (timeout > 60)
+        result = shell_cmd_tool.call('{"command": "echo hello", "timeout": 120, "justification": "test"}')
+        tracker.launch.assert_called_once()
+        call_kwargs = tracker.launch.call_args
+        assert call_kwargs.kwargs.get('heartbeat_interval') == 30, \
+            f"Expected heartbeat_interval=30 for auto-async, got {call_kwargs.kwargs.get('heartbeat_interval')}"
+
+    def test_auto_async_respects_explicit_heartbeat(self, shell_cmd_tool, mock_tracker):
+        """Auto-async mode should not override an explicitly set heartbeat_interval."""
+        tracker = self._tool_with_tracker(shell_cmd_tool, mock_tracker)
+        result = shell_cmd_tool.call('{"command": "echo hello", "timeout": 120, "heartbeat_interval": 60, "justification": "test"}')
+        tracker.launch.assert_called_once()
+        call_kwargs = tracker.launch.call_args
+        assert call_kwargs.kwargs.get('heartbeat_interval') == 60, \
+            f"Expected heartbeat_interval=60 (explicit), got {call_kwargs.kwargs.get('heartbeat_interval')}"
 
 
 # ============================================================================
