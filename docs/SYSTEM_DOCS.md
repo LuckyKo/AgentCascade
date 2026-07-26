@@ -677,6 +677,74 @@ Agent A calls: call_agent(agent_class="researcher", instance_name="Researcher1",
 - If the pool reaches capacity, new requests block until a slot opens (via endpoint slot acquisition)
 - The `active_stack` tracks which agents are currently running for UI rendering and concurrency counting
 
+### 5.4.1 Async Tool Architecture
+
+Async tools allow Agent Cascade to initiate long-running operations that execute independently of the main agent loop. This architecture ensures that the agent remains responsive while background tasks progress, providing a mechanism for monitoring, controlling, and receiving results from operations that would otherwise block execution.
+
+**Core Operation Pattern: Launch → Track → Notify**
+The async lifecycle follows a three-stage pattern designed to decouple operation execution from agent interaction:
+
+1. **Launch**: The agent invokes an async tool (e.g., `shell_cmd`). The tool initializes the background process and immediately returns a unique `tool_id` to the agent. This ID serves as a handle for all subsequent interactions.
+2. **Track**: A dedicated tracker thread is spawned to monitor the operation. This thread runs independently of the agent loop, capturing output streams and monitoring process state (running, completed, failed).
+3. **Notify**: The tracker thread delivers updates to the agent via async messages injected through the pool's message queue system. These messages can be triggered by timers (heartbeats), specific events (completion/error), or manual requests from the agent.
+
+**Output Delivery Model (No Duplication)**
+To prevent redundant data delivery across multiple notification mechanisms, Agent Cascade employs a position-indexed output buffer:
+
+- **Separate Buffers**: Output is captured in separate stdout and stderr line lists within the task state object. When reading for delivery, these are combined into a single ordered list.
+- **Position Tracking**: The system maintains a `last_heartbeat_sent_pos` pointer, which is a line index into the combined output list indicating how many lines have been delivered to the agent.
+- **Consumptive Reads**: Any mechanism that retrieves output—be it an automatic heartbeat, a manual `__status` call, or a final completion message—reads all lines from the current position onward and advances the pointer to the end of the available buffer.
+- **Result**: Each line of output is delivered exactly once, regardless of which notification trigger occurs first.
+
+```text
+[ Buffer: ["Line 1", "Line 2", "Line 3"] ]
+  ^ (last_heartbeat_sent_pos = 0)
+
+-- Heartbeat Triggered --
+  Agent receives: Line 1, Line 2
+  Pointer updates: [ Buffer: ["Line 1", "Line 2", "Line 3"] ]
+                              ^ (pos = 2)
+
+-- Agent calls __status --
+  Agent receives: Line 3
+  Pointer updates: [ Buffer: ["Line 1", "Line 2", "Line 3"] ]
+                                         ^ (pos = 3)
+```
+
+**Agent Interaction Commands**
+Agents interact with running async operations using a specialized set of control commands passed as arguments to the tool.
+
+Core Framework Commands:
+
+- `__status`: Performs a manual heartbeat check. Returns the current operation metadata (e.g., PID, elapsed time) and any output accumulated since the last read.
+- `__kill`: Terminates the background process immediately.
+- `__heartbeat=N`: Adjusts the frequency of automatic status updates (in seconds).
+- `__ctrl_c`: Sends an interrupt signal to the process (SIGINT), allowing for graceful termination of interactive tasks.
+
+Tool-Specific Commands:
+
+- `__wait` (shell_cmd only): Briefly blocks the agent's next turn to poll for new output or completion, useful for timing-sensitive operations. This is a convenience command implemented by shell_cmd and not part of the core framework.
+
+**Early Detection Optimization**
+To minimize latency for short-lived operations, the system implements early detection:
+
+- **Synchronous Completion**: If an operation completes during the launch phase (before the tracker thread is fully initialized), the result is returned immediately in the launch response, bypassing the async lifecycle entirely.
+- **Immediate Output**: Operations that produce output during the launch sequence include that output in the initial response rather than waiting for the first heartbeat.
+- **Pointer Advancement**: When early output or completion is detected during launch, the `last_heartbeat_sent_pos` pointer is immediately advanced past those lines. This ensures that subsequent heartbeats do not re-send the initial output.
+- **Race Condition Prevention**: Event-based synchronization ensures that if an operation completes while the tracker thread is starting, the completion signal is captured and delivered correctly without duplicate output or missed events.
+
+**Design Principles for Future Async Tools**
+When implementing new async capabilities, adhere to these constraints:
+
+- **Unique Identity**: Every async operation must generate a unique `tool_id` scoped to the session.
+- **Daemon Threads & Cleanup**: Tracker threads must be daemon threads so they do not block system shutdown. These threads should be joined before the task is removed from the registry to ensure clean resource release.
+- **Position-Based Consumption**: All output must be read via a line-index pointer to guarantee exactly-once delivery across heartbeats, status checks, and completion messages.
+- **Agent Agency**: The agent must always maintain the ability to query, modify, or terminate any running operation it launched.
+- **Resource Cleanup**: Tools must implement mechanisms to clean up background processes and threads upon completion or termination to prevent resource leaks.
+
+**Concrete Example: `shell_cmd`**
+The `shell_cmd` tool implements this architecture by launching a subprocess via `subprocess.Popen`, spawning a tracker thread that reads stdout/stderr non-blockingly, updating a shared state object with output and process metadata, and responding to agent commands by querying this shared state and advancing the read pointer. It also provides the `__wait` convenience command for polling behavior.
+
 ### 5.5 Halt / Resume / Terminate
 
 Any agent instance can be paused or resumed at any time from the WebUI. This is useful when a user wants to intervene, redirect an agent, or wait for approval on a security check.
