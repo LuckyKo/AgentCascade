@@ -16,7 +16,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 [x] Add skills (custom agent loading?). there are some pre-existing modules from Qwen agent that deal with skills that havent been integrated, investigate hw they could be incorporated in AC, alternatives or improvements to that.
 [ ] Add an Overseer agent that periodically checks on the health of the system, reads logs and telemetry, check if running agents got stuck in undetectable loops or migrated goals towards something that the user never asked for, suggests fixes and improvements into a suggestion box. Main agent will pull from the suggestion box during idle times when user is AFK to self improve the agents or the framework during our daily operation - do the whole DNA A/B testing thing. Overseer agent will always get its full working queue compressed when it finishes and save it into the suggestion box (no chat messages) - should be persistent across sessions. We'll set the interval at which it activates, it will silently interrupt running agents when it activates and resume them like it never happens when its done (unless it decides to kill an agent), or work in parallel using a different API endpoint. - big task, will do it after we stabilize the framework
-[ ] need a memory consolidation task ran periodically - takes all summaries in log and arranges them in a neat continuous package like long term memory -> replaces last summary
+[ ] need a memory consolidation task ran periodically, like when we accumulate 8 summaries, takes all summaries-1 from log and compact them again using the compressor agent, replace it in marker-1 position and remove the first 6 from log. he final output should have only this compaction and the last marker.
 [x] implement async shell_cmd launch (immediate tool response that it was launched, runs in background while agent keeps running and return final output as user message when done, can have heartbeat value that will periodically send console output back to caller agent) — DONE: AsyncShellTracker module with per-agent ID counters, max 5 concurrent shells, heartbeat injection via message queue, process tree cleanup on dismiss
 [x] make cmd_shell pop open a console window in the back so the user can inspect or interact with it if needed. — DONE: CREATE_NEW_CONSOLE flag on Windows Popen launch in AsyncShellTracker
 [ ] add auto-rollback feature on edit_file fail
@@ -28,6 +28,11 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] make out path helper that tools use resolve extra_rw/ro paths just like code_intepreter does
 [x] make shell_cmd automatically launch on async mode if the agent sets timeout bigger than 60s and doesn't specify the mode as sync.
 [x] check put shell_cmd async commands. add a `__wait` command to simply wait for next heartbeat - a no reply tool call basically (needed because most LLMs dont understand the concept of shutting up to get in SLEEPING state). make sure all these commands dont need justification field.
+[x] need full documentation of the REST commands for AC, probably a complete update of README too since its outdated and kinna useless.
+    - Created docs/API_DOCS_PLAN.md (approved blueprint)
+    - Rewrote README.md with accurate Quick Start + encryption example
+    - Created docs/API_REFERENCE.md with all endpoints + WebSocket spec
+
 
 # BUGS:
 
@@ -50,64 +55,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] UI issue: auto scroll to bottom keeps dropping after long tool outputs or reasoning (fixed — replaced requestAnimationFrame with immediate scroll, added programmaticScrollCount guard, debounce timer cleanup, tab switch lock reset)
 - [ ] add inner loop counter to telemetry's loop detected
 - [ ] odd useless truncation message on `list_dir` tool, should contain spillover path (should use helper truncation function like other tools, is there another one?): [TRUNCATED — Character limit exceeded.]. also needs the char limit added to the UI
-- [ ] overly aggressive stick to bottom function, active when streaming even when the user is actively scrolling up
+- [ ] overly aggressive stick to bottom function, active when streaming even when the user is actively scrolling up. it should NOT be fingting the user
 
 # Errors to investigate:
 
-# FIXED (2026-07-26): no cache hit on new user message — stale browser tab clearing work folders via update_config
-# Root cause: Second browser tab with empty localStorage sent update_config with work_access_folders_ro/rw=[], clearing server config. Session Metadata lost Extra Paths → KV cache busted.
-# Solution: Split into two paths:
-#   1. update_config (auto-sync): empty arrays = no-op, prevents stale tabs from clearing valid config
-#   2. set_work_folders (explicit Save button): allows clearing, only sent on intentional user action
-# Changes: config_handlers.py (defensive empty check), ws_handlers.py (new handler), web_ui/app.js + index.html (Save buttons, no auto-sync)
-2026-07-26 03:32:12,606 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 2.05.502.029 I slot print_timing: id  0 | task 180 | n_decoded =    329, tg =  18.53 t/s, tg_3s =  15.19 t/s
-2026-07-26 03:32:15,653 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 2.08.548.805 I slot print_timing: id  0 | task 180 | n_decoded =    375, tg =  18.03 t/s, tg_3s =  15.10 t/s
-2026-07-26 03:32:16,190 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 2.09.086.551 I slot print_timing: id  0 | task 180 | prompt eval time =    1587.88 ms /   299 tokens (    5.31 ms per token,   188.30 tokens per second)
-2026-07-26 03:32:16,191 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 2.09.086.556 I slot print_timing: id  0 | task 180 |        eval time =   21340.74 ms /   381 tokens (   56.01 ms per token,    17.85 tokens per second)
-2026-07-26 03:32:16,192 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 2.09.086.560 I slot print_timing: id  0 | task 180 |       total time =   22928.62 ms /   680 tokens
-2026-07-26 03:32:16,192 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 2.09.086.561 I slot print_timing: id  0 | task 180 |    graphs reused =        156
-2026-07-26 03:32:16,193 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 2.09.086.564 I slot print_timing: id  0 | task 180 | draft acceptance = 0.89604 (  181 accepted /   202 generated), mean len =  2.45
-2026-07-26 03:32:16,193 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 2.09.088.714 I slot      release: id  0 | task 180 | stop processing: n_tokens = 68192, truncated = 0
-2026-07-26 03:36:09,189 [INFO] autoloader: --> Incoming POST request to '/v1/chat/completions' (model param input: 'Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf')
-2026-07-26 03:36:09,190 [INFO] autoloader: Resolved model ID: 'Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf'
-2026-07-26 03:36:09,191 [INFO] autoloader: Forwarding POST /v1/chat/completions -> llama-server on port 9022
-2026-07-26 03:36:09,514 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 6.02.409.758 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = 129050742
-2026-07-26 03:36:12,208 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 6.05.104.069 I slot launch_slot_: id  0 | task 384 | processing task, is_child = 0
-2026-07-26 03:36:12,427 [INFO] httpx: HTTP Request: POST http://127.0.0.1:9022/v1/chat/completions "HTTP/1.1 200 OK"
-[32mINFO[0m:     127.0.0.1:58924 - "[1mPOST /v1/chat/completions HTTP/1.1[0m" [32m200 OK[0m
-2026-07-26 03:36:16,104 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 6.09.000.141 I slot print_timing: id  0 | task 384 | prompt processing, n_tokens =   4096, progress = 0.06, t =   3.90 s / 1051.32 tokens per second
-2026-07-26 03:36:17,980 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 6.10.876.382 I slot print_timing: id  0 | task 384 | prompt processing, n_tokens =   6144, progress = 0.09, t =   5.77 s / 1064.40 tokens per second
-2026-07-26 03:36:19,066 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 6.11.961.148 I slot print_timing: id  0 | task 384 | prompt processing, n_tokens =   7178, progress = 0.11, t =   6.86 s / 1046.81 tokens per second
-2026-07-26 03:36:19,715 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 6.12.611.403 I slot print_timing: id  0 | task 384 | prompt processing, n_tokens =   7622, progress = 0.11, t =   7.51 s / 1015.28 tokens per second
-
-2026-07-26 03:36:08,694 - agent_pool.py - 495 - DEBUG - Idle checker restarted
-2026-07-26 03:36:08,694 - agent_pool.py - 511 - DEBUG - Async registry executor recreated
-2026-07-26 03:36:08,696 - agent_pool.py - 514 - DEBUG - Stopped flag cleared — ready for new execution
-2026-07-26 03:36:08,697 - ws_handlers.py - 204 - DEBUG - Starting generation gen_id=3, instances={'Maine': 'IDLE'}, active_stack=0
-2026-07-26 03:36:08,698 - agent_pool.py - 495 - DEBUG - Idle checker restarted
-2026-07-26 03:36:08,699 - agent_pool.py - 511 - DEBUG - Async registry executor recreated
-2026-07-26 03:36:08,699 - agent_pool.py - 514 - DEBUG - Stopped flag cleared — ready for new execution
-2026-07-26 03:36:08,699 - execution_engine.py - 888 - DEBUG - engine.run() ENTRY - instance=Maine
-2026-07-26 03:36:08,700 - agent_pool.py - 2185 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
-2026-07-26 03:36:08,700 - execution_engine.py - 698 - DEBUG - [SLOT_ACQUIRE] initial - instance=Maine, class=orchestrator
-2026-07-26 03:36:08,701 - execution_engine.py - 966 - DEBUG - [TURN_START] Calling _setup_turn for Maine
-2026-07-26 03:36:08,702 - execution_engine.py - 1461 - INFO - [CACHE_REBUILD] Rebuilding working set for Maine (conv_len=174)
-2026-07-26 03:36:08,702 - execution_engine.py - 1558 - INFO - [CACHE_REBUILD] System prompt content CHANGED for Maine (len 4696→5250, tail_diff, first_diff@163: orig=': N:\work\WD\AgentWorkspace
-- Extra Paths (Read-Only): N:\wo' new=': N:\work\WD\AgentWorkspace
-- Log Path: n:\work\WD\AgentWork')
-2026-07-26 03:36:08,706 - agent_instance_logger.py - 486 - INFO - Rewrote agent log n:\work\WD\AgentWorkspace\logs\orchestrator_Maine_20260726_002809.jsonl with 174 messages.
-2026-07-26 03:36:08,707 - execution_engine.py - 1001 - DEBUG - [TURN_DONE] Got messages=174, llm_messages=174
-2026-07-26 03:36:08,726 - execution_engine.py - 1084 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
-2026-07-26 03:36:08,779 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 58165, Available tokens: 88868
-2026-07-26 03:37:50,717 - tool_dispatcher.py - 574 - DEBUG - call_agent nesting - Maine depth=1/10
-2026-07-26 03:37:50,717 - tool_dispatcher.py - 389 - DEBUG - [SLOT_SYNC_RELEASE] Releasing slot for 'Maine' before running sync child 'final_review_settings_fix'
-2026-07-26 03:37:50,719 - tool_dispatcher.py - 393 - DEBUG - [SLOT_SYNC_RELEASE] Slot released for 'Maine', active agents can now acquire
-2026-07-26 03:37:50,720 - execution_engine.py - 4183 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target=final_review_settings_fix, class=reviewer, caller=Maine, nest_depth=1, force_fresh=False
-2026-07-26 03:37:50,721 - lifecycle_manager.py - 194 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for final_review_settings_fix
-2026-07-26 03:37:50,772 - execution_engine.py - 4265 - DEBUG - starting engine.run() for final_review_settings_fix
-2026-07-26 03:37:50,777 - execution_engine.py - 888 - DEBUG - engine.run() ENTRY - instance=final_review_settings_fix
-2026-07-26 03:37:50,777 - agent_pool.py - 2185 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=reviewer, instance_name=final_review_settings_fix, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
-2026-07-26 03:37:50,777 - execution_engine.py - 698 - DEBUG - [SLOT_ACQUIRE] initial - instance=final_review_settings_fix, class=reviewer
-2026-07-26 03:37:50,779 - execution_engine.py - 966 - DEBUG - [TURN_START] Calling _setup_turn for final_review_settings_fix
-2026-07-26 03:37:50,779 - execution_engine.py - 1461 - INFO - [CACHE_REBUILD] Rebuilding working set for final_review_settings_fix (conv_len=2)
-2026-07-26 03:37:50,780 - execution_engine.py - 1558 - INFO - [CACHE_REBUILD] System prompt content CHANGED for final_review_settings_fix (len 2643→3369, tail_diff)

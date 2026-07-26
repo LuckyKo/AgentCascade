@@ -1,135 +1,95 @@
-<!---
-Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-   http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
--->
-
 # AgentCascade
 
-[中文](https://github.com/QwenLM/AgentCascade/blob/main/README_CN.md) ｜ English
-
-<p align="center">
-    <img src="https://qianwen-res.oss-accelerate-overseas.aliyuncs.com/logo_agent_cascade.png" width="400"/>
-<p>
-<br>
-
-<p align="center">
-          💜 <a href="https://chat.qwen.ai/"><b>Qwen Chat</b></a>&nbsp&nbsp | &nbsp&nbsp🤗 <a href="https://huggingface.co/Qwen">Hugging Face</a>&nbsp&nbsp | &nbsp&nbsp🤖 <a href="https://modelscope.cn/organization/qwen">ModelScope</a>&nbsp&nbsp | &nbsp&nbsp 📑 <a href="https://qwenlm.github.io/">Blog</a> &nbsp&nbsp ｜ &nbsp&nbsp📖 <a href="https://qwenlm.github.io/AgentCascade/en/">Documentation</a>
-
-<br>
-📊 <a href="https://qwenlm.github.io/AgentCascade/en/benchmarks/deepplanning/">Benchmark</a>&nbsp&nbsp | &nbsp&nbsp💬 <a href="https://github.com/QwenLM/Qwen/blob/main/assets/wechat.png">WeChat (微信)</a>&nbsp&nbsp | &nbsp&nbsp🫨 <a href="https://discord.gg/CV4E9rpNSD">Discord</a>&nbsp&nbsp
-</p>
-
----
-
-**AgentCascade** is a production-oriented multi-agent framework designed for building robust, scalable, and controllable LLM applications. Originally forked from `Qwen-Agent`, it has evolved into an independent system with a focus on orchestration, security, and developer productivity.
+AgentCascade is a multi-agent orchestration system featuring a secure API for remote control and monitoring.
 
 ## Core Features
 
-### 🤖 Multi-Agent Orchestration
-- **Orchestrator** (`execution_engine.py`): A supervisor agent that manages sub-agent lifecycles, intercepts `call_agent`/`dismiss_agent` tool calls, and handles multi-agent streaming as a unified generator.
-- **AgentPool** (`agent_pool.py`): Centralized agent management with per-instance conversation persistence (JSONL), context compression (auto + manual modes), and real-time state synchronization.
+- **Secure Message Injection**: Uses X25519 key exchange and AES-GCM encryption for the `/api/message` endpoint.
+- **Real-time Monitoring**: Full visibility into agent states and control via REST and WebSocket interfaces.
+- **Flexible API Configuration**: Dynamic endpoint management and priority configuration.
+- **Workspace Integration**: Direct access to workspace files and integrated document parsing utilities.
+- **Comprehensive Telemetry**: Detailed session logging and telemetry export for performance analysis.
 
-### 🛡️ Production Safety & Control
-- **OperationManager** (`operation_manager.py`): A mandatory approval system for all mutating operations (file edits, code execution, system commands). Every edit creates timestamped `.bak` backups automatically.
-- **Path Isolation**: Strict workspace-relative path resolution ensures agents never access or expose host-absolute paths.
-- **Graceful Lifecycle**: Comprehensive signal handling (SIGINT/SIGTERM) ensuring clean shutdowns, backup cleanup, and state preservation.
+## Quick Start
 
-### 💻 Modern Web UI & API
-- **Custom Console** (`web_ui/`): A lightweight, high-performance HTML/JS frontend replacing legacy Gradio interfaces. Supports multi-agent tab switching, approval workflows, and rich tool result rendering.
-- **WebSocket API Server** (`api_server.py`): A headless backend allowing any external interface (Electron, VS Code extensions, CLI) to control the agent cluster.
-
-### 🛠️ Robust Tooling
-- **XML-Based Tool Protocols**: Large text payloads (code, file contents) are handled via XML tags to eliminate JSON escaping corruptions.
-- **PythonExecutor Improvements**: Hardened execution with proper exception isolation and batch crash recovery.
-- **Multi-Modal Support**: Native handling of images and files within tool results, including backend proxying for local file rendering.
-
----
-
-## News
-* 🔥🔥🔥Feb 16, 2026: Open-sourced Qwen3.5. For usage examples, refer to [Qwen3.5 Agent Demo](./examples/assistant_qwen3.5.py).
-* Jan 27, 2026: Open-sourced agent evaluation benchmark [DeepPlanning](https://qwenlm.github.io/AgentCascade/en/benchmarks/deepplanning/) and added AgentCascade [documentation](https://qwenlm.github.io/AgentCascade/en/guide/).
-* Sep 23, 2025: Added [Qwen3-VL Tool-call Demo](./examples/cookbook_think_with_images.ipynb), supporting tools such as zoom in, image search, and web search.
-* Jul 23, 2025: Add [Qwen3-Coder Tool-call Demo](./examples/assistant_qwen3_coder.py); Added native API tool call interface support, such as using vLLM's built-in tool call parsing.
-
----
-
-## Getting Started
+### Prerequisites
+- Python 3.10 or higher
+- Docker (required for the `code_interpreter` tool)
 
 ### Installation
-
-- Install from PyPI:
+Install the package with necessary extensions:
 ```bash
 pip install -U "agent-cascade[rag,code_interpreter,mcp]"
 ```
 
-- Install from source for development:
+### Starting the Server
+Run the API server specifying the desired port:
 ```bash
-git clone https://github.com/LuckyKo/AgentCascade.git
-cd AgentCascade
-pip install -e ./"[rag,code_interpreter,mcp]"
+python start_api_server.py --port 8000
 ```
 
-### Preparation: Model Service
-
-You can use Alibaba Cloud's [DashScope](https://help.aliyun.com/zh/dashscope/developer-reference/quick-start), or deploy your own OpenAI-compatible API (vLLM, Ollama, etc.).
-
-- Set `DASHSCOPE_API_KEY` environment variable if using DashScope.
-- For local models, configure the `model_server` endpoint in your agent config.
-
----
-
-## Developing Your Own Agent
-
-The following example shows how to create an agent with custom tools:
+### First Connection
+To send a secure message, you must perform a handshake to establish a shared secret.
 
 ```python
-from agent_cascade.agents import Assistant
-from agent_cascade.tools.base import BaseTool, register_tool
+import requests
+import base64
+import json
+from cryptography.hazmat.primitives.asymmetric import x25519
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import os
 
-@register_tool('my_image_gen')
-class MyImageGen(BaseTool):
-    description = 'AI painting service'
-    parameters = [{'name': 'prompt', 'type': 'string', 'required': True}]
+BASE_URL = "http://localhost:8000"
 
-    def call(self, params: str, **kwargs) -> str:
-        # Implementation...
-        return '{"image_url": "..."}'
+# 1. Get Server Public Key (Base64)
+server_pub_b64 = requests.get(f"{BASE_URL}/api/keys").json()["public_key"]
+server_pub_bytes = base64.b64decode(server_pub_b64)
+server_pub_key = x25519.X25519PublicKey.from_public_bytes(server_pub_bytes)
 
-llm_cfg = {'model': 'qwen-max-latest'}
-bot = Assistant(llm=llm_cfg, function_list=['my_image_gen', 'code_interpreter'])
+# 2. Generate Client Keys and Handshake
+client_private_key = x25519.X25519PrivateKey.generate()
+client_pub_bytes = client_private_key.public_key().public_bytes_raw()
+client_pub_b64 = base64.b64encode(client_pub_bytes).decode('utf-8')
 
-# Run as chatbot
-for response in bot.run(messages=[{'role': 'user', 'content': 'draw a dog'}]):
-    print(response)
+response = requests.post(f"{BASE_URL}/api/handshake", json={"public_key": client_pub_b64})
+session_token = response.json()["session_token"]
+
+# 3. Derive Shared Secret (ECDH)
+shared_key = client_private_key.exchange(server_pub_key)
+aesgcm = AESGCM(shared_key)
+
+# 4. Encrypt and Inject Message
+# The decrypted payload must be valid JSON with at least a "text" field.
+nonce = os.urandom(12)
+message_data = {"text": "Hello Agent!", "target": "Maine"}  # "target" is optional
+ciphertext = aesgcm.encrypt(nonce, json.dumps(message_data).encode('utf-8'), None)
+
+payload = {
+    "session_token": session_token,
+    "nonce": nonce.hex(),
+    "ciphertext": ciphertext.hex()
+}
+requests.post(f"{BASE_URL}/api/message", json=payload)
 ```
 
----
+## Configuration
 
-## FAQ
+### Environment Variables
+Key configuration options are managed via environment variables:
 
-- **How to use Code Interpreter?**: Ensure Docker is running. The tool writes and executes code in an isolated container.
-- **How to use MCP?**: Configure `mcpServers` in your agent config. See [MCP Example](./examples/assistant_mcp_sqlite_bot.py).
-- **Does it support Parallel Tool Calls?**: Yes, natively supported via the `nous` prompt template.
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `QWEN_AGENT_MODEL` | LLM model name | - |
+| `QWEN_AGENT_API_BASE` | LLM API base URL | - |
+| `QWEN_AGENT_API_KEY` | LLM API key | - |
+| `DASHSCOPE_API_KEY` | Alibaba DashScope API key | - |
+| `QWEN_AGENT_IDLE_TIMEOUT` | Regular agent idle timeout | 900s |
+| `QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT` | System agent idle timeout | 900s |
+| `QWEN_AGENT_IDLE_CHECK_INTERVAL` | Idle check frequency | 60s |
 
----
+### CLI Flags
+- `--port`: Sets the port for the API server (e.g., `--port 8080`).
 
-## Credits & Origin
-
-**AgentCascade** was originally forked from [QwenLM/Qwen-Agent](https://github.com/QwenLM/Qwen-Agent). We are grateful to the Qwen team for providing the powerful foundation that enabled this framework to grow.
-
----
-
-## Disclaimer
-
-The Docker-based code interpreter is intended for local testing. Always exercise caution when allowing agents to execute code in production environments.
+## Navigation
+- **API Reference**: Detailed endpoint and WebSocket specifications can be found in [docs/API_REFERENCE.md](docs/API_REFERENCE.md).
+- **System Architecture**: For a deep-dive into the system design, see [docs/SYSTEM_DOCS.md](docs/SYSTEM_DOCS.md).
