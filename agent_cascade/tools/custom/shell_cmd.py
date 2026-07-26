@@ -166,7 +166,7 @@ class ShellCmd(BaseTool):
             heartbeat_interval: Seconds between heartbeats (-1 = only on completion)
 
         Returns:
-            Response string with tool_id and PID.
+            Response string with tool_id and PID, or completion result if command finished quickly.
         """
         tracker = self._get_tracker()
         if tracker is None:
@@ -176,7 +176,7 @@ class ShellCmd(BaseTool):
         effective_timeout = timeout if timeout else 3600
 
         try:
-            tool_id, pid = tracker.launch(
+            tool_id, pid, early_output, completed_early, return_code = tracker.launch(
                 agent_name=agent_name,
                 command=command,
                 heartbeat_interval=heartbeat_interval,
@@ -186,7 +186,23 @@ class ShellCmd(BaseTool):
         except ValueError as e:
             return f"[shell_cmd] {e}"
 
-        return (
+        # Case 1: Command completed very quickly — return completion result directly
+        if completed_early:
+            rc = return_code if return_code is not None else 0
+            status = "success" if (rc == 0) else f"exit code {rc}"
+            result = (
+                f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
+                f"Completed ({status}) — finished immediately.\n"
+                f"Command: `{command[:200]}`\n"
+            )
+            # Append early output if available
+            if early_output:
+                output_text = '\n'.join(early_output)
+                result += f"\nOutput:\n{output_text}"
+            return result
+
+        # Case 2 & 3: Still running — return launched message, with early output appended if available
+        launched_msg = (
             f"⟨shell_cmd launched⟩ Tool ID: {tool_id}\n"
             f"Command running in background.\n"
             f"Command: `{command[:200]}`\n"
@@ -200,6 +216,13 @@ class ShellCmd(BaseTool):
             f"  - __heartbeat=N → update heartbeat interval (N seconds)\n"
             f"  - any other text → send as stdin input to the running command"
         )
+
+        # Append early output if available (Case 2)
+        if early_output:
+            output_text = '\n'.join(early_output)
+            launched_msg += f"\n\nInitial output:\n{output_text}"
+
+        return launched_msg
 
     # ────────────────────────────────────────────────────────────────
     def _handle_control_command(

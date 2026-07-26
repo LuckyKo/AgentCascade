@@ -365,7 +365,8 @@ class TestOptionalJustification:
 
     def test_async_launch_with_justification_works(self, shell_cmd_tool, mock_tracker):
         tracker = AsyncShellTracker(pool=None)
-        tracker.launch = MagicMock(return_value=(1, 12345))
+        # New launch() signature: (tool_id, pid, early_output, completed_early, return_code)
+        tracker.launch = MagicMock(return_value=(1, 12345, None, False, None))
 
         mock_pool = MagicMock()
         mock_pool._async_shell_tracker = tracker
@@ -376,6 +377,43 @@ class TestOptionalJustification:
         tracker.launch.assert_called_once()
         assert '⟨shell_cmd launched⟩' in result
         assert 'Tool ID: 1' in result
+
+    def test_async_launch_early_completion_returns_completed_message(self, shell_cmd_tool, mock_tracker):
+        """When launch() detects early completion, return completed message instead of launched."""
+        tracker = AsyncShellTracker(pool=None)
+        # Simulate early completion with output captured during launch wait
+        tracker.launch = MagicMock(return_value=(1, 0, ['hello world'], True, 0))
+
+        mock_pool = MagicMock()
+        mock_pool._async_shell_tracker = tracker
+        shell_cmd_tool.agent_pool = mock_pool
+        shell_cmd_tool.agent_name = 'test_agent'
+
+        result = shell_cmd_tool.call('{"command": "echo hello", "async_mode": true, "justification": "test"}')
+        tracker.launch.assert_called_once()
+        assert '⟨shell_cmd completed⟩' in result
+        assert 'Tool ID: 1' in result
+        assert 'success' in result
+        assert 'hello world' in result
+
+    def test_async_launch_early_output_appended_to_launched_message(self, shell_cmd_tool, mock_tracker):
+        """When launch() detects early output but process still running, append to launched message."""
+        tracker = AsyncShellTracker(pool=None)
+        # Simulate early output with process still running
+        tracker.launch = MagicMock(return_value=(1, 0, ['starting...', 'loading...'], False, None))
+
+        mock_pool = MagicMock()
+        mock_pool._async_shell_tracker = tracker
+        shell_cmd_tool.agent_pool = mock_pool
+        shell_cmd_tool.agent_name = 'test_agent'
+
+        result = shell_cmd_tool.call('{"command": "long_running_task", "async_mode": true, "justification": "test"}')
+        tracker.launch.assert_called_once()
+        assert '⟨shell_cmd launched⟩' in result
+        assert 'Tool ID: 1' in result
+        assert 'Initial output:' in result
+        assert 'starting...' in result
+        assert 'loading...' in result
 
 
 # ============================================================================
@@ -409,7 +447,8 @@ class TestAutoAsyncMode:
     def _tool_with_tracker(self, shell_cmd_tool, tracker=None):
         if tracker is None:
             tracker = AsyncShellTracker(pool=None)
-        tracker.launch = MagicMock(return_value=(1, 12345))
+        # New launch() signature: (tool_id, pid, early_output, completed_early, return_code)
+        tracker.launch = MagicMock(return_value=(1, 12345, None, False, None))
         mock_pool = MagicMock()
         mock_pool._async_shell_tracker = tracker
         shell_cmd_tool.agent_pool = mock_pool

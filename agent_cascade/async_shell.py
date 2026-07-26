@@ -20,7 +20,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from agent_cascade.log import logger
 from agent_cascade.settings import (
@@ -38,6 +38,7 @@ from agent_cascade.shell_utils import (
 HEARTBEAT_CHECK_INTERVAL = 0.5          # How often the tracker thread checks for heartbeats (seconds)
 HEARTBEAT_TRUNCATE_FIRST_LINES = 5      # Lines kept at start when truncating heartbeat output
 HEARTBEAT_TRUNCATE_LAST_LINES = 10       # Lines kept at end when truncating heartbeat output
+EARLY_OUTPUT_CHECK_TIMEOUT = 0.5        # Max seconds to wait for early output/completion after launch
 
 ON_WINDOWS = os.name == 'nt'
 
@@ -68,6 +69,8 @@ class AsyncShellTask:
         return_code: Exit code of the process (None until complete)
         last_heartbeat_sent_pos: Index into combined output for tracking what was sent
         console_window: Pop a console window on Windows for user inspection
+        completion_reported: Whether completion was already reported from launch() for fast commands
+        launch_complete: Event signaled when launch() finishes its early result check (synchronizes with _track_task)
     """
     tool_id: int
     agent_name: str
@@ -83,9 +86,13 @@ class AsyncShellTask:
     return_code: Optional[int] = None
     last_heartbeat_sent_pos: int = 0   # Index into combined output lines
     console_window: bool = True        # Pop console window (TODO #21)
+    completion_reported: bool = False  # Track if completion was reported early from launch()
 
     # Lock for thread-safe access to mutable fields during heartbeat reads
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Event to synchronize launch() with _track_task — ensures early result check completes
+    # before tracking thread proceeds, preventing race on completion_reported.
+    launch_complete: threading.Event = field(default_factory=threading.Event, repr=False)
 
 
 class AsyncShellTracker:
@@ -162,10 +169,10 @@ class AsyncShellTracker:
         heartbeat_interval: float = -1.0,
         timeout: int = ASYNC_SHELL_DEFAULT_TIMEOUT,
         cwd: Optional[str] = None,
-    ) -> tuple:
+    ) -> Tuple[int, int, Optional[List[str]], bool, Optional[int]]:
         """Launch a shell command in the background.
 
-        Returns immediately with (tool_id, pid) so the agent can continue working.
+        Briefly polls after launch (up to 500ms) for early output or completion.
         A dedicated tracking thread monitors the process for heartbeats and completion.
 
         Args:
@@ -176,8 +183,12 @@ class AsyncShellTracker:
             cwd: Working directory (resolved by caller before passing here)
 
         Returns:
-            Tuple of (tool_id, pid) — tool_id is a simple counter per agent.
-            PID is 0 until the process actually starts (set asynchronously).
+            Tuple of (tool_id, pid, early_output, completed_early, return_code):
+              - tool_id: Simple counter per agent.
+              - pid: 0 until the process actually starts (set asynchronously).
+              - early_output: List of non-empty output lines captured during launch wait, or None.
+              - completed_early: True if the command finished within the launch wait period.
+              - return_code: Exit code if completed_early is True, else None.
 
         Raises:
             ValueError: If the agent already has MAX_ASYNC_SHELL_PER_AGENT active tasks.
@@ -220,7 +231,92 @@ class AsyncShellTracker:
         )
         tracker_thread.start()
 
-        return tool_id, 0  # PID will be set by _track_task asynchronously
+        # Briefly poll for early output or completion to avoid redundant messages.
+        # Wrap in try/finally to guarantee launch_complete is signaled even if an exception
+        # occurs — without this, _track_task would deadlock waiting on the event.
+        try:
+            early_output, completed_early, return_code = self._get_launch_result(
+                agent_name, tool_id, timeout=EARLY_OUTPUT_CHECK_TIMEOUT
+            )
+        finally:
+            task.launch_complete.set()
+
+        return tool_id, 0, early_output, completed_early, return_code
+
+    # ────────────────────────────────────────────────────────────────
+    def _get_launch_result(
+        self, agent_name: str, tool_id: int, timeout: float = EARLY_OUTPUT_CHECK_TIMEOUT
+    ) -> Tuple[Optional[List[str]], bool, Optional[int]]:
+        """Briefly poll after launch for early output or completion.
+
+        After spawning the tracking thread, waits up to `timeout` seconds checking
+        if the process has already produced output or finished. This avoids sending
+        a redundant "launched" message when a command completes very quickly.
+
+        Three possible outcomes:
+        - Process started and completed within timeout: returns output (if any), True, return_code
+        - Process started with output but still running: returns output lines, False, None
+        - Timeout elapsed before process started: returns None, False, None (normal launched behavior)
+
+        Args:
+            agent_name: Owner agent name
+            tool_id: Task identifier
+            timeout: Maximum seconds to wait (default EARLY_OUTPUT_CHECK_TIMEOUT)
+
+        Returns:
+            Tuple of (early_output_lines_or_None, completed_early_bool, return_code_or_None).
+            If completion was detected early, sets task.completion_reported=True so
+            the tracking thread doesn't send a duplicate completion message.
+        """
+        task = self._get_task(agent_name, tool_id)
+        if task is None:
+            logger.warning(
+                f"[AsyncShell] Task not found during launch result check: "
+                f"{agent_name} tool_id={tool_id}"
+            )
+            return None, False, None
+
+        start_wait = time.time()
+        while time.time() - start_wait < timeout:
+            with task._lock:
+                # Wait until process has actually started
+                if task.process is None:
+                    time.sleep(0.05)
+                    continue
+
+                pid = task.pid
+                combined = list(task.stdout_lines) + list(task.stderr_lines)
+                # Filter empty lines, mirroring _format_output_text's logic (returns list here, not joined string)
+                early_output = [l for l in combined if l.strip()] if combined else None
+                completed_early = task.completed
+                return_code = task.return_code
+
+                # If already completed, mark as reported atomically under the same lock.
+                # This prevents _track_task from sending a duplicate completion message.
+                if completed_early:
+                    task.completion_reported = True
+
+                # Update heartbeat position so subsequent heartbeats don't resend
+                # lines already shown in the launch message.
+                if early_output is not None:
+                    task.last_heartbeat_sent_pos = len(combined)
+
+            # Got process info, don't wait longer regardless of state
+            if completed_early:
+                logger.debug(
+                    f"[AsyncShell] Early completion detected for {agent_name} "
+                    f"tool_id={tool_id}, PID={pid}, rc={return_code}"
+                )
+            elif early_output:
+                logger.debug(
+                    f"[AsyncShell] Early output captured for {agent_name} "
+                    f"tool_id={tool_id}, PID={pid}, lines={len(early_output)}"
+                )
+
+            return early_output, completed_early, return_code
+
+        # Timeout elapsed without process starting — fall through to normal launched behavior
+        return None, False, None
 
     # ────────────────────────────────────────────────────────────────
     @staticmethod
@@ -383,6 +479,7 @@ class AsyncShellTracker:
             return
 
         t_out, t_err = None, None  # Track drain threads for join in finally
+        timed_out = False          # Fix: ensure defined if exception before _poll_loop
 
         try:
             original_command = command
@@ -394,6 +491,11 @@ class AsyncShellTracker:
                 task._drain_t_out, task._drain_t_err,
                 task._stdout_lock, task._stderr_lock,
             )
+
+            # Wait for launch() to finish its early result check. This ensures that
+            # completion_reported is set (if applicable) before we proceed to poll
+            # and potentially send a completion message, preventing duplicate messages.
+            task.launch_complete.wait()
 
             # ── Poll loop: wait for process with heartbeat checks ───
             timed_out = self._poll_loop(agent_name, tool_id, proc, task, t_out, t_err)
@@ -415,7 +517,11 @@ class AsyncShellTracker:
             # completion message. By sending first, the agent either sees the
             # message in _async_results (wakes up) or has_pending() still
             # returns True (keeps sleeping, will see message next iteration).
-            self._send_completion_message(agent_name, tool_id, original_command, timed_out)
+            # Skip if already reported early from launch() for fast-completing commands.
+            with task._lock:
+                already_reported = task.completion_reported
+            if not already_reported:
+                self._send_completion_message(agent_name, tool_id, original_command, timed_out)
 
             with task._lock:
                 task.completed = True
