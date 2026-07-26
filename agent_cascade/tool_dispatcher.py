@@ -208,6 +208,30 @@ class ToolDispatcher:
         if depth_error:
             return depth_error
 
+        # ── Active Instance Guard ────────────────────────────────────────────
+        # Prevent calling an instance name that's already in use by an active agent.
+        # lifecycle_manager only reuses IDLE/TERMINATED instances; if the target is
+        # RUNNING/SLEEPING/COMPLETING, attempting to call it creates a shadow instance
+        # with the same name → logger collision → corrupted logs with duplicate system messages.
+        # Catch this early and reject with guidance to use a different instance name.
+        from .agent_pool import ACTIVE_STATES
+        
+        target_inst = self.pool.get_instance(instance_name)
+        if target_inst is not None:
+            with target_inst._state_lock:
+                target_state = target_inst.state
+            
+            if target_state in ACTIVE_STATES:
+                logger.debug(
+                    "Active instance guard rejected: %s trying to call active instance %s (state=%s)",
+                    caller_name, instance_name, target_state.name
+                )
+                return (
+                    f"Error: Agent instance '{instance_name}' is already actively executing (state={target_state.name}). "
+                    f"Cannot create a second instance with the same name. Use a different instance name like "
+                    f"'{instance_name}_child' or wait for '{instance_name}' to complete."
+                )
+
         # ── Slot Collision Detection: Fake Sync Mode ────────────────────────
         # When the caller holds a concurrency slot, using ASYNC path causes deadlock:
         # 1. Caller holds the slot and continues making LLM calls
