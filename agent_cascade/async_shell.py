@@ -885,41 +885,71 @@ class AsyncShellTracker:
 
     # ────────────────────────────────────────────────────────────────
     def get_status(self, agent_name: str, tool_id: int) -> Optional[str]:
-        """Get the current status of a running shell task.
+        """Get current status and consume all accumulated output (manual heartbeat).
+
+        Returns PID, lifetime, and full accumulated stdout/stderr since last consumption.
+        Updates last_heartbeat_sent_pos so subsequent heartbeats don't re-send this output.
 
         Args:
             agent_name: Owner agent name
             tool_id: Task identifier
 
         Returns:
-            Status string with process info and recent output lines.
+            Status string with process info and consumed output lines.
         """
         task = self._get_task(agent_name, tool_id)
         if task is None:
             return f"No running shell found for agent '{agent_name}' with tool_id {tool_id}."
 
+        # Read status fields under lock
         with task._lock:
             pid = task.pid
             completed = task.completed
             return_code = task.return_code
             heartbeat = task.heartbeat_interval
             elapsed = time.time() - task.start_time
+            
+            # Consume all output since last consumption (same pattern as _send_heartbeat)
+            combined = list(task.stdout_lines) + list(task.stderr_lines)
+            consumed_lines = combined[task.last_heartbeat_sent_pos:]
+            task.last_heartbeat_sent_pos = len(combined)
 
-        # Get last 20 lines of output for context
-        combined = self._get_combined_output(task)
-        recent_lines = [l for l in combined[-20:] if l.strip()]
-        output_preview = '\n'.join(recent_lines[:15]) if recent_lines else "(no output yet)"
-
-        status_label = "completed" if completed else f"running ({elapsed:.0f}s elapsed)"
+        # Format status header
+        if completed:
+            rc = return_code if return_code is not None else "?"
+            status_label = f"completed (exit code {rc})"
+        else:
+            status_label = f"running ({elapsed:.0f}s elapsed)"
+        
         msg = (
             f"⟨shell_cmd status⟩ Tool ID: {tool_id}\n"
             f"Status: {status_label}\n"
             f"PID: {pid}\n"
-            f"Return code: {return_code if completed else 'N/A'}\n"
             f"Heartbeat interval: {heartbeat}s\n"
             f"Command: `{task.command[:200]}`\n"
-            f"Recent output:\n{output_preview}"
         )
+
+        # Append consumed output if any
+        if consumed_lines:
+            output_text = self._format_output_text(consumed_lines)
+
+            # Truncate large outputs to avoid massive status messages
+            max_chars = ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS * 2  # Status gets double the heartbeat limit
+            if len(output_text) > max_chars:
+                lines = output_text.split('\n')
+                keep_first = min(HEARTBEAT_TRUNCATE_FIRST_LINES, len(lines))
+                keep_last = min(HEARTBEAT_TRUNCATE_LAST_LINES, len(lines))
+                skipped = len(lines) - keep_first - keep_last
+                truncated_lines = lines[:keep_first]
+                if skipped > 0:
+                    truncated_lines.append(f"... ({skipped} lines omitted ...)")
+                truncated_lines.extend(lines[-keep_last:])
+                output_text = '\n'.join(truncated_lines)
+
+            msg += f"\nOutput ({len(consumed_lines)} lines):\n{output_text}"
+        else:
+            msg += "\nNo new output since last status check."
+
         return msg
 
     # ────────────────────────────────────────────────────────────────
