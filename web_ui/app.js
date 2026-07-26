@@ -569,9 +569,7 @@ const ranges = [
   { input: $('#setting-repeat-penalty'), output: $('#val-repeat-penalty') },
   { input: $('#setting-presence-penalty'), output: $('#val-presence-penalty') },
   { input: $('#setting-frequency-penalty'), output: $('#val-frequency-penalty') },
-  { input: $('#setting-shell-char-limit'), output: $('#val-shell-char-limit') },
-  { input: $('#setting-code-char-limit'), output: $('#val-code-char-limit') },
-];
+  ];
 
 // ── Initialization ───────────────────────────────────────────────────────────
 
@@ -909,6 +907,11 @@ function saveSettings(sendToServer) {
   if ($('#setting-grep-spillover')) s['grep-spillover'] = $('#setting-grep-spillover').checked;
   if ($('#setting-grep-char-limit')) s['grep-char-limit'] = $('#setting-grep-char-limit').value;
 
+  // Shell, code, and list_dir char limits (now number inputs)
+  if ($('#setting-shell-char-limit')) s['shell-char-limit'] = $('#setting-shell-char-limit').value;
+  if ($('#setting-code-char-limit')) s['code-char-limit'] = $('#setting-code-char-limit').value;
+  if ($('#setting-list-dir-char-limit')) s['list-dir-char-limit'] = $('#setting-list-dir-char-limit').value;
+
   localStorage.setItem('agent-cascade-settings', JSON.stringify(s));
   
   if (sendToServer && state.connected) {
@@ -1031,12 +1034,18 @@ function loadSettings() {
       $('#setting-grep-spillover').checked = grepSpillover;
     }
 
-    // Shell and code char limits (saved via ranges array using DOM IDs as keys)
-    if (s['setting-shell-char-limit'] !== undefined) {
-      $('#setting-shell-char-limit').value = s['setting-shell-char-limit'];
+    // Shell, code, and list_dir char limits (backward compatible: hyphenated or underscore keys)
+    const shellCharLimit = s['shell-char-limit'] !== undefined ? s['shell-char-limit'] : s['shell_char_limit'];
+    if (shellCharLimit !== undefined) {
+      $('#setting-shell-char-limit').value = shellCharLimit;
     }
-    if (s['setting-code-char-limit'] !== undefined) {
-      $('#setting-code-char-limit').value = s['setting-code-char-limit'];
+    const codeCharLimit = s['code-char-limit'] !== undefined ? s['code-char-limit'] : s['code_char_limit'];
+    if (codeCharLimit !== undefined) {
+      $('#setting-code-char-limit').value = codeCharLimit;
+    }
+    const listDirCharLimit = s['list-dir-char-limit'] !== undefined ? s['list-dir-char-limit'] : s['list_dir_char_limit'];
+    if (listDirCharLimit !== undefined) {
+      $('#setting-list-dir-char-limit').value = listDirCharLimit;
     }
 
     if (settingImageDetail && s['setting-image-detail'] !== undefined) {
@@ -4249,8 +4258,9 @@ function getGenerateCfg() {
   if ($('#setting-tool-result-max-chars')) cfg.tool_result_max_chars = parseInt($('#setting-tool-result-max-chars').value) || 10000;
   if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value) || -1;
   if ($('#setting-grep-spillover')) cfg.grep_spillover = $('#setting-grep-spillover').checked;
-  if ($('#setting-shell-char-limit')) cfg.shell_char_limit = parseInt($('#setting-shell-char-limit').value);
-  if ($('#setting-code-char-limit')) cfg.code_char_limit = parseInt($('#setting-code-char-limit').value);
+  if ($('#setting-shell-char-limit')) cfg.shell_char_limit = parseInt($('#setting-shell-char-limit').value) || -1;
+  if ($('#setting-code-char-limit')) cfg.code_char_limit = parseInt($('#setting-code-char-limit').value) || -1;
+  if ($('#setting-list-dir-char-limit')) cfg.list_dir_char_limit = parseInt($('#setting-list-dir-char-limit').value) || -1;
 
   // Approval timeout settings
   if (approvalTimeoutSeconds && approvalTimeoutSeconds.value) cfg.approval_timeout_seconds = parseInt(approvalTimeoutSeconds.value) || 300;

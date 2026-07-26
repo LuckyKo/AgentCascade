@@ -377,7 +377,7 @@ class CompressionHandler:
         # footer; this is a safety net for tools that set the truncation flag but
         # forget to append the marker themselves.
         if was_truncated and "[TRUNCATED" not in raw_tool_result:
-            raw_tool_result += "\n\n[TRUNCATED — Character limit exceeded.]"
+            raw_tool_result += f"\n\n[TRUNCATED — Character limit exceeded for {instance_name}:{tool_name}. Full output may be available in logs/spillover/]"
 
         return raw_tool_result
 
