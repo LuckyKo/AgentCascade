@@ -87,6 +87,7 @@ class WsMessageHandler:
             'refresh_souls': self.handle_refresh_souls,
             'restart_server': self.handle_restart_server,
             'update_config': self.handle_update_config,
+            'set_work_folders': self.handle_set_work_folders,
             'update_endpoints': self.handle_update_endpoints,
             'update_api_priorities': self.handle_update_api_priorities,
             'approve': self.handle_approve,
@@ -663,6 +664,61 @@ class WsMessageHandler:
                 # Snapshot keys first to avoid RuntimeError from dict changing during iteration.
                 for instance_name in list(self.agent_pool.instances.keys()):
                     _apply_ui_config(self.agent_pool, instance_name, ui_cfg)
+
+        await self._broadcast()
+
+    async def handle_set_work_folders(self, data: dict) -> None:
+        """Handle 'set_work_folders' — explicit user action to set work folders.
+
+        Unlike update_config (which may come from stale tabs via getGenerateCfg),
+        this message type is only sent when the user clicks the Save button in the
+        settings panel. Therefore, empty arrays are treated as intentional clears.
+
+        Note: Uses operation_manager.set_extra_work_folders() for consistent path
+        resolution and error handling with the rest of the codebase.
+        """
+        from agent_cascade.log import logger as _logger
+        if self.agent_pool is None or not hasattr(self.agent_pool, 'operation_manager') or self.agent_pool.operation_manager is None:
+            return
+
+        om = self.agent_pool.operation_manager
+
+        ro_raw = data.get('work_access_folders_ro')
+        rw_raw = data.get('work_access_folders_rw')
+
+        # Collect paths for each type — only process keys explicitly present in the message.
+        # Empty arrays are valid here (explicit user action = intentional clear).
+        ro_updated = False
+        rw_updated = False
+
+        if isinstance(ro_raw, list):
+            ro_paths = [p.strip() for p in ro_raw if p.strip()]
+            ro_updated = True
+        else:
+            ro_paths = None
+
+        if isinstance(rw_raw, list):
+            rw_paths = [p.strip() for p in rw_raw if p.strip()]
+            rw_updated = True
+        else:
+            rw_paths = None
+
+        # If neither key was present, nothing to do.
+        if not ro_updated and not rw_updated:
+            _logger.debug("[set_work_folders] No work folder keys provided, ignoring")
+            return
+
+        try:
+            # Preserve existing values for any type not explicitly updated.
+            final_ro = ro_paths if ro_updated else [str(p) for p in om.extra_work_folders_ro]
+            final_rw = rw_paths if rw_updated else [str(p) for p in om.extra_work_folders_rw]
+
+            # Delegate to operation_manager for consistent path resolution/validation.
+            # This handles invalid paths gracefully (logs warning, skips bad entries).
+            om.set_extra_work_folders(final_ro, final_rw)
+            _logger.info("[set_work_folders] Explicit save — RO=%s, RW=%s", ro_paths, rw_paths)
+        except Exception as e:
+            _logger.error("[set_work_folders] Failed to set work folders: %s", e)
 
         await self._broadcast()
 

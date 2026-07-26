@@ -55,25 +55,58 @@ def _handle_mcp_servers(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -
         _logger.warning("[MCP] Eager initialization failed: %s", e)
 
 
+def _normalize_paths(paths: list) -> list:
+    """Strip and filter paths from a list."""
+    return [p.strip() for p in paths if p.strip()]
+
+
 @register_config_handler('work_access_folders_ro')
 def _handle_work_folders(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Update read-only and read-write work folders (defense-in-depth: only if changed)."""
+    """Update read-only and read-write work folders (defense-in-depth: only if changed).
+
+    Only updates when a key is explicitly present AND contains non-empty paths.
+    Empty arrays are treated as "no opinion" to prevent stale clients from clearing
+    valid config (e.g., multiple browser tabs with different localStorage state).
+
+    To clear all folders, send an explicit 'clear_work_folders' flag or restart server.
+    """
     from agent_cascade.log import logger as _logger
     if agent_pool is None or not hasattr(agent_pool, 'operation_manager') or agent_pool.operation_manager is None:
         return
+
     om = agent_pool.operation_manager
-    ro_new = [p.strip() for p in ui_cfg.get('work_access_folders_ro', []) if p.strip()]
-    rw_new = [p.strip() for p in ui_cfg.get('work_access_folders_rw', []) if p.strip()]
-    ro_current = [str(p) for p in om.extra_work_folders_ro]
-    rw_current = [str(p) for p in om.extra_work_folders_rw]
-    ro_sorted = sorted([p.lower() for p in ro_new])
-    rw_sorted = sorted([p.lower() for p in rw_new])
-    ro_curr_sorted = sorted([p.lower() for p in ro_current])
-    rw_curr_sorted = sorted([p.lower() for p in rw_current])
-    if ro_sorted != ro_curr_sorted or rw_sorted != rw_curr_sorted:
-        om.set_extra_work_folders(ro_new, rw_new)
-    else:
-        _logger.debug("[update_config] Extra work folders unchanged (RO=%d, RW=%d)", len(ro_new), len(rw_new))
+
+    # Check each key independently — only update if present AND has actual paths.
+    ro_changed = False
+    rw_changed = False
+    ro_new_norm = None
+    rw_new_norm = None
+
+    ro_raw = ui_cfg.get('work_access_folders_ro')
+    if isinstance(ro_raw, list) and len(ro_raw) > 0:
+        ro_new_norm = _normalize_paths(ro_raw)
+        if ro_new_norm:
+            ro_current = sorted([str(p).lower() for p in om.extra_work_folders_ro])
+            ro_new_sorted = sorted([p.lower() for p in ro_new_norm])
+            ro_changed = ro_new_sorted != ro_current
+
+    rw_raw = ui_cfg.get('work_access_folders_rw')
+    if isinstance(rw_raw, list) and len(rw_raw) > 0:
+        rw_new_norm = _normalize_paths(rw_raw)
+        if rw_new_norm:
+            rw_current = sorted([str(p).lower() for p in om.extra_work_folders_rw])
+            rw_new_sorted = sorted([p.lower() for p in rw_new_norm])
+            rw_changed = rw_new_sorted != rw_current
+
+    if not ro_changed and not rw_changed:
+        _logger.debug("[work_folders] Extra work folders unchanged")
+        return
+
+    # Build final lists — use new values only when changed, preserve existing otherwise.
+    ro_final = ro_new_norm if ro_changed else [str(p) for p in om.extra_work_folders_ro]
+    rw_final = rw_new_norm if rw_changed else [str(p) for p in om.extra_work_folders_rw]
+
+    om.set_extra_work_folders(ro_final, rw_final)
 
 
 @register_config_handler('work_access_folders_rw')

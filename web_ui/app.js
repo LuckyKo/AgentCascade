@@ -1140,8 +1140,41 @@ if (sidePanel) {
   sidePanel.addEventListener('input', debouncedSaveSettings);
 }
 
-if (workAccessFoldersRW) workAccessFoldersRW.addEventListener('input', debouncedSaveSettings);
-if (workAccessFoldersRO) workAccessFoldersRO.addEventListener('input', debouncedSaveSettings);
+// Work folder textareas use explicit save button instead of auto-sync
+const saveWorkFoldersBtn = $('#saveWorkFolders');
+
+// Stop input events from bubbling to sidePanel's debouncedSaveSettings listener
+if (workAccessFoldersRW) workAccessFoldersRW.addEventListener('input', e => e.stopPropagation());
+if (workAccessFoldersRO) workAccessFoldersRO.addEventListener('input', e => e.stopPropagation());
+
+function saveWorkFolders() {
+  if (!workAccessFoldersRW || !workAccessFoldersRO || !saveWorkFoldersBtn) return;
+
+  const rwValue = workAccessFoldersRW.value.trim();
+  const roValue = workAccessFoldersRO.value.trim();
+
+  // Save to localStorage
+  const settings = JSON.parse(localStorage.getItem('agent-cascade-settings') || '{}');
+  settings['work-access-folders-rw'] = rwValue;
+  settings['work-access-folders-ro'] = roValue;
+  localStorage.setItem('agent-cascade-settings', JSON.stringify(settings));
+
+  // Send explicit set_work_folders message with both types (distinguishes from stale tab sync via update_config)
+  if (state.connected) {
+    send({
+      type: 'set_work_folders',
+      work_access_folders_rw: rwValue ? rwValue.split('\n').map(s => s.trim()).filter(s => s) : [],
+      work_access_folders_ro: roValue ? roValue.split('\n').map(s => s.trim()).filter(s => s) : []
+    });
+  }
+
+  // Brief visual feedback
+  const originalText = saveWorkFoldersBtn.textContent;
+  saveWorkFoldersBtn.textContent = 'Saved!';
+  setTimeout(() => { saveWorkFoldersBtn.textContent = originalText; }, 1200);
+}
+
+if (saveWorkFoldersBtn) saveWorkFoldersBtn.addEventListener('click', () => saveWorkFolders());
 
 if (afkToggle) {
   afkToggle.addEventListener('change', () => {
