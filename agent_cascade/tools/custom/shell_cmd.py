@@ -2,11 +2,9 @@ import logging
 from agent_cascade.operation_manager.shell import ShellMixin
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
+from agent_cascade.settings import AUTO_ASYNC_TIMEOUT_THRESHOLD, DEFAULT_AUTO_ASYNC_HEARTBEAT
 
 logger = logging.getLogger(__name__)
-
-AUTO_ASYNC_TIMEOUT_THRESHOLD = 60      # Seconds: timeout above this triggers auto-async mode
-DEFAULT_AUTO_ASYNC_HEARTBEAT = 30      # Default heartbeat interval for auto-async shells
 
 @register_tool('shell_cmd', allow_overwrite=True)
 class ShellCmd(BaseTool):

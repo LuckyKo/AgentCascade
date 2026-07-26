@@ -27,18 +27,16 @@ from agent_cascade.settings import (
     MAX_ASYNC_SHELL_PER_AGENT,
     ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS,
     ASYNC_SHELL_DEFAULT_TIMEOUT,
+    HEARTBEAT_CHECK_INTERVAL,
+    HEARTBEAT_TRUNCATE_FIRST_LINES,
+    HEARTBEAT_TRUNCATE_LAST_LINES,
+    EARLY_OUTPUT_CHECK_TIMEOUT,
 )
 from agent_cascade.shell_utils import (
     DRAIN_THREAD_JOIN_TIMEOUT,
     drain_pipe_lines,
     configure_windows_utf8,
 )
-
-# ─── Named constants ──────────────────────────────────────────────
-HEARTBEAT_CHECK_INTERVAL = 0.5          # How often the tracker thread checks for heartbeats (seconds)
-HEARTBEAT_TRUNCATE_FIRST_LINES = 5      # Lines kept at start when truncating heartbeat output
-HEARTBEAT_TRUNCATE_LAST_LINES = 10       # Lines kept at end when truncating heartbeat output
-EARLY_OUTPUT_CHECK_TIMEOUT = 0.5        # Max seconds to wait for early output/completion after launch
 
 ON_WINDOWS = os.name == 'nt'
 
@@ -69,8 +67,8 @@ class AsyncShellTask:
         return_code: Exit code of the process (None until complete)
         last_heartbeat_sent_pos: Index into combined output for tracking what was sent
         console_window: Pop a console window on Windows for user inspection
-        completion_reported: Whether completion was already reported from launch() for fast commands
-        launch_complete: Event signaled when launch() finishes its early result check (synchronizes with _track_task)
+        completed_at_launch: Whether the command finished during launch so tracking thread skips all messages
+        launch_check_done: Event signaled when launch() has finished its early completion check
     """
     tool_id: int
     agent_name: str
@@ -86,13 +84,13 @@ class AsyncShellTask:
     return_code: Optional[int] = None
     last_heartbeat_sent_pos: int = 0   # Index into combined output lines
     console_window: bool = True        # Pop console window (TODO #21)
-    completion_reported: bool = False  # Track if completion was reported early from launch()
+    completed_at_launch: bool = False  # If True, tracking thread skips heartbeats/output/completion
 
     # Lock for thread-safe access to mutable fields during heartbeat reads
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    # Event to synchronize launch() with _track_task — ensures early result check completes
-    # before tracking thread proceeds, preventing race on completion_reported.
-    launch_complete: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    # Event to synchronize launch()'s early check with tracking thread's completed_at_launch read
+    launch_check_done: threading.Event = field(default_factory=threading.Event, repr=False)
 
 
 class AsyncShellTracker:
@@ -232,14 +230,18 @@ class AsyncShellTracker:
         tracker_thread.start()
 
         # Briefly poll for early output or completion to avoid redundant messages.
-        # Wrap in try/finally to guarantee launch_complete is signaled even if an exception
-        # occurs — without this, _track_task would deadlock waiting on the event.
+        # The tracking thread now polls immediately (no blocking wait), so it can detect
+        # fast completions and set task.completed before we check here. If we see
+        # completed=True, we set completed_at_launch=True so the tracking thread skips
+        # sending any messages (heartbeats, output, completion).
         try:
             early_output, completed_early, return_code = self._get_launch_result(
                 agent_name, tool_id, timeout=EARLY_OUTPUT_CHECK_TIMEOUT
             )
         finally:
-            task.launch_complete.set()
+            # Always signal tracking thread that launch check is complete, even on exception.
+            # This prevents deadlock if _get_launch_result raises unexpectedly.
+            task.launch_check_done.set()
 
         return tool_id, 0, early_output, completed_early, return_code
 
@@ -265,8 +267,8 @@ class AsyncShellTracker:
 
         Returns:
             Tuple of (early_output_lines_or_None, completed_early_bool, return_code_or_None).
-            If completion was detected early, sets task.completion_reported=True so
-            the tracking thread doesn't send a duplicate completion message.
+            If completion was detected early, sets task.completed_at_launch=True so
+            the tracking thread skips all messages.
         """
         task = self._get_task(agent_name, tool_id)
         if task is None:
@@ -291,32 +293,48 @@ class AsyncShellTracker:
                 completed_early = task.completed
                 return_code = task.return_code
 
-                # If already completed, mark as reported atomically under the same lock.
-                # This prevents _track_task from sending a duplicate completion message.
+                # If already completed, mark it so tracking thread skips all messages.
+                # The caller will return the full result inline instead.
                 if completed_early:
-                    task.completion_reported = True
+                    task.completed_at_launch = True
 
                 # Update heartbeat position so subsequent heartbeats don't resend
                 # lines already shown in the launch message.
                 if early_output is not None:
                     task.last_heartbeat_sent_pos = len(combined)
 
-            # Got process info, don't wait longer regardless of state
+            # Got process info — if completed, return immediately.
+            # If we have output but not completion, keep polling briefly to see if
+            # completion is detected (for fast commands like echo). Only return with
+            # early_output if timeout is about to expire without completion.
             if completed_early:
-                logger.debug(
+                logger.info(
                     f"[AsyncShell] Early completion detected for {agent_name} "
                     f"tool_id={tool_id}, PID={pid}, rc={return_code}"
                 )
-            elif early_output:
-                logger.debug(
-                    f"[AsyncShell] Early output captured for {agent_name} "
-                    f"tool_id={tool_id}, PID={pid}, lines={len(early_output)}"
-                )
+                return early_output, completed_early, return_code
 
-            return early_output, completed_early, return_code
+            # Process started but not yet completed — continue polling briefly.
+            # This allows fast commands to be detected as complete even after output arrives.
+            time.sleep(0.05)
 
-        # Timeout elapsed without process starting — fall through to normal launched behavior
-        return None, False, None
+        # Timeout elapsed — do one final check in case process completed right at the boundary.
+        with task._lock:
+            if task.process is not None:
+                combined = list(task.stdout_lines) + list(task.stderr_lines)
+                final_output = [l for l in combined if l.strip()] if combined else None
+
+                # Check completion one last time before giving up
+                if task.completed:
+                    task.completed_at_launch = True
+                    return final_output, True, task.return_code
+
+                # Mark output as shown so tracking thread doesn't resend it
+                if final_output is not None:
+                    task.last_heartbeat_sent_pos = len(combined)
+
+                return final_output, False, None
+            return None, False, None
 
     # ────────────────────────────────────────────────────────────────
     @staticmethod
@@ -486,45 +504,62 @@ class AsyncShellTracker:
 
             # ── Spawn process and pipe drain threads ────────────────
             self._spawn_process(agent_name, tool_id, command, cwd)
-            proc = task.process
-            t_out, t_err, stdout_lock, stderr_lock = (
-                task._drain_t_out, task._drain_t_err,
-                task._stdout_lock, task._stderr_lock,
-            )
 
-            # Wait for launch() to finish its early result check. This ensures that
-            # completion_reported is set (if applicable) before we proceed to poll
-            # and potentially send a completion message, preventing duplicate messages.
-            task.launch_complete.wait()
+            # Read process and thread refs under lock for thread safety.
+            # These are set atomically in _spawn_process under the same lock.
+            with task._lock:
+                proc = task.process
+                t_out, t_err, stdout_lock, stderr_lock = (
+                    task._drain_t_out, task._drain_t_err,
+                    task._stdout_lock, task._stderr_lock,
+                )
 
-            # ── Poll loop: wait for process with heartbeat checks ───
+            # ── Poll loop: start immediately to detect fast completions ───
             timed_out = self._poll_loop(agent_name, tool_id, proc, task, t_out, t_err)
+
+            # ── Mark completed immediately so _get_launch_result() can detect it ───
+            # Set completed and return_code right after poll_loop exits (process finished).
+            # This allows launch()'s early check to see completion before we do cleanup.
+            # If launch() detects it first, it sets completed_at_launch=True and returns
+            # the full result inline; we skip all messages below when that flag is set.
+            rc = proc.returncode if proc.returncode is not None else (1 if timed_out else 0)
+            with task._lock:
+                task.completed = True
+                task.return_code = rc
 
             # Wait for reader threads to drain remaining buffers
             t_out.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
             t_err.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
 
-            # ── Capture return code ────────────────────────────────
-            self._wait_for_completion(proc, task)
+            # ── Wait for launch() to finish its early check ───────────
+            # Ensure launch_check_done is set before reading completed_at_launch.
+            # This prevents a race where we check the flag before _get_launch_result
+            # has had a chance to set it for fast-completing commands.
+            task.launch_check_done.wait()
 
-            # ── Send any remaining output as final heartbeat ─────────
-            self._send_remaining_output(agent_name, tool_id, timed_out)
-
-            # ── Send final result BEFORE marking completed ─────────────
-            # Order matters: send_completion_message puts into _async_results.
-            # If we mark completed first, has_pending() returns False and a
-            # sleeping agent might transition to COMPLETING before seeing the
-            # completion message. By sending first, the agent either sees the
-            # message in _async_results (wakes up) or has_pending() still
-            # returns True (keeps sleeping, will see message next iteration).
-            # Skip if already reported early from launch() for fast-completing commands.
+            # ── Check if command completed during launch ───────────
+            # If launch() detected completion and returned the full result inline,
+            # skip all messages (heartbeats, remaining output, completion).
             with task._lock:
-                already_reported = task.completion_reported
-            if not already_reported:
+                done_at_launch = task.completed_at_launch
+
+            if done_at_launch:
+                logger.debug(
+                    f"[AsyncShell] Task completed at launch for {agent_name} "
+                    f"tool_id={tool_id}, skipping all messages"
+                )
+            else:
+                # Send any remaining output as final message
+                self._send_remaining_output(agent_name, tool_id, timed_out)
+
+                # Send final result BEFORE marking completed
+                # Order matters: send_completion_message puts into _async_results.
+                # If we mark completed first, has_pending() returns False and a
+                # sleeping agent might transition to COMPLETING before seeing the
+                # completion message. By sending first, the agent either sees the
+                # message in _async_results (wakes up) or has_pending() still
+                # returns True (keeps sleeping, will see message next iteration).
                 self._send_completion_message(agent_name, tool_id, original_command, timed_out)
-
-            with task._lock:
-                task.completed = True
 
         except Exception as e:
             logger.warning(

@@ -190,6 +190,12 @@ CACHE_THRESHOLD_CHARS: int = int(os.getenv('QWEN_AGENT_CACHE_THRESHOLD_CHARS', '
 MAX_ASYNC_SHELL_PER_AGENT: int = 5            # Max concurrent async shells per agent
 ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS: int = int(os.getenv('QWEN_AGENT_ASYNC_SHELL_HEARTBEAT_CHARS', '800'))  # Max chars per heartbeat message
 ASYNC_SHELL_DEFAULT_TIMEOUT: int = 3600       # Default timeout for async shells (1 hour)
+HEARTBEAT_CHECK_INTERVAL: float = 0.5         # How often the tracker thread checks for heartbeats (seconds)
+HEARTBEAT_TRUNCATE_FIRST_LINES: int = 5       # Lines kept at start when truncating heartbeat output
+HEARTBEAT_TRUNCATE_LAST_LINES: int = 10       # Lines kept at end when truncating heartbeat output
+EARLY_OUTPUT_CHECK_TIMEOUT: float = 2.0       # Max seconds to wait for early output/completion after launch
+AUTO_ASYNC_TIMEOUT_THRESHOLD: int = 60        # Seconds: timeout above this triggers auto-async mode
+DEFAULT_AUTO_ASYNC_HEARTBEAT: int = 30        # Default heartbeat interval for auto-async shells
 
 # ── Skills system settings (Feature: Skills System Phase 1) ────────────
 LOAD_SKILL_AUTO: str = "AUTO"     # Auto-match relevant skills from task context
