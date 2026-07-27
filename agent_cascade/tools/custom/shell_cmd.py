@@ -96,21 +96,20 @@ class ShellCmd(BaseTool):
             except (ValueError, TypeError):
                 raise ValueError(f"tool_id must be a numeric value, got: {tool_id!r}")
 
-        # Validate justification is required for non-control commands
+        # Validate justification is required for non-control commands.
         # Note: Control commands are detected here and routed before auto-async logic applies.
         # Even if a control command has timeout > 60, it won't trigger auto-async mode.
-        # Detect control command by tool_id + command pattern, independent of async_mode flag
-        is_control_command = (tool_id is not None and
-                              (command in ShellMixin._CONTROL_COMMANDS or
-                               command.startswith(ShellMixin._CONTROL_HEARTBEAT_PREFIX)))
+        # When tool_id is provided, route to _handle_control_command which handles both
+        # __control commands (__kill, __status, etc.) and stdin input (any other text).
+        has_tool_id = tool_id is not None
 
-        if not is_control_command and not justification:
+        if not has_tool_id and not justification:
             raise ValueError("'justification' is required for shell_cmd unless using control commands with tool_id")
 
         agent_name = kwargs.get('agent_instance_name') or self.agent_name
 
-        # ── Handle control commands for existing async shells (takes priority) ──
-        if is_control_command:
+        # ── Handle control commands + stdin input for existing async shells (takes priority) ──
+        if has_tool_id:
             return self._handle_control_command(
                 agent_name=agent_name,
                 tool_id=tool_id,
@@ -149,6 +148,27 @@ class ShellCmd(BaseTool):
         return None
 
     # ────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _validate_command_input(command: str, timeout: int) -> str | None:
+        """Validate command length and timeout before execution.
+
+        Args:
+            command: Shell command string to validate.
+            timeout: Timeout value or None (uses default).
+
+        Returns:
+            Error message string if validation fails, None otherwise.
+        """
+        from agent_cascade.operation_manager.shell import MAX_SHELL_TIMEOUT
+
+        # Command length check uses the standard char_limit; caller should pass effective limit.
+        # This method focuses on timeout validation only — command length is checked inline
+        # where char_limit is available (it depends on agent_pool config).
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0 or timeout > MAX_SHELL_TIMEOUT):
+            return f"ERROR: Invalid timeout value: {timeout}. Must be a positive integer between 1 and {MAX_SHELL_TIMEOUT}."
+        return None
+
+    # ────────────────────────────────────────────────────────────────
     def _launch_async(
         self, agent_name: str, command: str, justification: str,
         cwd: str, timeout: int, heartbeat_interval: float,
@@ -166,6 +186,49 @@ class ShellCmd(BaseTool):
         Returns:
             Response string with tool_id and PID, or completion result if command finished quickly.
         """
+        # ── Resolve cwd (always, for all commands) ───────────────────
+        try:
+            resolved_cwd = self.agent_pool.operation_manager._resolve_path(cwd, mode="rw")
+        except Exception as e:
+            return f"ERROR: Invalid working directory: {str(e)}"
+
+        # ── Input validation: mirror sync mode checks (before approval) ──
+        char_limit = 2048
+        if hasattr(self, 'agent_pool') and self.agent_pool:
+            llm_cfg = getattr(self.agent_pool, 'llm_cfg', {})
+            char_limit = llm_cfg.get('shell_char_limit', char_limit)
+        elif self.cfg.get('shell_char_limit'):
+            char_limit = self.cfg.get('shell_char_limit')
+
+        if len(command) > char_limit:
+            return f"ERROR: Command exceeds maximum length of {char_limit} characters."
+
+        timeout_error = ShellCmd._validate_command_input(command, timeout)
+        if timeout_error is not None:
+            return timeout_error
+
+        # ── Approval gate: mirror sync mode logic ────────────────────
+        is_safe = ShellMixin._is_safe_readonly_shell_command(command)
+
+        if not is_safe:
+            description = (
+                f"⚠️ **SECURITY WARNING**: This is a host shell command running in async (background) mode. "
+                f"It can potentially bypass folder restrictions!\n\n"
+                f"**CWD**: {resolved_cwd}\n"
+                f"**Execute Shell Command**:\n```bash\n{command}\n```\n"
+                f"**Justification**: {justification}"
+            )
+
+            approved, reason = self.agent_pool.operation_manager.request_user_approval(
+                agent_name=agent_name,
+                tool_name='shell_cmd',
+                tool_args={'command': command, 'justification': justification, 'cwd': cwd, 'async_mode': True},
+                description=description,
+            )
+
+            if not approved:
+                return f"REJECTED: {reason}"
+
         tracker = self._get_tracker()
         if tracker is None:
             return "[shell_cmd] Async shell not available (tracker not initialized)."

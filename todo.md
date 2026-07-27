@@ -28,10 +28,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] make out path helper that tools use resolve extra_rw/ro paths just like code_intepreter does
 [x] make shell_cmd automatically launch on async mode if the agent sets timeout bigger than 60s and doesn't specify the mode as sync.
 [x] check put shell_cmd async commands. add a `__wait` command to simply wait for next heartbeat - a no reply tool call basically (needed because most LLMs dont understand the concept of shutting up to get in SLEEPING state). make sure all these commands dont need justification field.
-[x] need full documentation of the REST commands for AC, probably a complete update of README too since its outdated and kinna useless.
-    - Created docs/API_DOCS_PLAN.md (approved blueprint)
-    - Rewrote README.md with accurate Quick Start + encryption example
-    - Created docs/API_REFERENCE.md with all endpoints + WebSocket spec
+[ ] decouple `enable skills` toggle from auto-skill logic, add `enable auto-skill generation`
 
 
 # BUGS:
@@ -55,7 +52,25 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] UI issue: auto scroll to bottom keeps dropping after long tool outputs or reasoning (fixed — replaced requestAnimationFrame with immediate scroll, added programmaticScrollCount guard, debounce timer cleanup, tab switch lock reset)
 - [ ] add inner loop counter to telemetry's loop detected
 - [ ] odd useless truncation message on `list_dir` tool, should contain spillover path (should use helper truncation function like other tools, is there another one?): [TRUNCATED — Character limit exceeded.]. also needs the char limit added to the UI
-- [ ] overly aggressive stick to bottom function, active when streaming even when the user is actively scrolling up. it should NOT be fingting the user
+- [ ] overly aggressive stick to bottom function, active when streaming even when the user is actively scrolling up. it should NOT be fighting the user
+- [ ] extra work paths need to be tied to each session, they have to be loaded when we load existing sessions from the metadata entry.
+- [ ] sub agent kicked back to caller when the API connection dropped mid normal assistant message streaming
 
 # Errors to investigate:
 
+# Truncated extra paths in system message caused full prompt rebuild
+
+currency_limit=0
+2026-07-27 08:54:19,257 - execution_engine.py - 698 - DEBUG - [SLOT_ACQUIRE] initial - instance=Maine, class=orchestrator
+2026-07-27 08:54:19,258 - execution_engine.py - 967 - DEBUG - [TURN_START] Calling _setup_turn for Maine
+2026-07-27 08:54:19,258 - execution_engine.py - 1462 - INFO - [CACHE_REBUILD] Rebuilding working set for Maine (conv_len=445)
+2026-07-27 08:54:19,259 - execution_engine.py - 1559 - INFO - [CACHE_REBUILD] System prompt content CHANGED for Maine (len 5250→5387, first_diff@163: orig=': N:\work\WD\AgentWorkspace
+- Log Path: n:\work\WD\AgentWork' new=': N:\work\WD\AgentWorkspace
+- Extra Paths (Read-Only): N:\wo')
+2026-07-27 08:54:19,267 - agent_instance_logger.py - 486 - INFO - Rewrote agent log n:\work\WD\AgentWorkspace\logs\orchestrator_Maine_20260727_084424.jsonl with 653 messages.
+2026-07-27 08:54:19,268 - execution_engine.py - 1002 - DEBUG - [TURN_DONE] Got messages=445, llm_messages=445
+2026-07-27 08:54:19,291 - execution_engine.py - 1085 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
+2026-07-27 08:54:19,387 - base.py - 994 - INFO - Agent [Orchestrator] - ALL tokens: 80130, Available tokens: 88819
+2026-07-27 08:54:24,201 - agent_pool.py - 2734 - INFO - [idle_checker] Auto-dismissing idle system agent (Security) 'Security_op_dc743fe4' (idle for 115s, threshold=60s)
+2026-07-27 08:54:24,201 - agent_pool.py - 613 - DEBUG - Instance conversation cleanup key missing (expected): 'Security_op_dc743fe4'
+2026-07-27 08:54:24,204 - agent_pool.py - 2659 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_dc743fe4

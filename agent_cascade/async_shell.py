@@ -47,6 +47,72 @@ if ON_WINDOWS:
 else:
     _WIN_ENV = None
 
+# Named timing constants (avoid magic sleep durations)
+PROCESS_KILL_SETTLE_DELAY = 0.3     # Allow Windows console to process kill/Ctrl+C signal
+DRAIN_THREAD_FLUSH_DELAY = 0.2     # Allow drain threads to flush remaining output after kill
+LAUNCH_POLL_INTERVAL = 0.05        # Brief interval between launch completion checks
+
+
+def _send_windows_ctrl_c(pid: int) -> bool:
+    """Send Ctrl+C to a Windows process using GenerateConsoleCtrlEvent via ctypes.
+
+    Works for cmd.exe commands running with CREATE_NEW_CONSOLE where
+    proc.send_signal(signal.CTRL_C_EVENT) fails. Runs in a separate Python
+    subprocess to safely call FreeConsole/AttachConsole without affecting the parent.
+
+    Args:
+        pid: Target process PID
+
+    Returns:
+        True if Ctrl+C was sent successfully, False on failure.
+    """
+    import sys as _sys
+    # Launch helper that attaches to target's console and sends CTRL_C_EVENT
+    # Uses a proper no-op handler so the helper itself doesn't get killed by Ctrl+C
+    helper_code = f"""
+import ctypes, sys, time
+
+kernel = ctypes.windll.kernel32
+pid = {pid}
+
+# No-op handler that ignores all control events (prevents helper from dying)
+def ctrl_handler(dwCtrlType):
+    return True
+
+try:
+    kernel.FreeConsole()
+    kernel.AttachConsole(pid)
+
+    # Install dummy handler so Ctrl+C doesn't kill this process
+    handler_func = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)(ctrl_handler)
+    if not kernel.SetConsoleCtrlHandler(handler_func, True):
+        print(f"SetConsoleCtrlHandler failed: {{ctypes.get_last_error()}}", file=sys.stderr)
+        sys.exit(1)
+
+    # Send CTRL_C_EVENT to the target's console process group
+    result = kernel.GenerateConsoleCtrlEvent(0, 0)  # 0 = CTRL_C_EVENT, 0 = all processes in console
+    if not result:
+        print(f"GenerateConsoleCtrlEvent failed: {{ctypes.get_last_error()}}", file=sys.stderr)
+        sys.exit(1)
+
+except Exception as e:
+    print(f"Error: {{e}}", file=sys.stderr)
+    sys.exit(1)
+
+# Wait briefly for target process to respond to Ctrl+C
+time.sleep(0.5)
+sys.exit(0)
+"""
+    try:
+        result = subprocess.run(
+            [_sys.executable, '-c', helper_code],
+            capture_output=True, text=True, timeout=3
+        )
+        return result.returncode == 0
+    except Exception as e:
+        logger.debug(f"[AsyncShell] Ctrl+C helper failed for PID {pid}: {e}")
+        return False
+
 
 @dataclass
 class AsyncShellTask:
@@ -91,6 +157,9 @@ class AsyncShellTask:
 
     # Event to synchronize launch()'s early check with tracking thread's completed_at_launch read
     launch_check_done: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    # Flag set under _lock when task is killed externally; prevents further heartbeats.
+    killed: bool = False
 
 
 class AsyncShellTracker:
@@ -198,7 +267,7 @@ class AsyncShellTracker:
                 f"async shell commands running. Wait for one to finish or kill it first."
             )
 
-        # Fix #7: Validate heartbeat interval
+        # Clamp invalid heartbeat intervals to -1 (completion-only mode)
         if heartbeat_interval < -1:
             logger.debug(
                 f"[AsyncShell] Invalid heartbeat_interval={heartbeat_interval} for "
@@ -283,7 +352,7 @@ class AsyncShellTracker:
             with task._lock:
                 # Wait until process has actually started
                 if task.process is None:
-                    time.sleep(0.05)
+                    time.sleep(LAUNCH_POLL_INTERVAL)
                     continue
 
                 pid = task.pid
@@ -316,7 +385,7 @@ class AsyncShellTracker:
 
             # Process started but not yet completed — continue polling briefly.
             # This allows fast commands to be detected as complete even after output arrives.
-            time.sleep(0.05)
+            time.sleep(LAUNCH_POLL_INTERVAL)
 
         # Timeout elapsed — do one final check in case process completed right at the boundary.
         with task._lock:
@@ -377,6 +446,7 @@ class AsyncShellTracker:
             command,
             cwd=str(cwd) if cwd else None,
             shell=True,
+            stdin=subprocess.PIPE,      # Enable stdin for interactive input via send_input()
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -440,6 +510,11 @@ class AsyncShellTracker:
         last_heartbeat_time = time.time()
 
         while proc.poll() is None:
+            # Exit immediately if killed externally (prevents further heartbeats).
+            with task._lock:
+                if task.killed:
+                    break
+
             elapsed = time.time() - task.start_time
             if elapsed > task.timeout:
                 timed_out = True
@@ -449,10 +524,14 @@ class AsyncShellTracker:
                 t_err.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
                 break
 
-            # Send heartbeat if interval configured and enough time passed
-            if task.heartbeat_interval > 0:
+            # Send heartbeat if interval configured and enough time passed.
+            # Re-read heartbeat_interval each iteration so __heartbeat=-1 takes effect immediately.
+            with task._lock:
+                current_hb_interval = task.heartbeat_interval
+                is_killed = task.killed  # Read under same lock as heartbeat_interval
+            if current_hb_interval > 0 and not is_killed:
                 since_last_hb = time.time() - last_heartbeat_time
-                if since_last_hb >= task.heartbeat_interval:
+                if since_last_hb >= current_hb_interval:
                     self._send_heartbeat(agent_name, tool_id)
                     last_heartbeat_time = time.time()
 
@@ -490,14 +569,13 @@ class AsyncShellTracker:
             command: Shell command string
             cwd: Working directory path
         """
-        # Fix #3: Ensure cleanup even on exception — register task for tracking
         task = self._get_task(agent_name, tool_id)
         if task is None:
             logger.debug(f"[AsyncShell] Task not found at start of _track_task: {agent_name} tool_id={tool_id}")
             return
 
         t_out, t_err = None, None  # Track drain threads for join in finally
-        timed_out = False          # Fix: ensure defined if exception before _poll_loop
+        timed_out = False          # Ensure defined even if exception occurs before _poll_loop
 
         try:
             original_command = command
@@ -517,12 +595,22 @@ class AsyncShellTracker:
             # ── Poll loop: start immediately to detect fast completions ───
             timed_out = self._poll_loop(agent_name, tool_id, proc, task, t_out, t_err)
 
+            # If killed externally, ensure process is dead and use appropriate return code.
+            with task._lock:
+                killed_externally = task.killed
+            if killed_externally and proc.poll() is None:
+                self._kill_process_tree(proc, agent_name, tool_id)
+                time.sleep(PROCESS_KILL_SETTLE_DELAY)
+
             # ── Mark completed immediately so _get_launch_result() can detect it ───
             # Set completed and return_code right after poll_loop exits (process finished).
             # This allows launch()'s early check to see completion before we do cleanup.
             # If launch() detects it first, it sets completed_at_launch=True and returns
             # the full result inline; we skip all messages below when that flag is set.
-            rc = proc.returncode if proc.returncode is not None else (1 if timed_out else 0)
+            if killed_externally:
+                rc = proc.returncode if proc.returncode is not None else -1  # Killed externally
+            else:
+                rc = proc.returncode if proc.returncode is not None else (1 if timed_out else 0)
             with task._lock:
                 task.completed = True
                 task.return_code = rc
@@ -574,7 +662,7 @@ class AsyncShellTracker:
                 task.return_code = -1
 
         finally:
-            # Fix #2 & #3: Join drain threads before removing from _tasks
+            # Join drain threads before removing from _tasks to prevent data races.
             if t_out is not None and t_out.is_alive():
                 t_out.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
             if t_err is not None and t_err.is_alive():
@@ -598,7 +686,7 @@ class AsyncShellTracker:
                     ['taskkill', '/F', '/T', '/PID', str(pid)],
                     capture_output=True, timeout=10, text=True,
                 )
-                time.sleep(0.3)
+                time.sleep(PROCESS_KILL_SETTLE_DELAY)
             except Exception as e:
                 logger.warning(f"[AsyncShell] taskkill for PID {pid}: {e}")
         else:
@@ -629,15 +717,23 @@ class AsyncShellTracker:
             agent_name: Owner agent name
             tool_id: Task identifier
         """
+        # Ensure task is still registered and not killed before sending heartbeat.
         task = self._get_task(agent_name, tool_id)
         if task is None:
             return
 
-        # Fix #1: Read output + update position atomically under the same lock
         with task._lock:
+            if task.killed:
+                return
+            # Read output + update position atomically under the same lock
             combined = list(task.stdout_lines) + list(task.stderr_lines)
             new_lines = combined[task.last_heartbeat_sent_pos:]
             task.last_heartbeat_sent_pos = len(combined)
+
+        # Re-check killed flag after reading output to avoid sending heartbeat for killed tasks.
+        with task._lock:
+            if task.killed:
+                return
 
         if not new_lines:
             # Still running with no new output — send minimal heartbeat so sleeping
@@ -694,7 +790,7 @@ class AsyncShellTracker:
         if task is None:
             return
 
-        # Fix #1: Read output + update position atomically under the same lock
+        # Read output + update position atomically under the same lock
         with task._lock:
             combined = list(task.stdout_lines) + list(task.stderr_lines)
             remaining = combined[task.last_heartbeat_sent_pos:]
@@ -750,7 +846,12 @@ class AsyncShellTracker:
             )
         else:
             rc = task.return_code if task else 0
-            status = "success" if (rc == 0) else f"exit code {rc}"
+            if rc == -1:
+                status = "killed externally (via __kill)"
+            elif rc == 0:
+                status = "success"
+            else:
+                status = f"exit code {rc}"
             msg = (
                 f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
                 f"Completed ({status}).\n"
@@ -777,6 +878,10 @@ class AsyncShellTracker:
     # ────────────────────────────────────────────────────────────────
     def send_input(self, agent_name: str, tool_id: int, input_text: str) -> Optional[str]:
         """Send stdin input to a running shell process.
+
+        Note: All async shells use stdin=PIPE. Some Windows commands (e.g., 'timeout')
+        fail when stdin is redirected. Use alternative delay commands like
+        'ping -n N 127.0.0.1 >nul' instead.
 
         Args:
             agent_name: Owner agent name
@@ -822,6 +927,9 @@ class AsyncShellTracker:
                 proc = task.process
                 pid = task.pid
             if proc and proc.poll() is None:
+                # Set killed flag before killing so heartbeat loop exits immediately.
+                with task._lock:
+                    task.killed = True
                 self._kill_process_tree(proc, agent_name, tool_id)
                 return f"Shell killed [Tool ID: {tool_id}, PID: {pid}]."
             else:
@@ -850,14 +958,21 @@ class AsyncShellTracker:
             with task._lock:
                 proc = task.process
                 pid = task.pid
+
+            if not proc or proc.poll() is not None:
+                return f"Shell already finished [Tool ID: {tool_id}]."
+
             if ON_WINDOWS:
-                # Send CTRL_C_EVENT to the process group on Windows
-                if proc:
-                    proc.send_signal(signal.CTRL_C_EVENT)  # type: ignore[attr-defined]
+                # proc.send_signal(CTRL_C_EVENT) fails for cmd.exe commands running with
+                # CREATE_NEW_CONSOLE. Use GenerateConsoleCtrlEvent via helper subprocess.
+                success = _send_windows_ctrl_c(pid)
+                if not success:
+                    logger.debug(f"[AsyncShell] Ctrl+C helper failed for {agent_name} tool_id={tool_id}")
+                    return f"Failed to send Ctrl+C to tool_id {tool_id}: GenerateConsoleCtrlEvent returned failure."
             else:
                 import signal as sig
-                if proc:
-                    os.killpg(os.getpgid(proc.pid), sig.SIGINT)
+                os.killpg(os.getpgid(proc.pid), sig.SIGINT)
+
             return f"Ctrl+C sent to shell [Tool ID: {tool_id}, PID: {pid}]."
         except Exception as e:
             return f"Failed to send Ctrl+C to tool_id {tool_id}: {e}"
@@ -974,9 +1089,12 @@ class AsyncShellTracker:
                 with task._lock:
                     proc = task.process
                 if proc and proc.poll() is None:
+                    # Set killed flag before killing so heartbeat loop exits immediately.
+                    with task._lock:
+                        task.killed = True
                     self._kill_process_tree(proc, agent_name, tool_id)
                     # Wait briefly so drain threads flush remaining output
-                    time.sleep(0.2)
+                    time.sleep(DRAIN_THREAD_FLUSH_DELAY)
                     count += 1
             except Exception as e:
                 logger.debug(

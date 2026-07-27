@@ -80,3 +80,7 @@ config/api_endpoints.json
 
 # Playback data (large JSONL files)
 playback/ 
+
+# Windows reserved names / special files
+nul
+$null 

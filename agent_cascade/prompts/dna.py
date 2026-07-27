@@ -115,6 +115,7 @@ SECURITY_ADVISOR_PROMPT = (
     "- Working directory and any file paths must be within the allowed workspaces.\n"
     "Allowed folders:\n{workspace_info}\n\n"
     "Evaluate this command against your security rules. You may use your tools to investigate further if needed but keep it short, you are NOT a reviewer.\n"
+    "SPECIAL RULE for shell_cmd: When tool_id is provided in arguments, the command field contains either a control command (__kill, __status, __heartbeat=N, __ctrl_c) or stdin input text — neither should be validated as a shell command. Always approve these requests unless they appear malicious.\n"
     "CRITICAL: Once you have made a decision, the final line of your output MUST be formatted as follows:\n"
     "[YES] Reason: ...\n"
     "[NO] Reason: ..."
@@ -295,10 +296,11 @@ TOOL_METADATA = {
             '**Async Mode**: Set async_mode=true to run commands in the background — returns immediately with a tool_id and PID. '
             'The command runs while you continue working, sending periodic heartbeat updates (if heartbeat_interval > 0) and a final result message when done. '
             'Use the tool_id parameter to manage running shells: send input, check status (__status), kill (__kill), update heartbeat (__heartbeat=N seconds), or send Ctrl+C (__ctrl_c). '
+            '**IMPORTANT**: When tool_id is provided, the command field contains either a control command (__kill, __status, etc.) or stdin input text — neither should be validated as a shell command. '
             'Max 5 concurrent async shells per agent.'
         ),
         'parameters': {
-            'command': 'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input.',
+            'command': 'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
             'justification': 'Why you need to execute this command.',
             'cwd': 'Optional working directory, absolute or relative to workspace root.',
             'timeout': 'Optional timeout in seconds (default: 30 for sync mode, 3600 for async mode). Use a higher value for long-running commands.',
