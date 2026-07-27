@@ -196,7 +196,8 @@ function initSubAgentScrollLock(name, scrollContainer = null) {
       locked: true,
       listenerAdded: false,
       scrollDebounceTimer: null,
-      programmaticScrollCount: 0
+      programmaticScrollCount: 0,
+      lastKnownScrollTop: 0
     };
   }
 
@@ -209,10 +210,25 @@ function initSubAgentScrollLock(name, scrollContainer = null) {
     if (scrollContainer) {
       scrollContainer.addEventListener('scroll', () => {
         const lock = subAgentScrollLocks[name];
+        const currentScrollTop = scrollContainer.scrollTop;
+
+        // Upward-scroll detection: if user scrolls up (scrollTop decreases), unlock immediately
+        // regardless of distance from bottom. This fixes the race condition where streaming
+        // outruns user scroll speed and they never reach AUTO_SCROLL_THRESHOLD.
+        if (currentScrollTop < lock.lastKnownScrollTop) {
+          lock.locked = false;
+        }
+
         // Always debounce to detect if user scrolled away from bottom, even during programmatic scrolls.
         // The counter tracks programmatic scrolls but we must not block user scroll detection.
         if (lock.programmaticScrollCount > 0) {
           lock.programmaticScrollCount--;
+        }
+
+        // Immediate unlock: if user scrolls up (not at bottom) and this isn't a programmatic scroll, break the lock right away.
+        const distFromBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
+        if (distFromBottom > AUTO_SCROLL_THRESHOLD && lock.programmaticScrollCount === 0) {
+          lock.locked = false;
         }
 
         // Debounce: during rapid content changes/streaming, only respond after scroll settles.
@@ -221,6 +237,9 @@ function initSubAgentScrollLock(name, scrollContainer = null) {
           const distFromBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
           lock.locked = (distFromBottom < AUTO_SCROLL_THRESHOLD);
         }, 50);
+
+        // Update last known scroll position for upward-scroll detection on next event
+        lock.lastKnownScrollTop = currentScrollTop;
       });
       subAgentScrollLocks[name].listenerAdded = true;
     }
@@ -3133,6 +3152,11 @@ function renderSubAgentPanel(panel, agentData, name) {
 
   // 3. LAZY RENDERING: Skip expensive message work if the tab isn't visible
   if (!isVisible) {
+    // Release scroll lock so returning to this tab doesn't force-scroll to bottom.
+    // Auto-scroll will only re-engage if user is at the bottom (handled later).
+    if (subAgentScrollLocks[name]) {
+      subAgentScrollLocks[name].locked = false;
+    }
     // Still update status bar stats even when hidden (was in old renderMessages)
     if (statusWords) statusWords.textContent = `${wordCount} words`;
     if (statusTokens) statusTokens.textContent = `${tokCount} tokens`;
@@ -3285,7 +3309,7 @@ function renderSubAgentPanel(panel, agentData, name) {
   // requestAnimationFrame fires before all streaming content is rendered (stale scrollHeight),
   // causing scroll position to lag behind during rapid tool output/reasoning. Immediate execution
   // after DOM update ensures we use the current scrollHeight.
-  if (subAgentScrollLocks[name]) {
+  if (subAgentScrollLocks[name] && isVisible) {
     const lock = subAgentScrollLocks[name];
     const atBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < AUTO_SCROLL_THRESHOLD;
 
