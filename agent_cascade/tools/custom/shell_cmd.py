@@ -186,9 +186,10 @@ class ShellCmd(BaseTool):
         Returns:
             Response string with tool_id and PID, or completion result if command finished quickly.
         """
-        # ── Resolve cwd (always, for all commands) ───────────────────
+        # ── Resolve cwd using the same resolver as file tools ────────
         try:
-            resolved_cwd = self.agent_pool.operation_manager._resolve_path(cwd, mode="rw")
+            from agent_cascade.utils.tool_path_resolver import resolve_tool_path
+            resolved_cwd = resolve_tool_path(cwd, mode="rw", agent_pool=self.agent_pool)
         except Exception as e:
             return f"ERROR: Invalid working directory: {str(e)}"
 

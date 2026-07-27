@@ -381,7 +381,8 @@ class ShellMixin:
     ) -> str:
         """Execute a shell command — auto-approved for safe read-only commands."""
         try:
-            resolved_cwd = self._resolve_path(cwd, mode="rw")
+            from agent_cascade.utils.tool_path_resolver import resolve_tool_path
+            resolved_cwd = resolve_tool_path(cwd, mode="rw", agent_pool=self.agent_pool)
         except Exception as e:
             return f"ERROR: Invalid working directory: {str(e)}"
 
