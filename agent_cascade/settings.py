@@ -188,7 +188,8 @@ CACHE_THRESHOLD_CHARS: int = int(os.getenv('QWEN_AGENT_CACHE_THRESHOLD_CHARS', '
 
 # ── Async shell command settings (Feature: async shell_cmd) ───────────
 MAX_ASYNC_SHELL_PER_AGENT: int = 5            # Max concurrent async shells per agent
-ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS: int = int(os.getenv('QWEN_AGENT_ASYNC_SHELL_HEARTBEAT_CHARS', '800'))  # Max chars per heartbeat message
+# DEPRECATED: Async shell truncation now uses shell_char_limit from llm_cfg (default 2048, same as sync mode)
+ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS: int = int(os.getenv('QWEN_AGENT_ASYNC_SHELL_HEARTBEAT_CHARS', '800'))  # noqa: F841
 ASYNC_SHELL_DEFAULT_TIMEOUT: int = 3600       # Default timeout for async shells (1 hour)
 HEARTBEAT_CHECK_INTERVAL: float = 0.5         # How often the tracker thread checks for heartbeats (seconds)
 HEARTBEAT_TRUNCATE_FIRST_LINES: int = 5       # Lines kept at start when truncating heartbeat output
