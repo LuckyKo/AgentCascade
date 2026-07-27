@@ -23,13 +23,12 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from agent_cascade.log import logger
+from agent_cascade.tool_utils import truncate_with_spillover
 from agent_cascade.settings import (
     MAX_ASYNC_SHELL_PER_AGENT,
     ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS,
     ASYNC_SHELL_DEFAULT_TIMEOUT,
     HEARTBEAT_CHECK_INTERVAL,
-    HEARTBEAT_TRUNCATE_FIRST_LINES,
-    HEARTBEAT_TRUNCATE_LAST_LINES,
     EARLY_OUTPUT_CHECK_TIMEOUT,
 )
 from agent_cascade.shell_utils import (
@@ -754,21 +753,23 @@ class AsyncShellTracker:
         if not output_text:
             return
 
-        # Truncate to heartbeat char limit (keep first/last N lines with ellipsis)
-        max_chars = ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS
-        if len(output_text) > max_chars:
-            lines = output_text.split('\n')
-            keep_first = min(HEARTBEAT_TRUNCATE_FIRST_LINES, len(lines))
-            keep_last = min(HEARTBEAT_TRUNCATE_LAST_LINES, len(lines))
-            skipped = len(lines) - keep_first - keep_last
-            truncated_lines = lines[:keep_first]
-            if skipped > 0:
-                truncated_lines.append(f"... ({skipped} lines omitted ...)")
-            truncated_lines.extend(lines[-keep_last:])
-            output_text = '\n'.join(truncated_lines)
-
-        # Count lines for info header
+        # Count original lines before truncation (so header reflects actual data sent)
         line_count = len(output_text.split('\n'))
+
+        # Truncate to heartbeat char limit using mid-truncation with spillover
+        max_chars = ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS
+        try:
+            base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(self._pool, 'operation_manager') else None
+            if base_dir:
+                output_text = truncate_with_spillover(
+                    output_text, max_chars,
+                    instance_name=agent_name,
+                    tool_name='shell_cmd_async',
+                    base_dir=base_dir,
+                    operation_mode='mid',
+                )
+        except Exception as e:
+            logger.debug(f"[AsyncShell] truncate_with_spillover failed in heartbeat for {agent_name}: {e}")
 
         msg = (
             f"⟨shell_cmd heartbeat⟩ Tool ID: {tool_id} | "
@@ -801,6 +802,21 @@ class AsyncShellTracker:
 
         output_text = self._format_output_text(remaining)
         line_count = len(output_text.split('\n'))
+
+        # Truncate large remaining output using mid-truncation with spillover (3x heartbeat limit for final output)
+        max_chars = ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS * 3
+        try:
+            base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(self._pool, 'operation_manager') else None
+            if base_dir:
+                output_text = truncate_with_spillover(
+                    output_text, max_chars,
+                    instance_name=agent_name,
+                    tool_name='shell_cmd_async',
+                    base_dir=base_dir,
+                    operation_mode='mid',
+                )
+        except Exception as e:
+            logger.debug(f"[AsyncShell] truncate_with_spillover failed in remaining output for {agent_name}: {e}")
 
         if timed_out:
             msg = (
@@ -1048,18 +1064,20 @@ class AsyncShellTracker:
         if consumed_lines:
             output_text = self._format_output_text(consumed_lines)
 
-            # Truncate large outputs to avoid massive status messages
-            max_chars = ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS * 2  # Status gets double the heartbeat limit
-            if len(output_text) > max_chars:
-                lines = output_text.split('\n')
-                keep_first = min(HEARTBEAT_TRUNCATE_FIRST_LINES, len(lines))
-                keep_last = min(HEARTBEAT_TRUNCATE_LAST_LINES, len(lines))
-                skipped = len(lines) - keep_first - keep_last
-                truncated_lines = lines[:keep_first]
-                if skipped > 0:
-                    truncated_lines.append(f"... ({skipped} lines omitted ...)")
-                truncated_lines.extend(lines[-keep_last:])
-                output_text = '\n'.join(truncated_lines)
+            # Truncate large outputs using mid-truncation with spillover (status gets 2x heartbeat limit)
+            max_chars = ASYNC_SHELL_HEARTBEAT_TRUNCATE_CHARS * 2
+            try:
+                base_dir = self._pool.operation_manager.base_dir if self._pool and hasattr(self._pool, 'operation_manager') else None
+                if base_dir:
+                    output_text = truncate_with_spillover(
+                        output_text, max_chars,
+                        instance_name=agent_name,
+                        tool_name='shell_cmd_async',
+                        base_dir=base_dir,
+                        operation_mode='mid',
+                    )
+            except Exception as e:
+                logger.debug(f"[AsyncShell] truncate_with_spillover failed in get_status for {agent_name}: {e}")
 
             msg += f"\nOutput ({len(consumed_lines)} lines):\n{output_text}"
         else:

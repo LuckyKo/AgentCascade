@@ -2,6 +2,7 @@ import logging
 from agent_cascade.operation_manager.shell import ShellMixin
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
+from agent_cascade.tool_utils import truncate_with_spillover
 from agent_cascade.settings import AUTO_ASYNC_TIMEOUT_THRESHOLD, DEFAULT_AUTO_ASYNC_HEARTBEAT
 
 logger = logging.getLogger(__name__)
@@ -257,9 +258,22 @@ class ShellCmd(BaseTool):
                 f"Completed ({status}) — finished immediately.\n"
                 f"Command: `{command[:200]}`\n"
             )
-            # Append early output if available
+            # Append early output if available (truncate if large)
             if early_output:
                 output_text = '\n'.join(early_output)
+                try:
+                    base_dir = self.agent_pool.operation_manager.base_dir if self.agent_pool and hasattr(self.agent_pool, 'operation_manager') else None
+                    if base_dir:
+                        char_limit = llm_cfg.get('shell_char_limit', 2048) if isinstance(llm_cfg, dict) else 2048
+                        output_text = truncate_with_spillover(
+                            output_text, char_limit,
+                            instance_name=agent_name,
+                            tool_name='shell_cmd',
+                            base_dir=base_dir,
+                            operation_mode='mid',
+                        )
+                except Exception as e:
+                    logger.debug(f"[shell_cmd] truncate_with_spillover failed in early completion for {agent_name}: {e}")
                 result += f"\nOutput:\n{output_text}"
             return result
 
@@ -279,9 +293,22 @@ class ShellCmd(BaseTool):
             f"  - any other text → send as stdin input to the running command"
         )
 
-        # Append early output if available (Case 2)
+        # Append early output if available (Case 2, truncate if large)
         if early_output:
             output_text = '\n'.join(early_output)
+            try:
+                base_dir = self.agent_pool.operation_manager.base_dir if self.agent_pool and hasattr(self.agent_pool, 'operation_manager') else None
+                if base_dir:
+                    char_limit = llm_cfg.get('shell_char_limit', 2048) if isinstance(llm_cfg, dict) else 2048
+                    output_text = truncate_with_spillover(
+                        output_text, char_limit,
+                        instance_name=agent_name,
+                        tool_name='shell_cmd',
+                        base_dir=base_dir,
+                        operation_mode='mid',
+                    )
+            except Exception as e:
+                logger.debug(f"[shell_cmd] truncate_with_spillover failed in launched msg for {agent_name}: {e}")
             launched_msg += f"\n\nInitial output:\n{output_text}"
 
         return launched_msg
