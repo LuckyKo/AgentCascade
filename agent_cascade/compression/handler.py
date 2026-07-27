@@ -30,6 +30,7 @@ from agent_cascade.utils.pool_validation import validate_message_pool
 from agent_cascade.utils.utils import msg_field
 from agent_cascade.tool_utils import (
     was_tool_call_truncated,
+    clear_truncation_state,
     truncate_with_spillover,
 )
 
@@ -348,6 +349,9 @@ class CompressionHandler:
         # Step 2: Check if truncation was already marked via thread-local state.
         # This is the primary signal; we trust the tool's truncation flag.
         was_truncated = was_tool_call_truncated(instance_name, tool_name)
+        # Clear immediately so truncation flags don't leak into subsequent tool calls
+        # in the same turn (e.g., a later small __wait response after a large truncated one).
+        clear_truncation_state()
 
         # Step 3: If char_limit is set and exceeded, truncate now.
         # truncate_with_spillover adds its own [TRUNCATED ...] footer, so we don't

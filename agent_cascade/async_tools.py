@@ -214,45 +214,85 @@ class AsyncToolRegistry:
 
 class AsyncResultBuffer:
     """Thread-safe buffer for async tool results.
-    
+
     Stores completed async tool results by instance name and provides atomic
-    drain operation for efficient batch retrieval.
-    
+    drain operation for efficient batch retrieval, plus a blocking wait method
+    used by __wait to pause until the next async message is available.
+
     Attributes:
         _results: Maps instance_name to list of (result_string, function_id) tuples
         _lock: Lock protecting _results dictionary
+        _condition: Condition variable for waiting until new results are available
     """
-    
+
     def __init__(self):
         """Initialize the async result buffer."""
         # Store (result_string, function_id) tuples so the caller knows which tool_call_id the result belongs to
         self._results: Dict[str, List[tuple]] = {}
         self._lock = threading.Lock()
-    
+        self._condition = threading.Condition(self._lock)
+
     def put(self, instance_name: str, result: str, function_id: Optional[str] = None):
         """Add a result to the buffer for this instance.
-        
+
         Thread-safe append operation. Creates new list if instance not present.
-        
+        Notifies any waiters that a new result is available.
+
         Args:
             instance_name: The agent instance this result belongs to.
             result: The string result from a completed async tool.
             function_id: The LLM's tool_call_id for this async call (optional).
         """
-        with self._lock:
+        with self._condition:
             self._results.setdefault(instance_name, []).append((result, function_id))
-    
+            self._condition.notify_all()
+
     def drain(self, instance_name: str) -> List[tuple]:
         """Remove and return all results for this instance.
-        
+
         Atomically pops the entire results list under lock, minimizing lock
         contention and ensuring thread-safe access.
-        
+
         Args:
             instance_name: The agent instance to drain results for.
-            
+
         Returns:
             List of (result_string, function_id) tuples (may be empty). Original buffer is cleared.
         """
-        with self._lock:
+        with self._condition:
             return self._results.pop(instance_name, [])
+
+    def wait_for_next(self, instance_name: str, timeout: float = 30.0) -> Optional[tuple]:
+        """Block until a result is available for this instance, or timeout.
+
+        Used by __wait to pause until the next async message (e.g., heartbeat or completion)
+        is queued for this agent. When a message becomes available, it is removed from the
+        buffer and returned so it is not duplicated by normal draining.
+
+        Args:
+            instance_name: The agent instance to wait for results.
+            timeout: Maximum seconds to wait. If None, wait indefinitely.
+
+        Returns:
+            A single (result_string, function_id) tuple if a result becomes available,
+            or None if the timeout elapses with no new result for this instance.
+        """
+        with self._condition:
+            deadline = None if timeout is None else time.time() + timeout
+
+            while True:
+                items = self._results.get(instance_name)
+                if items and len(items) > 0:
+                    # Take the first available result for this instance
+                    return items.pop(0)
+
+                if deadline is not None:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        # Clean up empty list if we created one
+                        if instance_name in self._results and len(self._results[instance_name]) == 0:
+                            del self._results[instance_name]
+                        return None
+                    self._condition.wait(timeout=remaining)
+                else:
+                    self._condition.wait()

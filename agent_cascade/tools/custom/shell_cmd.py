@@ -60,6 +60,16 @@ class ShellCmd(BaseTool):
         self.agent_pool = kwargs.get('agent_pool')
         self.agent_name = kwargs.get('agent_name')
 
+    @staticmethod
+    def _truncate_shell_message(text: str, agent_name: str, agent_pool) -> str:
+        """Return async message content as-is.
+
+        Heartbeat/completion messages are already truncated by async_shell.py before
+        being queued. __wait must not re-truncate them; the outer tool-result path
+        will apply any necessary truncation once, consistently with other shell_cmd responses.
+        """
+        return text or ""
+
     def call(self, params: str, **kwargs) -> str:
         from agent_cascade.utils.utils import json_loads
         import json
@@ -289,6 +299,7 @@ class ShellCmd(BaseTool):
             f"  - __status → check current status and recent output\n"
             f"  - __kill → terminate the process\n"
             f"  - __ctrl_c → send interrupt signal\n"
+            f"  - __wait → wait until the process completes (max 60s)\n"
             f"  - __heartbeat=N → update heartbeat interval (N seconds)\n"
             f"  - any other text → send as stdin input to the running command"
         )
@@ -347,56 +358,39 @@ class ShellCmd(BaseTool):
         elif command == '__ctrl_c':
             return tracker.send_ctrl_c(agent_name, tool_id) or "No action taken."
         elif command == '__wait':
-            import time
+            buffer = getattr(self.agent_pool, '_async_results', None)
+            if buffer is None:
+                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Async result buffer not available."
+
+            # If there's no known task and nothing currently queued for this agent,
+            # do a short wait to see if a late completion message arrives. Otherwise, fail fast.
             task = tracker._get_task(agent_name, tool_id)
-            if task is None:
-                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No running shell found."
-            
-            # Read heartbeat_interval under lock for consistency
-            with task._lock:
-                hb_interval = task.heartbeat_interval
-                if task.completed:
-                    return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process already completed."
-            
-            # Record starting position
-            with task._lock:
-                combined = list(task.stdout_lines) + list(task.stderr_lines)
-                start_pos = len(combined)
-            
-            # Wait for new output or completion (timeout based on heartbeat interval, capped at 60s)
-            poll_interval = 0.5
-            timeout = min(max(hb_interval, 30.0), 60.0) if hb_interval > 0 else 30.0
-            deadline = time.time() + timeout
-            
-            while time.time() < deadline:
-                with task._lock:
-                    combined = list(task.stdout_lines) + list(task.stderr_lines)
-                    new_lines = combined[start_pos:]
-                    completed = task.completed
-                if new_lines or completed:
-                    break
-                
-                time.sleep(poll_interval)
-            
-            # Read final state
-            with task._lock:
-                combined = list(task.stdout_lines) + list(task.stderr_lines)
-                new_lines = combined[start_pos:]
-                completed = task.completed
-                return_code = task.return_code
-            
-            if completed:
-                rc = return_code if return_code is not None else "?"
-                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process completed (exit code {rc})."
-            
-            if new_lines:
-                line_count = len(new_lines)
-                output_text = '\n'.join(new_lines[:20])  # Limit to first 20 lines
-                if len(new_lines) > 20:
-                    output_text += f"\n... ({len(new_lines) - 20} more lines)"
-                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} | {line_count} new line{'s' if line_count != 1 else ''}\n{output_text}"
-            
-            return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No new output ({timeout:.0f}s timeout)."
+            has_queued = False
+            with buffer._condition:
+                has_queued = bool(buffer._results.get(agent_name))
+
+            if task is None and not has_queued:
+                # Brief grace period in case completion message is about to be queued
+                result_tuple = buffer.wait_for_next(agent_name, timeout=2.0)
+                if result_tuple is None:
+                    return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No running shell found."
+                result_str, _ = result_tuple
+                truncated = ShellCmd._truncate_shell_message(result_str, agent_name, self.agent_pool)
+                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id}\n{truncated}"
+
+            # Block until the next async message (heartbeat/completion/etc.) is queued
+            # for this agent, then return it. This aligns __wait with "wait until the
+            # async message queue is not empty".
+            timeout = 30.0
+            result_tuple = buffer.wait_for_next(agent_name, timeout=timeout)
+
+            if result_tuple is None:
+                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No async message within {timeout:.0f}s."
+
+            result_str, _ = result_tuple
+            # Apply the same truncation as heartbeats so __wait replies are consistent.
+            truncated = ShellCmd._truncate_shell_message(result_str, agent_name, self.agent_pool)
+            return f"⟨shell_cmd wait⟩ Tool ID: {tool_id}\n{truncated}"
         else:
             # Send as stdin input to the running process
             return tracker.send_input(agent_name, tool_id, command) or f"Input sent [Tool ID: {tool_id}]."
