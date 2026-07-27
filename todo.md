@@ -51,10 +51,10 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] security agent fails to timeout if it keeps failing to acquire API endpoint.
 - [x] UI issue: auto scroll to bottom keeps dropping after long tool outputs or reasoning (fixed — replaced requestAnimationFrame with immediate scroll, added programmaticScrollCount guard, debounce timer cleanup, tab switch lock reset)
 - [ ] add inner loop counter to telemetry's loop detected
-- [ ] odd useless truncation message on `list_dir` tool, should contain spillover path (should use helper truncation function like other tools, is there another one?): [TRUNCATED — Character limit exceeded.]. also needs the char limit added to the UI
+- [x] odd useless truncation message on `list_dir` tool, should contain spillover path (should use helper truncation function like other tools, is there another one?): [TRUNCATED — Character limit exceeded.]. also needs the char limit added to the UI
 - [x] overly aggressive stick to bottom function, active when streaming even when the user is actively scrolling up. it should NOT be fighting the user (fixed — immediate unlock on scroll up, visibility guard prevents auto-scroll on hidden tabs, lock released when tab becomes invisible)
 - [ ] extra work paths need to be tied to each session, they have to be loaded when we load existing sessions from the metadata entry.
-- [ ] sub agent kicked back to caller when the API connection dropped mid normal assistant message streaming
+- [x] sub agent kicked back to caller when the API connection dropped mid normal assistant message streaming (fixed — broadened retry_model_service_iterator in llm/base.py to catch all Exceptions during streaming, not just ModelServiceError; network errors now retry with exponential backoff up to max_retries)
 - [ ] inner loop char run detection does not seem to pick up if its within a tool call.
 
 # Errors to investigate:

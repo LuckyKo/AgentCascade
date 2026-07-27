@@ -1057,6 +1057,21 @@ def retry_model_service_iterator(
         except ModelServiceError as e:
             num_retries, delay = _raise_or_delay(e, num_retries, delay, max_retries)
 
+        except Exception as e:
+            logger.warning(
+                f'Streaming error (retry {num_retries + 1}/{max_retries}) - '
+                f'{type(e).__name__}: {e}'
+            )
+            if num_retries >= max_retries:
+                raise ModelServiceError(
+                    exception=Exception(f'Maximum number of retries ({max_retries}) exceeded.')
+                ) from None
+
+            num_retries += 1
+            jitter = 1.0 + random.random()
+            delay = min(delay * 2.0, 300.0) * jitter
+            time.sleep(delay)
+
 
 def _raise_or_delay(
     e: ModelServiceError,
