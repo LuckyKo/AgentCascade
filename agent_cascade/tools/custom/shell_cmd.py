@@ -243,7 +243,7 @@ class ShellCmd(BaseTool):
                 command=command,
                 heartbeat_interval=heartbeat_interval,
                 timeout=effective_timeout,
-                cwd=cwd,
+                cwd=resolved_cwd,
             )
         except ValueError as e:
             return f"[shell_cmd] {e}"
