@@ -12,6 +12,7 @@ import collections
 import copy
 import json
 import logging
+import os
 import random
 import threading
 import time
@@ -577,8 +578,10 @@ class APIRouter:
         # Per-instance endpoint cursor for "kick to next endpoint" behavior (thread-safe via self._lock).
         self._instance_endpoint_position: Dict[str, int] = {}
 
-        # Persistence path
-        if config_dir:
+        # Persistence path — env var takes precedence for test isolation
+        if os.environ.get("AGENT_CASCADE_TEST_CONFIG_DIR"):
+            self._config_dir = Path(os.environ["AGENT_CASCADE_TEST_CONFIG_DIR"])
+        elif config_dir:
             self._config_dir = Path(config_dir)
         else:
             # API config lives in the project root config/ dir, not workspace
