@@ -147,6 +147,7 @@ class AsyncShellTask:
     completed: bool = False
     return_code: Optional[int] = None
     last_heartbeat_sent_pos: int = 0   # Index into combined output lines
+    heartbeat_count: int = 0           # Number of heartbeats sent for this task
     console_window: bool = True        # Pop console window (TODO #21)
     completed_at_launch: bool = False  # If True, tracking thread skips heartbeats/output/completion
 
@@ -745,6 +746,9 @@ class AsyncShellTracker:
             combined = list(task.stdout_lines) + list(task.stderr_lines)
             new_lines = combined[task.last_heartbeat_sent_pos:]
             task.last_heartbeat_sent_pos = len(combined)
+            # Increment heartbeat counter for this task
+            task.heartbeat_count += 1
+            beat = task.heartbeat_count
 
         # Re-check killed flag after reading output to avoid sending heartbeat for killed tasks.
         with task._lock:
@@ -754,9 +758,9 @@ class AsyncShellTracker:
         if not new_lines:
             # Still running with no new output — send minimal heartbeat so sleeping
             # agents wake up and know the process hasn't died.
-            logger.debug("[async_shell] heartbeat(no output) agent=%s tool_id=%s",
-                         agent_name, tool_id)
-            msg = f"⟨shell_cmd heartbeat⟩ Tool ID: {tool_id} | No new output (still running)"
+            logger.debug("[async_shell] heartbeat(no output) agent=%s tool_id=%s beat=%s",
+                         agent_name, tool_id, beat)
+            msg = f"⟨shell_cmd heartbeat⟩ Beat {beat}, Tool ID: {tool_id} | No new output (still running)"
             pool = self._pool
             if pool and hasattr(pool, '_async_results'):
                 pool._async_results.put(agent_name, msg, function_id=f"heartbeat_{tool_id}")
@@ -790,7 +794,7 @@ class AsyncShellTracker:
                 logger.debug(f"[AsyncShell] truncate_with_spillover failed in heartbeat for {agent_name}: {e}")
 
         msg = (
-            f"⟨shell_cmd heartbeat⟩ Tool ID: {tool_id} | "
+            f"⟨shell_cmd heartbeat⟩ Beat {beat}, Tool ID: {tool_id} | "
             f"{line_count} line{'s' if line_count != 1 else ''} since last tick\n"
             f"{output_text}"
         )
