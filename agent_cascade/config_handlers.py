@@ -295,6 +295,29 @@ def _handle_loop_max_retries(ui_cfg: dict, agent_pool: Optional[Any], agents: li
         agent_pool.settings.loop_max_retries = max(0, int(ui_cfg.get('loop_max_retries', 2)))
 
 
+# Retry policy settings handlers (Phase 1 of retry refactoring)
+
+@register_config_handler('retry_max_attempts')
+def _handle_retry_max_attempts(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update total outer retry attempts. Range [1, 6]."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.retry_max_attempts = min(6, max(1, int(ui_cfg.get('retry_max_attempts', 3))))
+
+
+@register_config_handler('retry_base_delay')
+def _handle_retry_base_delay(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update initial backoff delay in seconds."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.retry_base_delay = max(0.1, float(ui_cfg.get('retry_base_delay', 1.0)))
+
+
+@register_config_handler('retry_max_delay')
+def _handle_retry_max_delay(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update maximum backoff cap in seconds."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.retry_max_delay = max(1.0, float(ui_cfg.get('retry_max_delay', 8.0)))
+
+
 @register_config_handler('ci_execution_timeout')
 def _handle_ci_execution_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update code interpreter execution timeout."""

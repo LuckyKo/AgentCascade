@@ -621,6 +621,11 @@ class PoolSettings:
     # Loop retry limit (dedicated budget for inner-loop retries, separate from LLM_MAX_RETRIES)
     loop_max_retries: int = 2                # Max retries after inner-loop detection before giving up
 
+    # Retry policy settings (Phase 1 of retry refactoring — new fields, no behavior change yet)
+    retry_max_attempts: int = 3              # Total outer retry attempts [1, 6]
+    retry_base_delay: float = 1.0            # Initial backoff delay in seconds
+    retry_max_delay: float = 8.0             # Maximum backoff cap in seconds
+
     # Code interpreter settings (Feature: CI session sharing)
     ci_execution_timeout: int = CI_EXECUTION_TIMEOUT      # Per-call code execution timeout (seconds)
     ci_watchdog_timeout: int = CI_WATCHDOG_TIMEOUT         # Kernel inactivity watchdog timeout (seconds)
