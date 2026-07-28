@@ -2158,6 +2158,58 @@ class ExecutionEngine:
             return router.caption_images(messages, agent_type=agent_type)
         return messages
 
+    def _handle_inner_loop_detection(
+        self,
+        instance: AgentInstance,
+        e: Exception,
+        retry_count: int,
+        loop_retry_count: int,
+        _loop_max: int
+    ) -> None:
+        """Handle inner-loop detection (CharacterRunDetected/MaxTokenExceeded).
+
+        Advances endpoint cursor when appropriate and checks loop budget exhaustion.
+        Counters are NOT incremented here — they were already incremented by
+        _abort_stream before the exception was raised.
+
+        Dual counter semantics:
+        - retry_count: shared budget counter for all retries (general + inner-loop)
+        - loop_retry_count: tracks inner-loop-specific retries for observability
+        Both draw from the same _loop_max budget pool.
+
+        Args:
+            instance: Agent instance making the call
+            e: The CharacterRunDetected or MaxTokenExceeded exception
+            retry_count: Current shared retry counter (already incremented by _abort_stream)
+            loop_retry_count: Current inner-loop-specific counter (already incremented by _abort_stream)
+            _loop_max: Maximum retry attempts from pool settings
+
+        Raises:
+            CharacterRunDetected: if loop budget exhausted (defense-in-depth check)
+        """
+        inst_name = instance.instance_name
+
+        # Check dedicated loop retry budget — fail fast if exhausted (_loop_max from UI setting)
+        # Note: generator already checks this before raising, so this is defense-in-depth.
+        # Raising here matches original inline behavior for this edge case.
+        if isinstance(e, CharacterRunDetected) and loop_retry_count >= _loop_max:
+            raise CharacterRunDetected(
+                f"inner_loop_exhausted: retried {_loop_max} times, "
+                f"giving up — {e}",
+                detection_reason=getattr(e, 'detection_reason', 'unknown'),
+            )
+
+        # Advance endpoint cursor only on character-run or max-token
+        # detection so the next retry starts from a different endpoint
+        # in the chain. Other detection types (sentence, ngram, block,
+        # entropy, max-chars) should retry the same endpoint — they are
+        # weaker signals. This is the "kick to next endpoint" mechanism
+        # — without this, retries would try the same (failing) endpoint
+        # again because call_with_fallback builds a fresh chain each time.
+        _reason = getattr(e, 'detection_reason', '')
+        if isinstance(e, MaxTokenExceeded) or _reason.startswith('character run'):
+            self.pool.api_router.advance_instance_endpoint(inst_name)
+
     def _execute_llm_call_with_retry(
         self,
         instance: AgentInstance,
@@ -2579,25 +2631,9 @@ class ExecutionEngine:
                     if not isinstance(e, (CharacterRunDetected, MaxTokenExceeded)):
                         retry_count += 1
 
-                    # Check dedicated loop retry budget — fail fast if
-                    # exhausted (_loop_max from UI setting)
-                    if isinstance(e, CharacterRunDetected) and loop_retry_count >= _loop_max:
-                        raise CharacterRunDetected(
-                            f"inner_loop_exhausted: retried {_loop_max} times, "
-                            f"giving up — {e}",
-                            detection_reason=getattr(e, 'detection_reason', 'unknown'),
-                        )
-
-                # Advance endpoint cursor only on character-run or max-token
-                # detection so the next retry starts from a different endpoint
-                # in the chain. Other detection types (sentence, ngram, block,
-                # entropy, max-chars) should retry the same endpoint — they are
-                # weaker signals. This is the "kick to next endpoint" mechanism
-                # — without this, retries would try the same (failing) endpoint
-                # again because call_with_fallback builds a fresh chain each time.
-                _reason = getattr(e, 'detection_reason', '')
-                if isinstance(e, MaxTokenExceeded) or _reason.startswith('character run'):
-                    self.pool.api_router.advance_instance_endpoint(inst_name)
+                    # Handle inner-loop detection: budget check and endpoint advancement
+                    if isinstance(e, (CharacterRunDetected, MaxTokenExceeded)):
+                        self._handle_inner_loop_detection(instance, e, retry_count, loop_retry_count, _loop_max)
 
                 # Classify error type using centralized policy (Phase 4a)
                 error_type = classify_error(e)
