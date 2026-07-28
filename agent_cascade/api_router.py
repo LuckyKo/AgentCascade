@@ -1189,21 +1189,38 @@ class APIRouter:
                     # Rate limiting: check and enforce per-endpoint rate limit before each call attempt.
                     # Each retry attempt counts against the rate limit.
                     if rate_limit_rpm > 0:
-                        now = time.time()
                         with self._lock:
                             if endpoint_base not in self._endpoint_call_history:
                                 self._endpoint_call_history[endpoint_base] = collections.deque()
-                            # Sliding window: remove calls older than RATE_LIMIT_WINDOW_SECONDS
-                            history = self._endpoint_call_history[endpoint_base]
-                            while history and now - history[0] >= RATE_LIMIT_WINDOW_SECONDS:
-                                history.popleft()
-                            # Check if we're over the limit
-                            if len(history) >= rate_limit_rpm:
-                                raise RuntimeError(
-                                    f"Rate limit exceeded for endpoint '{endpoint_name}' @ {endpoint_base} ({rate_limit_rpm} rpm)"
+                        # Loop until we successfully record this call (handles race conditions when multiple threads sleep)
+                        while True:
+                            now = time.time()
+                            wait_time = 0.0
+                            with self._lock:
+                                history = self._endpoint_call_history[endpoint_base]
+                                # Sliding window: remove calls older than RATE_LIMIT_WINDOW_SECONDS
+                                while history and now - history[0] >= RATE_LIMIT_WINDOW_SECONDS:
+                                    history.popleft()
+                                # Check if we're over the limit — calculate wait time instead of raising
+                                if len(history) >= rate_limit_rpm:
+                                    wait_time = RATE_LIMIT_WINDOW_SECONDS - (now - history[0])
+                            # Sleep outside the lock to avoid blocking other threads
+                            if wait_time > 0:
+                                logger.debug(
+                                    f"[APIRouter] Rate limit reached for '{endpoint_name}' @ {endpoint_base}. "
+                                    f"Waiting {wait_time:.1f}s before next call ({rate_limit_rpm} rpm)"
                                 )
-                            # Track this call atomically within the same lock to prevent race conditions
-                            history.append(now)
+                                time.sleep(wait_time)
+                            # After sleeping, re-check and try to record (loop handles contention)
+                            with self._lock:
+                                now = time.time()
+                                history = self._endpoint_call_history[endpoint_base]
+                                while history and now - history[0] >= RATE_LIMIT_WINDOW_SECONDS:
+                                    history.popleft()
+                                if len(history) < rate_limit_rpm:
+                                    # Track this call atomically within the same lock to prevent race conditions
+                                    history.append(now)
+                                    break  # Successfully recorded, exit loop
                     
                     result = execute_with_sem(current_agent_name)
                     
@@ -1219,16 +1236,6 @@ class APIRouter:
                     
                 except Exception as e:
                     err_msg = str(e)
-
-                    # Rate limit errors skip retries and jump directly to the next endpoint.
-                    if "Rate limit exceeded" in err_msg:
-                        logger.warning(
-                            f"[APIRouter] Rate limit hit for '{endpoint_name}' @ {endpoint_base}. "
-                            f"Skipping to next endpoint."
-                        )
-                        all_errors.append(f"Rate limit exceeded for '{endpoint_name}' @ {endpoint_base}")
-                        skipped_early = True
-                        break  # Go to next endpoint, don't waste retries
 
                     # Character-run / max-token detection: treat as endpoint failure and
                     # skip directly to the next endpoint in the chain. Retrying the same
