@@ -1704,6 +1704,50 @@ class AgentPool:
         except Exception as e:
             logger.warning(f"Logger setup after load (non-critical): {e}")
 
+        # ── Skills System: Inject skills into loaded instance's system message ──
+        # Apply the same skill loading logic as _create_and_run_agent so that
+        # self-augmentation and other AUTO-mode skills are present after restart.
+        try:
+            from agent_cascade.execution_engine import _build_skills_block
+            from agent_cascade.settings import DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE, LOAD_SKILL_AUTO
+
+            load_skill_value = getattr(self.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
+            if isinstance(load_skill_value, str):
+                load_skill_value_upper = load_skill_value.strip().upper()
+            else:
+                load_skill_value_upper = "AUTO"
+
+            skill_manager = getattr(self, 'skill_manager', None)
+            if skill_manager and load_skill_value_upper != LOAD_SKILL_NONE and new_inst.conversation:
+                # Get task text from first user message for AUTO-mode matching
+                first_user_msg = next(
+                    (m for m in new_inst.conversation if m.role == USER),
+                    None
+                )
+                task_text = first_user_msg.content if first_user_msg else ""
+
+                loaded_skills = []
+                try:
+                    loaded_skills = skill_manager.resolve_load_skill(load_skill_value, task_text, "")
+                except Exception as e:
+                    logger.warning(f"[SKILLS] Failed to resolve skills on load for {instance_name}: {e}")
+
+                # Always include self-augmentation when AUTO mode is enabled
+                if load_skill_value_upper == LOAD_SKILL_AUTO:
+                    _self_aug_body = skill_manager.load_full_instructions("self-augmentation")
+                    if _self_aug_body and _self_aug_body not in loaded_skills:
+                        loaded_skills.append(_self_aug_body)
+
+                # Append skills block to the existing system message content
+                if loaded_skills:
+                    skills_block = _build_skills_block(loaded_skills)
+                    sys_msg = new_inst.conversation[0]
+                    if sys_msg.role == SYSTEM:
+                        sys_msg.content += skills_block
+                        logger.info(f"[SKILLS] Injected {len(loaded_skills)} skill(s) into loaded instance '{instance_name}' system message")
+        except Exception as e:
+            logger.warning(f"[SKILLS] Skill injection on load failed for {instance_name}: {e}")
+
         log_source = "file" if Path(log_input).exists() else "JSON input"
         return f"Loaded {len(msg_objects)} messages for '{instance_name}' ({agent_class}) from {log_source}."
 
