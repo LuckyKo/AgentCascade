@@ -4356,14 +4356,14 @@ class ExecutionEngine:
             # Unified auto-skill gating: both toggles must be ON, using pool settings as single source of truth
             from agent_cascade.auto_skill_helpers import run_auto_skill_proposal
             created_skills = run_auto_skill_proposal(
-                pool=pool,
+                pool=self.pool,
                 skill_manager=skill_manager,
                 inst=inst,
                 task_text=task_text,
                 instance_name=instance_name,
                 total_tool_calls=total_tool_calls,
                 append_fn=lambda msg: self._append_and_log(inst, self._make_user_message(msg)),
-                rollback_fn=lambda pop_count: pool._rollback_instance(instance_name, pop_count=pop_count),
+                rollback_fn=lambda pop_count: self.pool._rollback_instance(instance_name, pop_count=pop_count),
                 is_stopped=lambda: self._is_stopped(instance_name),
                 engine_run_generator=lambda: self.run(inst),
             )

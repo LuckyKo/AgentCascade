@@ -241,6 +241,10 @@ class AgentInstance:
     compression_summary: Optional[str] = None  # Current cumulative summary (if any)
     _compression_lock: threading.RLock = field(default_factory=threading.RLock)  # RLock: recovery paths may re-acquire via instance_conversations.__setitem__
 
+    # ── Auto-Skill Tracking ────────────────────────────────────────────────
+    _auto_skill_proposed: bool = field(default=False)          # Tracks if auto-skill prompt was injected for this instance
+    _auto_skill_proposed_count: int = field(default=0)         # Number of times auto-skill was proposed in this session
+
     # ── System Prompt Initialization Tracking (Bug #41 fix) ────────────────
     _system_prompt_initialized: bool = field(default=False)  # Track if system prompt has been initialized once. Once set, session metadata and resources are frozen — they won't update even if the environment changes.
 
