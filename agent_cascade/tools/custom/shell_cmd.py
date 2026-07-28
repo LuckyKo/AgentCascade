@@ -299,7 +299,7 @@ class ShellCmd(BaseTool):
             f"  - __status → check current status and recent output\n"
             f"  - __kill → terminate the process\n"
             f"  - __ctrl_c → send interrupt signal\n"
-            f"  - __wait → wait until the process completes (max 60s)\n"
+            f"  - __wait → wait until next heartbeat (max 60s)\n"
             f"  - __heartbeat=N → update heartbeat interval (N seconds)\n"
             f"  - any other text → send as stdin input to the running command"
         )

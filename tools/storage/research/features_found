@@ -1,0 +1,54 @@
+# Features Found in Log File Scan
+
+## New Features (Not in Existing List)
+
+### Feature #31: API Router Double Fields Fix (04/06/2026)
+- Source: orchestrator_Maine_20260604_232152.jsonl (~62000)
+- Problem: Case-insensitive duplicates in agent_priorities caused double entries in UI
+- Fix: _normalize_agent_priorities() merges endpoint IDs from case-duplicate keys instead of discarding them
+- Follow-up fix for empty fields (EmptyFieldsFixer): merged rather than discarded
+
+### Feature #32: UI Stale Key Cleanup + Include-from-Priorities (04/06/2026)  
+- Source: orchestrator_Maine_20260604_093000.jsonl (~52000)
+- Problem: renderAgentApiAssignments only built typeToName from state.agents, missing keys in agent_priorities
+- Fix: Include agent types from priorities + cleanup stale names (compression_agent, security_advisor, etc.)
+- Applied to both main and unified branches
+
+### Feature #33: Compression Agent Endpoint Fix v2 (04/06/2026)
+- Source: coder_CompressionEndpointFix2_20260604_050708.jsonl (~48000)
+- Problem: compression_agent falling back to wrong endpoint via _last_successful_endpoint_cfg
+- Approach: Cleaner fix removing overengineered endpoint_agent_type field; set _allocated_max_input_tokens instead
+
+### Feature #34: Session Restore with Forced Compression (04/06/2026)
+- Source: orchestrator_Maine_20260604_051207.jsonl (~49950)
+- Problem: System info showed stale data after session restore
+- Fix: Forced compression during session load to get fresh system_info
+
+### Feature #35: Token Cache Invalidation After Context Bar Edit (05/06/2026+)
+- Source: context bar edit flow in api_server.py / execution_engine.py
+- Problem: Token count stale after user edits messages via context bar
+- Fix: Invalidate _cached_token_count and _last_token_count_conversation_length
+
+### Feature #36: Context Bar Edit + Auto-Continue (05/06/2026)
+- Source: orchestrator_Maine_20260604_215627.jsonl (~58000)
+- Problem: Token count stale after context bar edits, no auto-resume
+- Fix: Invalidate token cache + auto-continue from halted state
+
+### Feature #37: Sub-Agent Stream Updates During Execution (Phase 5)
+- Source: coder_Phase5Implementer_20260602_063543.jsonl (~17000)
+- Part of larger Phase 5 cycle (matches existing Feature #18)
+
+## Existing Features (Already in List - Confirmed Present)
+- #1 UIUpdateReviewer, #2 SLEEPING/AgentState, #5 Shell Test + Security Advisor Investigation
+- #6 Bug #43 Pre-execution Termination Check, #7 Bug #40/41/42 Review Series
+- #8 EndpointScheduler Resize (api_router.py), #9 Forced Compression API Route
+- #10 Phase 5 Polish Session, #11 CompressionAgent Fix + Token Count Fix
+- #12 System Prompt Initialization Fix (Bug #41)
+- #13 Bug #40/41/42 Validation Reviewer
+- #14 Session Load Investigation (SystemInfo stale data)
+- #15 Security Advisor / Compression Agent Endpoint Scheduler Bypass (Bug 7)
+- #16 EndpointScheduler Slot Acquisition for Security/Compression Agents
+- #17 System Prompt Injection Refactor (creation-time only)
+- #18 Disabled Tools Propagation + Sub-Agent Instance State Tracking
+
+## Total: ~37 features identified (31 existing confirmed + 6 new)

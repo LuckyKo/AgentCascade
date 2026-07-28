@@ -1,0 +1,261 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.6, pytest-9.0.2, pluggy-1.6.0 -- C:\Python312\python.exe
+cachedir: .pytest_cache
+rootdir: N:\work\WD\AgentCascade
+configfile: pytest.ini
+plugins: anyio-4.9.0, asyncio-1.4.0, timeout-2.4.0, xdist-3.8.0, typeguard-4.4.4
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 60.0s
+timeout method: thread
+timeout func_only: False
+created: 8/8 workers
+8 workers [38 items]
+
+scheduling tests via LoadScheduling
+
+tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_message_invalid_ciphertext_returns_400 
+tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_state_returns_state_object 
+tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_file_invalid_path_returns_error 
+tests/test_api_endpoints.py::TestAppSetup::test_create_test_client 
+tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_handshake_missing_public_key_returns_400 
+tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_get_status_with_valid_token_returns_200 
+tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_message_without_valid_token_returns_401 
+tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_get_keys_returns_public_key_and_algorithm 
+[gw2] [  2%] PASSED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_handshake_missing_public_key_returns_400 
+[gw7] [  5%] PASSED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_file_invalid_path_returns_error 
+tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_post_find_file_returns_response 
+tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_end_to_end_encrypted_message 
+[gw0] [  7%] PASSED tests/test_api_endpoints.py::TestAppSetup::test_create_test_client 
+tests/test_api_endpoints.py::TestAppSetup::test_root_endpoint_serves_index_or_fails_gracefully 
+[gw4] [ 10%] PASSED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_get_status_with_valid_token_returns_200 
+tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_message_invalid_nonce_returns_400 
+[gw1] [ 13%] PASSED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_get_keys_returns_public_key_and_algorithm 
+tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_handshake_returns_session_token 
+[gw6] [ 15%] PASSED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_state_returns_state_object 
+tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_sessions_returns_sessions_list 
+[gw3] [ 18%] PASSED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_message_without_valid_token_returns_401 
+tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_get_status_without_valid_token_returns_401 
+[gw5] [ 21%] PASSED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_message_invalid_ciphertext_returns_400 
+tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_agents_returns_list 
+[gw2] node down: Not properly terminated
+[gw2] [ 23%] FAILED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_end_to_end_encrypted_message 
+
+replacing crashed worker gw2
+[gw7] node down: Not properly terminated
+[gw7] [ 26%] FAILED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_post_find_file_returns_response 
+
+replacing crashed worker gw7
+[gw0] node down: Not properly terminated
+[gw0] [ 28%] FAILED tests/test_api_endpoints.py::TestAppSetup::test_root_endpoint_serves_index_or_fails_gracefully 
+
+replacing crashed worker gw0
+[gw1] node down: Not properly terminated
+[gw1] [ 31%] FAILED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_handshake_returns_session_token 
+
+replacing crashed worker gw1
+[gw3] node down: Not properly terminated
+[gw3] [ 34%] FAILED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_get_status_without_valid_token_returns_401 
+
+replacing crashed worker gw3
+[gw5] node down: Not properly terminated
+[gw5] [ 36%] FAILED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_agents_returns_list 
+
+replacing crashed worker gw5
+[gw4] node down: Not properly terminated
+[gw4] [ 39%] FAILED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_message_invalid_nonce_returns_400 
+
+replacing crashed worker gw4
+[gw6] node down: Not properly terminated
+[gw6] [ 42%] FAILED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_sessions_returns_sessions_list 
+
+replacing crashed worker gw6
+
+tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_put_endpoints_updates_endpoint 
+tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_post_endpoints_bulk_works_without_error 
+tests/test_api_endpoints.py::TestOperationControl::test_post_reject_returns_ok 
+tests/test_api_endpoints.py::TestWebSocket::test_ws_send_stop_generating_false 
+tests/test_api_endpoints.py::TestWebSocket::test_ws_send_message_queues_it 
+tests/test_api_endpoints.py::TestWebSocket::test_ws_send_set_session_name_changes_it 
+tests/test_api_endpoints.py::TestWebSocket::test_ws_send_resume_all_no_crash 
+tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_telemetry_export_returns_jsonl 
+[gw8] [ 44%] PASSED tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_put_endpoints_updates_endpoint 
+tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_delete_endpoints_removes_endpoint 
+[gw9] [ 47%] PASSED tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_post_endpoints_bulk_works_without_error 
+tests/test_api_endpoints.py::TestOperationControl::test_post_approve_returns_ok 
+[gw10] [ 50%] PASSED tests/test_api_endpoints.py::TestOperationControl::test_post_reject_returns_ok 
+tests/test_api_endpoints.py::TestWebSocket::test_ws_connect_receives_initial_state 
+[gw12] [ 52%] PASSED tests/test_api_endpoints.py::TestWebSocket::test_ws_send_message_queues_it 
+tests/test_api_endpoints.py::TestWebSocket::test_ws_send_select_agent_no_crash 
+[gw11] [ 55%] PASSED tests/test_api_endpoints.py::TestWebSocket::test_ws_send_stop_generating_false 
+tests/test_api_endpoints.py::TestWebSocket::test_ws_send_reset_clears_state 
+[gw13] [ 57%] PASSED tests/test_api_endpoints.py::TestWebSocket::test_ws_send_set_session_name_changes_it 
+tests/test_api_endpoints.py::TestWebSocket::test_ws_send_approve_no_crash 
+[gw14] [ 60%] PASSED tests/test_api_endpoints.py::TestWebSocket::test_ws_send_resume_all_no_crash 
+tests/test_api_endpoints.py::TestWebSocket::test_ws_send_invalid_type_no_crash 
+[gw15] [ 63%] PASSED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_telemetry_export_returns_jsonl 
+tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_telemetry_returns_data 
+[gw8] node down: Not properly terminated
+[gw8] [ 65%] FAILED tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_delete_endpoints_removes_endpoint 
+
+replacing crashed worker gw8
+[gw9] node down: Not properly terminated
+[gw9] [ 68%] FAILED tests/test_api_endpoints.py::TestOperationControl::test_post_approve_returns_ok 
+
+replacing crashed worker gw9
+[gw10] node down: Not properly terminated
+[gw10] [ 71%] FAILED tests/test_api_endpoints.py::TestWebSocket::test_ws_connect_receives_initial_state 
+
+replacing crashed worker gw10
+[gw11] node down: Not properly terminated
+[gw11] [ 73%] FAILED tests/test_api_endpoints.py::TestWebSocket::test_ws_send_reset_clears_state 
+
+replacing crashed worker gw11
+[gw13] node down: Not properly terminated
+[gw13] [ 76%] FAILED tests/test_api_endpoints.py::TestWebSocket::test_ws_send_approve_no_crash 
+
+replacing crashed worker gw13
+[gw14] node down: Not properly terminated
+[gw14] [ 78%] FAILED tests/test_api_endpoints.py::TestWebSocket::test_ws_send_invalid_type_no_crash 
+
+replacing crashed worker gw14
+[gw15] node down: Not properly terminated
+[gw15] [ 81%] FAILED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_telemetry_returns_data 
+
+replacing crashed worker gw15
+[gw12] node down: Not properly terminated
+[gw12] [ 84%] FAILED tests/test_api_endpoints.py::TestWebSocket::test_ws_send_select_agent_no_crash 
+
+replacing crashed worker gw12
+
+tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_post_parse_accepts_file_upload 
+tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_post_endpoints_adds_endpoint 
+tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_post_resume_all_returns_ok 
+[gw16] [ 86%] PASSED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_post_parse_accepts_file_upload 
+tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_post_reset_clears_session 
+[gw17] [ 89%] PASSED tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_post_endpoints_adds_endpoint 
+tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_endpoints_returns_config 
+[gw18] [ 92%] PASSED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_post_resume_all_returns_ok 
+tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_get_endpoints_shows_added_endpoint 
+[gw16] node down: Not properly terminated
+[gw16] [ 94%] FAILED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_post_reset_clears_session 
+
+replacing crashed worker gw16
+[gw17] node down: Not properly terminated
+[gw17] [ 97%] FAILED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_endpoints_returns_config 
+
+replacing crashed worker gw17
+[gw18] node down: Not properly terminated
+[gw18] [100%] FAILED tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_get_endpoints_shows_added_endpoint 
+
+replacing crashed worker gw18
+
+================================== FAILURES ===================================
+_________________________ tests/test_api_endpoints.py _________________________
+[gw2] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw2' crashed while running 'tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_end_to_end_encrypted_message'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw7] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw7' crashed while running 'tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_post_find_file_returns_response'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw0] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw0' crashed while running 'tests/test_api_endpoints.py::TestAppSetup::test_root_endpoint_serves_index_or_fails_gracefully'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw1] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw1' crashed while running 'tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_handshake_returns_session_token'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw3] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw3' crashed while running 'tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_get_status_without_valid_token_returns_401'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw5] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw5' crashed while running 'tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_agents_returns_list'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw4] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw4' crashed while running 'tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_message_invalid_nonce_returns_400'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw6] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw6' crashed while running 'tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_sessions_returns_sessions_list'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw8] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw8' crashed while running 'tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_delete_endpoints_removes_endpoint'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw9] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw9' crashed while running 'tests/test_api_endpoints.py::TestOperationControl::test_post_approve_returns_ok'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw10] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw10' crashed while running 'tests/test_api_endpoints.py::TestWebSocket::test_ws_connect_receives_initial_state'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw11] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw11' crashed while running 'tests/test_api_endpoints.py::TestWebSocket::test_ws_send_reset_clears_state'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw13] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw13' crashed while running 'tests/test_api_endpoints.py::TestWebSocket::test_ws_send_approve_no_crash'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw14] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw14' crashed while running 'tests/test_api_endpoints.py::TestWebSocket::test_ws_send_invalid_type_no_crash'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw15] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw15' crashed while running 'tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_telemetry_returns_data'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw12] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw12' crashed while running 'tests/test_api_endpoints.py::TestWebSocket::test_ws_send_select_agent_no_crash'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw16] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw16' crashed while running 'tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_post_reset_clears_session'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw17] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw17' crashed while running 'tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_endpoints_returns_config'
+_________________________ tests/test_api_endpoints.py _________________________
+[gw18] win32 -- Python 3.12.6 C:\Python312\python.exe
+worker 'gw18' crashed while running 'tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_get_endpoints_shows_added_endpoint'
+============================== warnings summary ===============================
+tests/test_api_endpoints.py: 19 warnings
+  N:\work\WD\AgentCascade\agent_cascade\api_server.py:624: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+tests/test_api_endpoints.py: 19 warnings
+  C:\Python312\Lib\site-packages\fastapi\applications.py:4495: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============================ slowest 10 durations =============================
+6.36s setup    tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_message_invalid_ciphertext_returns_400
+6.35s setup    tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_message_without_valid_token_returns_401
+6.34s setup    tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_state_returns_state_object
+6.31s setup    tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_get_keys_returns_public_key_and_algorithm
+6.30s setup    tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_get_status_with_valid_token_returns_200
+6.30s setup    tests/test_api_endpoints.py::TestAppSetup::test_create_test_client
+6.28s setup    tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_handshake_missing_public_key_returns_400
+6.28s setup    tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_file_invalid_path_returns_error
+5.75s setup    tests/test_api_endpoints.py::TestWebSocket::test_ws_send_stop_generating_false
+5.65s setup    tests/test_api_endpoints.py::TestOperationControl::test_post_reject_returns_ok
+=========================== short test summary info ===========================
+FAILED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_end_to_end_encrypted_message
+FAILED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_post_find_file_returns_response
+FAILED tests/test_api_endpoints.py::TestAppSetup::test_root_endpoint_serves_index_or_fails_gracefully
+FAILED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_handshake_returns_session_token
+FAILED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_get_status_without_valid_token_returns_401
+FAILED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_agents_returns_list
+FAILED tests/test_api_endpoints.py::TestAuthEncryptionFlow::test_post_message_invalid_nonce_returns_400
+FAILED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_sessions_returns_sessions_list
+FAILED tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_delete_endpoints_removes_endpoint
+FAILED tests/test_api_endpoints.py::TestOperationControl::test_post_approve_returns_ok
+FAILED tests/test_api_endpoints.py::TestWebSocket::test_ws_connect_receives_initial_state
+FAILED tests/test_api_endpoints.py::TestWebSocket::test_ws_send_reset_clears_state
+FAILED tests/test_api_endpoints.py::TestWebSocket::test_ws_send_approve_no_crash
+FAILED tests/test_api_endpoints.py::TestWebSocket::test_ws_send_invalid_type_no_crash
+FAILED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_telemetry_returns_data
+FAILED tests/test_api_endpoints.py::TestWebSocket::test_ws_send_select_agent_no_crash
+FAILED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_post_reset_clears_session
+FAILED tests/test_api_endpoints.py::TestUnauthenticatedEndpoints::test_get_endpoints_returns_config
+FAILED tests/test_api_endpoints.py::TestEndpointManagementCRUD::test_get_endpoints_shows_added_endpoint
+=========== 19 failed, 19 passed, 38 warnings in 205.62s (0:03:25) ============

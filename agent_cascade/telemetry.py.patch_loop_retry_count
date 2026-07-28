@@ -1,0 +1,49 @@
+PATCH for telemetry.py record_loop_detected():
+
+OLD (line 438):
+    def record_loop_detected(self, instance_name: str, reason: str, auto_rolled_back: bool = False, pop_count: int = 0):
+
+NEW (line 438):
+    def record_loop_detected(self, instance_name: str, reason: str, auto_rolled_back: bool = False, pop_count: int = 0, loop_retry_count: int = 0):
+
+OLD (lines 441-448):
+            event = {
+                "type": "loop_detected",
+                "instance": instance_name,
+                "reason": reason,
+                "auto_rolled_back": auto_rolled_back,
+                "pop_count": pop_count,
+                "timestamp": _now_iso(),
+            }
+
+NEW (lines 441-449):
+            event = {
+                "type": "loop_detected",
+                "instance": instance_name,
+                "reason": reason,
+                "auto_rolled_back": auto_rolled_back,
+                "pop_count": pop_count,
+                "loop_retry_count": loop_retry_count,
+                "timestamp": _now_iso(),
+            }
+
+PATCH for execution_engine.py:
+
+1. Initialize instance._loop_retry_count at start of engine.run():
+   After line 921 (instance._loop_rollback_count = 0), add:
+       instance._loop_retry_count = 0
+
+2. Sync local loop_retry_count to instance when incremented in _execute_llm_call_with_retry:
+   After line 2289 (loop_retry_count += 1), add:
+       instance._loop_retry_count = loop_retry_count
+
+3. Pass loop_retry_count in telemetry call at _pre_llm_checks:
+   Change lines 1858-1860 from:
+       tel.record_loop_detected(
+           inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count,
+       )
+   To:
+       tel.record_loop_detected(
+           inst_name, reason=reason, auto_rolled_back=True, pop_count=pop_count,
+           loop_retry_count=getattr(instance, '_loop_retry_count', 0),
+       )

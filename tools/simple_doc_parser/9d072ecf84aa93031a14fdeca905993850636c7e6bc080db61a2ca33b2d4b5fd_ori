@@ -1,0 +1,724 @@
+[
+  {
+    "page_num": 1,
+    "content": [
+      {
+        "text": "GitHub - LuckyKo/AgentCascade: Self Evolving Multi Agent Framework · GitHub",
+        "token": 17
+      },
+      {
+        "text": "Skip to content",
+        "token": 3
+      },
+      {
+        "text": "Navigation Menu",
+        "token": 2
+      },
+      {
+        "text": "Toggle navigation",
+        "token": 2
+      },
+      {
+        "text": "\tSign in",
+        "token": 3
+      },
+      {
+        "text": "Appearance settings",
+        "token": 2
+      },
+      {
+        "text": "PlatformAI CODE CREATIONGitHub CopilotWrite better code with AIGitHub Copilot appDirect agents from issue to mergeMCP RegistryNewIntegrate external toolsDEVELOPER WORKFLOWSActionsAutomate any workflowCodespacesInstant dev environmentsIssuesPlan and track workCode ReviewManage code changesAPPLICATION SECURITYGitHub Advanced SecurityFind and fix vulnerabilitiesCode securitySecure your code as you buildSecret protectionStop leaks before they startEXPLOREWhy GitHubDocumentationBlogChangelogMarketplaceView all featuresSolutionsBY COMPANY SIZEEnterprisesSmall and medium teamsStartupsNonprofitsBY USE CASEApp ModernizationDevSecOpsDevOpsCI/CDView all use casesBY INDUSTRYHealthcareFinancial servicesManufacturingGovernmentView all industriesView all solutionsResourcesEXPLORE BY TOPICAISoftware DevelopmentDevOpsSecurityView all topicsEXPLORE BY TYPECustomer storiesEvents & webinarsEbooks & reportsBusiness insightsGitHub SkillsSUPPORT & SERVICESDocumentationCustomer supportCommunity forumTrust centerPartnersView all resourcesOpen SourceCOMMUNITYGitHub SponsorsFund open source developersPROGRAMSSecurity LabMaintainer CommunityAcceleratorGitHub StarsArchive ProgramREPOSITORIESTopicsTrendingCollectionsEnterpriseENTERPRISE SOLUTIONSEnterprise platformAI-powered developer platformAVAILABLE ADD-ONSGitHub Advanced SecurityEnterprise-grade security featuresCopilot for BusinessEnterprise-grade AI featuresPremium SupportEnterprise-grade 24/7 supportPricing",
+        "token": 281
+      },
+      {
+        "text": "Search or jump to...",
+        "token": 5
+      },
+      {
+        "text": "Search code, repositories, users, issues, pull requests...",
+        "token": 12
+      },
+      {
+        "text": "\tSearch",
+        "token": 2
+      },
+      {
+        "text": "Clear",
+        "token": 1
+      },
+      {
+        "text": "Search syntax tips ",
+        "token": 4
+      },
+      {
+        "text": "\tProvide feedback",
+        "token": 3
+      },
+      {
+        "text": "We read every piece of feedback, and take your input very seriously.",
+        "token": 14
+      },
+      {
+        "text": "Include my email address so I can be contacted",
+        "token": 9
+      },
+      {
+        "text": "     Cancel",
+        "token": 2
+      },
+      {
+        "text": "    Submit feedback",
+        "token": 3
+      },
+      {
+        "text": "\tSaved searches",
+        "token": 3
+      },
+      {
+        "text": "Use saved searches to filter your results more quickly",
+        "token": 9
+      },
+      {
+        "text": "Name",
+        "token": 1
+      },
+      {
+        "text": "Query",
+        "token": 1
+      },
+      {
+        "text": "\tTo see all available qualifiers, see our documentation.",
+        "token": 11
+      },
+      {
+        "text": "     Cancel",
+        "token": 2
+      },
+      {
+        "text": "    Create saved search",
+        "token": 4
+      },
+      {
+        "text": "\tSign in",
+        "token": 3
+      },
+      {
+        "text": "\tSign up",
+        "token": 3
+      },
+      {
+        "text": "Appearance settings",
+        "token": 2
+      },
+      {
+        "text": "Resetting focus",
+        "token": 3
+      },
+      {
+        "text": "You signed in with another tab or window. Reload to refresh your session.",
+        "token": 15
+      },
+      {
+        "text": "You signed out in another tab or window. Reload to refresh your session.",
+        "token": 15
+      },
+      {
+        "text": "You switched accounts on another tab or window. Reload to refresh your session.",
+        "token": 15
+      },
+      {
+        "text": "Dismiss alert",
+        "token": 2
+      },
+      {
+        "text": "\tLuckyKo",
+        "token": 4
+      },
+      {
+        "text": "/",
+        "token": 1
+      },
+      {
+        "text": "AgentCascade",
+        "token": 2
+      },
+      {
+        "text": "Public",
+        "token": 1
+      },
+      {
+        "text": "Notifications",
+        "token": 1
+      },
+      {
+        "text": " You must be signed in to change notification settings",
+        "token": 9
+      },
+      {
+        "text": "Fork",
+        "token": 2
+      },
+      {
+        "text": "    0",
+        "token": 3
+      },
+      {
+        "text": "\tStar",
+        "token": 2
+      },
+      {
+        "text": " 0",
+        "token": 2
+      },
+      {
+        "text": "Code",
+        "token": 1
+      },
+      {
+        "text": "Issues",
+        "token": 1
+      },
+      {
+        "text": "0",
+        "token": 1
+      },
+      {
+        "text": "Pull requests",
+        "token": 2
+      },
+      {
+        "text": "0",
+        "token": 1
+      },
+      {
+        "text": "Actions",
+        "token": 1
+      },
+      {
+        "text": "Projects",
+        "token": 1
+      },
+      {
+        "text": "Security and quality",
+        "token": 3
+      },
+      {
+        "text": "0",
+        "token": 1
+      },
+      {
+        "text": "Insights",
+        "token": 2
+      },
+      {
+        "text": "Additional navigation options",
+        "token": 3
+      },
+      {
+        "text": "\tCode",
+        "token": 1
+      },
+      {
+        "text": "\tIssues",
+        "token": 3
+      },
+      {
+        "text": "\tPull requests",
+        "token": 3
+      },
+      {
+        "text": "\tActions",
+        "token": 2
+      },
+      {
+        "text": "\tProjects",
+        "token": 2
+      },
+      {
+        "text": "\tSecurity and quality",
+        "token": 4
+      },
+      {
+        "text": "\tInsights",
+        "token": 3
+      },
+      {
+        "text": "LuckyKo/AgentCascade",
+        "token": 7
+      },
+      {
+        "text": " masterBranchesTagsGo to fileCodeOpen more actions menuFolders and filesNameNameLast commit messageLast commit dateLatest commit History83 Commits83 Commits.agent_lessons.agent_lessons  .github/workflows.github/workflows  .qwen.qwen  agent-cascade-docs/websiteagent-cascade-docs/website  agent_cascade.egg-infoagent_cascade.egg-info  agent_cascadeagent_cascade  agent_serveragent_server  agentsagents  assetsassets  benchmarkbenchmark  browser_agentbrowser_agent  examplesexamples  teststests  web_uiweb_ui  .gitignore.gitignore  .pre-commit-config.yaml.pre-commit-config.yaml  AgentCascade.code-workspaceAgentCascade.code-workspace  LICENSELICENSE  MANIFEST.inMANIFEST.in  README.mdREADME.md  README_CN.mdREADME_CN.md  agent_factory.pyagent_factory.py  agent_logger.pyagent_logger.py  agent_orchestrator.pyagent_orchestrator.py  agent_pool.pyagent_pool.py  api_router.pyapi_router.py  api_server.pyapi_server.py  browser_agent.mdbrowser_agent.md  browser_agent_cn.mdbrowser_agent_cn.md  check_lm_studio.pycheck_lm_studio.py  check_quotes.pycheck_quotes.py  demo_soul_webui.pydemo_soul_webui.py  demo_webui.pydemo_webui.py  error.txterror.txt  file_manager.pyfile_manager.py  lessons_compression_fix.mdlessons_compression_fix.md  message_client.pymessage_client.py  operation_manager.pyoperation_manager.py  profile_grep_ops.pyprofile_grep_ops.py  profile_server.batprofile_server.bat  profile_streaming.pyprofile_streaming.py  run_server.pyrun_server.py  setup.pysetup.py  soul.mdsoul.md  soul_loader.pysoul_loader.py  start.batstart.bat  start_api_server.pystart_api_server.py  start_multi_agent.pystart_multi_agent.py  telemetry.pytelemetry.py  test_compression_fix.pytest_compression_fix.py  test_compressor_fix.pytest_compressor_fix.py  View all filesRepository files navigationREADMEApache-2.0 license",
+        "token": 486
+      },
+      {
+        "text": "AgentCascade",
+        "token": 2
+      },
+      {
+        "text": "中文 ｜ English",
+        "token": 4
+      },
+      {
+        "text": "\t💜 Qwen Chat   |   🤗 Hugging Face   |   🤖 ModelScope   |    📑 Blog    ｜   📖 Documentation",
+        "token": 36
+      },
+      {
+        "text": "📊 Benchmark   |   💬 WeChat (微信)   |   🫨 Discord  ",
+        "token": 21
+      },
+      {
+        "text": "AgentCascade is a production-oriented multi-agent framework designed for building robust, scalable, and controllable LLM applications. Originally forked from Qwen-Agent, it has evolved into an independent system with a focus on orchestration, security, and developer productivity.",
+        "token": 51
+      },
+      {
+        "text": "Core Features",
+        "token": 2
+      },
+      {
+        "text": "🤖 Multi-Agent Orchestration",
+        "token": 6
+      },
+      {
+        "text": "OrchestratorAgent (agent_orchestrator.py): A supervisor agent that manages sub-agent lifecycles, intercepts call_agent/dismiss_agent tool calls, and handles multi-agent streaming as a unified generator.",
+        "token": 44
+      },
+      {
+        "text": "AgentPool (agent_pool.py): Centralized agent management with per-instance conversation persistence (JSONL), context compression (auto + manual modes), and real-time state synchronization.",
+        "token": 34
+      },
+      {
+        "text": "🛡️ Production Safety & Control",
+        "token": 6
+      },
+      {
+        "text": "OperationManager (operation_manager.py): A mandatory approval system for all mutating operations (file edits, code execution, system commands). Every edit creates timestamped .bak backups automatically.",
+        "token": 35
+      },
+      {
+        "text": "Path Isolation: Strict workspace-relative path resolution ensures agents never access or expose host-absolute paths.",
+        "token": 20
+      },
+      {
+        "text": "Graceful Lifecycle: Comprehensive signal handling (SIGINT/SIGTERM) ensuring clean shutdowns, backup cleanup, and state preservation.",
+        "token": 26
+      },
+      {
+        "text": "💻 Modern Web UI & API",
+        "token": 6
+      },
+      {
+        "text": "Custom Console (web_ui/): A lightweight, high-performance HTML/JS frontend replacing legacy Gradio interfaces. Supports multi-agent tab switching, approval workflows, and rich tool result rendering.",
+        "token": 37
+      },
+      {
+        "text": "WebSocket API Server (api_server.py): A headless backend allowing any external interface (Electron, VS Code extensions, CLI) to control the agent cluster.",
+        "token": 32
+      },
+      {
+        "text": "🛠️ Robust Tooling",
+        "token": 6
+      },
+      {
+        "text": "XML-Based Tool Protocols: Large text payloads (code, file contents) are handled via XML tags to eliminate JSON escaping corruptions.",
+        "token": 27
+      },
+      {
+        "text": "PythonExecutor Improvements: Hardened execution with proper exception isolation and batch crash recovery.",
+        "token": 17
+      },
+      {
+        "text": "Multi-Modal Support: Native handling of images and files within tool results, including backend proxying for local file rendering.",
+        "token": 24
+      },
+      {
+        "text": "News",
+        "token": 1
+      },
+      {
+        "text": "🔥🔥🔥Feb 16, 2026: Open-sourced Qwen3.5. For usage examples, refer to Qwen3.5 Agent Demo.",
+        "token": 37
+      },
+      {
+        "text": "Jan 27, 2026: Open-sourced agent evaluation benchmark DeepPlanning and added AgentCascade documentation.",
+        "token": 25
+      },
+      {
+        "text": "Sep 23, 2025: Added Qwen3-VL Tool-call Demo, supporting tools such as zoom in, image search, and web search.",
+        "token": 35
+      },
+      {
+        "text": "Jul 23, 2025: Add Qwen3-Coder Tool-call Demo; Added native API tool call interface support, such as using vLLM's built-in tool call parsing.",
+        "token": 42
+      },
+      {
+        "text": "Getting Started",
+        "token": 2
+      },
+      {
+        "text": "Installation",
+        "token": 1
+      },
+      {
+        "text": "Install from PyPI:",
+        "token": 5
+      },
+      {
+        "text": "pip install -U \"agent-cascade[rag,code_interpreter,mcp]\"",
+        "token": 17
+      },
+      {
+        "text": "Install from source for development:",
+        "token": 6
+      },
+      {
+        "text": "git clone https://github.com/LuckyKo/AgentCascade.git",
+        "token": 14
+      },
+      {
+        "text": "cd AgentCascade",
+        "token": 3
+      },
+      {
+        "text": "pip install -e ./\"[rag,code_interpreter,mcp]\"",
+        "token": 15
+      },
+      {
+        "text": "Preparation: Model Service",
+        "token": 5
+      },
+      {
+        "text": "You can use Alibaba Cloud's DashScope, or deploy your own OpenAI-compatible API (vLLM, Ollama, etc.).",
+        "token": 28
+      },
+      {
+        "text": "Set DASHSCOPE_API_KEY environment variable if using DashScope.",
+        "token": 14
+      },
+      {
+        "text": "For local models, configure the model_server endpoint in your agent config.",
+        "token": 14
+      },
+      {
+        "text": "Developing Your Own Agent",
+        "token": 5
+      },
+      {
+        "text": "The following example shows how to create an agent with custom tools:",
+        "token": 13
+      },
+      {
+        "text": "from agent_cascade.agents import Assistant",
+        "token": 8
+      },
+      {
+        "text": "from agent_cascade.tools.base import BaseTool, register_tool",
+        "token": 12
+      },
+      {
+        "text": "@register_tool('my_image_gen')",
+        "token": 7
+      },
+      {
+        "text": "class MyImageGen(BaseTool):",
+        "token": 7
+      },
+      {
+        "text": "    description = 'AI painting service'",
+        "token": 8
+      },
+      {
+        "text": "    parameters = [{'name': 'prompt', 'type': 'string', 'required': True}]",
+        "token": 20
+      },
+      {
+        "text": "    def call(self, params: str, **kwargs) -> str:",
+        "token": 15
+      },
+      {
+        "text": "\t# Implementation...",
+        "token": 4
+      },
+      {
+        "text": "\treturn '{\"image_url\": \"...\"}'",
+        "token": 8
+      },
+      {
+        "text": "llm_cfg = {'model': 'qwen-max-latest'}",
+        "token": 14
+      },
+      {
+        "text": "bot = Assistant(llm=llm_cfg, function_list=['my_image_gen', 'code_interpreter'])",
+        "token": 22
+      },
+      {
+        "text": "# Run as chatbot",
+        "token": 5
+      },
+      {
+        "text": "for response in bot.run(messages=[{'role': 'user', 'content': 'draw a dog'}]):",
+        "token": 22
+      },
+      {
+        "text": "    print(response)",
+        "token": 4
+      },
+      {
+        "text": "FAQ",
+        "token": 1
+      },
+      {
+        "text": "How to use Code Interpreter?: Ensure Docker is running. The tool writes and executes code in an isolated container.",
+        "token": 22
+      },
+      {
+        "text": "How to use MCP?: Configure mcpServers in your agent config. See MCP Example.",
+        "token": 18
+      },
+      {
+        "text": "Does it support Parallel Tool Calls?: Yes, natively supported via the nous prompt template.",
+        "token": 18
+      },
+      {
+        "text": "Credits & Origin",
+        "token": 3
+      },
+      {
+        "text": "AgentCascade was originally forked from QwenLM/Qwen-Agent. We are grateful to the Qwen team for providing the powerful foundation that enabled this framework to grow.",
+        "token": 34
+      },
+      {
+        "text": "Disclaimer",
+        "token": 1
+      },
+      {
+        "text": "The Docker-based code interpreter is intended for local testing. Always exercise caution when allowing agents to execute code in production environments.",
+        "token": 24
+      },
+      {
+        "text": "About",
+        "token": 1
+      },
+      {
+        "text": "\tSelf Evolving Multi Agent Framework",
+        "token": 7
+      },
+      {
+        "text": "Resources",
+        "token": 1
+      },
+      {
+        "text": "\tReadme",
+        "token": 2
+      },
+      {
+        "text": "License",
+        "token": 1
+      },
+      {
+        "text": "     Apache-2.0 license",
+        "token": 7
+      },
+      {
+        "text": "\tUh oh!",
+        "token": 4
+      },
+      {
+        "text": " There was an error while loading. Please reload this page.",
+        "token": 12
+      },
+      {
+        "text": "Activity ",
+        "token": 2
+      },
+      {
+        "text": "Stars",
+        "token": 1
+      },
+      {
+        "text": "0",
+        "token": 1
+      },
+      {
+        "text": "\tstars ",
+        "token": 3
+      },
+      {
+        "text": "Watchers",
+        "token": 2
+      },
+      {
+        "text": "0",
+        "token": 1
+      },
+      {
+        "text": "\twatching ",
+        "token": 3
+      },
+      {
+        "text": "Forks",
+        "token": 2
+      },
+      {
+        "text": "0",
+        "token": 1
+      },
+      {
+        "text": "\tforks ",
+        "token": 3
+      },
+      {
+        "text": "\tReport repository",
+        "token": 3
+      },
+      {
+        "text": "Releases",
+        "token": 2
+      },
+      {
+        "text": "No releases published",
+        "token": 3
+      },
+      {
+        "text": "Packages",
+        "token": 1
+      },
+      {
+        "text": "      0",
+        "token": 3
+      },
+      {
+        "text": "\tUh oh!",
+        "token": 4
+      },
+      {
+        "text": " There was an error while loading. Please reload this page.",
+        "token": 12
+      },
+      {
+        "text": "Contributors ",
+        "token": 3
+      },
+      {
+        "text": "\tUh oh!",
+        "token": 4
+      },
+      {
+        "text": " There was an error while loading. Please reload this page.",
+        "token": 12
+      },
+      {
+        "text": "Languages",
+        "token": 1
+      },
+      {
+        "text": "Python",
+        "token": 1
+      },
+      {
+        "text": "87.0%",
+        "token": 5
+      },
+      {
+        "text": "JavaScript",
+        "token": 1
+      },
+      {
+        "text": "6.4%",
+        "token": 4
+      },
+      {
+        "text": "CSS",
+        "token": 1
+      },
+      {
+        "text": "2.0%",
+        "token": 4
+      },
+      {
+        "text": "TypeScript",
+        "token": 2
+      },
+      {
+        "text": "1.5%",
+        "token": 4
+      },
+      {
+        "text": "HTML",
+        "token": 1
+      },
+      {
+        "text": "1.4%",
+        "token": 4
+      },
+      {
+        "text": "Shell",
+        "token": 1
+      },
+      {
+        "text": "1.2%",
+        "token": 4
+      },
+      {
+        "text": "Other",
+        "token": 1
+      },
+      {
+        "text": "0.5%",
+        "token": 4
+      },
+      {
+        "text": "Footer",
+        "token": 1
+      },
+      {
+        "text": "\t© 2026 GitHub, Inc.",
+        "token": 12
+      },
+      {
+        "text": "Footer navigation",
+        "token": 2
+      },
+      {
+        "text": "Terms",
+        "token": 1
+      },
+      {
+        "text": "Privacy",
+        "token": 1
+      },
+      {
+        "text": "Security",
+        "token": 1
+      },
+      {
+        "text": "Status",
+        "token": 1
+      },
+      {
+        "text": "Community",
+        "token": 1
+      },
+      {
+        "text": "Docs",
+        "token": 1
+      },
+      {
+        "text": "Contact",
+        "token": 1
+      },
+      {
+        "text": "\tManage cookies",
+        "token": 3
+      },
+      {
+        "text": "      Do not share my personal information",
+        "token": 7
+      },
+      {
+        "text": "    You can’t perform that action at this time.",
+        "token": 11
+      }
+    ],
+    "title": "GitHub - LuckyKo/AgentCascade: Self Evolving Multi Agent Framework · GitHub"
+  }
+]

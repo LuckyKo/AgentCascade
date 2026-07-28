@@ -146,6 +146,7 @@ rules:
   - Reject deception immediately.
   - Reject hallucinations or impossible commands.
   - Be conservative when uncertainty is high.
+  - Reasoning effort: low
 
 decision_format:
   - Provide a brief justification.

@@ -1,0 +1,104 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.6, pytest-9.0.2, pluggy-1.6.0 -- C:\Python312\python.exe
+cachedir: .pytest_cache
+rootdir: N:\work\WD\AgentCascade
+configfile: pytest.ini
+plugins: anyio-4.9.0, asyncio-1.4.0, timeout-2.4.0, xdist-3.8.0, typeguard-4.4.4
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 60.0s
+timeout method: thread
+timeout func_only: False
+created: 8/8 workers
+8 workers [14 items]
+
+scheduling tests via LoadScheduling
+
+tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls 
+tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_fails_then_succeeds_on_retry 
+tests/test_retry_baseline.py::TestInnerLoopDetection::test_character_run_detected_skips_to_next_endpoint 
+tests/test_retry_baseline.py::TestInnerLoopDetection::test_max_token_exceeded_skips_to_next_endpoint 
+tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds 
+tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_generic_exception 
+tests/test_retry_baseline.py::TestSubAgentRetryBehavior::test_sub_agent_separate_retry_budget 
+tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_connection_error 
+[gw5] [  7%] PASSED tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_generic_exception 
+tests/test_retry_baseline.py::TestBackoffTiming::test_router_backoff_exponential 
+[gw4] [ 14%] PASSED tests/test_retry_baseline.py::TestInnerLoopDetection::test_max_token_exceeded_skips_to_next_endpoint 
+[gw3] [ 21%] PASSED tests/test_retry_baseline.py::TestInnerLoopDetection::test_character_run_detected_skips_to_next_endpoint 
+[gw7] [ 28%] PASSED tests/test_retry_baseline.py::TestSubAgentRetryBehavior::test_sub_agent_separate_retry_budget 
+tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_endpoint_max_retries_decoupled 
+tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_max_retries_always_zero 
+[gw4] [ 35%] PASSED tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_endpoint_max_retries_decoupled 
+[gw3] [ 42%] PASSED tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_max_retries_always_zero 
+[gw2] [ 50%] PASSED tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds 
+tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted 
+[gw6] [ 57%] FAILED tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_connection_error 
+[gw1] [ 64%] PASSED tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_fails_then_succeeds_on_retry 
+tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_one_retry 
+[gw1] [ 71%] PASSED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_one_retry 
+[gw5] [ 78%] PASSED tests/test_retry_baseline.py::TestBackoffTiming::test_router_backoff_exponential 
+[gw0] [ 85%] PASSED tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls 
+tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_zero_retries 
+[gw0] [ 92%] PASSED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_zero_retries 
+[gw2] [100%] PASSED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted 
+
+================================== FAILURES ===================================
+___ TestRawChatErrorPreservation.test_error_type_preserved_connection_error ___
+[gw6] win32 -- Python 3.12.6 C:\Python312\python.exe
+
+self = <tests.test_retry_baseline.TestRawChatErrorPreservation object at 0x0000028638942990>
+
+    def test_error_type_preserved_connection_error(self):
+        """VERIFIED FIX: ConnectionError propagates without L1 wrapping."""
+        llm = MockLLM(cfg={"max_retries": 0}, fail_count=1, fail_type=ConnectionError)
+    
+        with pytest.raises(ConnectionError):
+            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+>           list(result)
+
+tests\test_retry_baseline.py:342: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+agent_cascade\llm\base.py:519: in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+agent_cascade\llm\base.py:379: in _format_and_cache
+    for o in output:
+             ^^^^^^
+agent_cascade\llm\base.py:503: in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <tests.test_retry_baseline.MockLLM object at 0x0000028638942870>
+messages = [Message({'role': 'system', 'content': 'You are a helpful assistant.'}), Message({'role': 'user', 'content': 'hi'})]
+delta_stream = False, generate_cfg = {}
+
+    def _chat_stream(self, messages, delta_stream=False, generate_cfg=None):
+        """Mock streaming that can be configured to fail."""
+        self.call_count += 1
+    
+        if self.fail_count > 0 and self.call_count <= self.fail_count:
+            exc_class = self.fail_type or ModelServiceError
+>           raise exc_class(message=f"Simulated failure #{self.call_count}")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: ConnectionError() takes no keyword arguments
+
+tests\test_retry_baseline.py:58: TypeError
+---------------------------- Captured stdout call -----------------------------
+2026-07-28 03:27:44,133 - base.py - 986 - INFO - Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+------------------------------ Captured log call ------------------------------
+[32mINFO    [0m agent_cascade_logger:base.py:986 Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+============================ slowest 10 durations =============================
+3.19s call     tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted
+3.09s call     tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls
+3.07s call     tests/test_retry_baseline.py::TestBackoffTiming::test_router_backoff_exponential
+1.03s call     tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_fails_then_succeeds_on_retry
+1.02s call     tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_one_retry
+0.02s call     tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds
+0.01s call     tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_zero_retries
+0.01s setup    tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds
+0.01s setup    tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_connection_error
+0.01s setup    tests/test_retry_baseline.py::TestSubAgentRetryBehavior::test_sub_agent_separate_retry_budget
+=========================== short test summary info ===========================
+FAILED tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_connection_error
+======================== 1 failed, 13 passed in 12.18s ========================

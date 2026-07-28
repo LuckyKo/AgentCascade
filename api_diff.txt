@@ -1,0 +1,297 @@
+diff --git a/docs/API_REFERENCE.md b/docs/API_REFERENCE.md
+index 7d57c93..2ff421f 100644
+--- a/docs/API_REFERENCE.md
++++ b/docs/API_REFERENCE.md
+@@ -108,40 +108,259 @@ All API errors follow a consistent JSON format:
+ **Endpoint**: `/ws/chat`
+ **Authentication**: Unauthenticated. No token verification is performed upon connection, and all subsequent WebSocket messages are sent without authentication.
+ 
+-### Client $\rightarrow$ Server Messages
+-Messages are sent as JSON objects with a `type` field.
++### Client → Server Messages
++
++All messages are JSON objects with a required `type` field. Field requirements below are derived from `agent_cascade/ws_handlers.py`.
++
++#### message
++Send a new message to start agent generation.
++```json
++{
++    "type": "message",
++    "text": "<required: message content>",
++    "target_agent": "<optional: target instance name, defaults to session_name>",
++    "agent_index": "<optional: integer index of selected agent>",
++    "session_name": "<optional: new session name>",
++    "generate_cfg": "<optional: generation configuration object>"
++}
++```
++
++#### continue
++Send current stack as-is to the LLM.
++```json
++{
++    "type": "continue",
++    "target_agent": "<optional>",
++    "agent_index": "<optional>",
++    "session_name": "<optional>",
++    "generate_cfg": "<optional>"
++}
++```
++
++#### stop
++Stop all streaming and set active agents to IDLE.
++```json
++{
++    "type": "stop"
++}
++```
++
++#### pause
++Pause ALL running instances (blocks Phase 4 tool execution).
++```json
++{
++    "type": "pause"
++}
++```
++
++#### resume_all
++Resume ALL paused instances.
++```json
++{
++    "type": "resume_all"
++}
++```
++
++#### resume
++Resume a specific agent instance.
++```json
++{
++    "type": "resume",
++    "instance_name": "<optional: defaults to session_name>"
++}
++```
++
++#### terminate_agent_instance / terminate_sub_agent
++Forcefully terminate an agent instance. Root orchestrator is protected and transitions to IDLE instead.
++```json
++{
++    "type": "terminate_agent_instance",
++    "instance_name": "<required: name of instance to terminate>"
++}
++```
++
++#### retry
++Remove trailing assistant/function messages and resend stack.
++```json
++{
++    "type": "retry",
++    "target_agent": "<optional>",
++    "agent_index": "<optional>",
++    "session_name": "<optional>",
++    "generate_cfg": "<optional>"
++}
++```
++
++#### reset
++Clear conversation and reset session.
++```json
++{
++    "type": "reset"
++}
++```
++
++#### refresh_souls
++Reload agent configurations from disk.
++```json
++{
++    "type": "refresh_souls"
++}
++```
++
++#### restart_server
++Trigger a server restart via os.execl.
++```json
++{
++    "type": "restart_server"
++}
++```
++
++#### update_config
++Update LLM or agent configuration. Delegates to ConfigUpdateRouter.
++```json
++{
++    "type": "update_config",
++    "generate_cfg": "<required: config object with fields like disabled_tools, etc.>"
++}
++```
++
++#### set_work_folders
++Change workspace directory settings. Empty arrays are treated as intentional clears.
++```json
++{
++    "type": "set_work_folders",
++    "work_access_folders_ro": ["<optional: read-only folder paths>"],
++    "work_access_folders_rw": ["<optional: read-write folder paths>"]
++}
++```
++
++#### update_endpoints
++Bulk update all endpoints and priorities.
++```json
++{
++    "type": "update_endpoints",
++    "endpoints": ["<array of endpoint config objects>"],
++    "agent_priorities": {"<agent_type>": ["<endpoint_id priority order>"]}
++}
++```
++
++#### update_api_priorities
++Update agent-type → endpoint priority mappings.
++```json
++{
++    "type": "update_api_priorities",
++    "agent_priorities": {"<agent_type>": ["<endpoint_id priority order>"]}
++}
++```
++
++#### approve
++Approve a pending operation request.
++```json
++{
++    "type": "approve",
++    "request_id": "<required: ID of request to approve>",
++    "automated": "<optional: boolean, true if auto-approved>"
++}
++```
++
++#### reject
++Reject a pending operation request.
++```json
++{
++    "type": "reject",
++    "request_id": "<required: ID of request to reject>",
++    "reason": "<optional: rejection reason, defaults to 'Rejected by user'>",
++    "automated": "<optional: boolean>"
++}
++```
++
++#### ask_security
++Consult the Security advisor for pending tool approvals.
++```json
++{
++    "type": "ask_security"
++}
++```
++
++#### set_auto_security
++Toggle automatic security checks.
++```json
++{
++    "type": "set_auto_security",
++    "enabled": "<required: boolean>"
++}
++```
++
++#### edit_message
++Modify the content of a previous message in conversation history.
++```json
++{
++    "type": "edit_message",
++    "index": "<required: integer index of message to edit>",
++    "content": "<required: new message content>",
++    "instance_name": "<optional: defaults to session_name>"
++}
++```
++
++#### delete_messages
++Remove specific messages from history.
++```json
++{
++    "type": "delete_messages",
++    "indices": ["<required: array of integer indices to delete>"],
++    "instance_name": "<optional: defaults to session_name>"
++}
++```
++
++#### select_agent
++Switch the active agent context.
++```json
++{
++    "type": "select_agent",
++    "index": "<required: integer index of agent to select>"
++}
++```
++
++#### set_session_name
++Rename the current session.
++```json
++{
++    "type": "set_session_name",
++    "name": "<required: new session name, defaults to 'Maine' if missing>"
++}
++```
++
++#### load_session
++Load a previously saved session from a log file.
++```json
++{
++    "type": "load_session",
++    "path": "<required: absolute path to JSONL log file>"
++}
++```
++
++#### inject
++Inject a message into an agent's queue without starting generation.
++```json
++{
++    "type": "inject",
++    "text": "<required: message content>",
++    "target_agent": "<optional: defaults to session_name>"
++}
++```
++
++#### dismiss_queue
++Clear the pending message queue for an instance.
++```json
++{
++    "type": "dismiss_queue",
++    "instance_name": "<optional: defaults to session_name>",
++    "message_index": "<required: integer index to remove, or -1 to clear all>"
++}
++```
++
++### Server → Client Messages
+ 
+-| Type | Description |
+-|------|-------------|
+-| `message` | Send a standard message to an agent. |
+-| `stop` | Stop the current agent execution. |
+-| `retry` | Retry the last operation. |
+-| `reset` | Reset the session. |
+-| `approve` | Approve a pending operation. |
+-| `reject` | Reject a pending operation. |
+-| `edit_message` | Modify the content of a previous message. |
+-| `delete_messages` | Remove specific messages from history. |
+-| `select_agent` | Switch the active agent context. |
+-| `set_session_name` | Rename the current session. |
+-| `inject` | Inject a message into the history. |
+-| `continue` | Continue a paused execution. |
+-| `pause` | Pause the current execution. |
+-| `resume_all` | Resume all halted agents. |
+-| `resume` | Resume a specific agent. |
+-| `terminate_agent_instance` | Forcefully terminate an agent instance. |
+-| `terminate_sub_agent` | Forcefully terminate a sub-agent. |
+-| `refresh_souls` | Reload agent configurations. |
+-| `restart_server` | Trigger a server restart. |
+-| `update_config` | Update LLM or agent configuration. |
+-| `set_work_folders` | Change workspace directory settings. |
+-| `update_endpoints` | Modify API endpoint configurations. |
+-| `update_api_priorities` | Update endpoint priority levels. |
+-| `ask_security` | Consult the security advisor. |
+-| `set_auto_security` | Toggle automatic security checks. |
+-| `load_session` | Load a previously saved session. |
+-| `dismiss_queue` | Clear the pending message queue. |
+-
+-### Server $\rightarrow$ Client Messages
+ | Type | Description |
+ |------|-------------|
+ | `state` | Full system state snapshot. |

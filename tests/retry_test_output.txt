@@ -1,0 +1,201 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.6, pytest-9.0.2, pluggy-1.6.0 -- C:\Python312\python.exe
+cachedir: .pytest_cache
+rootdir: N:\work\WD\AgentCascade
+configfile: pytest.ini
+plugins: anyio-4.9.0, asyncio-1.4.0, timeout-2.4.0, xdist-3.8.0, typeguard-4.4.4
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 60.0s
+timeout method: thread
+timeout func_only: False
+created: 8/8 workers
+8 workers [14 items]
+
+scheduling tests via LoadScheduling
+
+tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_fails_then_succeeds_on_retry 
+tests/test_retry_baseline.py::TestInnerLoopDetection::test_character_run_detected_skips_to_next_endpoint 
+tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds 
+tests/test_retry_baseline.py::TestInnerLoopDetection::test_max_token_exceeded_skips_to_next_endpoint 
+tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_l1_wraps_generic_exception 
+tests/test_retry_baseline.py::TestSubAgentRetryBehavior::test_sub_agent_separate_retry_budget 
+tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_l1_wraps_connection_error 
+tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls 
+[gw3] [  7%] PASSED tests/test_retry_baseline.py::TestInnerLoopDetection::test_character_run_detected_skips_to_next_endpoint 
+[gw7] [ 14%] PASSED tests/test_retry_baseline.py::TestSubAgentRetryBehavior::test_sub_agent_separate_retry_budget 
+tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_max_retries_from_cfg 
+[gw4] [ 21%] PASSED tests/test_retry_baseline.py::TestInnerLoopDetection::test_max_token_exceeded_skips_to_next_endpoint 
+tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_endpoint_max_retries_leaks_to_llm_cfg 
+[gw2] [ 28%] PASSED tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds 
+tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted 
+[gw3] [ 35%] FAILED tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_max_retries_from_cfg 
+[gw4] [ 42%] FAILED tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_endpoint_max_retries_leaks_to_llm_cfg 
+[gw5] [ 50%] FAILED tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_l1_wraps_generic_exception 
+[gw6] [ 57%] FAILED tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_l1_wraps_connection_error 
+tests/test_retry_baseline.py::TestBackoffTiming::test_router_backoff_exponential 
+[gw1] [ 64%] PASSED tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_fails_then_succeeds_on_retry 
+tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_one_retry 
+[gw1] [ 71%] PASSED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_one_retry 
+[gw0] [ 78%] PASSED tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls 
+tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_zero_retries 
+[gw0] [ 85%] PASSED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_zero_retries 
+[gw2] [ 92%] PASSED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted 
+[gw5] [100%] PASSED tests/test_retry_baseline.py::TestBackoffTiming::test_router_backoff_exponential 
+
+================================== FAILURES ===================================
+____________ TestLLayerRetryBehavior.test_l1_max_retries_from_cfg _____________
+[gw3] win32 -- Python 3.12.6 C:\Python312\python.exe
+
+self = <tests.test_retry_baseline.TestLLayerRetryBehavior object at 0x0000016552759880>
+
+    def test_l1_max_retries_from_cfg(self):
+        """max_retries can be set via cfg. MockLLM defaults to 0 for test isolation."""
+        llm_with_endpoint_cfg = MockLLM({"max_retries": 2})
+>       assert llm_with_endpoint_cfg.max_retries == 2
+E       assert 0 == 2
+E        +  where 0 = <tests.test_retry_baseline.MockLLM object at 0x000001655275B440>.max_retries
+
+tests\test_retry_baseline.py:482: AssertionError
+____ TestLLayerRetryBehavior.test_l1_endpoint_max_retries_leaks_to_llm_cfg ____
+[gw4] win32 -- Python 3.12.6 C:\Python312\python.exe
+
+self = <tests.test_retry_baseline.TestLLayerRetryBehavior object at 0x000001F46B4BF950>
+
+    def test_l1_endpoint_max_retries_leaks_to_llm_cfg(self):
+        """CRITICAL: endpoint.max_retries is passed to LLM via to_llm_cfg().
+    
+        This means changing an endpoint's retry count affects BOTH:
+        - L2 (APIRouter): how many times it retries the endpoint before failover
+        - L1 (BaseChatModel): how many times the LLM retries its own calls
+    
+        This coupling is intentional but problematic. The retry refactoring will
+        decouple these concerns into separate retry policies.
+        """
+        ep = APIEndpoint(
+            name="test", api_base="http://localhost:9981/v1", model="m",
+            max_retries=3, base_retry_delay=0.5, max_retry_delay=10.0,
+        )
+        llm_cfg = ep.to_llm_cfg()
+    
+        # The endpoint's retry settings are baked into the LLM config
+>       assert llm_cfg["max_retries"] == 3, \
+               ^^^^^^^^^^^^^^^^^^^^^^
+            f"Endpoint max_retries={ep.max_retries} leaked to LLM cfg: {llm_cfg['max_retries']}"
+E       KeyError: 'max_retries'
+
+tests\test_retry_baseline.py:507: KeyError
+________ TestRawChatErrorPreservation.test_l1_wraps_generic_exception _________
+[gw5] win32 -- Python 3.12.6 C:\Python312\python.exe
+
+self = <tests.test_retry_baseline.TestRawChatErrorPreservation object at 0x000001A24DDD9F70>
+
+    def test_l1_wraps_generic_exception(self):
+        """L1 retry wrapper catches generic Exception → wraps as ModelServiceError.
+    
+        This is a KNOWN BUG that Phase 2 will fix. The raw_chat() path should
+        preserve original exception types but currently does not because
+        retry_model_service_iterator uses bare `except Exception`.
+        """
+        class CustomAPIError(Exception):
+            pass
+    
+        llm = MockLLM(cfg={"max_retries": 0}, fail_count=1, fail_type=CustomAPIError)
+    
+        with pytest.raises(ModelServiceError) as exc_info:
+            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+>           list(result)
+
+tests\test_retry_baseline.py:332: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+agent_cascade\llm\base.py:519: in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+agent_cascade\llm\base.py:379: in _format_and_cache
+    for o in output:
+             ^^^^^^
+agent_cascade\llm\base.py:503: in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <tests.test_retry_baseline.MockLLM object at 0x000001A24DDDAD80>
+messages = [Message({'role': 'system', 'content': 'You are a helpful assistant.'}), Message({'role': 'user', 'content': 'hi'})]
+delta_stream = False, generate_cfg = {}
+
+    def _chat_stream(self, messages, delta_stream=False, generate_cfg=None):
+        """Mock streaming that can be configured to fail."""
+        self.call_count += 1
+    
+        if self.fail_count > 0 and self.call_count <= self.fail_count:
+            exc_class = self.fail_type or ModelServiceError
+>           raise exc_class(message=f"Simulated failure #{self.call_count}")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: CustomAPIError() takes no keyword arguments
+
+tests\test_retry_baseline.py:58: TypeError
+---------------------------- Captured stdout call -----------------------------
+2026-07-28 03:25:40,626 - base.py - 986 - INFO - Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+------------------------------ Captured log call ------------------------------
+[32mINFO    [0m agent_cascade_logger:base.py:986 Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+_________ TestRawChatErrorPreservation.test_l1_wraps_connection_error _________
+[gw6] win32 -- Python 3.12.6 C:\Python312\python.exe
+
+self = <tests.test_retry_baseline.TestRawChatErrorPreservation object at 0x000001577A135E50>
+
+    def test_l1_wraps_connection_error(self):
+        """ConnectionError is also wrapped as ModelServiceError by L1."""
+        llm = MockLLM(cfg={"max_retries": 0}, fail_count=1, fail_type=ConnectionError)
+    
+        with pytest.raises(ModelServiceError) as exc_info:
+            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+>           list(result)
+
+tests\test_retry_baseline.py:345: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+agent_cascade\llm\base.py:519: in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+agent_cascade\llm\base.py:379: in _format_and_cache
+    for o in output:
+             ^^^^^^
+agent_cascade\llm\base.py:503: in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <tests.test_retry_baseline.MockLLM object at 0x000001577A1348C0>
+messages = [Message({'role': 'system', 'content': 'You are a helpful assistant.'}), Message({'role': 'user', 'content': 'hi'})]
+delta_stream = False, generate_cfg = {}
+
+    def _chat_stream(self, messages, delta_stream=False, generate_cfg=None):
+        """Mock streaming that can be configured to fail."""
+        self.call_count += 1
+    
+        if self.fail_count > 0 and self.call_count <= self.fail_count:
+            exc_class = self.fail_type or ModelServiceError
+>           raise exc_class(message=f"Simulated failure #{self.call_count}")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: ConnectionError() takes no keyword arguments
+
+tests\test_retry_baseline.py:58: TypeError
+---------------------------- Captured stdout call -----------------------------
+2026-07-28 03:25:40,626 - base.py - 986 - INFO - Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+------------------------------ Captured log call ------------------------------
+[32mINFO    [0m agent_cascade_logger:base.py:986 Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+============================ slowest 10 durations =============================
+3.29s call     tests/test_retry_baseline.py::TestBackoffTiming::test_router_backoff_exponential
+3.27s call     tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted
+3.19s call     tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls
+1.01s call     tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_one_retry
+1.01s call     tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_fails_then_succeeds_on_retry
+0.02s call     tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds
+0.01s call     tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_zero_retries
+0.01s setup    tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_l1_wraps_generic_exception
+0.01s setup    tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls
+0.01s setup    tests/test_retry_baseline.py::TestInnerLoopDetection::test_max_token_exceeded_skips_to_next_endpoint
+=========================== short test summary info ===========================
+FAILED tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_max_retries_from_cfg
+FAILED tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_endpoint_max_retries_leaks_to_llm_cfg
+FAILED tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_l1_wraps_generic_exception
+FAILED tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_l1_wraps_connection_error
+======================== 4 failed, 10 passed in 12.80s ========================

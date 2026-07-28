@@ -1,0 +1,233 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.6, pytest-9.0.2, pluggy-1.6.0 -- C:\Python312\python.exe
+cachedir: .pytest_cache
+rootdir: N:\work\WD\AgentCascade
+configfile: pytest.ini
+plugins: anyio-4.9.0, asyncio-1.4.0, timeout-2.4.0, xdist-3.8.0, typeguard-4.4.4
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 60.0s
+timeout method: thread
+timeout func_only: False
+created: 8/8 workers
+8 workers [14 items]
+
+scheduling tests via LoadScheduling
+
+tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_fails_then_succeeds_on_retry 
+tests/test_retry_baseline.py::TestInnerLoopDetection::test_character_run_detected_skips_to_next_endpoint 
+tests/test_retry_baseline.py::TestInnerLoopDetection::test_max_token_exceeded_skips_to_next_endpoint 
+tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls 
+tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_generic_exception 
+tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds 
+tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_connection_error 
+tests/test_retry_baseline.py::TestSubAgentRetryBehavior::test_sub_agent_separate_retry_budget 
+[gw5] [  7%] PASSED tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_generic_exception 
+[gw6] [ 14%] PASSED tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_connection_error 
+[gw3] [ 21%] PASSED tests/test_retry_baseline.py::TestInnerLoopDetection::test_character_run_detected_skips_to_next_endpoint 
+tests/test_retry_baseline.py::TestBackoffTiming::test_router_backoff_exponential 
+[gw4] [ 28%] PASSED tests/test_retry_baseline.py::TestInnerLoopDetection::test_max_token_exceeded_skips_to_next_endpoint 
+tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_max_retries_always_zero 
+[gw7] [ 35%] PASSED tests/test_retry_baseline.py::TestSubAgentRetryBehavior::test_sub_agent_separate_retry_budget 
+tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_endpoint_max_retries_decoupled 
+[gw3] [ 42%] PASSED tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_max_retries_always_zero 
+[gw4] [ 50%] PASSED tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_endpoint_max_retries_decoupled 
+[gw2] [ 57%] PASSED tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds 
+tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted 
+[gw5] [ 64%] PASSED tests/test_retry_baseline.py::TestBackoffTiming::test_router_backoff_exponential 
+[gw1] [ 71%] PASSED tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_fails_then_succeeds_on_retry 
+tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_one_retry 
+[gw0] [ 78%] FAILED tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls 
+tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_zero_retries 
+[gw0] [ 85%] PASSED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_zero_retries 
+[gw1] [ 92%] PASSED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_one_retry 
+[gw2] [100%] FAILED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted 
+
+================================== FAILURES ===================================
+_ TestSingleEndpointRetryCount.test_endpoint_max_retries_two_gives_three_calls _
+[gw0] win32 -- Python 3.12.6 C:\Python312\python.exe
+
+self = <tests.test_retry_baseline.TestSingleEndpointRetryCount object at 0x000002B8FFD61C40>
+
+    def test_endpoint_max_retries_two_gives_three_calls(self):
+        """max_retries=2 → exactly 3 calls (initial + 2 retries) before failover."""
+        router = make_router()
+        ep = APIEndpoint(
+            name="test-ep",
+            api_base="http://localhost:9998/v1",
+            model="mock-model",
+            max_retries=2,
+        )
+        router.add_endpoint(ep)
+    
+        llm = MockLLM(fail_count=5, fail_type=ConnectionError)
+    
+        def do_call(llm_cfg):
+            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            list(result)
+            return True
+    
+        # Will exhaust custom endpoint (3 calls) then fall back to default_llm_cfg
+        with pytest.raises(RuntimeError, match="All API endpoints exhausted"):
+            router.call_with_fallback("coder", do_call, agent_instance_name="test-inst")
+    
+        # Custom endpoint: 3 attempts (max_retries=2). Default fallback also tried.
+        # Total >= 3 because default fallback adds more attempts.
+>       assert llm.call_count >= 3, f"Expected at least 3 calls from custom endpoint, got {llm.call_count}"
+E       AssertionError: Expected at least 3 calls from custom endpoint, got 2
+E       assert 2 >= 3
+E        +  where 2 = <tests.test_retry_baseline.MockLLM object at 0x000002B8FFEBF020>.call_count
+
+tests\test_retry_baseline.py:151: AssertionError
+---------------------------- Captured stdout call -----------------------------
+2026-07-28 07:16:14,824 - base.py - 986 - INFO - Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+2026-07-28 07:16:15,911 - base.py - 986 - INFO - Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+------------------------------ Captured log call ------------------------------
+[32mINFO    [0m agent_cascade_logger:base.py:986 Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+[33mWARNING [0m agent_cascade.api_router:api_router.py:1186 [APIRouter] Endpoint 'default-model' @ http://localhost:1111/v1 attempt 1/2: ConnectionError() takes no keyword arguments
+Traceback: Traceback (most recent call last):
+  File "N:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1139, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "N:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1080, in execute_with_sem
+    result = call_fn(llm_cfg, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "N:\work\WD\AgentCascade\tests\test_retry_baseline.py", line 142, in do_call
+    list(result)
+  File "N:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 519, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "N:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 379, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "N:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 503, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "N:\work\WD\AgentCascade\tests\test_retry_baseline.py", line 58, in _chat_stream
+    raise exc_class(message=f"Simulated failure #{self.call_count}")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: ConnectionError() takes no keyword arguments
+
+[32mINFO    [0m agent_cascade_logger:base.py:986 Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+[33mWARNING [0m agent_cascade.api_router:api_router.py:1186 [APIRouter] Endpoint 'default-model' @ http://localhost:1111/v1 attempt 2/2: ConnectionError() takes no keyword arguments
+Traceback: Traceback (most recent call last):
+  File "N:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1139, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "N:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1080, in execute_with_sem
+    result = call_fn(llm_cfg, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "N:\work\WD\AgentCascade\tests\test_retry_baseline.py", line 142, in do_call
+    list(result)
+  File "N:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 519, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "N:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 379, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "N:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 503, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "N:\work\WD\AgentCascade\tests\test_retry_baseline.py", line 58, in _chat_stream
+    raise exc_class(message=f"Simulated failure #{self.call_count}")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: ConnectionError() takes no keyword arguments
+_________ TestPerformanceBaseline.test_latency_max_retries_exhausted __________
+[gw2] win32 -- Python 3.12.6 C:\Python312\python.exe
+
+self = <tests.test_retry_baseline.TestPerformanceBaseline object at 0x00000231611B21B0>
+
+    def test_latency_max_retries_exhausted(self):
+        """All retries exhausted → measure total time until failure."""
+        router = make_router()
+        ep = APIEndpoint(
+            id="ep-perf3", name="Perf-EP", api_base="http://localhost:9982/v1",
+            model="perf-model", max_retries=2,
+        )
+        router.add_endpoint(ep)
+    
+        llm = MockLLM(fail_count=10, fail_type=ConnectionError)
+    
+        def do_call(llm_cfg):
+            result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
+            list(result)
+            return True
+    
+        start = time.time()
+        with pytest.raises(RuntimeError):
+            router.call_with_fallback("coder", do_call, agent_instance_name="perf-test")
+        elapsed = time.time() - start
+    
+        # Custom endpoint: 3 attempts. Default fallback: also tried (with its own retries).
+>       assert llm.call_count >= 3
+E       assert 2 >= 3
+E        +  where 2 = <tests.test_retry_baseline.MockLLM object at 0x00000231611B31D0>.call_count
+
+tests\test_retry_baseline.py:464: AssertionError
+---------------------------- Captured stdout call -----------------------------
+2026-07-28 07:16:15,895 - base.py - 986 - INFO - Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+2026-07-28 07:16:16,937 - base.py - 986 - INFO - Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+------------------------------ Captured log call ------------------------------
+[32mINFO    [0m agent_cascade_logger:base.py:986 Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+[33mWARNING [0m agent_cascade.api_router:api_router.py:1186 [APIRouter] Endpoint 'default-model' @ http://localhost:1111/v1 attempt 1/2: ConnectionError() takes no keyword arguments
+Traceback: Traceback (most recent call last):
+  File "N:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1139, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "N:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1080, in execute_with_sem
+    result = call_fn(llm_cfg, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "N:\work\WD\AgentCascade\tests\test_retry_baseline.py", line 455, in do_call
+    list(result)
+  File "N:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 519, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "N:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 379, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "N:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 503, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "N:\work\WD\AgentCascade\tests\test_retry_baseline.py", line 58, in _chat_stream
+    raise exc_class(message=f"Simulated failure #{self.call_count}")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: ConnectionError() takes no keyword arguments
+
+[32mINFO    [0m agent_cascade_logger:base.py:986 Agent [Unknown] - ALL tokens: 1, Available tokens: 64994
+[33mWARNING [0m agent_cascade.api_router:api_router.py:1186 [APIRouter] Endpoint 'default-model' @ http://localhost:1111/v1 attempt 2/2: ConnectionError() takes no keyword arguments
+Traceback: Traceback (most recent call last):
+  File "N:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1139, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "N:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1080, in execute_with_sem
+    result = call_fn(llm_cfg, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "N:\work\WD\AgentCascade\tests\test_retry_baseline.py", line 455, in do_call
+    list(result)
+  File "N:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 519, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "N:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 379, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "N:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 503, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "N:\work\WD\AgentCascade\tests\test_retry_baseline.py", line 58, in _chat_stream
+    raise exc_class(message=f"Simulated failure #{self.call_count}")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: ConnectionError() takes no keyword arguments
+============================ slowest 10 durations =============================
+1.10s call     tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_fails_then_succeeds_on_retry
+1.09s call     tests/test_retry_baseline.py::TestBackoffTiming::test_router_backoff_exponential
+1.09s call     tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls
+1.06s call     tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_one_retry
+1.06s call     tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds
+1.05s call     tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted
+0.01s call     tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_zero_retries
+0.01s setup    tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds
+0.01s setup    tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_connection_error
+0.01s setup    tests/test_retry_baseline.py::TestInnerLoopDetection::test_max_token_exceeded_skips_to_next_endpoint
+=========================== short test summary info ===========================
+FAILED tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls
+FAILED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted
+======================== 2 failed, 12 passed in 11.65s ========================

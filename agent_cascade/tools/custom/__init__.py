@@ -12,6 +12,7 @@ from .syntax_check import SyntaxCheck
 from .ddg_search import DDGSearch
 from .scan_skills import ScanSkills
 from .propose_skill import ProposeSkill
+from .load_skill import LoadSkill
 
 __all__ = [
     'ReadFile',
@@ -34,4 +35,5 @@ __all__ = [
     'DDGSearch',
     'ScanSkills',
     'ProposeSkill',
+    'LoadSkill',
 ]

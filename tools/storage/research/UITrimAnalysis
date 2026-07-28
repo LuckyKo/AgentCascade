@@ -1,0 +1,77 @@
+## UI Compression Marker Trimming - Root Cause Analysis
+
+### Problem
+The orchestrator (Maine) sees 3 compression markers in its memory, but the UI chat window only shows the last one.
+
+### Files Involved
+1. **api_server.py** — Server-side state building and streaming
+2. **agent_pool.py** — History management and slicing
+3. **web_ui/app.js** — Frontend message handling and rendering
+
+### Key Functions Identified
+
+#### 1. `find_last_marker()` (agent_pool.py, line 595)
+Static method that scans backwards through history for the latest compression marker. Returns index of last marker or -1.
+
+```python
+@staticmethod
+def find_last_marker(history: List[Union[dict, Message]]) -> int:
+    for i in range(len(history) - 1, -1, -1):
+        msg = history[i]
+        role = msg.get(ROLE) if isinstance(msg, dict) else getattr(msg, ROLE, '')
+        content = msg.get(CONTENT, '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+        if role == USER and isinstance(content, str) and content.startswith(COMPRESSION_MARKER):
+            return i
+    return -1
+```
+
+#### 2. `slice_history_for_llm()` (agent_pool.py, line 694)
+Extracts the "working set" from full history — only messages from the last compression marker onwards. Used for LLM context, NOT for UI display directly.
+
+```python
+def slice_history_for_llm(self, history):
+    latest_summary_idx = self.find_last_marker(history)
+    if latest_summary_idx == -1:
+        return history
+    sliced = history[latest_summary_idx:]
+    # Prepend system message if not in slice
+    ...
+    return list(sliced)  # Only returns from LAST marker onwards!
+```
+
+#### 3. `build_state()` (api_server.py, ~line 676)
+Builds full state snapshot sent to UI. CRITICAL LINE at 692:
+```python
+display_msgs = list(active_h) if show_active_only else msgs
+```
+- By default (`show_active_only=False`): sends ALL messages from `session['history']`
+- When `show_active_only=True`: sends only `active_h` (from last marker onwards via `slice_history_for_llm`)
+
+#### 4. `build_stream_update()` (api_server.py, ~line 781)
+Builds lightweight streaming delta — ONLY sends new response messages, NOT full history. CRITICAL: The delta mechanism does NOT include compression markers that were inserted into history during generation.
+
+### Root Cause Analysis
+
+**The streaming delta mechanism is the primary culprit for missing compression markers.**
+
+When compression happens DURING active generation:
+1. A new USER-role compression marker is inserted into `session['history']`
+2. `build_stream_update()` computes `history_count = len(session['history'])` (increased by 1)
+3. But it only sends `response_msgs` — which are the response messages from the agent, NOT the compression marker
+4. The frontend receives: `{history_count: N+1, response_messages: [...]}` where the new marker is never transmitted
+
+This means: **compression markers inserted during generation are invisible to the streaming delta mechanism.**
+
+### When Markers DO Reach the UI
+After generation completes, `build_state(generating=False)` at line 1382 broadcasts a full state including all history messages. So markers should appear after generation ends.
+
+### Potential Additional Causes
+
+1. **`show_active_only=True` setting**: If enabled, `slice_history_for_llm()` is used for display, which only shows from the LAST marker onwards. This would explain seeing only 1 marker.
+
+2. **Frontend delta merge logic** (app.js line 878-881): When `historyCount <= state.messages.length`, it truncates and appends response messages. If a compression marker was inserted in the middle of history, this could cause misalignment.
+
+### Recommended Investigation
+1. Check if `show_active_only` is being set to True in any default config or user setting
+2. Verify that after generation ends, `build_state(generating=False)` includes ALL markers
+3. Fix `build_stream_update()` to include new compression markers when they're inserted during active generation

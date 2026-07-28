@@ -1,0 +1,174 @@
+diff --git a/agent_cascade/api_router.py b/agent_cascade/api_router.py
+index 56ea0d5..11efe35 100644
+--- a/agent_cascade/api_router.py
++++ b/agent_cascade/api_router.py
+@@ -565,6 +565,7 @@ class APIRouter:
+         self.policy = policy or POLICY_DEFAULT
+         self.endpoints: Dict[str, APIEndpoint] = {}           # id → endpoint
+         self.agent_priorities: Dict[str, List[str]] = {}      # agent_type → [endpoint_ids]
++        self._agent_types_with_priorities: set = set()        # Agent types with active endpoint priorities (gates Tier 2 fallback)
+         self._lock = threading.Lock()
+         
+         # Per-server semaphores for concurrency control: api_base -> (Semaphore, limit)
+@@ -632,9 +633,10 @@ class APIRouter:
+                     eid for eid in self.agent_priorities[agent_type]
+                     if eid != endpoint_id
+                 ]
+-                # Remove empty lists
++                # Remove empty lists and clean up tracking set
+                 if not self.agent_priorities[agent_type]:
+                     del self.agent_priorities[agent_type]
++                    self._agent_types_with_priorities.discard(agent_type)
+             self._save()
+             return True
+ 
+@@ -675,6 +677,7 @@ class APIRouter:
+             # If normalized key differs from input and input exists, remove it to prevent duplicates
+             if canonical != agent_type and agent_type in self.agent_priorities:
+                 del self.agent_priorities[agent_type]
++                self._agent_types_with_priorities.discard(agent_type)
+             
+             # Validate that all IDs exist
+             valid_ids = [eid for eid in endpoint_ids if eid in self.endpoints]
+@@ -682,11 +685,13 @@ class APIRouter:
+             
+             if valid_ids:
+                 self.agent_priorities[canonical] = valid_ids
++                self._agent_types_with_priorities.add(canonical)  # Track that this agent type was configured
+                 logger.info(f"[APIRouter.set_agent_priorities] {canonical} → {valid_ids} "
+                            f"({'filtered ' + str(filtered_count) + ' invalid IDs, ' if filtered_count else ''}"
+                            f"canonical key: {canonical})")
+             elif canonical in self.agent_priorities:
+                 del self.agent_priorities[canonical]
++                self._agent_types_with_priorities.discard(canonical)
+                 logger.info(f"[APIRouter.set_agent_priorities] Removed priorities for {canonical} "
+                            f"(all {len(endpoint_ids)} IDs were invalid)")
+             else:
+@@ -820,6 +825,14 @@ class APIRouter:
+         # This ensures consistent behavior across restarts regardless of source ordering
+         return CANONICAL_AGENT_TYPES.get(agent_type_lower, agent_type)
+ 
++    @staticmethod
++    def _adjust_config_for_tokens(cfg: dict, allocated_tokens: Optional[int]) -> None:
++        """Adjust max_input_tokens in cfg if allocated_tokens is provided and would exceed the configured limit."""
++        if allocated_tokens is not None:
++            effective_limit = cfg.get('max_input_tokens', 0)
++            if effective_limit > 0 and effective_limit < allocated_tokens:
++                cfg['max_input_tokens'] = allocated_tokens
++
+     def get_endpoint_chain(
+         self,
+         agent_type: str,
+@@ -877,38 +890,35 @@ class APIRouter:
+                     # to endpoints that can handle their full token budget rather than being capped by
+                     # static endpoint limits. NOTE: If the LLM API has a hard cap below allocated_tokens, 
+                     # the call may fail with an error — this is acceptable as it's better than silent truncation.
+-                    if allocated_tokens is not None:
+-                        effective_limit = cfg.get('max_input_tokens', 0)
+-                        # Only adjust if effective_limit > 0 (explicitly configured). A limit of 0 means "unlimited".
+-                        if effective_limit > 0 and effective_limit < allocated_tokens:
+-                            cfg['max_input_tokens'] = allocated_tokens
++                    self._adjust_config_for_tokens(cfg, allocated_tokens)
+                     
+                     configs.append(cfg)
+ 
+             # 2. If no agent-specific endpoints found, try the last successful endpoint (Tier 2)
+             #    This provides automatic recovery when an agent's configured endpoints become unavailable.
++            #    Only used if this agent type ever had endpoints configured — agents with no configuration
++            #    should fall back directly to the global default (Tier 3), not pick up stale configs from other agents.
+             #    Kept inside lock to prevent TOCTOU race between condition check and data access.
+             if not configs and self._last_successful_endpoint_cfg is not None:
+-                last_success_cfg = self._last_successful_endpoint_cfg
+-                # Validate that the last successful endpoint still exists and is enabled
+-                api_base = last_success_cfg.get('api_base') or last_success_cfg.get('model_server', '')
+-                for ep in self.endpoints.values():
+-                    if ep.api_base == api_base and ep.enabled:
+-                        # Use the stored config but ensure it has proper token limits
+-                        cfg = copy.deepcopy(last_success_cfg)
+-                        ep_limit = ep.max_input_tokens
+-                        if ep_limit <= 0 and general_limit > 0:
+-                            cfg['max_input_tokens'] = general_limit
+-                        
+-                        # Adjust for allocated tokens requirement (dynamic endpoint selection)
+-                        if allocated_tokens is not None:
+-                            effective_limit = cfg.get('max_input_tokens', 0)
+-                            # Only adjust if effective_limit > 0 (explicitly configured). A limit of 0 means "unlimited".
+-                            if effective_limit > 0 and effective_limit < allocated_tokens:
+-                                cfg['max_input_tokens'] = allocated_tokens
+-                        
+-                        configs.append(cfg)
+-                        break
++                if normalized_agent_type not in self._agent_types_with_priorities:
++                    logger.debug(f"[APIRouter] Skipping Tier 2 fallback for '{normalized_agent_type}' (no priorities configured)")
++                elif normalized_agent_type in self._agent_types_with_priorities:
++                    last_success_cfg = self._last_successful_endpoint_cfg
++                    # Validate that the last successful endpoint still exists and is enabled
++                    api_base = last_success_cfg.get('api_base') or last_success_cfg.get('model_server', '')
++                    for ep in self.endpoints.values():
++                        if ep.api_base == api_base and ep.enabled:
++                            # Use the stored config but ensure it has proper token limits
++                            cfg = copy.deepcopy(last_success_cfg)
++                            ep_limit = ep.max_input_tokens
++                            if ep_limit <= 0 and general_limit > 0:
++                                cfg['max_input_tokens'] = general_limit
++                            
++                            self._adjust_config_for_tokens(cfg, allocated_tokens)
++                            
++                            configs.append(cfg)
++                            logger.debug(f"[APIRouter] Using Tier 2 fallback for '{normalized_agent_type}': {api_base}")
++                            break
+ 
+         # 3. Always append the default as last resort (Tier 3) — inside lock
+             # so cursor rotation below reads atomically with config building
+@@ -916,11 +926,8 @@ class APIRouter:
+                 configs.append(copy.deepcopy(self.default_llm_cfg))
+             
+             # Adjust default endpoint for allocated tokens requirement (dynamic endpoint selection)
+-            if allocated_tokens is not None and configs:
+-                default_cfg = configs[-1]
+-                effective_limit = default_cfg.get('max_input_tokens', 0)
+-                if effective_limit > 0 and effective_limit < allocated_tokens:
+-                    default_cfg['max_input_tokens'] = allocated_tokens
++            if configs:
++                self._adjust_config_for_tokens(configs[-1], allocated_tokens)
+ 
+             # Per-instance cursor rotation: rotate the chain so it starts from the
+             # tracked position. This skips endpoints that already failed with inner-loop
+@@ -1395,6 +1402,7 @@ class APIRouter:
+             data = {
+                 'endpoints': [ep.to_dict() for ep in self.endpoints.values()],
+                 'agent_priorities': self.agent_priorities,
++                'agent_types_with_priorities': list(self._agent_types_with_priorities),
+             }
+             with open(self._config_path, 'w', encoding='utf-8') as f:
+                 json.dump(data, f, indent=2, ensure_ascii=False)
+@@ -1461,6 +1469,21 @@ class APIRouter:
+             # Normalize agent_priorities to remove case-insensitive duplicates
+             raw_priorities = data.get('agent_priorities', {})
+             self.agent_priorities = self._normalize_agent_priorities(raw_priorities)
++            
++            # Load tracking set for agent types that ever had endpoints configured.
++            # This gates Tier 2 fallback: agents with no configuration should go straight to global default.
++            # For backward compatibility, if the field is missing (old config), we infer it from current priorities.
++            raw_tracked = data.get('agent_types_with_priorities', [])
++            if raw_tracked:
++                self._agent_types_with_priorities = set(raw_tracked)
++            else:
++                # Backward compat: any agent type with current priorities was clearly configured at some point
++                self._agent_types_with_priorities = set(self.agent_priorities.keys())
++            
++            # Sync tracking set with actual priorities — remove any stale entries from old configs.
++            # Prevents incorrect Tier 2 fallback if config has tracked types without actual priorities.
++            self._agent_types_with_priorities &= set(self.agent_priorities.keys())
++            
+             logger.info(f"[APIRouter] Loaded {len(self.endpoints)} endpoints from {self._config_path}")
+         except Exception as e:
+             logger.error(f"[APIRouter] Failed to load config from {self._config_path}: {e}")
+@@ -1499,6 +1522,7 @@ class APIRouter:
+             # Normalize agent_priorities to remove case-insensitive duplicates
+             raw_priorities = data.get('agent_priorities', {})
+             self.agent_priorities = self._normalize_agent_priorities(raw_priorities)
++            self._agent_types_with_priorities = set(self.agent_priorities.keys())
+             
+             ep_ids = list(self.endpoints.keys())
+             logger.info(f"[APIRouter.from_dict] Updated: {len(self.endpoints)} endpoints "

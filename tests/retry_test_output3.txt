@@ -1,0 +1,56 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.6, pytest-9.0.2, pluggy-1.6.0 -- C:\Python312\python.exe
+cachedir: .pytest_cache
+rootdir: N:\work\WD\AgentCascade
+configfile: pytest.ini
+plugins: anyio-4.9.0, asyncio-1.4.0, timeout-2.4.0, xdist-3.8.0, typeguard-4.4.4
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 60.0s
+timeout method: thread
+timeout func_only: False
+created: 8/8 workers
+8 workers [14 items]
+
+scheduling tests via LoadScheduling
+
+tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_fails_then_succeeds_on_retry 
+tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_generic_exception 
+tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_connection_error 
+tests/test_retry_baseline.py::TestInnerLoopDetection::test_character_run_detected_skips_to_next_endpoint 
+tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds 
+tests/test_retry_baseline.py::TestSubAgentRetryBehavior::test_sub_agent_separate_retry_budget 
+tests/test_retry_baseline.py::TestInnerLoopDetection::test_max_token_exceeded_skips_to_next_endpoint 
+tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls 
+[gw5] [  7%] PASSED tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_generic_exception 
+[gw6] [ 14%] PASSED tests/test_retry_baseline.py::TestRawChatErrorPreservation::test_error_type_preserved_connection_error 
+tests/test_retry_baseline.py::TestBackoffTiming::test_router_backoff_exponential 
+[gw3] [ 21%] PASSED tests/test_retry_baseline.py::TestInnerLoopDetection::test_character_run_detected_skips_to_next_endpoint 
+tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_max_retries_always_zero 
+[gw7] [ 28%] PASSED tests/test_retry_baseline.py::TestSubAgentRetryBehavior::test_sub_agent_separate_retry_budget 
+[gw4] [ 35%] PASSED tests/test_retry_baseline.py::TestInnerLoopDetection::test_max_token_exceeded_skips_to_next_endpoint 
+[gw3] [ 42%] PASSED tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_max_retries_always_zero 
+tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_endpoint_max_retries_decoupled 
+[gw4] [ 50%] PASSED tests/test_retry_baseline.py::TestLLayerRetryBehavior::test_l1_endpoint_max_retries_decoupled 
+[gw2] [ 57%] PASSED tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds 
+tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted 
+[gw1] [ 64%] PASSED tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_fails_then_succeeds_on_retry 
+tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_one_retry 
+[gw1] [ 71%] PASSED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_one_retry 
+[gw5] [ 78%] PASSED tests/test_retry_baseline.py::TestBackoffTiming::test_router_backoff_exponential 
+[gw0] [ 85%] PASSED tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls 
+tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_zero_retries 
+[gw0] [ 92%] PASSED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_zero_retries 
+[gw2] [100%] PASSED tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted 
+
+============================ slowest 10 durations =============================
+3.19s call     tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_max_retries_exhausted
+3.19s call     tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_max_retries_two_gives_three_calls
+3.09s call     tests/test_retry_baseline.py::TestBackoffTiming::test_router_backoff_exponential
+1.09s call     tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_one_retry
+1.01s call     tests/test_retry_baseline.py::TestSingleEndpointRetryCount::test_endpoint_fails_then_succeeds_on_retry
+0.02s call     tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds
+0.01s call     tests/test_retry_baseline.py::TestPerformanceBaseline::test_latency_zero_retries
+0.01s setup    tests/test_retry_baseline.py::TestInnerLoopDetection::test_max_token_exceeded_skips_to_next_endpoint
+0.01s setup    tests/test_retry_baseline.py::TestSubAgentRetryBehavior::test_sub_agent_separate_retry_budget
+0.01s setup    tests/test_retry_baseline.py::TestMultiEndpointFailover::test_first_fails_second_succeeds
+============================= 14 passed in 12.42s =============================
