@@ -2210,6 +2210,28 @@ class ExecutionEngine:
         if isinstance(e, MaxTokenExceeded) or _reason.startswith('character run'):
             self.pool.api_router.advance_instance_endpoint(inst_name)
 
+    def _record_telemetry_event(self, inst_name: str, event_type: str, **kwargs) -> None:
+        """Record telemetry event for LLM call lifecycle.
+
+        Lightweight wrapper to reduce inline noise in retry logic.
+        Failures are silently swallowed — telemetry must never break LLM calls.
+
+        Args:
+            inst_name: Agent instance name
+            event_type: One of 'start', 'end', 'first_token'
+            **kwargs: Event-specific data (input_tokens_est, output_tokens_est, model)
+        """
+        try:
+            if tel := self._telemetry():
+                if event_type == 'start':
+                    tel.record_llm_call_start(inst_name, **kwargs)
+                elif event_type == 'end':
+                    tel.record_llm_call_end(inst_name, **kwargs)
+                elif event_type == 'first_token':
+                    tel.record_llm_first_token(inst_name, **kwargs)
+        except Exception:
+            pass
+
     def _execute_llm_call_with_retry(
         self,
         instance: AgentInstance,
@@ -2266,14 +2288,11 @@ class ExecutionEngine:
         while retry_count <= _loop_max:
             try:
                 # Telemetry: record LLM call start (non-blocking)
-                if (tel := self._telemetry()) is not None:
-                    try:
-                        model = getattr(template.llm, 'model', '') or ''
-                        tel.record_llm_call_start(
-                            inst_name, input_tokens_est=_input_tokens_est, model=model,
-                        )
-                    except Exception:
-                        pass
+                self._record_telemetry_event(
+                    inst_name, 'start',
+                    input_tokens_est=_input_tokens_est,
+                    model=getattr(template.llm, 'model', '') or '',
+                )
 
                 # Streaming UI Content Update Fix: Track partial LLM content
                 # for UI updates every ~100ms
@@ -2335,11 +2354,7 @@ class ExecutionEngine:
                         except Exception:
                             pass
                     # Record telemetry end for aborted call
-                    if (tel := self._telemetry()) is not None:
-                        try:
-                            tel.record_llm_call_end(inst_name, output_tokens_est=0)
-                        except Exception:
-                            pass
+                    self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                     try:
                         gen.close()
                     except RuntimeError:
@@ -2432,13 +2447,9 @@ class ExecutionEngine:
                         if isinstance(e, (CharacterRunDetected, MaxTokenExceeded)):
                             raise
 
-                    # Telemetry: record Time To First Token (TTFT) on the first
-                    # streaming chunk
-                    if not _first_token_received and (tel := self._telemetry()) is not None:
-                        try:
-                            tel.record_llm_first_token(inst_name)
-                        except Exception:
-                            pass
+                    # Telemetry: record Time To First Token (TTFT) on the first streaming chunk
+                    if not _first_token_received:
+                        self._record_telemetry_event(inst_name, 'first_token')
                         _first_token_received = True
 
                     # Check stop/halt mid-stream FIRST (before any work) —
@@ -2450,13 +2461,8 @@ class ExecutionEngine:
                     # can also be triggered DURING the streaming call itself
                     # (while chunks are arriving).
                     if self._is_stopped(inst_name):
-                        # Telemetry: record LLM call end for mid-stream stop
-                        # (non-blocking)
-                        if (tel := self._telemetry()) is not None:
-                            try:
-                                tel.record_llm_call_end(inst_name, output_tokens_est=0)
-                            except Exception:
-                                pass
+                        # Telemetry: record LLM call end for mid-stream stop (non-blocking)
+                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                         with instance._compression_lock:
                             instance._streaming_responses = []
                         # ── Fix TODO
@@ -2483,13 +2489,8 @@ class ExecutionEngine:
                     # Re-check stop/halt after UI update (defense in depth —
                     # catches stop during slow streaming)
                     if self._is_stopped(inst_name):
-                        # Telemetry: record LLM call end for mid-stream stop
-                        # (non-blocking)
-                        if (tel := self._telemetry()) is not None:
-                            try:
-                                tel.record_llm_call_end(inst_name, output_tokens_est=0)
-                            except Exception:
-                                pass
+                        # Telemetry: record LLM call end for mid-stream stop (non-blocking)
+                        self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                         with instance._compression_lock:
                             instance._streaming_responses = []
                         # ── Fix TODO
@@ -2575,33 +2576,19 @@ class ExecutionEngine:
                                     fc_str = str(getattr(fc, 'name', '')) + str(getattr(fc, 'arguments', ''))
                             _output_tokens_est += (len(c) + len(rc) + len(fc_str)) // TOKEN_ESTIMATE_CHAR_DIVISOR
 
-                    if (tel := self._telemetry()) is not None:
-                        try:
-                            tel.record_llm_call_end(inst_name, output_tokens_est=_output_tokens_est)
-                        except Exception:
-                            pass
+                    self._record_telemetry_event(inst_name, 'end', output_tokens_est=_output_tokens_est)
                     break
 
-                # Telemetry: record LLM call end for empty response before
-                # retrying (non-blocking)
-                if (tel := self._telemetry()) is not None:
-                    try:
-                        tel.record_llm_call_end(inst_name, output_tokens_est=0)
-                    except Exception:
-                        pass
+                # Telemetry: record LLM call end for empty response before retrying (non-blocking)
+                self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
 
             except Exception as e:
                 with instance._compression_lock:
                     instance._streaming_responses = []
 
                 if retry_count > _loop_max:
-                    # Telemetry: record LLM call end for exhausted retries
-                    # (non-blocking)
-                    if (tel := self._telemetry()) is not None:
-                        try:
-                            tel.record_llm_call_end(inst_name, output_tokens_est=0)
-                        except Exception:
-                            pass
+                    # Telemetry: record LLM call end for exhausted retries (non-blocking)
+                    self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                     error_msg = str(e).split('\n')[0] if e else "Unknown error"
                     # Give clearer message for loop detection failures
                     if isinstance(e, CharacterRunDetected) and 'inner_loop_exhausted' in error_msg:
@@ -2638,23 +2625,14 @@ class ExecutionEngine:
                 # Classify error type using centralized policy (Phase 4a)
                 error_type = classify_error(e)
 
-                # Telemetry: record LLM call end for failed retry attempt
-                # before continuing (non-blocking)
+                # Telemetry: record LLM call end for failed retry attempt before continuing (non-blocking)
                 # Skip for fatal errors — they have their own end call below
-                if error_type != 'fatal' and (tel := self._telemetry()) is not None:
-                    try:
-                        tel.record_llm_call_end(inst_name, output_tokens_est=0)
-                    except Exception:
-                        pass
+                if error_type != 'fatal':
+                    self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
 
                 if error_type == 'fatal':
-                    # Telemetry: record LLM call end for fatal error
-                    # (non-blocking)
-                    if (tel := self._telemetry()) is not None:
-                        try:
-                            tel.record_llm_call_end(inst_name, output_tokens_est=0)
-                        except Exception:
-                            pass
+                    # Telemetry: record LLM call end for fatal error (non-blocking)
+                    self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                     error_msg = str(e).split('\n')[0] if e else "Unknown error"
                     logger.warning(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} with non-retryable error: {e}")
                     yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: LLM call failed — {error_msg}]")
