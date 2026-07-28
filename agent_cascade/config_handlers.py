@@ -288,13 +288,6 @@ def _handle_loop_entropy(ui_cfg: dict, agent_pool: Optional[Any], agents: list) 
             ui_cfg.get('loop_entropy_enabled', True))
 
 
-@register_config_handler('loop_max_retries')
-def _handle_loop_max_retries(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Update max retries after inner-loop detection (dedicated budget)."""
-    if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.loop_max_retries = max(0, int(ui_cfg.get('loop_max_retries', 2)))
-
-
 # Retry policy settings handlers (Phase 1 of retry refactoring)
 
 @register_config_handler('retry_max_attempts')

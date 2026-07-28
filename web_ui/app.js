@@ -132,7 +132,6 @@ const POOL_SETTINGS_MAP = [
   { id: 'setting-loop-min-chars', prop: 'value', key: 'loop_min_chars', localKey: 'loop-min-chars' },
   { id: 'setting-loop-max-chars', prop: 'value', key: 'loop_max_chars', localKey: 'loop-max-chars' },
   { id: 'setting-loop-score-threshold', prop: 'value', key: 'loop_score_threshold', localKey: 'loop-score-threshold' },
-  { id: 'setting-loop-max-retries', prop: 'value', key: 'loop_max_retries', localKey: 'loop-max-retries' },
   { id: 'setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled', localKey: 'loop-char-run-enabled' },
   { id: 'setting-loop-sentence-rep', prop: 'checked', key: 'loop_sentence_rep_enabled', localKey: 'loop-sentence-rep-enabled' },
   { id: 'setting-loop-ngram-rep', prop: 'checked', key: 'loop_ngram_rep_enabled', localKey: 'loop-ngram-rep-enabled' },
@@ -912,7 +911,6 @@ function saveSettings(sendToServer) {
   if ($('#setting-loop-min-chars')) s['loop-min-chars'] = $('#setting-loop-min-chars').value;
   if ($('#setting-loop-max-chars')) s['loop-max-chars'] = $('#setting-loop-max-chars').value;
   if ($('#setting-loop-score-threshold')) s['loop-score-threshold'] = $('#setting-loop-score-threshold').value;
-  if ($('#setting-loop-max-retries')) s['loop-max-retries'] = $('#setting-loop-max-retries').value;
   if ($('#setting-loop-char-run')) s['loop-char-run-enabled'] = $('#setting-loop-char-run').checked;
   if ($('#setting-loop-sentence-rep')) s['loop-sentence-rep-enabled'] = $('#setting-loop-sentence-rep').checked;
   if ($('#setting-loop-ngram-rep')) s['loop-ngram-rep-enabled'] = $('#setting-loop-ngram-rep').checked;
@@ -1042,7 +1040,6 @@ function loadSettings() {
     if (s['loop-min-chars'] !== undefined) $('#setting-loop-min-chars').value = s['loop-min-chars'];
     if (s['loop-max-chars'] !== undefined) $('#setting-loop-max-chars').value = s['loop-max-chars'];
     if (s['loop-score-threshold'] !== undefined) $('#setting-loop-score-threshold').value = s['loop-score-threshold'];
-    if (s['loop-max-retries'] !== undefined) $('#setting-loop-max-retries').value = s['loop-max-retries'];
     if (s['loop-char-run-enabled'] !== undefined) $('#setting-loop-char-run').checked = s['loop-char-run-enabled'];
     if (s['loop-sentence-rep-enabled'] !== undefined) $('#setting-loop-sentence-rep').checked = s['loop-sentence-rep-enabled'];
     if (s['loop-ngram-rep-enabled'] !== undefined) $('#setting-loop-ngram-rep').checked = s['loop-ngram-rep-enabled'];
@@ -4331,7 +4328,6 @@ function getGenerateCfg() {
   if ($('#setting-loop-min-chars')) cfg.loop_min_chars = parseInt($('#setting-loop-min-chars').value) || 4000;
   if ($('#setting-loop-max-chars')) cfg.loop_max_chars = parseInt($('#setting-loop-max-chars').value) || 40960;
   if ($('#setting-loop-score-threshold')) cfg.loop_score_threshold = parseInt($('#setting-loop-score-threshold').value) || 300;
-  if ($('#setting-loop-max-retries')) cfg.loop_max_retries = parseInt($('#setting-loop-max-retries').value) || 2;
   if ($('#setting-loop-char-run')) cfg.loop_char_run_enabled = $('#setting-loop-char-run').checked;
   if ($('#setting-loop-sentence-rep')) cfg.loop_sentence_rep_enabled = $('#setting-loop-sentence-rep').checked;
   if ($('#setting-loop-ngram-rep')) cfg.loop_ngram_rep_enabled = $('#setting-loop-ngram-rep').checked;

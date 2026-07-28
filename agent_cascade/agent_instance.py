@@ -618,9 +618,6 @@ class PoolSettings:
     loop_block_rep_enabled: bool = True       # Block repetition detection
     loop_entropy_enabled: bool = True         # Entropy collapse detection
 
-    # Loop retry limit (dedicated budget for inner-loop retries, separate from LLM_MAX_RETRIES)
-    loop_max_retries: int = 2                # Max retries after inner-loop detection before giving up
-
     # Retry policy settings (Phase 6 — exposed via UI/Config with validation)
     retry_max_attempts: int = 3              # Total outer retry attempts [1, 6]
     endpoint_max_retries: int = 1            # Per-endpoint retries before failover [0, 2]

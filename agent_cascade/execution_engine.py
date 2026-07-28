@@ -2285,7 +2285,7 @@ class ExecutionEngine:
             agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'generalist'
             llm_messages = self._ensure_image_captions(llm_messages, agent_type=agent_type)
 
-        while retry_count <= _max_attempts:
+        while retry_count < _max_attempts:
             try:
                 # Telemetry: record LLM call start (non-blocking)
                 self._record_telemetry_event(

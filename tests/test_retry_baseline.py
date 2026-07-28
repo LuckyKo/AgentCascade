@@ -55,7 +55,9 @@ class MockLLM(BaseChatModel):
 
         if self.fail_count > 0 and self.call_count <= self.fail_count:
             exc_class = self.fail_type or ModelServiceError
-            raise exc_class(message=f"Simulated failure #{self.call_count}")
+            msg = f"Simulated failure #{self.call_count}"
+            # ModelServiceError uses message= kwarg; standard exceptions use positional arg
+            raise exc_class(msg) if exc_class is not ModelServiceError else exc_class(message=msg)
 
         # Success path: yield a single accumulated message batch
         from agent_cascade.llm.schema import Message, ASSISTANT
@@ -66,7 +68,8 @@ class MockLLM(BaseChatModel):
         self.call_count += 1
         if self.fail_count > 0 and self.call_count <= self.fail_count:
             exc_class = self.fail_type or ModelServiceError
-            raise exc_class(message=f"Simulated failure #{self.call_count}")
+            msg = f"Simulated failure #{self.call_count}"
+            raise exc_class(msg) if exc_class is not ModelServiceError else exc_class(message=msg)
         from agent_cascade.llm.schema import Message, ASSISTANT
         return [Message(role=ASSISTANT, content="mock response")]
 
