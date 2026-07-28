@@ -14,7 +14,7 @@ from agent_cascade.tools.custom import (
     ReadFile, ViewImage, WriteFile, EditFile, ListDir, Grep,
     DeleteFile, CopyFile, ReIndent, ListAgents, ShellCmd,
     ReadLogs, Calculate, CodeMap, ForgetLast, SyntaxCheck, ScanSkills,
-    ProposeSkill,
+    ProposeSkill, LoadSkill,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
 from agent_cascade.tools.custom import DDGSearch, SystemInfo as _SystemInfo
@@ -130,6 +130,9 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
             tools_to_register[tool_name] = (t, False, False)
         elif tool_name == 'propose_skill':
             t = ProposeSkill(agent_pool=agent_pool)
+            tools_to_register[tool_name] = (t, False, False)
+        elif tool_name == 'load_skill':
+            t = LoadSkill(agent_pool=agent_pool)
             tools_to_register[tool_name] = (t, False, False)
         else:
             logger.debug("Unknown tool '%s' in AVAILABLE_TOOLS — skipping", tool_name)
