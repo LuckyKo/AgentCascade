@@ -29,7 +29,13 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] make shell_cmd automatically launch on async mode if the agent sets timeout bigger than 60s and doesn't specify the mode as sync.
 [x] check put shell_cmd async commands. add a `__wait` command to simply wait for next heartbeat - a no reply tool call basically (needed because most LLMs dont understand the concept of shutting up to get in SLEEPING state). make sure all these commands dont need justification field.
 [ ] decouple `enable skills` toggle from auto-skill logic, add `enable auto-skill generation`
+[ ] make a way to elegantly acquire a skill at run time (beside agent init)
+[ ] add a `range` argument to edit_file tool for the delete_and_insert mode so its less confusing than reusing `old_contnet`
 
+
+# COMPLETED REFACTORINGS:
+
+- [x] API retry/fallback system refactored from 3 overlapping layers to 2 clean layers with centralized policy (retry_policy.py). Reduced default total retry budget from potentially 40+ attempts to 3. Clean break — no backwards compat for old config names. See docs/retry_refactor_plan.md and commit history (11d0891..3a4fb95).
 
 # BUGS:
 
@@ -55,7 +61,8 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] overly aggressive stick to bottom function, active when streaming even when the user is actively scrolling up. it should NOT be fighting the user (fixed — immediate unlock on scroll up, visibility guard prevents auto-scroll on hidden tabs, lock released when tab becomes invisible)
 - [ ] extra work paths need to be tied to each session, they have to be loaded when we load existing sessions from the metadata entry.
 - [x] sub agent kicked back to caller when the API connection dropped mid normal assistant message streaming (fixed — broadened retry_model_service_iterator in llm/base.py to catch all Exceptions during streaming, not just ModelServiceError; network errors now retry with exponential backoff up to max_retries)
-- [ ] inner loop char run detection does not seem to pick up if its within a tool call.
+- [ ] inner loop detection does not seem to pick up if loop is happening within a tool call.
+- [ ] Write a proper README.md that describes the project as a whole and offers easy install & use instructions
 
 # Errors to investigate:
 
