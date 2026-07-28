@@ -137,6 +137,8 @@ class TestSingleEndpointRetryCount:
             max_retries=2,
         )
         router.add_endpoint(ep)
+        # Register endpoint in agent_priorities so it's included in the chain
+        router.set_agent_priorities("coder", [ep.id])
 
         llm = MockLLM(fail_count=5, fail_type=ConnectionError)
 
@@ -450,6 +452,8 @@ class TestPerformanceBaseline:
             model="perf-model", max_retries=2,
         )
         router.add_endpoint(ep)
+        # Register endpoint in agent_priorities so it's included in the chain
+        router.set_agent_priorities("coder", [ep.id])
 
         llm = MockLLM(fail_count=10, fail_type=ConnectionError)
 
