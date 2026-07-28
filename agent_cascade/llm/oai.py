@@ -280,6 +280,7 @@ class TextChatAtOAI(BaseFnCallModel):
             if response.status_code == 200:
                 models_data = response.json()
                 data = models_data.get('data', [])
+                non_chat_keywords = ['whisper', 'tts-', '-tts', 'embedding', 'rerank']
                 target_model = None
                 
                 # 1. Try exact match
@@ -288,12 +289,25 @@ class TextChatAtOAI(BaseFnCallModel):
                         target_model = m
                         break
                 
-                # 2. If no exact match and only one model, assume it's the one 
+                # 2. Prefer models marked as "loaded" by the server (llama-autoloader compatibility)
+                if not target_model:
+                    loaded_models = [m for m in data if m.get('loaded') is True]
+                    if len(loaded_models) == 1:
+                        target_model = loaded_models[0]
+                        logger.debug(f"Using loaded model '{target_model.get('id')}' for context detection.")
+                    elif len(loaded_models) > 1:
+                        # Multiple loaded — try substring match against configured model name
+                        for m in loaded_models:
+                            if self.model and self.model.lower() in m.get('id', '').lower():
+                                target_model = m
+                                logger.debug(f"Using loaded model '{target_model.get('id')}' for context detection (name match).")
+                                break
+                
+                # 3. If no exact match and only one model, assume it's the one 
                 # BUT ONLY if it's a plausible chat model and we are in dynamic mode.
                 if not target_model and len(data) == 1:
                     m_id = data[0].get('id', '').lower()
                     # Skip auto-selection for models that are clearly for other tasks (TTS, Whisper, etc.)
-                    non_chat_keywords = ['whisper', 'tts-', '-tts', 'embedding', 'rerank']
                     is_plausible_chat = not any(k in m_id for k in non_chat_keywords)
                     
                     if is_plausible_chat:
@@ -309,24 +323,23 @@ class TextChatAtOAI(BaseFnCallModel):
                             target_model = data[0]
                             logger.info(f"Using single available model '{target_model.get('id')}' for context length detection fallback.")
                 
-                # 3. Special case for LM Studio / whatever_is_on
+                # 4. Special case for LM Studio / whatever_is_on
                 if not target_model and (self.model == 'whatever_is_on' or not data):
                     # Use the first model if it exists and looks plausible
                     if data:
                         m_id = data[0].get('id', '').lower()
-                        non_chat_keywords = ['whisper', 'tts-', '-tts', 'embedding', 'rerank']
                         if not any(k in m_id for k in non_chat_keywords):
                             target_model = data[0]
                             logger.info(f"Picking first available model '{target_model.get('id')}' for potential context detection.")
                 
                 if target_model:
-                    # 4. Extract context length from model object (check direct and nested config)
+                    # 5. Extract context length from model object (check direct and nested config)
                     ctx_len = (target_model.get('context_length') or 
                                target_model.get('max_context_length') or
                                target_model.get('config', {}).get('context_length') or
                                target_model.get('config', {}).get('max_context_length'))
                     
-                    # 5. If still missing, try querying the specific model endpoint
+                    # 6. If still missing, try querying the specific model endpoint
                     if not ctx_len:
                         try:
                             specific_url = f"{models_url}/{target_model.get('id')}"
