@@ -322,13 +322,27 @@ class SkillManager:
     def load_full_instructions(self, skill_name: str) -> Optional[str]:
         """Load full SKILL.md body (Tier 2) for a skill.
 
+        Supports case-insensitive matching to tolerate LLM input variations.
+
         Args:
             skill_name: The registered skill name.
 
         Returns:
             Full markdown instructions string, or None if skill not found.
         """
+        # Exact match first
         reg = self._skills_registry.get(skill_name)
+        if reg is not None:
+            pass
+        else:
+            # Case-insensitive fallback (handles LLM capitalizing names like "Self-Augmentation")
+            lower = skill_name.lower()
+            for key, entry in self._skills_registry.items():
+                if key.lower() == lower:
+                    reg = entry
+                    logger.debug("[SKILLS] load_full_instructions: case-insensitive match '%s' -> '%s'",
+                                 skill_name, key)
+                    break
         if reg is None:
             logger.debug("[SKILLS] load_full_instructions: skill '%s' not in registry (registry has %d skills)",
                          skill_name, len(self._skills_registry))
