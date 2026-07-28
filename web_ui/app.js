@@ -143,6 +143,11 @@ const POOL_SETTINGS_MAP = [
   { id: 'setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars', localKey: 'cache-threshold-chars' },
   { id: 'setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode', localKey: 'enable-skills',
     transform: (v) => v === 'AUTO' },
+  // Retry policy settings (Phase 6)
+  { id: 'setting-retry-max-attempts', prop: 'value', key: 'retry_max_attempts', localKey: 'retry-max-attempts' },
+  { id: 'setting-endpoint-max-retries', prop: 'value', key: 'endpoint_max_retries', localKey: 'endpoint-max-retries' },
+  { id: 'setting-retry-base-delay', prop: 'value', key: 'retry_base_delay', localKey: 'retry-base-delay' },
+  { id: 'setting-retry-max-delay', prop: 'value', key: 'retry_max_delay', localKey: 'retry-max-delay' },
   { id: 'setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
   { id: 'setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop', localKey: 'auto_rollback_on_loop' },
   { id: 'setting-grep-spillover', prop: 'checked', key: 'grep_spillover', localKey: 'grep-spillover' },
@@ -919,6 +924,12 @@ function saveSettings(sendToServer) {
   if ($('#setting-cache-pool-size')) s['cache-pool-size'] = $('#setting-cache-pool-size').value;
   if ($('#setting-cache-threshold-chars')) s['cache-threshold-chars'] = $('#setting-cache-threshold-chars').value;
 
+  // Retry policy settings (Phase 6) — store as validated numbers, not raw strings
+  if ($('#setting-retry-max-attempts')) s['retry-max-attempts'] = Math.min(6, Math.max(1, parseInt($('#setting-retry-max-attempts').value) || 3));
+  if ($('#setting-endpoint-max-retries')) s['endpoint-max-retries'] = Math.min(2, Math.max(0, parseInt($('#setting-endpoint-max-retries').value) || 1));
+  if ($('#setting-retry-base-delay')) s['retry-base-delay'] = Math.max(0.1, parseFloat($('#setting-retry-base-delay').value) || 1.0);
+  if ($('#setting-retry-max-delay')) s['retry-max-delay'] = Math.max(1.0, parseFloat($('#setting-retry-max-delay').value) || 8.0);
+
   // Log API POST Dump toggle (frontend-only, not in backend pool_settings)
   if ($('#setting-log-api-post')) s['log-api-post'] = $('#setting-log-api-post').checked;
 
@@ -937,6 +948,9 @@ function saveSettings(sendToServer) {
     send({ type: 'update_config', generate_cfg: getGenerateCfg() });
   }
   
+  // Update inputs with validated/clamped values so UI reflects actual stored values
+  applyRetryValidation();
+
   // Re-render to apply setting changes immediately (like context bar max value)
   updateAllContextBars();
 }
@@ -1101,6 +1115,21 @@ function loadSettings() {
       $('#setting-cache-threshold-chars').value = s['cache-threshold-chars'];
     }
 
+    // Retry policy settings (Phase 6)
+    if ($('#setting-retry-max-attempts') && s['retry-max-attempts'] !== undefined) {
+      $('#setting-retry-max-attempts').value = s['retry-max-attempts'];
+    }
+    if ($('#setting-endpoint-max-retries') && s['endpoint-max-retries'] !== undefined) {
+      $('#setting-endpoint-max-retries').value = s['endpoint-max-retries'];
+    }
+    if ($('#setting-retry-base-delay') && s['retry-base-delay'] !== undefined) {
+      $('#setting-retry-base-delay').value = s['retry-base-delay'];
+    }
+    if ($('#setting-retry-max-delay') && s['retry-max-delay'] !== undefined) {
+      $('#setting-retry-max-delay').value = s['retry-max-delay'];
+    }
+
+    // MCP settings restore (workAccessFoldersRW block follows below)
     if (workAccessFoldersRW) {
       if (s['work-access-folders-rw'] !== undefined) {
         workAccessFoldersRW.value = s['work-access-folders-rw'];
@@ -4242,6 +4271,39 @@ sessionNameInput.addEventListener('change', () => {
   send({ type: 'set_session_name', name: state.sessionName });
 });
 
+/** Validate and clamp retry policy settings to safe ranges. Mutates cfg in place. */
+function validateRetrySettings(cfg) {
+    if (cfg.retry_max_attempts !== undefined) {
+        cfg.retry_max_attempts = Math.min(6, Math.max(1, parseInt(cfg.retry_max_attempts) || 3));
+    }
+    if (cfg.endpoint_max_retries !== undefined) {
+        cfg.endpoint_max_retries = Math.min(2, Math.max(0, parseInt(cfg.endpoint_max_retries) || 1));
+    }
+    if (cfg.retry_base_delay !== undefined) {
+        cfg.retry_base_delay = Math.max(0.1, parseFloat(cfg.retry_base_delay) || 1.0);
+    }
+    if (cfg.retry_max_delay !== undefined) {
+        cfg.retry_max_delay = Math.max(1.0, parseFloat(cfg.retry_max_delay) || 8.0);
+    }
+}
+
+/** Update retry input elements to show validated/clamped values after save */
+function applyRetryValidation() {
+    const el = id => document.getElementById(id);
+    if (el('setting-retry-max-attempts')) {
+        el('setting-retry-max-attempts').value = Math.min(6, Math.max(1, parseInt(el('setting-retry-max-attempts').value) || 3));
+    }
+    if (el('setting-endpoint-max-retries')) {
+        el('setting-endpoint-max-retries').value = Math.min(2, Math.max(0, parseInt(el('setting-endpoint-max-retries').value) || 1));
+    }
+    if (el('setting-retry-base-delay')) {
+        el('setting-retry-base-delay').value = Math.max(0.1, parseFloat(el('setting-retry-base-delay').value) || 1.0);
+    }
+    if (el('setting-retry-max-delay')) {
+        el('setting-retry-max-delay').value = Math.max(1.0, parseFloat(el('setting-retry-max-delay').value) || 8.0);
+    }
+}
+
 function getGenerateCfg() {
   const cfg = {};
   if ($('#setting-endpoint') && $('#setting-endpoint').value.trim()) cfg.api_base = $('#setting-endpoint').value.trim();
@@ -4295,6 +4357,12 @@ function getGenerateCfg() {
   if ($('#setting-cache-pool-size')) cfg.cache_pool_size = parseInt($('#setting-cache-pool-size').value) || 50;
   if ($('#setting-cache-threshold-chars')) cfg.cache_threshold_chars = parseInt($('#setting-cache-threshold-chars').value) || 1000;
 
+  // Retry policy settings (Phase 6)
+  if ($('#setting-retry-max-attempts')) cfg.retry_max_attempts = parseInt($('#setting-retry-max-attempts').value) || 3;
+  if ($('#setting-endpoint-max-retries')) cfg.endpoint_max_retries = parseInt($('#setting-endpoint-max-retries').value) || 1;
+  if ($('#setting-retry-base-delay')) cfg.retry_base_delay = parseFloat($('#setting-retry-base-delay').value) || 1.0;
+  if ($('#setting-retry-max-delay')) cfg.retry_max_delay = parseFloat($('#setting-retry-max-delay').value) || 8.0;
+
   if ($('#setting-mcp-enabled') && !$('#setting-mcp-enabled').checked) {
     // MCP is disabled
   } else if ($('#setting-mcp-servers') && $('#setting-mcp-servers').value.trim()) {
@@ -4319,6 +4387,9 @@ function getGenerateCfg() {
   if (defaultWorkspace && defaultWorkspace.textContent && defaultWorkspace.textContent !== 'Loading...') {
     cfg.default_workspace = defaultWorkspace.textContent.replace(' (Pending restart)', '').trim();
   }
+
+  // Validate retry policy settings before returning
+  validateRetrySettings(cfg);
 
   return cfg;
 }

@@ -559,6 +559,30 @@
                       </label>
                     </div>
                     <!-- End Loop Tuning -->
+                    <!-- Retry Policy Settings (Phase 6) -->
+                    <details class="settings-section">
+                    <summary class="settings-section-title">Retry Policy</summary>
+                    <div class="settings-section-body" style="margin: 4px 0 8px 12px; padding: 8px; border-left: 2px solid #555; background: rgba(255,255,255,0.03);">
+                    <div class="setting-field" style="font-size:11px; color:#aaa; margin-bottom:6px;">LLM Retry Configuration</div>
+                    <label class="setting-field">
+                    <span title="Total outer retry attempts across all layers and endpoints [1-6]">Max Attempts</span>
+                    <input type="number" id="setting-retry-max-attempts" min="1" max="6" step="1" value="3" />
+                    </label>
+                    <label class="setting-field">
+                    <span title="Retries per endpoint before failover to next [0-2]. 0=failover immediately, 2=max retries on single endpoint">Endpoint Retries</span>
+                    <input type="number" id="setting-endpoint-max-retries" min="0" max="2" step="1" value="1" />
+                    </label>
+                    <label class="setting-field">
+                    <span title="Initial backoff delay in seconds [≥0.1]">Base Delay (s)</span>
+                    <input type="number" id="setting-retry-base-delay" min="0.1" max="30" step="0.1" value="1.0" />
+                    </label>
+                    <label class="setting-field">
+                    <span title="Maximum backoff cap in seconds [≥1.0]">Max Delay (s)</span>
+                    <input type="number" id="setting-retry-max-delay" min="1.0" max="60" step="0.5" value="8.0" />
+                    </label>
+                    </div>
+                    </details>
+                    <!-- End Retry Policy -->
                     <label class="setting-field toggle-field">
                       <span>Log API POST Dump</span>
                       <input type="checkbox" id="setting-log-api-post" />

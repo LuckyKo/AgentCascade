@@ -301,21 +301,40 @@ def _handle_loop_max_retries(ui_cfg: dict, agent_pool: Optional[Any], agents: li
 def _handle_retry_max_attempts(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update total outer retry attempts. Range [1, 6]."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.retry_max_attempts = min(6, max(1, int(ui_cfg.get('retry_max_attempts', 3))))
+        val = int(ui_cfg.get('retry_max_attempts', 3))
+        if val < 1 or val > 6:
+            raise ValueError(f"retry_max_attempts must be in [1, 6], got {val}")
+        agent_pool.settings.retry_max_attempts = val
+
+
+@register_config_handler('endpoint_max_retries')
+def _handle_endpoint_max_retries(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update per-endpoint retries before failover. Range [0, 2]."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = int(ui_cfg.get('endpoint_max_retries', 1))
+        if val < 0 or val > 2:
+            raise ValueError(f"endpoint_max_retries must be in [0, 2], got {val}")
+        agent_pool.settings.endpoint_max_retries = val
 
 
 @register_config_handler('retry_base_delay')
 def _handle_retry_base_delay(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Update initial backoff delay in seconds."""
+    """Update initial backoff delay in seconds. Must be ≥ 0.1."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.retry_base_delay = max(0.1, float(ui_cfg.get('retry_base_delay', 1.0)))
+        val = float(ui_cfg.get('retry_base_delay', 1.0))
+        if val < 0.1:
+            raise ValueError(f"retry_base_delay must be ≥ 0.1, got {val}")
+        agent_pool.settings.retry_base_delay = val
 
 
 @register_config_handler('retry_max_delay')
 def _handle_retry_max_delay(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Update maximum backoff cap in seconds."""
+    """Update maximum backoff cap in seconds. Must be ≥ 1.0."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.retry_max_delay = max(1.0, float(ui_cfg.get('retry_max_delay', 8.0)))
+        val = float(ui_cfg.get('retry_max_delay', 8.0))
+        if val < 1.0:
+            raise ValueError(f"retry_max_delay must be ≥ 1.0, got {val}")
+        agent_pool.settings.retry_max_delay = val
 
 
 @register_config_handler('ci_execution_timeout')
