@@ -47,6 +47,7 @@ AVAILABLE_TOOLS: List[str] = [
     'syntax_check',     # Check file syntax without execution
     'scan_skills',      # Scan registered skills and return matching skills with relevance scores
     'propose_skill',    # Propose a new reusable skill for future tasks
+    'load_skill',       # Load registered skill instructions into current context at runtime
 ]
 
 # Tools NOT in AVAILABLE_TOOLS (hidden from agents, used internally only):
@@ -116,7 +117,7 @@ SECURITY_ADVISOR_PROMPT = (
     "Allowed folders:\n{workspace_info}\n\n"
     "Evaluate this command against your security rules. You may use your tools to investigate further if needed but keep it short, you are NOT a reviewer.\n"
     "SPECIAL RULE for shell_cmd: When tool_id is provided in arguments, the command field contains either a control command (__kill, __status, __heartbeat=N, __ctrl_c) or stdin input text — neither should be validated as a shell command. Always approve these requests unless they appear malicious.\n"
-    "CRITICAL: Once you have made a decision, the final line of your output MUST be formatted as follows:\n"
+    "CRITICAL: Once you have made a decision, the final line of your output MUST be formatted as one of the following:\n"
     "[YES] Reason: ...\n"
     "[NO] Reason: ..."
 )
@@ -536,6 +537,30 @@ TOOL_METADATA = {
             'skill_content': 'Full SKILL.md content including YAML frontmatter (name, description, triggers) and markdown body.',
             'test_task': 'Optional task text for self-match validation. If provided, the skill must match this task to be promoted.'
         }
+    },
+    'load_skill': {
+        'description': (
+            'Load registered skill instructions into your current context at runtime. '
+            'Use this when you need specialized expertise for your task. '
+            'Takes one or more skill names and injects their full instructions as guidelines.'
+        ),
+        'parameters': {
+            'skill_names': {
+                'oneOf': [
+                    {
+                        'type': 'string',
+                        'description': 'A single skill name to load.',
+                    },
+                    {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'List of skill names to load (e.g., ["code-review", "docker-best-practices"]).',
+                    }
+                ],
+                'description': 'Skill name(s) to load into your context.',
+            },
+        },
+        'required': ['skill_names'],
     }
 }
 
