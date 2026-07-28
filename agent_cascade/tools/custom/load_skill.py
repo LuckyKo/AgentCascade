@@ -85,19 +85,14 @@ class LoadSkill(BaseTool):
             return "No skill names provided."
 
         # Get SkillManager from pool
+        if self.agent_pool is None:
+            return "No agent pool available."
         skill_manager = getattr(self.agent_pool, 'skill_manager', None)
         if skill_manager is None:
             return "No skills system available. Skills may not have been initialized."
 
-        # DEBUG logging
-        logger.warning(f"[SKILLS-DEBUG] load_skill: agent_pool id={id(self.agent_pool)}, skill_manager id={id(skill_manager)}")
-        logger.warning(f"[SKILLS-DEBUG] load_skill: registry keys={list(skill_manager._skills_registry.keys())}")
-        logger.warning(f"[SKILLS-DEBUG] load_skill: skill_paths={skill_manager._skill_paths}, cache_timestamp={skill_manager._cache_timestamp}")
-
         # Trigger discovery so new/recent skills are visible (matches scan_skills behavior)
         skill_manager._ensure_discovered()
-
-        logger.warning(f"[SKILLS-DEBUG] load_skill after _ensure_discovered: registry keys={list(skill_manager._skills_registry.keys())}")
 
         # Resolve the target agent instance to append messages to.
         # Priority: explicit kwarg > agent_obj.instance_name > self.agent_name > default.
