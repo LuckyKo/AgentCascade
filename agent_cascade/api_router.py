@@ -93,7 +93,8 @@ class APIEndpoint:
             'api_key': self.api_key,
             'model_type': self.model_type,
             'max_input_tokens': self.max_input_tokens,
-            'max_retries': self.max_retries,  # Pass endpoint-level retry count to LLM module
+            # NOTE: max_retries intentionally excluded — endpoint retry config controls L2 (API router) only.
+            # L1 retries are disabled (see llm/base.py). Including this here was the source of coupling.
             'vision_enabled': self.vision_enabled,  # Vision capability flag for routing decisions
         }
 
@@ -998,6 +999,7 @@ class APIRouter:
         all_errors = []
 
         for cfg_idx, llm_cfg in enumerate(chain):
+            # Default per-endpoint retry count. Can be overridden by APIEndpoint config (max_retries field).
             max_retries = 2
             skipped_early = False         # Track if endpoint was skipped before retries exhausted
             concurrency_limit = 0

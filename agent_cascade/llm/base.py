@@ -87,13 +87,12 @@ class BaseChatModel(ABC):
         # Support max_input_tokens at the top level of cfg
         if 'max_input_tokens' in cfg and 'max_input_tokens' not in generate_cfg:
             generate_cfg['max_input_tokens'] = cfg['max_input_tokens']
-        # Support max_retries at the top level of cfg (from endpoint settings)
-        if 'max_retries' in cfg and 'max_retries' not in generate_cfg:
-            generate_cfg['max_retries'] = cfg['max_retries']
-            
+        
         cache_dir = cfg.get('cache_dir', generate_cfg.pop('cache_dir', None))
-        mr = generate_cfg.pop('max_retries', 2)
-        self.max_retries = mr if isinstance(mr, int) and mr >= 0 else 2
+        # L1 retries are disabled (Phase 2 refactor). Retries handled by L2 (API router) and L3 (execution engine).
+        # max_retries=0 is defensive — wrappers have been bypassed in chat()/raw_chat() anyway.
+        generate_cfg.pop('max_retries', None)  # Ignore any max_retries in config — no longer used at L1
+        self.max_retries = 0
         self.generate_cfg = generate_cfg
         self.model_type = cfg.get('model_type', '')
         
@@ -352,13 +351,9 @@ class BaseChatModel(ABC):
                         generate_cfg=generate_cfg,
                     )
 
-        if stream and delta_stream:
-            # No retry for delta streaming
-            output = _call_model_service()
-        elif stream and (not delta_stream):
-            output = retry_model_service_iterator(_call_model_service, max_retries=self.max_retries)
-        else:
-            output = retry_model_service(_call_model_service, max_retries=self.max_retries)
+        # Direct call — no L1 retry wrapper. Retries are handled by L2 (API router) and L3 (execution engine).
+        # Bypassing wrappers entirely to preserve ModelServiceError instance attributes for _classify_llm_error().
+        output = _call_model_service()
 
         if isinstance(output, list):
             assert not stream
@@ -545,11 +540,8 @@ class BaseChatModel(ABC):
             return processed
         
         if stream:
-            # Wrap with retry logic for robustness against transient failures
-            def _chat_stream_with_retry():
-                return self._chat_stream(messages=messages, delta_stream=False, generate_cfg=generate_cfg)
-            
-            output_iter = retry_model_service_iterator(_chat_stream_with_retry, max_retries=self.max_retries)
+            # Direct call — no L1 retry wrapper. Retries are handled by L2 (API router) and L3 (execution engine).
+            output_iter = self._chat_stream(messages=messages, delta_stream=False, generate_cfg=generate_cfg)
             postprocessed_iter = (_postprocess_batch(batch) for batch in output_iter)
             
             return self._convert_messages_iterator_to_target_type(
@@ -1026,11 +1018,16 @@ def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int, a
     return new_messages
 
 
+# ── DEPRECATED: L1 retry helpers (Phase 2 refactor) ─────────────────────────
+# These functions are no longer called by chat()/raw_chat() — wrappers have been
+# bypassed to preserve original exception types for _classify_llm_error().
+# Retained here only for backwards compatibility; scheduled for removal.
+
 def retry_model_service(
     fn,
     max_retries: int = 10,
 ) -> Any:
-    """Retry a function"""
+    """DEPRECATED: Retry a function. Unused — bypassed in chat(). Retained for backwards compat only."""
 
     num_retries, delay = 0, 1.0
     while True:
@@ -1045,7 +1042,7 @@ def retry_model_service_iterator(
     it_fn,
     max_retries: int = 10,
 ) -> Iterator:
-    """Retry an iterator"""
+    """DEPRECATED: Retry an iterator. Unused — bypassed in chat()/raw_chat(). Retained for backwards compat only."""
 
     num_retries, delay = 0, 1.0
     while True:
@@ -1081,7 +1078,7 @@ def _raise_or_delay(
     max_delay: float = 300.0,
     exponential_base: float = 2.0,
 ) -> Tuple[int, float]:
-    """Retry with exponential backoff"""
+    """DEPRECATED: Retry with exponential backoff. Unused — bypassed in chat()/raw_chat(). Retained for backwards compat only."""
 
     # Note: All raises use `from None` to break Python's implicit exception chaining.
     # Without this, when _raise_or_delay is called from within retry_model_service_iterator's

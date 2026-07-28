@@ -309,42 +309,42 @@ class TestInnerLoopDetection:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestRawChatErrorPreservation:
-    """Verify error types propagate correctly through raw_chat().
+    """Verify error types propagate correctly through chat()/raw_chat() without L1 wrapping.
 
-    BUG DOCUMENTATION: retry_model_service_iterator catches generic Exception and
-    wraps as ModelServiceError. This corrupts error types for the execution engine.
+    After Phase 2: L1 retry wrappers have been bypassed entirely. Original exception types
+    now propagate directly to L2 (API router) and L3 (execution engine), allowing
+    _classify_llm_error() to make correct retry vs fatal decisions.
     """
 
-    def test_l1_wraps_generic_exception(self):
-        """L1 retry wrapper catches generic Exception → wraps as ModelServiceError.
+    def test_error_type_preserved_generic_exception(self):
+        """VERIFIED FIX: Generic exceptions propagate without being wrapped as ModelServiceError.
 
-        This is a KNOWN BUG that Phase 2 will fix. The raw_chat() path should
-        preserve original exception types but currently does not because
-        retry_model_service_iterator uses bare `except Exception`.
+        Before Phase 2: retry_model_service_iterator caught bare Exception and re-wrapped
+        as ModelServiceError, corrupting error types. Now wrappers are bypassed entirely.
         """
         class CustomAPIError(Exception):
-            pass
+            def __init__(self, message=None):
+                super().__init__(message or "custom api error")
 
         llm = MockLLM(cfg={"max_retries": 0}, fail_count=1, fail_type=CustomAPIError)
 
-        with pytest.raises(ModelServiceError) as exc_info:
+        # Error should propagate as-is, NOT wrapped as ModelServiceError
+        with pytest.raises(CustomAPIError):
             result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
             list(result)
 
-        # BUG: CustomAPIError is wrapped as ModelServiceError instead of propagating
-        assert isinstance(exc_info.value, ModelServiceError), \
-            f"Expected ModelServiceError (the bug!), got {type(exc_info.value)}"
-        print(f"[OBSERVED] Error wrapping confirmed: CustomAPIError → {type(exc_info.value).__name__}")
+    def test_error_type_preserved_connection_error(self):
+        """VERIFIED FIX: ConnectionError propagates without L1 wrapping."""
+        # Use a ConnectionError subclass that accepts keyword args (MockLLM uses message=)
+        class MockConnectionError(ConnectionError):
+            def __init__(self, message=None):
+                super().__init__(message or "connection failed")
 
-    def test_l1_wraps_connection_error(self):
-        """ConnectionError is also wrapped as ModelServiceError by L1."""
-        llm = MockLLM(cfg={"max_retries": 0}, fail_count=1, fail_type=ConnectionError)
+        llm = MockLLM(cfg={"max_retries": 0}, fail_count=1, fail_type=MockConnectionError)
 
-        with pytest.raises(ModelServiceError) as exc_info:
+        with pytest.raises(MockConnectionError):
             result = llm.chat(messages=[{"role": "user", "content": "hi"}], stream=True)
             list(result)
-
-        assert isinstance(exc_info.value, ModelServiceError)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -474,28 +474,32 @@ class TestPerformanceBaseline:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestLLayerRetryBehavior:
-    """Document Layer 1 (LLM base) retry behavior for reference."""
+    """Verify Layer 1 (LLM base) retries are disabled after Phase 2 refactor.
 
-    def test_l1_max_retries_from_cfg(self):
-        """max_retries can be set via cfg. MockLLM defaults to 0 for test isolation."""
-        llm_with_endpoint_cfg = MockLLM({"max_retries": 2})
-        assert llm_with_endpoint_cfg.max_retries == 2
+    After Phase 2, L1 retry wrappers have been bypassed in chat()/raw_chat().
+    Retries are now handled exclusively by L2 (API router) and L3 (execution engine).
+    """
+
+    def test_l1_max_retries_always_zero(self):
+        """max_retries is always 0 — config values are ignored after Phase 2.
+
+        L1 retries are disabled to avoid error type corruption. Retries handled by L2/L3.
+        """
+        # Even if cfg specifies max_retries, it's ignored at L1
+        llm_with_cfg = MockLLM({"max_retries": 2})
+        assert llm_with_cfg.max_retries == 0
 
         llm_custom = MockLLM({"max_retries": 5})
-        assert llm_custom.max_retries == 5
+        assert llm_custom.max_retries == 0
 
         llm_zero = MockLLM({"max_retries": 0})
         assert llm_zero.max_retries == 0
 
-    def test_l1_endpoint_max_retries_leaks_to_llm_cfg(self):
-        """CRITICAL: endpoint.max_retries is passed to LLM via to_llm_cfg().
+    def test_l1_endpoint_max_retries_decoupled(self):
+        """VERIFIED FIX: endpoint.max_retries no longer leaks into LLM cfg.
 
-        This means changing an endpoint's retry count affects BOTH:
-        - L2 (APIRouter): how many times it retries the endpoint before failover
-        - L1 (BaseChatModel): how many times the LLM retries its own calls
-
-        This coupling is intentional but problematic. The retry refactoring will
-        decouple these concerns into separate retry policies.
+        After Phase 2, to_llm_cfg() excludes max_retries. Endpoint retry config
+        controls only L2 (API router) behavior — L1 retries are disabled.
         """
         ep = APIEndpoint(
             name="test", api_base="http://localhost:9981/v1", model="m",
@@ -503,9 +507,9 @@ class TestLLayerRetryBehavior:
         )
         llm_cfg = ep.to_llm_cfg()
 
-        # The endpoint's retry settings are baked into the LLM config
-        assert llm_cfg["max_retries"] == 3, \
-            f"Endpoint max_retries={ep.max_retries} leaked to LLM cfg: {llm_cfg['max_retries']}"
+        # Endpoint's max_retries should NOT be in LLM config anymore (coupling broken)
+        assert "max_retries" not in llm_cfg, \
+            f"Endpoint max_retries leaked to LLM cfg — coupling not broken: {llm_cfg}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
