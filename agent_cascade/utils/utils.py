@@ -37,7 +37,7 @@ from pydantic import BaseModel
 
 from agent_cascade.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION, ROLE, SYSTEM, USER, ContentItem, Message
 from agent_cascade.log import logger
-from agent_cascade.settings import IMAGE_TOKEN_ESTIMATE
+from agent_cascade.settings import CHAT_TEMPLATE_TOKEN_OVERHEAD, IMAGE_TOKEN_ESTIMATE
 
 # Max length for function/tool call arguments before truncation (shared across utils and agent_invoker)
 MAX_FC_ARGS_LEN = 2048
@@ -1062,7 +1062,7 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         function_call = msg.get('function_call')
         if role == ASSISTANT and function_call:
             text = f'{function_call}'
-            stats = {'tokens': qwen_count(text), 'words': len(text.split())}
+            stats = {'tokens': qwen_count(text) + CHAT_TEMPLATE_TOKEN_OVERHEAD, 'words': len(text.split())}
             msg['_tokens'] = stats['tokens']
             msg['_words'] = stats['words']
             return stats
@@ -1084,7 +1084,7 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
         function_call = getattr(msg, 'function_call', None)
         if role == ASSISTANT and function_call:
             text = f'{function_call}'
-            return {'tokens': qwen_count(text), 'words': len(text.split())}
+            return {'tokens': qwen_count(text) + CHAT_TEMPLATE_TOKEN_OVERHEAD, 'words': len(text.split())}
         msg_obj = msg
         is_dict = False
 
@@ -1129,7 +1129,7 @@ def get_message_stats(msg: Union[Message, dict, list, bool, None]) -> dict:
             return f"[Image: {match.group(1)}]"
         
         text_for_tokens = IMAGE_REGEX.sub(repl, text)
-        tokens = qwen_count(text_for_tokens) + image_tokens
+        tokens = qwen_count(text_for_tokens) + image_tokens + CHAT_TEMPLATE_TOKEN_OVERHEAD
         words = len(text.split())
         stats = {'tokens': tokens, 'words': words}
         

@@ -35,7 +35,6 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 # BUGS:
 
-- [ ] no agent tab refresh during tool call streaming causes `Activity` bar to be still during tool writing process
 - [ ] manually asking for security agent opinion does not fill it in and stop the security agent info once it reached conclusion
 - [ ] telemetry `Output Tokens (est)` severely undercounts
 - [ ] we are pushing wrong summary from the inner loop detector if the compressor fails and gets stuck in a loop `[SYSTEM ERROR: Empty LLM response]`. it should try another API endpoint instead 
@@ -43,14 +42,13 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] approval timeout occurs even when explicitly disabled in options, when it was set on auto-ask mode — DONE: Security advisor used hard-coded 180s timeout constant instead of reading from operation_manager settings. Fixed `security_handler.run_check()` to dynamically read `enable_timeout` and `approval_timeout_seconds` from operation manager. Timeout message now shows actual configured value. Added None guards for safety.
 - [x] I dont want truncation of the user messages in the que (UI user que display) — DONE: Renamed `get_queue_previews` → `get_queue_messages`, removed `max_length` truncation (100 chars). Method now returns full message strings. Updated all 4 call sites.
 - [ ] UI streaming stops on `pause`. it should not, pause should ONLY stop the tool response logic.
-- [ ] some of the UI setting are getting reset on browser/system restart (they stick on refresh though)
+- [ ] some of the UI setting are getting reset on system restart (they stick just fine on refresh though)
 - [x] After changes to Security agent soul shell_cmd fails with this: `REJECTED: Security check error: No template for agent class Security`
 - [x] forced compression seems lazy, waits for a agent call to already happen when over the limit instead of triggering before that (fixed - always use _count_history_tokens for proactive check)
 - [x] remove context window limit truncation of tool response, we already have wild read truncation for extremes and with the fix from above it should be unnecessary (removed truncate_tool_result + dead code cleanup)
 - [x] inner loop API fallback should only apply if we hit the `char run` detect specifically, not for the others types of detection hits
 - [x] compression task message included in image embeds of a message that is was not even in the compressed range of messages. the image embeds should not be sent at all to compressor, it already receives the caption data (fixed — added agent_class param to build_task_message, skip image embedding for Compressor, removed post-hoc stripping code)
 - [x] add truncation with helper to list_dir, keep head mode. (done - uses truncate_with_spillover, head mode, char_limit=3000 default)
-- [ ] security agent fails to timeout if it keeps failing to acquire API endpoint.
 - [x] UI issue: auto scroll to bottom keeps dropping after long tool outputs or reasoning (fixed — replaced requestAnimationFrame with immediate scroll, added programmaticScrollCount guard, debounce timer cleanup, tab switch lock reset)
 - [ ] add inner loop counter to telemetry's loop detected
 - [x] odd useless truncation message on `list_dir` tool, should contain spillover path (should use helper truncation function like other tools, is there another one?): [TRUNCATED — Character limit exceeded.]. also needs the char limit added to the UI
@@ -59,6 +57,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] sub agent kicked back to caller when the API connection dropped mid normal assistant message streaming (fixed — broadened retry_model_service_iterator in llm/base.py to catch all Exceptions during streaming, not just ModelServiceError; network errors now retry with exponential backoff up to max_retries)
 - [ ] inner loop detection does not seem to pick up if loop is happening within a tool call.
 - [ ] Write a proper README.md that describes the project as a whole and offers easy install & use instructions
+- [x] context token estimation (the one in base.py) is off by about 10% less than what llama.cpp reports as receiving. (fixed — added CHAT_TEMPLATE_TOKEN_OVERHEAD=5 per message to get_message_stats() in utils/utils.py, and unified _count_history_tokens() in execution_engine.py to use get_message_stats() instead of raw qwen_count(); error dropped from ~37% to ~4%)
 
 # Errors to investigate:
 
@@ -78,3 +77,5 @@ currency_limit=0
 2026-07-27 08:54:24,201 - agent_pool.py - 2734 - INFO - [idle_checker] Auto-dismissing idle system agent (Security) 'Security_op_dc743fe4' (idle for 115s, threshold=60s)
 2026-07-27 08:54:24,201 - agent_pool.py - 613 - DEBUG - Instance conversation cleanup key missing (expected): 'Security_op_dc743fe4'
 2026-07-27 08:54:24,204 - agent_pool.py - 2659 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_dc743fe4
+
+

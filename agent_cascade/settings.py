@@ -104,6 +104,8 @@ TOKEN_ESTIMATE_CHAR_DIVISOR: float = float(os.getenv(
     'QWEN_AGENT_TOKEN_ESTIMATE_CHAR_DIVISOR', 5.0))
 IMAGE_TOKEN_ESTIMATE: int = int(os.getenv(
     'QWEN_AGENT_IMAGE_TOKEN_ESTIMATE', 255))  # Estimated tokens per image in message counting
+CHAT_TEMPLATE_TOKEN_OVERHEAD: int = int(os.getenv(
+    'QWEN_AGENT_CHAT_TEMPLATE_TOKEN_OVERHEAD', 5))  # Overhead per message from chat template (e.g., <|im_start|>{role}\n...<|im_end|>\n)
 MESSAGE_TOKEN_ESTIMATE: int = int(os.getenv(
     'QWEN_AGENT_MESSAGE_TOKEN_ESTIMATE', 500))  # Estimated tokens per message during compression
 CONTEXT_RESERVATION_RATIO: float = float(os.getenv(

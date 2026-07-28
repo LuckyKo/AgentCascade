@@ -58,7 +58,7 @@ from agent_cascade.tool_utils import (
 # have
 # hard dependency on api_integration at module scope (cleaner separation of
 # concerns).
-from agent_cascade.utils.utils import extract_text_from_message, msg_field, msg_set
+from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, msg_field, msg_set
 
 # M3: Import validate_message_pool from standalone utils module (Phase 2 Task
 # 2.4)
@@ -4569,10 +4569,13 @@ class ExecutionEngine:
         return _resolve_max_tokens(self.pool, instance)
 
     def _count_history_tokens(self, messages: List[Message], instance: AgentInstance = None) -> int:
-        """Calculate total tokens in a message list (with caching — Fix #2)."""
+        """Calculate total tokens in a message list (with caching — Fix #2).
+        
+        Uses get_message_stats() for consistent token counting including chat
+        template overhead. This aligns with llm/base.py::_count_tokens and ensures
+        all code paths report the same estimates that match llama.cpp's actual counts.
+        """
         try:
-            from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
-
             # Check cache: if conversation length hasn't changed, reuse the
             # cached count
             inst = instance or getattr(self, '_current_instance', None)  # Prefer explicit param (thread-safe)
@@ -4581,60 +4584,8 @@ class ExecutionEngine:
 
             total = 0
             for msg in messages:
-                # Explicit type guard for known message types (dict or Message
-                # object)
-                if isinstance(msg, list):
-                    # Skip unexpected list objects to prevent incorrect
-                    # processing
-                    continue
-
-                role = msg_field(msg, 'role', '')
-                func_call = msg_field(msg, 'function_call')
-
-                # For assistant with function call, count the function call
-                # string
-                # plus any reasoning_content that might accompany it
-                if role == ASSISTANT and func_call:
-                    total += qwen_count(f'{func_call}')
-                    # Also count reasoning_content for function call messages
-                    rc = msg_field(msg, 'reasoning_content') or msg_field(msg, 'reasoning')
-                    if rc:
-                        rc_str = str(rc).strip() if not isinstance(rc, list) else ' '.join(
-                            (item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', ''))
-                            for item in rc if (item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', None))
-                        )
-                        total += qwen_count(rc_str)
-                    continue
-
-                msg_obj = Message(**msg) if isinstance(msg, dict) else msg
-                text = extract_text_from_message(msg_obj, add_upload_info=True)
-
-                # Count reasoning_content separately to avoid undercounting.
-                # extract_text_from_message only includes reasoning as fallback
-                # when
-                # content is empty, so we always count it explicitly here.
-                rc = msg_field(msg_obj, 'reasoning_content') or msg_field(msg_obj, 'reasoning')
-                if rc:
-                    if isinstance(rc, list):
-                        rc_texts = []
-                        for item in rc:
-                            t = item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')
-                            if t:
-                                rc_texts.append(str(t))
-                        rc_str = ' '.join(rc_texts)
-                    else:
-                        rc_str = str(rc).strip()
-                else:
-                    rc_str = ''
-
-                total += qwen_count(text)
-
-                # Add reasoning content tokens, but skip if main content is
-                # empty
-                # (extract_text already included reasoning as fallback in that
-                # case).
-                if text and rc_str:
-                    total += qwen_count(rc_str)
+                stats = get_message_stats(msg)
+                total += stats['tokens']
 
             # Update cache
             if inst:
