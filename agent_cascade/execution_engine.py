@@ -4246,6 +4246,12 @@ class ExecutionEngine:
                 logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
                 loaded_skills = []
 
+            # Always include self-augmentation skill when skills are enabled (AUTO mode)
+            if loaded_skills and load_skill_value_upper == LOAD_SKILL_AUTO:
+                _self_aug_body = skill_manager.load_full_instructions("self-augmentation")
+                if _self_aug_body and _self_aug_body not in loaded_skills:
+                    loaded_skills.append(_self_aug_body)
+
         # Inject skill instructions into system prompt if any were loaded
         if loaded_skills:
             skills_block = _build_skills_block(loaded_skills)
