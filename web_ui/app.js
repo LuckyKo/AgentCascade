@@ -4619,14 +4619,6 @@ function renderApiEndpoints() {
              </div>
              <div style="display:flex;gap:8px;margin-top:6px;">
                <label class="setting-field" style="flex:1;">
-                 <span>Backoff Base (s)</span>
-                 <input type="number" min="0.1" max="60" step="0.5" class="ep-input-base-delay" value="${ep.base_retry_delay || 1.0}" title="Base delay for exponential backoff on retry">
-               </label>
-               <label class="setting-field" style="flex:1;">
-                 <span>Backoff Max (s)</span>
-                 <input type="number" min="1" max="60" step="1" class="ep-input-max-delay" value="${ep.max_retry_delay || 30.0}" title="Maximum cap on retry delay">
-               </label>
-               <label class="setting-field" style="flex:1;">
                  <span>Rate Limit (rpm)</span>
                  <input type="number" min="0" step="1" class="ep-input-rate-limit" value="${ep.rate_limit_rpm || 0}" title="Requests per minute. 0 = unlimited">
                </label>
@@ -4840,8 +4832,6 @@ function handleApiEndpointBlur(e) {
   ep.max_input_tokens = _epVal(card, '.ep-input-tokens', parseInt, 0);
 
   // Float fields (NaN-safe with appropriate defaults)
-  ep.base_retry_delay = _epVal(card, '.ep-input-base-delay', parseFloat, 1.0);
-  ep.max_retry_delay = _epVal(card, '.ep-input-max-delay', parseFloat, 30.0);
   ep.rate_limit_rpm = _epVal(card, '.ep-input-rate-limit', parseInt, 0);
 
   // Checkbox toggles (optional elements)
@@ -5060,9 +5050,6 @@ if (btnAddEndpoint) {
       model: '',
       enabled: true,
       max_retries: 2,
-      // NEW defaults matching the backend dataclass
-      base_retry_delay: 1.0,
-      max_retry_delay: 30.0,
       rate_limit_rpm: 0
     });
     

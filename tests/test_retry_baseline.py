@@ -132,8 +132,6 @@ class TestSingleEndpointRetryCount:
             api_base="http://localhost:9998/v1",
             model="mock-model",
             max_retries=2,
-            base_retry_delay=0.01,  # Fast retries for testing
-            max_retry_delay=0.05,
         )
         router.add_endpoint(ep)
 
@@ -160,8 +158,6 @@ class TestSingleEndpointRetryCount:
             api_base="http://localhost:9997/v1",
             model="mock-model",
             max_retries=2,
-            base_retry_delay=0.01,
-            max_retry_delay=0.05,
         )
         router.add_endpoint(ep)
 
@@ -192,12 +188,12 @@ class TestMultiEndpointFailover:
         # First endpoint: fails always, max_retries=1 (2 calls total)
         ep_a = APIEndpoint(
             id="ep-a", name="A", api_base="http://localhost:9996/v1", model="a",
-            max_retries=1, base_retry_delay=0.01, max_retry_delay=0.05,
+            max_retries=1,
         )
         # Second endpoint: succeeds immediately
         ep_b = APIEndpoint(
             id="ep-b", name="B", api_base="http://localhost:9995/v1", model="b",
-            max_retries=2, base_retry_delay=0.01, max_retry_delay=0.05,
+            max_retries=2,
         )
 
         router.add_endpoint(ep_a)
@@ -400,7 +396,7 @@ class TestPerformanceBaseline:
         router = make_router()
         ep = APIEndpoint(
             id="ep-perf", name="Perf-EP", api_base="http://localhost:9984/v1",
-            model="perf-model", max_retries=2, base_retry_delay=0.01, max_retry_delay=0.05,
+            model="perf-model", max_retries=2,
         )
         router.add_endpoint(ep)
 
@@ -424,7 +420,7 @@ class TestPerformanceBaseline:
         router = make_router()
         ep = APIEndpoint(
             id="ep-perf2", name="Perf-EP", api_base="http://localhost:9983/v1",
-            model="perf-model", max_retries=2, base_retry_delay=0.05, max_retry_delay=0.1,
+            model="perf-model", max_retries=2,
         )
         router.add_endpoint(ep)
 
@@ -448,7 +444,7 @@ class TestPerformanceBaseline:
         router = make_router()
         ep = APIEndpoint(
             id="ep-perf3", name="Perf-EP", api_base="http://localhost:9982/v1",
-            model="perf-model", max_retries=2, base_retry_delay=0.05, max_retry_delay=0.1,
+            model="perf-model", max_retries=2,
         )
         router.add_endpoint(ep)
 
@@ -503,7 +499,7 @@ class TestLLayerRetryBehavior:
         """
         ep = APIEndpoint(
             name="test", api_base="http://localhost:9981/v1", model="m",
-            max_retries=3, base_retry_delay=0.5, max_retry_delay=10.0,
+            max_retries=3,
         )
         llm_cfg = ep.to_llm_cfg()
 
@@ -524,7 +520,7 @@ class TestBackoffTiming:
         router = make_router()
         ep = APIEndpoint(
             id="ep-backoff", name="Backoff-EP", api_base="http://localhost:9980/v1",
-            model="backoff-model", max_retries=3, base_retry_delay=0.1, max_retry_delay=0.5,
+            model="backoff-model", max_retries=3,
         )
         router.add_endpoint(ep)
 
