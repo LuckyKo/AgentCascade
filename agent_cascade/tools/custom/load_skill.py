@@ -157,20 +157,13 @@ class LoadSkill(BaseTool):
             # Sanitize skill name in message content (Fix #5)
             safe_name = _sanitize_for_text(name)
 
-            # Format the injected message
-            content = f"## Loaded Skill: {safe_name}\n\n{body}\n\nApply the above guidelines to your current task."
-
-            # Check instance is still valid before appending (Fix #4)
-            if getattr(inst, 'is_terminated', False):
-                logger.warning("[SKILLS] Runtime load: instance '%s' terminated during skill loading", agent_name)
-                break
-
-            # Append as USER message
-            msg = Message(role=USER, content=content)
-            inst.append_message(msg)
+            # Queue skill content as USER message via pool.
+            # This ensures it's injected after the tool result (preserves OpenAI API ordering: A→F→U→A).
+            skill_content = f"## Loaded Skill: {safe_name}\n\n{body}\n\nApply the above guidelines to your current task."
+            self.agent_pool.enqueue_message(agent_name, skill_content)
             loaded.append(name)
 
-            logger.info("[SKILLS] Runtime load: injected skill '%s' into instance '%s'", name, agent_name)
+            logger.info("[SKILLS] Runtime load: queued skill '%s' for instance '%s'", name, agent_name)
 
         # Build summary
         lines = []
