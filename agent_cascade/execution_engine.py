@@ -2851,9 +2851,17 @@ class ExecutionEngine:
             # Pass _do_call directly — call_with_fallback handles generator
             # lifecycle via finally blocks. Also pass instance_name so the router
             # can apply per-instance cursor rotation (kick to next endpoint).
+            # NEW: pass caller_agent_type for endpoint inheritance when agent has no priorities.
+            _caller_type = None
+            if getattr(instance, 'parent_instance', None):
+                _parent = self.pool.get_instance(instance.parent_instance)
+                if _parent and hasattr(_parent, 'agent_class') and not getattr(_parent, 'is_terminated', False):
+                    _caller_type = _parent.agent_class
+
             return self.pool.api_router.call_with_fallback(
                 agent_type, _do_call, allocated_tokens=allocated_tokens,
                 agent_instance_name=instance.instance_name,
+                caller_agent_type=_caller_type,
             )
         else:
             # Direct call without router — same merge priority as fallback
