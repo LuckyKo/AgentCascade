@@ -237,18 +237,18 @@ class TestCalculateBackoffExponentialGrowth:
 
 
 class TestCalculateBackoffJitter:
-    """Verify jitter adds randomness within expected bounds."""
+    """Verify jitter adds positive-only randomness within expected bounds."""
 
     def test_jitter_stays_within_bounds(self):
-        """Jitter should keep result within ±jitter_factor of raw value."""
+        """Jitter should keep result between raw and raw*(1+jitter_factor) — never reduces delay."""
         # Use max_delay high enough that jitter bounds are not affected by capping
-        policy = RetryPolicy(base_delay=1.0, max_delay=100.0, jitter_factor=0.1)  # ±10%
+        policy = RetryPolicy(base_delay=1.0, max_delay=100.0, jitter_factor=0.1)  # +10% max
         raw = 1.0  # attempt 1: 1 * 2^0
 
         # Run many times to ensure jitter is actually applied and stays in bounds
         results = [calculate_backoff(1, policy) for _ in range(100)]
 
-        lower_bound = raw * (1 - policy.jitter_factor)
+        lower_bound = raw  # Positive-only jitter never reduces delay
         upper_bound = raw * (1 + policy.jitter_factor)
 
         # All results should be within jitter bounds (max_delay is high enough not to interfere)
@@ -259,7 +259,7 @@ class TestCalculateBackoffJitter:
         """Jitter should produce different values (not always the same)."""
         policy = RetryPolicy(base_delay=1.0, jitter_factor=0.5)
 
-        # With ±50% jitter, it's statistically unlikely all 50 calls return the same value
+        # With +50% jitter, it's statistically unlikely all 50 calls return the same value
         results = [calculate_backoff(1, policy) for _ in range(50)]
         unique_results = set(results)
 

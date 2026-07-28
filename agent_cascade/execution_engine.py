@@ -35,6 +35,7 @@ from agent_cascade.settings import (
     LLM_RETRY_MAX_BACKOFF,
     TOKEN_ESTIMATE_CHAR_DIVISOR,
 )
+from agent_cascade.retry_policy import classify_error, calculate_backoff, RetryPolicy
 
 from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
@@ -2049,6 +2050,9 @@ class ExecutionEngine:
 
         Extracted from _call_llm_with_injection() - Phase 3.6
 
+        .. deprecated:: Use agent_cascade.retry_policy.classify_error() instead.
+           Kept for backward compatibility; will be removed in a future phase.
+
         Args:
             error: The exception that occurred
 
@@ -2186,6 +2190,13 @@ class ExecutionEngine:
         loop_retry_count = 0       # Dedicated counter for inner-loop retries (gated by pool.settings.loop_max_retries)
         error_already_yielded = False
         _loop_max = max(1, getattr(self.pool.settings, 'loop_max_retries', 2))  # At least 1 retry to avoid instant failure
+
+        # Build centralized retry policy from pool settings (Phase 4a)
+        _retry_policy = RetryPolicy(
+            retry_max_attempts=getattr(self.pool.settings, 'retry_max_attempts', 3),
+            base_delay=getattr(self.pool.settings, 'retry_base_delay', 1.0),
+            max_delay=getattr(self.pool.settings, 'retry_max_delay', 8.0),
+        )
 
         # Estimate input tokens for telemetry (rough char-based estimate)
         _input_tokens_est = sum(len(m.content or '') for m in llm_messages) // TOKEN_ESTIMATE_CHAR_DIVISOR
@@ -2588,8 +2599,8 @@ class ExecutionEngine:
                 if isinstance(e, MaxTokenExceeded) or _reason.startswith('character run'):
                     self.pool.api_router.advance_instance_endpoint(inst_name)
 
-                # Classify error type
-                error_type = self._classify_llm_error(e)
+                # Classify error type using centralized policy (Phase 4a)
+                error_type = classify_error(e)
 
                 # Telemetry: record LLM call end for failed retry attempt
                 # before continuing (non-blocking)
@@ -2614,11 +2625,8 @@ class ExecutionEngine:
                     error_already_yielded = True
                     break
 
-                # Calculate exponential backoff delay with jitter (applied
-                # before cap)
-                raw_backoff = LLM_RETRY_BASE_DELAY * (2 ** (retry_count - 1))
-                jitter = random.uniform(0, 0.1 * raw_backoff)
-                backoff = min(raw_backoff + jitter, LLM_RETRY_MAX_BACKOFF)
+                # Calculate exponential backoff delay with jitter using centralized policy (Phase 4a)
+                backoff = calculate_backoff(retry_count, _retry_policy)
 
                 logger.warning(
                     f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{_loop_max}. "

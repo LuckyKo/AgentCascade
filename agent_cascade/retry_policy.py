@@ -124,5 +124,5 @@ def calculate_backoff(attempt: int, policy: RetryPolicy) -> float:
         Delay in seconds, bounded between 0.1 and policy.max_delay.
     """
     raw = policy.base_delay * (2 ** (attempt - 1))
-    jitter = random.uniform(-policy.jitter_factor, policy.jitter_factor) * raw
+    jitter = random.uniform(0, policy.jitter_factor) * raw
     return min(max(raw + jitter, 0.1), policy.max_delay)
