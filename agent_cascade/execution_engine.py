@@ -2164,7 +2164,7 @@ class ExecutionEngine:
         e: Exception,
         retry_count: int,
         loop_retry_count: int,
-        _loop_max: int
+        _max_attempts: int
     ) -> None:
         """Handle inner-loop detection (CharacterRunDetected/MaxTokenExceeded).
 
@@ -2175,26 +2175,26 @@ class ExecutionEngine:
         Dual counter semantics:
         - retry_count: shared budget counter for all retries (general + inner-loop)
         - loop_retry_count: tracks inner-loop-specific retries for observability
-        Both draw from the same _loop_max budget pool.
+        Both draw from the same _max_attempts budget pool.
 
         Args:
             instance: Agent instance making the call
             e: The CharacterRunDetected or MaxTokenExceeded exception
             retry_count: Current shared retry counter (already incremented by _abort_stream)
             loop_retry_count: Current inner-loop-specific counter (already incremented by _abort_stream)
-            _loop_max: Maximum retry attempts from pool settings
+            _max_attempts: Maximum retry attempts from pool settings
 
         Raises:
-            CharacterRunDetected: if loop budget exhausted (defense-in-depth check)
+            CharacterRunDetected: if retry budget exhausted (defense-in-depth check)
         """
         inst_name = instance.instance_name
 
-        # Check dedicated loop retry budget — fail fast if exhausted (_loop_max from UI setting)
+        # Check dedicated loop retry budget — fail fast if exhausted (_max_attempts from pool.settings.retry_max_attempts)
         # Note: generator already checks this before raising, so this is defense-in-depth.
         # Raising here matches original inline behavior for this edge case.
-        if isinstance(e, CharacterRunDetected) and loop_retry_count >= _loop_max:
+        if isinstance(e, CharacterRunDetected) and loop_retry_count >= _max_attempts:
             raise CharacterRunDetected(
-                f"inner_loop_exhausted: retried {_loop_max} times, "
+                f"inner_loop_exhausted: retried {_max_attempts} times, "
                 f"giving up — {e}",
                 detection_reason=getattr(e, 'detection_reason', 'unknown'),
             )
@@ -2261,9 +2261,9 @@ class ExecutionEngine:
         inst_name = instance.instance_name
         last_output = None
         retry_count = 0
-        loop_retry_count = 0       # Dedicated counter for inner-loop retries (gated by pool.settings.loop_max_retries)
+        loop_retry_count = 0       # Dedicated counter for inner-loop retries (gated by pool.settings.retry_max_attempts)
         error_already_yielded = False
-        _loop_max = max(1, getattr(self.pool.settings, 'loop_max_retries', 2))  # At least 1 retry to avoid instant failure
+        _max_attempts = self.pool.settings.retry_max_attempts  # At least 1 retry to avoid instant failure
 
         # Build centralized retry policy from pool settings (Phase 4a)
         _retry_policy = RetryPolicy(
@@ -2285,7 +2285,7 @@ class ExecutionEngine:
             agent_type = instance.agent_class.lower() if hasattr(instance, 'agent_class') else 'generalist'
             llm_messages = self._ensure_image_captions(llm_messages, agent_type=agent_type)
 
-        while retry_count <= _loop_max:
+        while retry_count <= _max_attempts:
             try:
                 # Telemetry: record LLM call start (non-blocking)
                 self._record_telemetry_event(
@@ -2411,10 +2411,10 @@ class ExecutionEngine:
                                         if _sample_path:
                                             logger.debug(f"  [LOOP_SAMPLE] Saved to {_sample_path}")
                                         # Check dedicated loop retry budget
-                                        # (gated by _loop_max from UI setting)
-                                        if loop_retry_count >= _loop_max:
+                                        # (gated by _max_attempts from pool.settings.retry_max_attempts)
+                                        if loop_retry_count >= _max_attempts:
                                             raise CharacterRunDetected(
-                                                f"inner_loop_exhausted: retried {_loop_max} times, "
+                                                f"inner_loop_exhausted: retried {_max_attempts} times, "
                                                 f"giving up — last reason: {_ev['reason']}",
                                                 detection_reason=_ev['reason'],
                                             )
@@ -2586,20 +2586,20 @@ class ExecutionEngine:
                 with instance._compression_lock:
                     instance._streaming_responses = []
 
-                if retry_count > _loop_max:
+                if retry_count > _max_attempts:
                     # Telemetry: record LLM call end for exhausted retries (non-blocking)
                     self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                     error_msg = str(e).split('\n')[0] if e else "Unknown error"
                     # Give clearer message for loop detection failures
                     if isinstance(e, CharacterRunDetected) and 'inner_loop_exhausted' in error_msg:
-                        display_msg = f"LLM generation loop detected (exceeded {_loop_max} loop retries)"
+                        display_msg = f"LLM generation loop detected (exceeded {_max_attempts} max attempts)"
                     elif isinstance(e, CharacterRunDetected):
-                        display_msg = f"LLM generation loop detected (tried {_loop_max} times)"
+                        display_msg = f"LLM generation loop detected (tried {_max_attempts} times)"
                     elif isinstance(e, MaxTokenExceeded):
-                        display_msg = f"LLM exceeded token limit (tried {_loop_max} times)"
+                        display_msg = f"LLM exceeded token limit (tried {_max_attempts} times)"
                     else:
-                        display_msg = f"LLM call failed after {_loop_max} retries — {error_msg}"
-                    logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {_loop_max} retries: {e}")
+                        display_msg = f"LLM call failed after {_max_attempts} retry attempts — {error_msg}"
+                    logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {_max_attempts} retry attempts: {e}")
                     yield Message(role=ASSISTANT, content=f"[SYSTEM ERROR: {display_msg}]")
                     error_already_yielded = True
                     break
@@ -2620,7 +2620,7 @@ class ExecutionEngine:
 
                     # Handle inner-loop detection: budget check and endpoint advancement
                     if isinstance(e, (CharacterRunDetected, MaxTokenExceeded)):
-                        self._handle_inner_loop_detection(instance, e, retry_count, loop_retry_count, _loop_max)
+                        self._handle_inner_loop_detection(instance, e, retry_count, loop_retry_count, _max_attempts)
 
                 # Classify error type using centralized policy (Phase 4a)
                 error_type = classify_error(e)
@@ -2643,12 +2643,12 @@ class ExecutionEngine:
                 backoff = calculate_backoff(retry_count, _retry_policy)
 
                 logger.warning(
-                    f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{_loop_max}. "
+                    f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{_max_attempts}. "
                     f"Retrying in {backoff:.1f}s with new endpoint... Error: {e}"
                 )
 
                 # Signal retry to UI before blocking on sleep
-                yield self._make_retrying_message(instance, retry_count, _loop_max, backoff)
+                yield self._make_retrying_message(instance, retry_count, _max_attempts, backoff)
                 time.sleep(backoff)
                 yield None
 
