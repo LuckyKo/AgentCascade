@@ -7,6 +7,7 @@ task execution. Uses the same skill infrastructure as init-time auto-loading.
 """
 
 import logging
+import re
 
 from agent_cascade.llm.schema import Message, USER
 from agent_cascade.tools.base import BaseTool, register_tool
@@ -79,14 +80,14 @@ class LoadSkill(BaseTool):
         if skill_manager is None:
             return "No skills system available. Skills may not have been initialized."
 
-        # Resolve the target agent instance to append messages to
+        # Resolve the target agent instance to append messages to.
+        # Priority: explicit kwarg > agent_obj.instance_name > self.agent_name > default.
         agent_obj = kwargs.get('agent_obj')
-        agent_name = (
-            kwargs.get('agent_instance_name') or
-            getattr(agent_obj, 'instance_name', None) if agent_obj else None or
-            self.agent_name or
-            'Orchestrator'
-        )
+        agent_name = kwargs.get('agent_instance_name')
+        if not agent_name and agent_obj is not None:
+            agent_name = getattr(agent_obj, 'instance_name', None)
+        if not agent_name:
+            agent_name = self.agent_name or 'Orchestrator'
 
         inst = None
         if self.agent_pool:
@@ -98,18 +99,52 @@ class LoadSkill(BaseTool):
         if inst is None:
             return f"Could not find agent instance '{agent_name}' to load skills into."
 
+        # Validate and normalize skill names
+        VALID_SKILL_NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
+
+        def _sanitize_for_text(raw: str) -> str:
+            """Strip newlines and control chars to prevent message injection."""
+            return ''.join(c for c in raw if c.isprintable() and c not in '\x00\x1b')
+
         # Load each skill and inject as user message
         loaded = []
         failed = []
 
-        for name in skill_names:
-            body = skill_manager.load_full_instructions(name)
-            if body is None:
+        for raw_name in skill_names:
+            # Validate skill name (Fix #3)
+            name = raw_name.strip() if isinstance(raw_name, str) else ''
+            if not name:
+                logger.warning("[SKILLS] Runtime load: empty skill name skipped")
+                failed.append(raw_name)
+                continue
+            if not VALID_SKILL_NAME_RE.match(name):
+                logger.warning("[SKILLS] Runtime load: invalid skill name '%s' (must be alphanumeric with hyphens/underscores)", raw_name)
+                failed.append(raw_name)
+                continue
+
+            # Load instructions with error handling (Fix #2)
+            try:
+                body = skill_manager.load_full_instructions(name)
+            except Exception as e:
+                logger.warning("[SKILLS] Runtime load: error loading skill '%s': %s", name, e)
                 failed.append(name)
                 continue
 
+            if body is None:
+                logger.warning("[SKILLS] Runtime load: skill '%s' not found", name)  # Fix #6
+                failed.append(name)
+                continue
+
+            # Sanitize skill name in message content (Fix #5)
+            safe_name = _sanitize_for_text(name)
+
             # Format the injected message
-            content = f"## Loaded Skill: {name}\n\n{body}\n\nApply the above guidelines to your current task."
+            content = f"## Loaded Skill: {safe_name}\n\n{body}\n\nApply the above guidelines to your current task."
+
+            # Check instance is still valid before appending (Fix #4)
+            if getattr(inst, 'is_terminated', False):
+                logger.warning("[SKILLS] Runtime load: instance '%s' terminated during skill loading", agent_name)
+                break
 
             # Append as USER message
             msg = Message(role=USER, content=content)
