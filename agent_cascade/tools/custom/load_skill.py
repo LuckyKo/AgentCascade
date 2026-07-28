@@ -80,6 +80,9 @@ class LoadSkill(BaseTool):
         if skill_manager is None:
             return "No skills system available. Skills may not have been initialized."
 
+        # Trigger discovery so new/recent skills are visible (matches scan_skills behavior)
+        skill_manager._ensure_discovered()
+
         # Resolve the target agent instance to append messages to.
         # Priority: explicit kwarg > agent_obj.instance_name > self.agent_name > default.
         agent_obj = kwargs.get('agent_obj')
