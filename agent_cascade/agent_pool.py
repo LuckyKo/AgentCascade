@@ -1719,6 +1719,9 @@ class AgentPool:
 
             skill_manager = getattr(self, 'skill_manager', None)
             if skill_manager and load_skill_value_upper != LOAD_SKILL_NONE and new_inst.conversation:
+                # Ensure skills are discovered before attempting to load them
+                skill_manager._ensure_discovered()
+
                 # Get task text from first user message for AUTO-mode matching
                 first_user_msg = next(
                     (m for m in new_inst.conversation if m.role == USER),
