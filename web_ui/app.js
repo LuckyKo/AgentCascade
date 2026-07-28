@@ -142,6 +142,7 @@ const POOL_SETTINGS_MAP = [
   { id: 'setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars', localKey: 'cache-threshold-chars' },
   { id: 'setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode', localKey: 'enable-skills',
     transform: (v) => v === 'AUTO' },
+  { id: 'setting-auto-skill-gen', prop: 'checked', key: 'auto_skill_enabled', localKey: 'auto-skill-gen' },
   // Retry policy settings (Phase 6)
   { id: 'setting-retry-max-attempts', prop: 'value', key: 'retry_max_attempts', localKey: 'retry-max-attempts' },
   { id: 'setting-endpoint-max-retries', prop: 'value', key: 'endpoint_max_retries', localKey: 'endpoint-max-retries' },
@@ -827,6 +828,17 @@ if (settingMaxContext) {
   });
 }
 
+// Skills toggles: unchecking "Enable Skills" also disables auto-skill generation
+if ($('#setting-enable-skills')) {
+  $('#setting-enable-skills').addEventListener('change', (e) => {
+    const autoSkillGen = $('#setting-auto-skill-gen');
+    if (autoSkillGen && !e.target.checked) {
+      autoSkillGen.checked = false;
+      saveSettings();
+    }
+  });
+}
+
 // Appearance colors
 if (settingUserColor) {
   settingUserColor.addEventListener('input', (e) => {
@@ -892,6 +904,7 @@ function saveSettings(sendToServer) {
   if ($('#setting-max-turns')) s['max-turns'] = $('#setting-max-turns').value;
   if ($('#setting-auto-continue')) s['auto-continue'] = $('#setting-auto-continue').checked;
   if ($('#setting-enable-skills')) s['enable-skills'] = $('#setting-enable-skills').checked;
+  if ($('#setting-auto-skill-gen')) s['auto-skill-gen'] = $('#setting-auto-skill-gen').checked;
   if ($('#setting-inner-loop-detect')) s['inner-loop-detect'] = $('#setting-inner-loop-detect').checked;
   // Save Agent Budgeting toggle state
   if ($('#setting-agent-budgeting')) s['enable_agent_budgeting'] = $('#setting-agent-budgeting').checked;
@@ -1024,6 +1037,7 @@ function loadSettings() {
     if (s['max-turns'] !== undefined) $('#setting-max-turns').value = s['max-turns'];
     if (s['auto-continue'] !== undefined) $('#setting-auto-continue').checked = s['auto-continue'];
     if (s['enable-skills'] !== undefined) $('#setting-enable-skills').checked = s['enable-skills'];
+    if (s['auto-skill-gen'] !== undefined) $('#setting-auto-skill-gen').checked = s['auto-skill-gen'];
     if (s['inner-loop-detect'] !== undefined) $('#setting-inner-loop-detect').checked = s['inner-loop-detect'];
     // Restore Agent Budgeting toggle state
     if (s['enable_agent_budgeting'] !== undefined) $('#setting-agent-budgeting').checked = s['enable_agent_budgeting'];
@@ -4323,6 +4337,7 @@ function getGenerateCfg() {
   if ($('#setting-auto-continue')) cfg.auto_continue = $('#setting-auto-continue').checked;
   if ($('#setting-auto-rollback')) cfg.auto_rollback_on_loop = $('#setting-auto-rollback').checked;
   if ($('#setting-enable-skills')) cfg.default_load_skill_mode = $('#setting-enable-skills').checked ? 'AUTO' : 'NONE';
+  if ($('#setting-auto-skill-gen')) cfg.auto_skill_enabled = $('#setting-auto-skill-gen').checked;
   if ($('#setting-inner-loop-detect')) cfg.inner_loop_detect_enabled = $('#setting-inner-loop-detect').checked;
   // Loop detection tuning settings
   if ($('#setting-loop-min-chars')) cfg.loop_min_chars = parseInt($('#setting-loop-min-chars').value) || 4000;

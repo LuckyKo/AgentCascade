@@ -4353,55 +4353,20 @@ class ExecutionEngine:
             # detailed analysis.
             self._create_completed = True  # Mark for finally-block EXIT log reason tracking
 
-            if AUTO_SKILL_ENABLED and skill_manager and load_skill_value_upper != LOAD_SKILL_NONE:
-                # Snapshot under lock: conversation length + skills registry
-                with inst._compression_lock:
-                    _conv_length = len(inst.conversation)
-                _skills_before = set(skill_manager.get_skill_names())
-
-                # Check trigger and inject prompt
-                _append_fn = lambda msg: self._append_and_log(inst, self._make_user_message(msg))
-                if skill_manager.check_and_inject_auto_skill_prompt(
-                    inst=inst,
-                    total_tool_calls=total_tool_calls,
-                    task_text=task_text,
-                    instance_name=instance_name,
-                    append_fn=_append_fn,
-                ):
-                    # Set turn limit and let the engine loop handle extra turns
-                    _orig_max_turns = inst.max_turns
-                    inst.max_turns = AUTO_SKILL_EXTRA_TURNS
-                    try:
-                        for resp in self.run(inst):
-                            if self._is_stopped(instance_name):
-                                break
-                            # Unpack (messages, is_streaming) tuple from engine.run()
-                            if isinstance(resp, tuple) and len(resp) == 2:
-                                final_resp = resp[0]
-                            else:
-                                final_resp = resp
-                            # Count tool calls from FUNCTION role messages
-                            total_tool_calls += sum(1 for m in final_resp if msg_field(m, 'role', '') == FUNCTION)
-                    except Exception as e:
-                        logger.warning("[AUTO-SKILL] Extra turn error for %s: %s", instance_name, e)
-                    finally:
-                        inst.max_turns = _orig_max_turns
-
-                    created_skills = skill_manager.finalize_auto_skill(
-                        inst=inst,
-                        instance_name=instance_name,
-                        snapshot_length=_conv_length,
-                        rollback_fn=lambda pop_count: self.pool._rollback_instance(
-                            instance_name, pop_count=pop_count),
-                        check_skill_created_fn=lambda: list(
-                            set(skill_manager._skills_registry.keys()) - frozenset(_skills_before)),
-                    )
-                else:
-                    created_skills = []
-
-                # Inject notice into the last assistant message
-                from agent_cascade.skills.manager import inject_skill_notice
-                inject_skill_notice(inst, created_skills)
+            # Unified auto-skill gating: both toggles must be ON, using pool settings as single source of truth
+            from agent_cascade.auto_skill_helpers import run_auto_skill_proposal
+            created_skills = run_auto_skill_proposal(
+                pool=pool,
+                skill_manager=skill_manager,
+                inst=inst,
+                task_text=task_text,
+                instance_name=instance_name,
+                total_tool_calls=total_tool_calls,
+                append_fn=lambda msg: self._append_and_log(inst, self._make_user_message(msg)),
+                rollback_fn=lambda pop_count: pool._rollback_instance(instance_name, pop_count=pop_count),
+                is_stopped=lambda: self._is_stopped(instance_name),
+                engine_run_generator=lambda: self.run(inst),
+            )
 
             # Item 12: Always emit final sub-agent state after loop completes
             # (Fix

@@ -794,6 +794,7 @@ def build_state_from_pool(
             'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
             'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
             'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
+            'auto_skill_enabled': getattr(ps, 'auto_skill_enabled', True),
             # Retry policy settings (Phase 6)
             'retry_max_attempts': getattr(ps, 'retry_max_attempts', 3),
             'endpoint_max_retries': getattr(ps, 'endpoint_max_retries', 1),
@@ -933,6 +934,7 @@ def build_stream_update_from_pool(
             'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
             'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
             'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
+            'auto_skill_enabled': getattr(ps, 'auto_skill_enabled', True),
             # Retry policy settings (Phase 6)
             'retry_max_attempts': getattr(ps, 'retry_max_attempts', 3),
             'endpoint_max_retries': getattr(ps, 'endpoint_max_retries', 1),

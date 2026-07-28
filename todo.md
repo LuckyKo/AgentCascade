@@ -28,14 +28,10 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] make out path helper that tools use resolve extra_rw/ro paths just like code_intepreter does
 [x] make shell_cmd automatically launch on async mode if the agent sets timeout bigger than 60s and doesn't specify the mode as sync.
 [x] check put shell_cmd async commands. add a `__wait` command to simply wait for next heartbeat - a no reply tool call basically (needed because most LLMs dont understand the concept of shutting up to get in SLEEPING state). make sure all these commands dont need justification field.
-[ ] decouple `enable skills` toggle from auto-skill logic, add `enable auto-skill generation`
+[x] decouple `enable skills` toggle from auto-skill logic, add `enable auto-skill generation`
 [ ] make a way to elegantly acquire a skill at run time (beside agent init)
 [ ] add a `range` argument to edit_file tool for the delete_and_insert mode so its less confusing than reusing `old_contnet`
 
-
-# COMPLETED REFACTORINGS:
-
-- [x] API retry/fallback system refactored from 3 overlapping layers to 2 clean layers with centralized policy (retry_policy.py). Reduced default total retry budget from potentially 40+ attempts to 3. Clean break — no backwards compat for old config names. See docs/retry_refactor_plan.md and commit history (11d0891..3a4fb95).
 
 # BUGS:
 

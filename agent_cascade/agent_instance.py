@@ -639,5 +639,6 @@ class PoolSettings:
 
     # Skills system settings
     default_load_skill_mode: str = DEFAULT_LOAD_SKILL_MODE  # "AUTO" (default) or "NONE" — controls whether skills auto-load on call_agent
+    auto_skill_enabled: bool = True                         # Controls whether auto-skill generation/proposal is allowed
     
     

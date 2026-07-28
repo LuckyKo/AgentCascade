@@ -24,10 +24,10 @@ from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, ROLE, USER, Message,
 )
 from agent_cascade.log import logger
-from agent_cascade.settings import AUTO_SKILL_ENABLED, AUTO_SKILL_EXTRA_TURNS
 
 from .agent_pool import AgentPool
 from .agent_instance import AgentState
+from .execution_engine import ExecutionEngine
 
 
 
@@ -212,12 +212,10 @@ def run_agent_thread_unified(
                 ))
 
         inst = pool.get_instance(instance_name)
-        if inst and AUTO_SKILL_ENABLED:
-            # Check pool settings for skill mode gate
-            _load_mode = getattr(pool.settings, 'default_load_skill_mode', 'AUTO')
-            skill_manager = getattr(pool, 'skill_manager', None)
-            if _load_mode == 'NONE':
-                skill_manager = None  # Gate: disable auto-skill generation
+        skill_manager = getattr(pool, 'skill_manager', None)
+
+        if inst and skill_manager:
+            # Extract task_text from first user message for auto-skill proposal context
             task_text = ""
             if inst.conversation:
                 for msg in inst.conversation:
@@ -227,60 +225,21 @@ def run_agent_thread_unified(
                         if content:
                             task_text = content[:500]
                             break
-            if skill_manager:
-                # Snapshot under lock: conversation length + skills registry
-                with inst._compression_lock:
-                    _conv_length = len(inst.conversation)
-                _skills_before = set(skill_manager.get_skill_names())
 
-                # Check trigger and inject prompt
-                _append_fn = lambda msg: inst.append_message(Message(role=USER, content=msg))
-                if skill_manager.check_and_inject_auto_skill_prompt(
-                    inst=inst,
-                    total_tool_calls=total_tool_calls,
-                    task_text=task_text,
-                    instance_name=instance_name,
-                    append_fn=_append_fn,
-                ):
-                    # Set turn limit and let the engine loop handle extra turns
-                    _orig_max_turns = inst.max_turns
-                    inst.max_turns = AUTO_SKILL_EXTRA_TURNS
-                    try:
-                        from .execution_engine import ExecutionEngine
-                        _engine = ExecutionEngine(pool)
-                        for turn_output_raw in _engine.run(inst):
-                            if is_stopped():
-                                break
-                            # Unpack (turn_output, is_streaming) tuple
-                            if isinstance(turn_output_raw, tuple) and len(turn_output_raw) == 2:
-                                turn_output = turn_output_raw[0]
-                            else:
-                                turn_output = turn_output_raw
-                            # Count tool calls from FUNCTION role messages
-                            total_tool_calls += sum(1 for m in turn_output if (
-                                m.get('role', '') == FUNCTION
-                                if isinstance(m, dict) else getattr(m, 'role', '') == FUNCTION
-                            ))
-                    except Exception as e:
-                        logger.warning("[AUTO-SKILL] Extra turn error for %s: %s", instance_name, e)
-                    finally:
-                        inst.max_turns = _orig_max_turns
-
-                    created_skills = skill_manager.finalize_auto_skill(
-                        inst=inst,
-                        instance_name=instance_name,
-                        snapshot_length=_conv_length,
-                        rollback_fn=lambda pop_count: pool._rollback_instance(
-                            instance_name, pop_count=pop_count),
-                        check_skill_created_fn=lambda: list(
-                            set(skill_manager._skills_registry.keys()) - frozenset(_skills_before)),
-                    )
-                else:
-                    created_skills = []
-
-                # Inject notice into the last message
-                from agent_cascade.skills.manager import inject_skill_notice
-                inject_skill_notice(inst, created_skills)
+            # Unified auto-skill gating: both toggles must be ON, using pool settings as single source of truth
+            from agent_cascade.auto_skill_helpers import run_auto_skill_proposal
+            created_skills = run_auto_skill_proposal(
+                pool=pool,
+                skill_manager=skill_manager,
+                inst=inst,
+                task_text=task_text,
+                instance_name=instance_name,
+                total_tool_calls=total_tool_calls,
+                append_fn=lambda msg: inst.append_message(Message(role=USER, content=msg)),
+                rollback_fn=lambda pop_count: pool._rollback_instance(instance_name, pop_count=pop_count),
+                is_stopped=is_stopped,
+                engine_run_generator=lambda: ExecutionEngine(pool).run(inst),
+            )
 
         # ── Final state broadcast ────────────────────────────────────────
         final_state = build_state_from_pool(

@@ -227,6 +227,13 @@ def _handle_default_load_skill_mode(ui_cfg: dict, agent_pool: Optional[Any], age
                         sm._rebuild_index()
 
 
+@register_config_handler('auto_skill_enabled')
+def _handle_auto_skill_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle auto-skill generation/proposal on/off."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.auto_skill_enabled = bool(ui_cfg.get('auto_skill_enabled', True))
+
+
 @register_config_handler('loop_min_chars')
 def _handle_loop_min_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update minimum characters before activating heavy loop detection."""
