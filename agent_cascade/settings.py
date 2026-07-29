@@ -96,6 +96,19 @@ DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT: int = int(os.getenv(
 ENDPOINT_SLOT_ACQUIRE_TIMEOUT: int = int(os.getenv(
     'QWEN_AGENT_ENDPOINT_SLOT_ACQUIRE_TIMEOUT', 30))  # Timeout in seconds for acquiring endpoint scheduling slots
 
+# Settings for endpoint cooldown (time-based skip of failed endpoints)
+def _parse_endpoint_cooldown():
+    """Parse AGENT_CASCADE_ENDPOINT_COOLDOWN with safe defaults."""
+    try:
+        val = int(os.getenv('AGENT_CASCADE_ENDPOINT_COOLDOWN', '60'))
+        return max(0, val)  # Clamp to 0 if negative
+    except (ValueError, TypeError):
+        return 60
+
+ENDPOINT_COOLDOWN_SECONDS: int = _parse_endpoint_cooldown()  # Seconds to skip a failed endpoint before retrying
+ENDPOINT_FAILURE_CLEANUP_HOURS: int = int(os.getenv(
+    'AGENT_CASCADE_ENDPOINT_FAILURE_CLEANUP_HOURS', 24))  # Remove failure records older than this many hours
+
 # Settings for token estimation
 # Aggressive estimate used for telemetry and output estimation.
 # Based on typical English text (~4 chars/token), this is more optimistic
