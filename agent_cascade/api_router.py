@@ -959,14 +959,14 @@ class APIRouter:
 
             # Filter out endpoints currently in cooldown period.
             # Default endpoint is appended after filtering, so it's always available as last resort.
+            # NOTE: Already under self._lock from outer scope — read _endpoint_failure_times directly.
             if ENDPOINT_COOLDOWN_SECONDS > 0 and configs:
                 now = time.time()
                 filtered_configs = []
                 skipped_count = 0
                 for cfg in configs:
                     api_base = cfg.get('api_base') or cfg.get('model_server', '')
-                    with self._lock:
-                        last_fail = self._endpoint_failure_times.get(api_base, 0)
+                    last_fail = self._endpoint_failure_times.get(api_base, 0)
                     if api_base and (now - last_fail) < ENDPOINT_COOLDOWN_SECONDS:
                         skipped_count += 1
                         logger.debug(
