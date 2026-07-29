@@ -2208,7 +2208,18 @@ class ExecutionEngine:
         # again because call_with_fallback builds a fresh chain each time.
         _reason = getattr(e, 'detection_reason', '')
         if isinstance(e, MaxTokenExceeded) or _reason.startswith('character run'):
-            self.pool.api_router.advance_instance_endpoint(inst_name)
+            new_pos = self.pool.api_router.advance_instance_endpoint(inst_name)
+            logger.warning(
+                f"[INNER_LOOP] Endpoint cursor advanced for '{inst_name}' "
+                f"to position {new_pos} (detection: {_reason}). "
+                f"Next retry will use a different endpoint."
+            )
+        else:
+            logger.info(
+                f"[INNER_LOOP] Detection triggered for '{inst_name}' "
+                f"(reason: {_reason}), but not strong enough to advance cursor. "
+                f"Retrying same endpoint."
+            )
 
     def _record_telemetry_event(self, inst_name: str, event_type: str, **kwargs) -> None:
         """Record telemetry event for LLM call lifecycle.
@@ -2642,9 +2653,19 @@ class ExecutionEngine:
                 # Calculate exponential backoff delay with jitter using centralized policy (Phase 4a)
                 backoff = calculate_backoff(retry_count, _retry_policy)
 
+                # Only claim "new endpoint" when cursor was actually advanced.
+                # Matches _handle_inner_loop_detection logic: character-run and max-token
+                # advance the cursor; other detections (sentence, ngram, block, entropy)
+                # retry the same endpoint. Non-inner-loop errors also retry same endpoint.
+                _det_reason = getattr(e, 'detection_reason', '')
+                advancing_endpoint = isinstance(e, MaxTokenExceeded) or (
+                    isinstance(e, CharacterRunDetected) and _det_reason.startswith('character run')
+                )
+                endpoint_str = " with new endpoint" if advancing_endpoint else ""
+
                 logger.warning(
                     f"[ENDPOINT_RETRY] LLM call failed for {inst_name}, retry {retry_count}/{_max_attempts}. "
-                    f"Retrying in {backoff:.1f}s with new endpoint... Error: {e}"
+                    f"Retrying in {backoff:.1f}s{endpoint_str}... Error: {e}"
                 )
 
                 # Signal retry to UI before blocking on sleep

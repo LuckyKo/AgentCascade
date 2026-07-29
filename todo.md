@@ -35,10 +35,9 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 # BUGS:
 
-- [ ] manually asking for security agent opinion does not fill it in and stop the security agent info once it reached conclusion
 - [ ] telemetry `Output Tokens (est)` severely undercounts
 - [ ] we are pushing wrong summary from the inner loop detector if the compressor fails and gets stuck in a loop `[SYSTEM ERROR: Empty LLM response]`. it should try another API endpoint instead 
-- [ ] inner loop detector is almost unusable how many false positives generates, `char run` is the only good mode. pls make tests that simulate streaming as it happens normally, use rel existing logs to check for false positives.
+- [ ] inner loop detector is almost unusable how many false positives generates, `char run` is the only good mode. pls make tests that simulate streaming as it happens normally, use existing logs to check for false positives.
 - [x] approval timeout occurs even when explicitly disabled in options, when it was set on auto-ask mode — DONE: Security advisor used hard-coded 180s timeout constant instead of reading from operation_manager settings. Fixed `security_handler.run_check()` to dynamically read `enable_timeout` and `approval_timeout_seconds` from operation manager. Timeout message now shows actual configured value. Added None guards for safety.
 - [x] I dont want truncation of the user messages in the que (UI user que display) — DONE: Renamed `get_queue_previews` → `get_queue_messages`, removed `max_length` truncation (100 chars). Method now returns full message strings. Updated all 4 call sites.
 - [ ] UI streaming stops on `pause`. it should not, pause should ONLY stop the tool response logic.
@@ -79,3 +78,426 @@ currency_limit=0
 2026-07-27 08:54:24,204 - agent_pool.py - 2659 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_dc743fe4
 
 
+# Wtf is this? the LLM outputs were just fine
+
+**RESOLVED (2026-07-29)** — Two bugs fixed:
+
+1. **Inner loop false positive**: char_run counter persisted across whitespace-only chunks that were skipped, causing non-consecutive "/" characters in file paths to falsely accumulate into a "character run". Fixed by resetting `char_run = 0` when skipping whitespace chunks (`inner_loop_detect.py:213`).
+
+2. **Misleading fallback logs + dead code**: Retry message always said "with new endpoint" even for errors that don't advance the cursor. Also, api_router.py had dead code checking for CharacterRunDetected that could never execute (exceptions happen during generator iteration after call_with_fallback returns). Fixed logging accuracy and removed dead code (`execution_engine.py:2656-2665`, `api_router.py:1283-1309`).
+
+2026-07-29 04:58:17,804 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 50020, Available tokens: 123517
+2026-07-29 04:58:31,215 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 50452, Available tokens: 123517
+2026-07-29 04:58:54,648 - execution_engine.py - 2362 - INFO - [STREAM_GUARD] Detected generation loop: character run '/' (71) (score=100.0) for inner_loop_researcher. Retrying…
+2026-07-29 04:58:54,648 - execution_engine.py - 2412 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade\workspace\logs\loop_samples\samples_2026-07-29.jsonl
+2026-07-29 04:58:54,652 - execution_engine.py - 2444 - DEBUG - [INNER_LOOP] Detection error for inner_loop_researcher: inner_loop: character run '/' (71)
+2026-07-29 04:58:54,652 - execution_engine.py - 2645 - WARNING - [ENDPOINT_RETRY] LLM call failed for inner_loop_researcher, retry 1/3. Retrying in 1.1s with new endpoint... Error: inner_loop: character run '/' (71)
+2026-07-29 04:58:55,765 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 50452, Available tokens: 123517
+2026-07-29 04:59:29,657 - execution_engine.py - 2362 - INFO - [STREAM_GUARD] Detected generation loop: character run '/' (71) (score=100.0) for inner_loop_researcher. Retrying…
+2026-07-29 04:59:29,657 - execution_engine.py - 2412 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade\workspace\logs\loop_samples\samples_2026-07-29.jsonl
+2026-07-29 04:59:29,660 - execution_engine.py - 2444 - DEBUG - [INNER_LOOP] Detection error for inner_loop_researcher: inner_loop: character run '/' (71)
+2026-07-29 04:59:29,660 - execution_engine.py - 2645 - WARNING - [ENDPOINT_RETRY] LLM call failed for inner_loop_researcher, retry 2/3. Retrying in 2.2s with new endpoint... Error: inner_loop: character run '/' (71)
+2026-07-29 04:59:31,856 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 50452, Available tokens: 123517
+2026-07-29 04:59:31,924 - oai.py - 404 - INFO - LLM infrastructure changed. Re-detecting context for: http://router.huggingface.co/v1
+2026-07-29 04:59:32,318 - oai.py - 369 - DEBUG - Could not identify a target model in http://router.huggingface.co/v1/models for context length detection.
+2026-07-29 04:59:32,318 - oai.py - 77 - DEBUG - [CACHE] MISS creating new client key=('http://router.huggingface.co/v1', 'REDACTED_HF_TOKEN')
+2026-07-29 04:59:32,753 - log.py - 41 - WARNING - [APIRouter] Endpoint 'zai-org/GLM-5.2:novita' @ http://router.huggingface.co/v1 attempt 1/3: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 427, in _chat_stream
+    response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 240, in _chat_complete_create
+    return client.chat.completions.create(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_utils\_utils.py", line 286, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\resources\chat\completions\completions.py", line 1192, in create
+    return self._post(
+           ^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1259, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1047, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.APIStatusError: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1272, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1201, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 519, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 379, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 503, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 557, in _chat_stream
+    raise ModelServiceError(exception=ex, code=code if code else None)
+agent_cascade.llm.base.ModelServiceError: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+[APIRouter] Endpoint 'zai-org/GLM-5.2:novita' @ http://router.huggingface.co/v1 attempt 1/3: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 427, in _chat_stream
+    response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 240, in _chat_complete_create
+    return client.chat.completions.create(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_utils\_utils.py", line 286, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\resources\chat\completions\completions.py", line 1192, in create
+    return self._post(
+           ^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1259, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1047, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.APIStatusError: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1272, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1201, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 519, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 379, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 503, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 557, in _chat_stream
+    raise ModelServiceError(exception=ex, code=code if code else None)
+agent_cascade.llm.base.ModelServiceError: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+
+2026-07-29 04:59:33,855 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 50452, Available tokens: 123517
+2026-07-29 04:59:33,943 - log.py - 41 - WARNING - [APIRouter] Endpoint 'zai-org/GLM-5.2:novita' @ http://router.huggingface.co/v1 attempt 2/3: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 427, in _chat_stream
+    response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 240, in _chat_complete_create
+    return client.chat.completions.create(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_utils\_utils.py", line 286, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\resources\chat\completions\completions.py", line 1192, in create
+    return self._post(
+           ^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1259, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1047, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.APIStatusError: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1272, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1201, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 519, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 379, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 503, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 557, in _chat_stream
+    raise ModelServiceError(exception=ex, code=code if code else None)
+agent_cascade.llm.base.ModelServiceError: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+[APIRouter] Endpoint 'zai-org/GLM-5.2:novita' @ http://router.huggingface.co/v1 attempt 2/3: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 427, in _chat_stream
+    response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 240, in _chat_complete_create
+    return client.chat.completions.create(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_utils\_utils.py", line 286, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\resources\chat\completions\completions.py", line 1192, in create
+    return self._post(
+           ^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1259, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1047, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.APIStatusError: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1272, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1201, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 519, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 379, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 503, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 557, in _chat_stream
+    raise ModelServiceError(exception=ex, code=code if code else None)
+agent_cascade.llm.base.ModelServiceError: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+
+2026-07-29 04:59:35,999 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 50452, Available tokens: 123517
+2026-07-29 04:59:36,100 - log.py - 41 - WARNING - [APIRouter] Endpoint 'zai-org/GLM-5.2:novita' @ http://router.huggingface.co/v1 attempt 3/3: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 427, in _chat_stream
+    response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 240, in _chat_complete_create
+    return client.chat.completions.create(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_utils\_utils.py", line 286, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\resources\chat\completions\completions.py", line 1192, in create
+    return self._post(
+           ^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1259, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1047, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.APIStatusError: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1272, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1201, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 519, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 379, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 503, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 557, in _chat_stream
+    raise ModelServiceError(exception=ex, code=code if code else None)
+agent_cascade.llm.base.ModelServiceError: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+[APIRouter] Endpoint 'zai-org/GLM-5.2:novita' @ http://router.huggingface.co/v1 attempt 3/3: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+Traceback: Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 427, in _chat_stream
+    response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 240, in _chat_complete_create
+    return client.chat.completions.create(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_utils\_utils.py", line 286, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\resources\chat\completions\completions.py", line 1192, in create
+    return self._post(
+           ^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1259, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1047, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.APIStatusError: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1272, in call_with_fallback
+    result = execute_with_sem(current_agent_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1201, in execute_with_sem
+    first_chunk = next(it)
+                  ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 519, in _convert_messages_iterator_to_target_type
+    for messages in messages_iter:
+                    ^^^^^^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 379, in _format_and_cache
+    for o in output:
+             ^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 503, in _postprocess_messages_iterator
+    for pre_msg in messages:
+                   ^^^^^^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 557, in _chat_stream
+    raise ModelServiceError(exception=ex, code=code if code else None)
+agent_cascade.llm.base.ModelServiceError: <html>
+<head><title>307 Temporary Redirect</title></head>
+<body>
+<center><h1>307 Temporary Redirect</h1></center>
+<hr><center>CloudFront</center>
+</body>
+</html>
+
+2026-07-29 04:59:36,113 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 50452, Available tokens: 123517
+2026-07-29 04:59:36,177 - oai.py - 404 - INFO - LLM infrastructure changed. Re-detecting context for: http://127.0.0.1:1234/v1
+2026-07-29 04:59:36,201 - oai.py - 297 - DEBUG - Using loaded model 'Agents-A1-APEX-I-Quality.gguf' for context detection.
+2026-07-29 04:59:36,201 - oai.py - 346 - DEBUG - Missing context metadata in list. Trying specific endpoint: http://127.0.0.1:1234/v1/models/Agents-A1-APEX-I-Quality.gguf
+2026-07-29 04:59:36,364 - oai.py - 367 - INFO - Model Agents-A1-APEX-I-Quality.gguf found, but could not detect context length via API.
+2026-07-29 05:00:06,197 - execution_engine.py - 2362 - INFO - [STREAM_GUARD] Detected generation loop: character run '/' (71) (score=100.0) for inner_loop_researcher. Retrying…
+2026-07-29 05:00:06,198 - execution_engine.py - 2412 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentCascade\workspace\logs\loop_samples\samples_2026-07-29.jsonl
+2026-07-29 05:00:06,208 - execution_engine.py - 2444 - DEBUG - [INNER_LOOP] Detection error for inner_loop_researcher: inner_loop_exhausted: retried 3 times, giving up — last reason: character run '/' (71)
+2026-07-29 05:00:06,211 - execution_engine.py - 1301 - ERROR - EXCEPTION - inner_loop_researcher: CharacterRunDetected: inner_loop_exhausted: retried 3 times, giving up — inner_loop_exhausted: retried 3 times, giving up — last reason: character run '/' (71)
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 2416, in _execute_llm_call_with_retry
+    raise CharacterRunDetected(
+agent_cascade.exceptions.CharacterRunDetected: inner_loop_exhausted: retried 3 times, giving up — last reason: character run '/' (71)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 1148, in run
+    for msg in gen:
+               ^^^
+  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 2701, in _call_llm_with_injection
+    yield from self._execute_llm_call_with_retry(instance, llm_messages, template, active_functions)
+  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 2623, in _execute_llm_call_with_retry
+    self._handle_inner_loop_detection(instance, e, retry_count, loop_retry_count, _max_attempts)
+  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 2196, in _handle_inner_loop_detection
+    raise CharacterRunDetected(
+agent_cascade.exceptions.CharacterRunDetected: inner_loop_exhausted: retried 3 times, giving up — inner_loop_exhausted: retried 3 times, giving up — last reason: character run '/' (71)
+2026-07-29 05:00:06,215 - execution_engine.py - 1385 - DEBUG - EXIT - inner_loop_researcher RUNNING→IDLE
+2026-07-29 05:00:06,216 - execution_engine.py - 4416 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=inner_loop_researcher, reason=completed, inst_type=AgentInstance, conv_len=2, final_resp_len=1
+2026-07-29 05:00:06,220 - tool_dispatcher.py - 433 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'inner_loop_researcher' completed in 296.45s
+2026-07-29 05:00:06,221 - tool_dispatcher.py - 446 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'Maine' after sync child
+2026-07-29 05:00:06,223 - agent_pool.py - 2232 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
+2026-07-29 05:00:06,224 - tool_dispatcher.py - 455 - DEBUG - [SLOT_SYNC_REACQUIRED] Successfully re-acquired slot for 'Maine'. Total SYNC path elapsed: 296.47s
+2026-07-29 05:00:06,224 - tool_dispatcher.py - 116 - DEBUG - handle_call_agent returned type=str
+2

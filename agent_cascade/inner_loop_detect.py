@@ -208,6 +208,9 @@ class InnerLoopDetector:
         """
         # Guard against empty or whitespace-only chunks (no-op, avoids accumulating junk).
         if not chunk or not chunk.strip():
+            # Reset char_run so characters separated by whitespace don't falsely accumulate
+            # into a run (e.g., "/" + "\n\n" + "/" → should not trigger char loop).
+            self.char_run = 0
             return None
 
         ##################################################
