@@ -1956,10 +1956,10 @@ function handleServerMessage(data) {
     case 'import_settings': {
       if (data.status === 'success') {
         showInSystemToastBar(`✅ Settings imported successfully (${data.applied_keys?.length || 0} keys applied)`);
-        // Trigger a full settings sync from server state
-        setTimeout(() => {
-          send({ type: 'update_config', generate_cfg: getGenerateCfg() });
-        }, 500);
+        // Clear localStorage so the next server state sync will populate UI with imported values.
+        // Without this, syncPoolSettings skips settings that already have local values,
+        // leaving the UI showing old settings instead of the newly imported ones.
+        localStorage.removeItem('agent-cascade-settings');
       } else {
         showInSystemToastBar(`⚠️ Import failed: ${data.message || 'Unknown error'}`);
       }
