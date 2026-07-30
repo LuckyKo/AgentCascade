@@ -1,6 +1,6 @@
 # AgentCascade
 
-AgentCascade is a professional multi-agent orchestration system designed to solve complex, multi-step problems that are too large for a single AI model to handle. By coordinating a pool of specialized agents, the system ensures that every part of a task is handled by the most qualified expert, resulting in production-grade outputs and reliable automation.
+AgentCascade is a professional multi-agent orchestration system designed to solve complex, multi-step problems that are too large for a single AI model to handle. Built as an evolution of the [Qwen-Agent](https://github.com/QwenLM/Qwen-Agent) framework, it introduces significant architectural improvements including a unified agent pool model, per-agent endpoint routing with automatic failover, and robust session persistence. By coordinating a pool of specialized agents, the system ensures that every part of a task is handled by the most qualified expert, resulting in production-grade outputs and reliable automation.
 
 ### Example Use Cases
 
