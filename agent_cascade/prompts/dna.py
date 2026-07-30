@@ -197,7 +197,7 @@ TOOL_METADATA = {
             'old_content': "For exact/heuristic modes: The EXACT literal text to replace (include at least 3 lines of context). Not used in delete_and_insert mode.",
             'new_content': 'The exact literal text to replace old_content with. For delete_and_insert match_mode provide empty string to delete without inserting new content.',
             'match_mode': "Match mode for editing. Options: 'exact' (default, character-for-character match), 'heuristic' (Python-aware structure matching), 'heuristic_agnostic' (whitespace-only normalization), or 'delete_and_insert' (uses the `range` parameter to specify which lines to delete before inserting new_content).",
-            'range': "Required for delete_and_insert match_mode: A line range string specifying which lines to delete before inserting new_content (or use empty string for new_content to delete only). Format: 'start:end' (1-indexed, inclusive) e.g. '5:10' deletes lines 5-10; '5:' deletes from line 5 to end; ':10' deletes from start through line 10; single number '5' inserts before line 5; '0' appends at end of file.",
+            'range': "Required for delete_and_insert match_mode: A line range string specifying which lines to delete before inserting new_content (or use empty string for new_content to delete only). Format: 'start:end' (1-indexed, inclusive) e.g. '5:10' deletes lines 5-10; '5:' deletes from line 5 to end; ':10' deletes from start through line 10. IMPORTANT: A single number like '5' is INSERT-ONLY before that line — no deletion occurs. To delete a single line, use 'N:N' (e.g., '3:3'). Use '0' to append at end of file.",
             'justification': 'Why you need to edit this file'
         }
     },
