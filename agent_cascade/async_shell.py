@@ -160,6 +160,9 @@ class AsyncShellTask:
     # Flag set under _lock when task is killed externally; prevents further heartbeats.
     killed: bool = False
 
+    # Secondary "viewer" process for visible console window on Windows (fire-and-forget)
+    viewer_process: Optional[subprocess.Popen] = None
+
 
 class AsyncShellTracker:
     """Manages background shell processes across all agents.
@@ -253,6 +256,7 @@ class AsyncShellTracker:
         heartbeat_interval: float = -1.0,
         timeout: int = ASYNC_SHELL_DEFAULT_TIMEOUT,
         cwd: Optional[str] = None,
+        console_window: bool = True,
     ) -> Tuple[int, int, Optional[List[str]], bool, Optional[int]]:
         """Launch a shell command in the background.
 
@@ -265,6 +269,7 @@ class AsyncShellTracker:
             heartbeat_interval: Seconds between heartbeat updates (-1 = only notify on completion)
             timeout: Max seconds before killing the process tree
             cwd: Working directory (resolved by caller before passing here)
+            console_window: If True (default), pop a visible console window on Windows.
 
         Returns:
             Tuple of (tool_id, pid, early_output, completed_early, return_code):
@@ -300,6 +305,7 @@ class AsyncShellTracker:
             command=command,
             heartbeat_interval=heartbeat_interval,
             timeout=timeout,
+            console_window=console_window,
         )
 
         # Register the task before launching so tracking thread can find it
@@ -484,6 +490,37 @@ class AsyncShellTracker:
             f"PID={proc.pid}, cmd='{original_command[:80]}'"
         )
 
+        # ── Spawn viewer process for visible console window on Windows ───
+        # When console_window=True and stdout/stderr are piped, Windows doesn't show
+        # a visible conhost window even with CREATE_NEW_CONSOLE. Workaround: spawn a
+        # secondary cmd.exe WITHOUT pipes that inherits console output to display visibly.
+        # The viewer is killed in _kill_process_tree when the main process completes or is terminated.
+        if ON_WINDOWS and task.console_window:
+            try:
+                # Reuse configure_windows_utf8 to get consistent chcp prefix
+                viewer_cmd, _ = configure_windows_utf8(original_command, create_new_console=True)
+
+                # Use shell=False to avoid quoting issues with special characters in command.
+                # The command string is passed as a single argument to cmd.exe /c, preserving its structure.
+                viewer = subprocess.Popen(
+                    ['cmd.exe', '/c', viewer_cmd],
+                    cwd=str(cwd) if cwd else None,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
+                    env=env,
+                    # No stdout/stderr args → inherit from parent so it shows in its own window
+                )
+                with task._lock:
+                    task.viewer_process = viewer
+                logger.debug(
+                    f"[AsyncShell] Viewer process spawned for tool_id={tool_id}, "
+                    f"PID={viewer.pid}"
+                )
+            except Exception as e:
+                # Viewer failure affects user-facing behavior (no visible window); log at warning level
+                logger.warning(
+                    f"[AsyncShell] Failed to spawn viewer for tool_id={tool_id}: {e}"
+                )
+
         # ── Pipe draining threads (use shared drain_pipe_lines) ─────
         stdout_lock = threading.Lock()
         stderr_lock = threading.Lock()
@@ -618,6 +655,9 @@ class AsyncShellTracker:
             if killed_externally and proc.poll() is None:
                 self._kill_process_tree(proc, agent_name, tool_id)
                 time.sleep(PROCESS_KILL_SETTLE_DELAY)
+            elif not timed_out and not killed_externally:
+                # Normal completion — ensure viewer is cleaned up
+                self._kill_process_tree(proc, agent_name, tool_id)
 
             # ── Mark completed immediately so _get_launch_result() can detect it ───
             # Set completed and return_code right after poll_loop exits (process finished).
@@ -670,6 +710,14 @@ class AsyncShellTracker:
             logger.warning(
                 f"[AsyncShell] Track error for {agent_name} tool_id={tool_id}: {e}"
             )
+            # Clean up processes if they exist to avoid orphans
+            with task._lock:
+                proc = task.process
+            if proc is not None:
+                try:
+                    self._kill_process_tree(proc, agent_name, tool_id)
+                except Exception as kill_err:
+                    logger.warning(f"[AsyncShell] Kill on track error failed for {agent_name} tool_id={tool_id}: {kill_err}")
             self._send_completion_message(
                 agent_name, tool_id, original_command,
                 timed_out=False, error=str(e),
@@ -693,12 +741,51 @@ class AsyncShellTracker:
                         del self._tasks[agent_name]
 
     # ────────────────────────────────────────────────────────────────
+    def _kill_viewer_process(self, task: 'AsyncShellTask') -> None:
+        """Atomically retrieve and kill the viewer process under the task's lock.
+
+        Called from _kill_process_tree to clean up the secondary console window.
+        Resets task.viewer_process after cleanup to prevent stale references.
+
+        Args:
+            task: The AsyncShellTask whose viewer should be killed.
+        """
+        with task._lock:
+            viewer = task.viewer_process
+            task.viewer_process = None  # Reset immediately to avoid re-kill race
+
+        if viewer and viewer.poll() is None:
+            try:
+                if ON_WINDOWS:
+                    subprocess.run(
+                        ['taskkill', '/F', '/T', '/PID', str(viewer.pid)],
+                        capture_output=True, timeout=5, text=True,
+                    )
+                else:
+                    viewer.kill()
+                logger.debug(f"[AsyncShell] Killed viewer PID {viewer.pid}")
+            except Exception as e:
+                logger.debug(f"[AsyncShell] Failed to kill viewer PID {viewer.pid}: {e}")
+
+    # ────────────────────────────────────────────────────────────────
     def _kill_process_tree(self, proc: subprocess.Popen, agent_name: str, tool_id: int):
-        """Kill the process and its descendants. Reuses ShellMixin logic."""
+        """Kill the main process tree and its associated viewer process (if any).
+
+        Terminates the primary shell subprocess plus all descendants via taskkill/killpg.
+        Also cleans up the secondary "viewer" console window spawned on Windows when
+        console_window=True. Uses _kill_viewer_process to avoid race conditions around
+        viewer_process access.
+
+        Args:
+            proc: Popen handle for the main process.
+            agent_name: Owner agent name (for task lookup).
+            tool_id: Task identifier (for task lookup and logging).
+        """
         pid = proc.pid
+
         if ON_WINDOWS:
             try:
-                # First pass: taskkill with tree flag
+                # First pass: taskkill with tree flag (main process)
                 subprocess.run(
                     ['taskkill', '/F', '/T', '/PID', str(pid)],
                     capture_output=True, timeout=10, text=True,
@@ -715,6 +802,11 @@ class AsyncShellTracker:
                     proc.kill()
                 except Exception as e:
                     logger.warning(f"[AsyncShell] kill fallback for PID {pid}: {e}")
+
+        # Kill viewer process after main (separate console window)
+        task = self._get_task(agent_name, tool_id)
+        if task is not None:
+            self._kill_viewer_process(task)
 
     # ────────────────────────────────────────────────────────────────
     def _get_combined_output(self, task: AsyncShellTask) -> List[str]:
@@ -1129,6 +1221,8 @@ class AsyncShellTracker:
             try:
                 with task._lock:
                     proc = task.process
+
+                # Kill main process (and viewer via _kill_process_tree)
                 if proc and proc.poll() is None:
                     # Set killed flag before killing so heartbeat loop exits immediately.
                     with task._lock:
