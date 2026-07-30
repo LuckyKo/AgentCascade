@@ -683,8 +683,10 @@ class WsMessageHandler:
         Returns pool_settings.json contents plus current disabled_tools config.
         Sent back via WebSocket response message.
         """
+        from agent_cascade.log import logger
+
         if not self.agent_pool or not hasattr(self.agent_pool, '_pool_settings_path'):
-            await self._send({'type': 'error', 'message': 'Agent pool not available for export'})
+            await self.broadcast_fn({'type': 'error', 'message': 'Agent pool not available for export'})
             return
 
         try:
@@ -716,13 +718,13 @@ class WsMessageHandler:
                 settings_data['work_access_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
                 settings_data['default_workspace'] = str(om.base_dir)
 
-            await self._send({
+            await self.broadcast_fn({
                 'type': 'export_settings',
                 'settings': settings_data,
             })
         except Exception as e:
             logger.error(f"[export_settings] Failed to export settings: {e}")
-            await self._send({'type': 'error', 'message': f'Export failed: {str(e)}'})
+            await self.broadcast_fn({'type': 'error', 'message': f'Export failed: {str(e)}'})
 
     async def handle_import_settings(self, data: dict) -> None:
         """Handle 'import_settings' — validate and apply settings from JSON blob.
@@ -730,13 +732,15 @@ class WsMessageHandler:
         Silently skips unknown fields for future-proofing. Validates types where possible.
         For tool assignments: only applies tools that currently exist in the registry.
         """
+        from agent_cascade.log import logger
+
         if not self.agent_pool:
-            await self._send({'type': 'error', 'message': 'Agent pool not available for import'})
+            await self.broadcast_fn({'type': 'error', 'message': 'Agent pool not available for import'})
             return
 
         settings_json = data.get('settings')
         if not isinstance(settings_json, dict):
-            await self._send({'type': 'error', 'message': 'Invalid settings: must be a JSON object'})
+            await self.broadcast_fn({'type': 'error', 'message': 'Invalid settings: must be a JSON object'})
             return
 
         try:
@@ -749,7 +753,7 @@ class WsMessageHandler:
             filtered_cfg = {k: v for k, v in settings_json.items() if k in known_keys}
 
             if not filtered_cfg:
-                await self._send({'type': 'error', 'message': 'No recognized settings found in import data'})
+                await self.broadcast_fn({'type': 'error', 'message': 'No recognized settings found in import data'})
                 return
 
             # Apply each setting through the router (handles validation)
@@ -764,14 +768,14 @@ class WsMessageHandler:
             for instance_name in list(self.agent_pool.instances.keys()):
                 _apply_ui_config(self.agent_pool, instance_name, filtered_cfg)
 
-            await self._send({
+            await self.broadcast_fn({
                 'type': 'import_settings',
                 'status': 'success',
                 'applied_keys': list(filtered_cfg.keys()),
             })
         except Exception as e:
             logger.error(f"[import_settings] Failed to import settings: {e}")
-            await self._send({'type': 'error', 'message': f'Import failed: {str(e)}'})
+            await self.broadcast_fn({'type': 'error', 'message': f'Import failed: {str(e)}'})
 
     async def handle_set_work_folders(self, data: dict) -> None:
         """Handle 'set_work_folders' — explicit user action to set work folders.
