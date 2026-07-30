@@ -772,6 +772,7 @@ class WsMessageHandler:
                 'type': 'import_settings',
                 'status': 'success',
                 'applied_keys': list(filtered_cfg.keys()),
+                'settings': filtered_cfg,
             })
         except Exception as e:
             logger.error(f"[import_settings] Failed to import settings: {e}")

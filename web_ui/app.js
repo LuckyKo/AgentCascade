@@ -1968,6 +1968,16 @@ function handleServerMessage(data) {
         } catch (e) {
           console.warn('[Import] Failed to clean pool settings from localStorage:', e);
         }
+
+        // Apply imported settings directly to UI controls (no need to wait for state message).
+        if (data.settings) {
+          for (const { id, prop, key, transform } of POOL_SETTINGS_MAP) {
+            const el = $(id);
+            if (el && data.settings[key] !== undefined) {
+              el[prop] = transform ? transform(data.settings[key]) : data.settings[key];
+            }
+          }
+        }
       } else {
         showInSystemToastBar(`⚠️ Import failed: ${data.message || 'Unknown error'}`);
       }
