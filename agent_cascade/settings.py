@@ -169,12 +169,12 @@ class InnerLoopSettings:
     block_size: int = 128                  # Token window size for block repetition
     entropy_window: int = 128             # Token window for Shannon entropy calculation
     char_run_limit: int = 70              # Max consecutive identical chars before alert
-    score_threshold: int = 350            # Cumulative score to trigger loop detection (balanced between catching real loops and avoiding false positives on varied text with repeated patterns)
+    score_threshold: int = 350            # Cumulative score to trigger loop detection. Kept at original value; FP reduction comes from higher repetition thresholds (sentence=15, ngram=7, block=6). A single repeating pattern maxes ~290 points with one-time scoring, so raising this above 350 would make single-pattern loops undetectable.
 
     # Detection thresholds (hardcoded in detection logic)
-    sentence_repetition_threshold: int = 9   # Sentence count to flag repetition (raised further to reduce FPs on live data and chunked text fragments)
-    ngram_repetition_threshold: int = 5      # N-gram count to flag repetition
-    block_repetition_threshold: int = 4      # Block count to flag repetition
+    sentence_repetition_threshold: int = 15  # Sentence count to flag repetition (raised from 9 to reduce FPs on fragmented similar phrases in technical writing)
+    ngram_repetition_threshold: int = 7      # N-gram count to flag repetition (raised from 5 to require stronger repetition signal)
+    block_repetition_threshold: int = 6      # Block count to flag repetition (raised from 4; blocks of 128 tokens repeating 4x was too aggressive)
     entropy_threshold: float = 2.0          # Shannon entropy below which a loop is suspected
 
     # Scoring
