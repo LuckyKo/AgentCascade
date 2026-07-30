@@ -2193,10 +2193,11 @@ class ExecutionEngine:
         # Note: generator already checks this before raising, so this is defense-in-depth.
         # Raising here matches original inline behavior for this edge case.
         if isinstance(e, CharacterRunDetected) and loop_retry_count >= _max_attempts:
+            last_reason = getattr(e, 'detection_reason', str(e))
             raise CharacterRunDetected(
                 f"inner_loop_exhausted: retried {_max_attempts} times, "
-                f"giving up — {e}",
-                detection_reason=getattr(e, 'detection_reason', 'unknown'),
+                f"giving up — last reason: {last_reason}",
+                detection_reason=last_reason,
             )
 
         # Advance endpoint cursor only on character-run or max-token
