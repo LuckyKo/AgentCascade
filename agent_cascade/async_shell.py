@@ -870,18 +870,18 @@ class AsyncShellTracker:
         """Send the final completion message to the agent."""
         task = self._get_task(agent_name, tool_id)
 
+        elapsed = time.time() - task.start_time if task and task.start_time else 0
+
         if timed_out and not error:
             msg = (
                 f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
                 f"Timed out after {task.timeout if task else '?'} seconds. "
                 f"All child processes terminated.\n"
-                f"Command: `{command[:200]}`\n"
             )
         elif error:
             msg = (
                 f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
                 f"Error: {error}\n"
-                f"Command: `{command[:200]}`\n"
             )
         else:
             rc = task.return_code if task else 0
@@ -893,8 +893,7 @@ class AsyncShellTracker:
                 status = f"exit code {rc}"
             msg = (
                 f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
-                f"Completed ({status}).\n"
-                f"Command: `{command[:200]}`\n"
+                f"Completed in {elapsed:.1f} s ({status}).\n"
             )
 
         # Put completion into async result buffer so it wakes sleeping agents

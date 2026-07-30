@@ -1,4 +1,5 @@
 import logging
+import time
 from agent_cascade.operation_manager.shell import ShellMixin
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
@@ -248,6 +249,7 @@ class ShellCmd(BaseTool):
         # Default timeout for async mode is much longer (1 hour)
         effective_timeout = timeout if timeout else 3600
 
+        start_time = time.time()
         try:
             tool_id, pid, early_output, completed_early, return_code = tracker.launch(
                 agent_name=agent_name,
@@ -261,12 +263,12 @@ class ShellCmd(BaseTool):
 
         # Case 1: Command completed very quickly — return completion result directly
         if completed_early:
+            elapsed = time.time() - start_time
             rc = return_code if return_code is not None else 0
             status = "success" if (rc == 0) else f"exit code {rc}"
             result = (
                 f"⟨shell_cmd completed⟩ Tool ID: {tool_id}\n"
-                f"Completed ({status}) — finished immediately.\n"
-                f"Command: `{command[:200]}`\n"
+                f"Completed in {elapsed:.1f} s ({status}).\n"
             )
             # Append early output if available (truncate if large)
             if early_output:
