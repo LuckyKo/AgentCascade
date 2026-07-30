@@ -1956,10 +1956,18 @@ function handleServerMessage(data) {
     case 'import_settings': {
       if (data.status === 'success') {
         showInSystemToastBar(`✅ Settings imported successfully (${data.applied_keys?.length || 0} keys applied)`);
-        // Clear localStorage so the next server state sync will populate UI with imported values.
-        // Without this, syncPoolSettings skips settings that already have local values,
-        // leaving the UI showing old settings instead of the newly imported ones.
-        localStorage.removeItem('agent-cascade-settings');
+        // Remove only pool settings from localStorage so syncPoolSettings will apply server values.
+        // This preserves frontend-only settings (colors, font size, log-api-post, etc.) while still
+        // allowing the next state message to sync imported pool settings into UI controls.
+        try {
+          const saved = JSON.parse(localStorage.getItem('agent-cascade-settings')) || {};
+          POOL_SETTINGS_MAP.forEach(({ localKey }) => {
+            if (saved.hasOwnProperty(localKey)) delete saved[localKey];
+          });
+          localStorage.setItem('agent-cascade-settings', JSON.stringify(saved));
+        } catch (e) {
+          console.warn('[Import] Failed to clean pool settings from localStorage:', e);
+        }
       } else {
         showInSystemToastBar(`⚠️ Import failed: ${data.message || 'Unknown error'}`);
       }
