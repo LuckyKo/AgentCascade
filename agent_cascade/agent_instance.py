@@ -608,7 +608,11 @@ class PoolSettings:
     # SLEEPING state settings (for async tools)
     sleeping_timeout: float = AGENT_SLEEPING_TIMEOUT  # Max seconds to wait for background tools before timeout
     sleeping_wakeup_interval: float = AGENT_SLEEPING_WAKEUP_INTERVAL  # Wakeup log interval while SLEEPING
-    
+
+    # Agent execution settings
+    max_turns: int = DEFAULT_MAX_TURNS              # Default turn limit per agent execution
+    auto_rollback_on_loop: bool = True              # Auto-rollback on detected loops (loop recovery toggle)
+
     # Inner-loop detection toggle (off by default until sensitivity is fixed)
     inner_loop_detect_enabled: bool = False   # Enable in-message loop detection during streaming
     loop_min_chars: int = 4000                # Min chars before activating heavy checks
@@ -644,5 +648,28 @@ class PoolSettings:
     # Skills system settings
     default_load_skill_mode: str = DEFAULT_LOAD_SKILL_MODE  # "AUTO" (default) or "NONE" — controls whether skills auto-load on call_agent
     auto_skill_enabled: bool = True                         # Controls whether auto-skill generation/proposal is allowed
+
+    # Agent budgeting settings
+    enable_agent_budgeting: bool = True                     # Enable max_turns propagation/budgeting for agent calls
+
+    def to_dict(self) -> dict:
+        """Serialize settings to a JSON-safe dictionary."""
+        from dataclasses import asdict
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'PoolSettings':
+        """Deserialize settings from a dictionary.
+        
+        Gracefully handles missing keys (uses defaults) and unknown keys (ignores).
+        Uses dataclass __init__ with filtered kwargs for type safety.
+        """
+        try:
+            # Filter to only known fields, let dataclass defaults fill gaps
+            instance = cls()
+            kwargs = {k: v for k, v in data.items() if hasattr(instance, k)}
+            return cls(**kwargs)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Invalid pool_settings.json: {e}") from e
     
     

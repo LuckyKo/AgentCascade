@@ -1202,10 +1202,25 @@ if __name__ == "__main__":
 
     operation_mgr.agent_pool = agent_pool
 
-    # Set idle timeout settings via PoolSettings (new pool uses PoolSettings instead of constructor args)
-    agent_pool.settings.idle_timeout_seconds = idle_timeout
-    agent_pool.settings.system_agent_idle_timeout_seconds = system_idle_timeout
-    agent_pool.settings.idle_check_interval = idle_check_interval
+    # Apply CLI/env overrides via config handlers (before any WebSocket connections exist).
+    # Uses handlers directly for validation and consistency with runtime updates.
+    from agent_cascade.config_handlers import CONFIG_HANDLERS
+
+    startup_cfg = {
+        'idle_timeout_seconds': idle_timeout,
+        'system_agent_idle_timeout_seconds': system_idle_timeout,
+        'idle_check_interval': idle_check_interval,
+    }
+    for key, value in startup_cfg.items():
+        handler = CONFIG_HANDLERS.get(key)
+        if handler:
+            try:
+                handler(startup_cfg, agent_pool, [])
+            except Exception as e:
+                logger.warning(f"[INIT] Config update failed for '{key}': {e}")
+
+    if hasattr(agent_pool, '_save_pool_settings'):
+        agent_pool._save_pool_settings()  # Persist startup-effective values
 
     # Create the root orchestrator instance in the new pool (use lowercase to match template key)
     try:

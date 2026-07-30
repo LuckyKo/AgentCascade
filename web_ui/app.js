@@ -128,6 +128,12 @@ function clearAutoSecurityTimers() {
  * Each entry: { id, prop, transform? } — prop is 'checked' or 'value'.
  * transform(value) is called to convert the server value before assignment. */
 const POOL_SETTINGS_MAP = [
+  // Core agent settings
+  { id: 'setting-max-turns', prop: 'value', key: 'max_turns', localKey: 'max-turns' },
+  { id: 'setting-max-rollbacks', prop: 'value', key: 'max_auto_rollbacks', localKey: 'max-rollbacks' },
+  { id: 'setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop', localKey: 'auto_rollback_on_loop' },
+  { id: 'setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
+  // Inner-loop detection
   { id: 'setting-inner-loop-detect', prop: 'checked', key: 'inner_loop_detect_enabled', localKey: 'inner-loop-detect' },
   { id: 'setting-loop-min-chars', prop: 'value', key: 'loop_min_chars', localKey: 'loop-min-chars' },
   { id: 'setting-loop-max-chars', prop: 'value', key: 'loop_max_chars', localKey: 'loop-max-chars' },
@@ -137,9 +143,7 @@ const POOL_SETTINGS_MAP = [
   { id: 'setting-loop-ngram-rep', prop: 'checked', key: 'loop_ngram_rep_enabled', localKey: 'loop-ngram-rep-enabled' },
   { id: 'setting-loop-block-rep', prop: 'checked', key: 'loop_block_rep_enabled', localKey: 'loop-block-rep-enabled' },
   { id: 'setting-loop-entropy', prop: 'checked', key: 'loop_entropy_enabled', localKey: 'loop-entropy-enabled' },
-  { id: 'setting-cache-pool-enabled', prop: 'checked', key: 'cache_pool_enabled', localKey: 'cache-pool-enabled' },
-  { id: 'setting-cache-pool-size', prop: 'value', key: 'cache_pool_size', localKey: 'cache-pool-size' },
-  { id: 'setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars', localKey: 'cache-threshold-chars' },
+  // Skills system
   { id: 'setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode', localKey: 'enable-skills',
     transform: (v) => v === 'AUTO' },
   { id: 'setting-auto-skill-gen', prop: 'checked', key: 'auto_skill_enabled', localKey: 'auto-skill-gen' },
@@ -148,9 +152,17 @@ const POOL_SETTINGS_MAP = [
   { id: 'setting-endpoint-max-retries', prop: 'value', key: 'endpoint_max_retries', localKey: 'endpoint-max-retries' },
   { id: 'setting-retry-base-delay', prop: 'value', key: 'retry_base_delay', localKey: 'retry-base-delay' },
   { id: 'setting-retry-max-delay', prop: 'value', key: 'retry_max_delay', localKey: 'retry-max-delay' },
-  { id: 'setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
-  { id: 'setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop', localKey: 'auto_rollback_on_loop' },
+  // Cache pool
+  { id: 'setting-cache-pool-enabled', prop: 'checked', key: 'cache_pool_enabled', localKey: 'cache-pool-enabled' },
+  { id: 'setting-cache-pool-size', prop: 'value', key: 'cache_pool_size', localKey: 'cache-pool-size' },
+  { id: 'setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars', localKey: 'cache-threshold-chars' },
+  // Tool char limits
+  { id: 'setting-tool-result-max-chars', prop: 'value', key: 'tool_result_max_chars', localKey: 'tool-result-max-chars' },
+  { id: 'setting-grep-char-limit', prop: 'value', key: 'grep_char_limit', localKey: 'grep-char-limit' },
   { id: 'setting-grep-spillover', prop: 'checked', key: 'grep_spillover', localKey: 'grep-spillover' },
+  { id: 'setting-shell-char-limit', prop: 'value', key: 'shell_char_limit', localKey: 'shell-char-limit' },
+  { id: 'setting-code-char-limit', prop: 'value', key: 'code_char_limit', localKey: 'code-char-limit' },
+  { id: 'setting-list-dir-char-limit', prop: 'value', key: 'list_dir_char_limit', localKey: 'list-dir-char-limit' },
 ];
 
 /** Sync pool settings from server state to UI elements.
@@ -1244,6 +1256,54 @@ function saveWorkFolders() {
 
 if (saveWorkFoldersBtn) saveWorkFoldersBtn.addEventListener('click', () => saveWorkFolders());
 
+// ── Export/Import Settings Buttons ────────────────────────────────────────────
+
+const exportSettingsBtn = $('#exportSettingsBtn');
+const importSettingsBtn = $('#importSettingsBtn');
+const importSettingsInput = $('#importSettingsInput');
+
+if (exportSettingsBtn) {
+  exportSettingsBtn.addEventListener('click', async () => {
+    try {
+      // Request export from server via WebSocket
+      send({ type: 'export_settings' });
+    } catch (e) {
+      console.error('[Export] Failed to request export:', e);
+      alert('Failed to export settings: ' + e.message);
+    }
+  });
+}
+
+if (importSettingsBtn && importSettingsInput) {
+  importSettingsBtn.addEventListener('click', () => {
+    importSettingsInput.click();
+  });
+
+  importSettingsInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const settings = JSON.parse(text);
+
+      if (typeof settings !== 'object' || settings === null) {
+        alert('Invalid settings file: expected a JSON object');
+        importSettingsInput.value = '';
+        return;
+      }
+
+      // Send to server for validation and application
+      send({ type: 'import_settings', settings });
+    } catch (err) {
+      console.error('[Import] Failed to parse/import settings:', err);
+      alert('Failed to import settings: ' + err.message);
+    } finally {
+      importSettingsInput.value = '';  // Reset so same file can be selected again
+    }
+  });
+}
+
 if (afkToggle) {
   afkToggle.addEventListener('change', () => {
     saveSettings();
@@ -1874,6 +1934,37 @@ function handleServerMessage(data) {
       delete state._lastActivityPreview;
       updateControls();
       break;
+
+    case 'export_settings': {
+      if (data.settings) {
+        const blob = new Blob([JSON.stringify(data.settings, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        a.download = `agent-cascade-settings-${timestamp}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } else {
+        showInSystemToastBar('⚠️ Export returned no settings data');
+      }
+      break;
+    }
+
+    case 'import_settings': {
+      if (data.status === 'success') {
+        showInSystemToastBar(`✅ Settings imported successfully (${data.applied_keys?.length || 0} keys applied)`);
+        // Trigger a full settings sync from server state
+        setTimeout(() => {
+          send({ type: 'update_config', generate_cfg: getGenerateCfg() });
+        }, 500);
+      } else {
+        showInSystemToastBar(`⚠️ Import failed: ${data.message || 'Unknown error'}`);
+      }
+      break;
+    }
   }
 
   // Trigger sounds based on state changes

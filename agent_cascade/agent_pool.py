@@ -262,6 +262,12 @@ class AgentPool:
         self.llm_cfg = llm_cfg                          # LLM config (used as fallback when no api_router)
         self.settings = PoolSettings()                  # Configurable thresholds and timeouts
 
+        # ── PoolSettings persistence ────────────────────────────────────────
+        self._pool_settings_path = self.api_router._config_dir / 'pool_settings.json'
+        self._settings_save_lock = threading.Lock()     # Protect concurrent save operations
+        self._load_pool_settings()                      # Load persisted values, overriding defaults
+        self._apply_pending_config()                    # Apply work folders/workspace that need operation_manager
+
         # ── Focused managers (delegation targets) ───────────────────────────
         # Only LoggerManager and IdleManager get their own files — they have
         # distinct lifecycles (file I/O, background thread). Halt state and
@@ -340,6 +346,151 @@ class AgentPool:
         # ── Agent discovery (unchanged) ──────────────────────────────────────
         self.agents_dir = Path(agents_dir)
         self._discover_agents(agents_dir)
+
+    # ── PoolSettings persistence methods ───────────────────────────────────────
+
+    def _save_pool_settings(self):
+        """Persist PoolSettings plus extra config (disabled_tools, work folders) to disk.
+
+        Thread-safe via lock, fault-tolerant. Saves everything in a single file
+        (pool_settings.json) with PoolSettings fields at the top level alongside
+        extra keys like 'disabled_tools'.
+        """
+        try:
+            with self._settings_save_lock:
+                self._pool_settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Start with PoolSettings data
+                data = self.settings.to_dict()
+
+                # Add disabled_tools config (under lock to ensure consistency)
+                with self._ui_disabled_tools_lock:
+                    if self._ui_disabled_tools:
+                        data['disabled_tools'] = dict(self._ui_disabled_tools)
+
+                # Add work folders from operation_manager if available
+                if hasattr(self, 'operation_manager') and self.operation_manager:
+                    om = self.operation_manager
+                    if om.extra_work_folders_ro or om.extra_work_folders_rw:
+                        data['work_access_folders_ro'] = [str(p) for p in om.extra_work_folders_ro]
+                        data['work_access_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
+
+                # Add default workspace if available
+                if hasattr(self, 'operation_manager') and self.operation_manager:
+                    data['default_workspace'] = str(self.operation_manager.base_dir)
+
+                with open(self._pool_settings_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[PoolSettings] Failed to save settings: {e}")
+
+    def _load_pool_settings(self):
+        """Load PoolSettings plus extra config from disk. Fault-tolerant.
+
+        Handles backwards compatibility: silently ignores unknown fields and applies
+        only valid settings. For disabled_tools, filters out references to tools
+        that no longer exist in the registry.
+        """
+        if not self._pool_settings_path.exists():
+            return
+        try:
+            with open(self._pool_settings_path, 'r', encoding='utf-8-sig') as f:
+                content = f.read().strip()
+                if not content:
+                    return
+                data = json.loads(content)
+
+            if not isinstance(data, dict):
+                logger.warning(f"[PoolSettings] Config file is not a dictionary. Skipping.")
+                return
+
+            # Extract extra keys before passing to PoolSettings.from_dict (which filters unknowns)
+            disabled_tools_raw = data.pop('disabled_tools', None)
+            work_folders_ro_raw = data.pop('work_access_folders_ro', None)
+            work_folders_rw_raw = data.pop('work_access_folders_rw', None)
+            default_workspace_raw = data.pop('default_workspace', None)
+
+            # Replace settings with loaded values (defaults fill gaps for new fields)
+            self.settings = PoolSettings.from_dict(data)
+
+            # Apply disabled_tools with backwards-compatible validation
+            if disabled_tools_raw:
+                self._apply_loaded_disabled_tools(disabled_tools_raw)
+
+            # Apply work folders after operation_manager is initialized
+            # (This is called during __init__ before om exists, so defer to post-init)
+            if (work_folders_ro_raw or work_folders_rw_raw) and hasattr(self, '_pending_work_folders'):
+                self._pending_work_folders = {
+                    'ro': work_folders_ro_raw,
+                    'rw': work_folders_rw_raw,
+                }
+
+            # Store default_workspace for later application
+            if default_workspace_raw:
+                self._pending_default_workspace = default_workspace_raw
+
+        except Exception as e:
+            logger.error(f"[PoolSettings] Failed to load settings from {self._pool_settings_path}: {e}. Using defaults.")
+
+    def _apply_loaded_disabled_tools(self, disabled_tools_raw):
+        """Apply loaded disabled_tools config with backwards-compatible validation.
+
+        Silently ignores references to tools that no longer exist in the registry.
+        """
+        from agent_cascade.tools.base import TOOL_REGISTRY
+        from agent_cascade.utils.disabled_tools import normalize_disabled_tools
+
+        known_tools = set(TOOL_REGISTRY.keys())
+
+        try:
+            if isinstance(disabled_tools_raw, dict):
+                validated_dict = {}
+                for agent_key, agent_tools in disabled_tools_raw.items():
+                    normalized = normalize_disabled_tools(agent_tools)
+                    valid_tools = [t for t in normalized if t in known_tools]
+                    ignored = set(normalized) - set(valid_tools)
+                    if ignored:
+                        logger.debug(f"[disabled_tools] Ignoring unknown tools from saved config for '{agent_key}': {ignored}")
+                    validated_dict[agent_key] = valid_tools
+                self.set_ui_disabled_tools(validated_dict)
+            elif isinstance(disabled_tools_raw, list):
+                normalized = normalize_disabled_tools(disabled_tools_raw)
+                valid_tools = [t for t in normalized if t in known_tools]
+                ignored = set(normalized) - set(valid_tools)
+                if ignored:
+                    logger.debug(f"[disabled_tools] Ignoring unknown tools from saved config (global): {ignored}")
+                self.set_ui_disabled_tools(valid_tools)
+        except Exception as e:
+            logger.warning(f"[disabled_tools] Failed to apply loaded disabled tools config: {e}")
+
+    def _apply_pending_config(self):
+        """Apply configuration loaded from pool_settings.json that requires operation_manager.
+
+        Called after __init__ completes and operation_manager is available.
+        """
+        # Apply pending work folders
+        if hasattr(self, '_pending_work_folders') and self._pending_work_folders:
+            om = getattr(self, 'operation_manager', None)
+            if om:
+                try:
+                    ro_paths = self._pending_work_folders.get('ro', []) or []
+                    rw_paths = self._pending_work_folders.get('rw', []) or []
+                    om.set_extra_work_folders(ro_paths, rw_paths)
+                    logger.info(f"[PoolSettings] Applied saved work folders: RO={len(ro_paths)}, RW={len(rw_paths)}")
+                except Exception as e:
+                    logger.warning(f"[PoolSettings] Failed to apply saved work folders: {e}")
+
+        # Apply pending default workspace
+        if hasattr(self, '_pending_default_workspace') and self._pending_default_workspace:
+            om = getattr(self, 'operation_manager', None)
+            if om:
+                try:
+                    ws_path = Path(self._pending_default_workspace).resolve()
+                    if ws_path != om.base_dir:
+                        om.set_base_dir(self._pending_default_workspace)
+                        logger.info(f"[PoolSettings] Applied saved default workspace: {ws_path}")
+                except Exception as e:
+                    logger.warning(f"[PoolSettings] Failed to apply saved default workspace: {e}")
 
     # ── Child relationship helper (centralized mutation for Bug41 fix) ────────
 

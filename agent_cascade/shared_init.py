@@ -98,11 +98,26 @@ def configure_and_start_pool(agent_pool, idle_timeout: float, system_agent_idle_
     # Set back-reference so OperationManager can check pool.stopped during approval loops
     agent_pool.operation_manager.agent_pool = agent_pool
 
-    # Configure pool settings before starting background services (avoids race window)
+    # Configure pool settings before starting background services (avoids race window).
+    # Uses config handlers directly for consistency with runtime updates and validation.
     if hasattr(agent_pool, 'settings'):
-        agent_pool.settings.idle_timeout_seconds = idle_timeout
-        agent_pool.settings.system_agent_idle_timeout_seconds = system_agent_idle_timeout
-        agent_pool.settings.idle_check_interval = idle_check_interval
+        from agent_cascade.config_handlers import CONFIG_HANDLERS
+
+        startup_cfg = {
+            'idle_timeout_seconds': idle_timeout,
+            'system_agent_idle_timeout_seconds': system_agent_idle_timeout,
+            'idle_check_interval': idle_check_interval,
+        }
+        for key, value in startup_cfg.items():
+            handler = CONFIG_HANDLERS.get(key)
+            if handler:
+                try:
+                    handler(startup_cfg, agent_pool, [])
+                except Exception as e:
+                    logger.warning(f"[INIT] Config update failed for '{key}': {e}")
+
+        if hasattr(agent_pool, '_save_pool_settings'):
+            agent_pool._save_pool_settings()  # Persist startup-effective values
 
     try:
         agent_pool.start()

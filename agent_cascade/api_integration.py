@@ -776,13 +776,23 @@ def build_state_from_pool(
     # Get pending approvals (only include if non-empty to prevent UI flickering)
     pending_approvals = _get_approvals(pool)
 
-    # Extract pool settings for frontend sync (inner-loop detection tuning + cache pool)
+    # Extract pool settings for frontend sync (ALL non-cosmetic persistent settings)
     pool_settings = {}
     if hasattr(pool, 'settings'):
         ps = pool.settings
         pool_settings.update({
+            # Core pool/agent settings
+            'idle_timeout_seconds': getattr(ps, 'idle_timeout_seconds', 900.0),
+            'system_agent_idle_timeout_seconds': getattr(ps, 'system_agent_idle_timeout_seconds', 900.0),
+            'max_parallel_agents': getattr(ps, 'max_workers', 10),
+            'auto_continue': getattr(ps, 'auto_continue', True),
+            'enable_agent_budgeting': getattr(ps, 'enable_agent_budgeting', True),
+            'max_turns': getattr(ps, 'max_turns', 50),
+            'max_auto_rollbacks': getattr(ps, 'max_auto_rollbacks', 3),
+            'auto_rollback_on_loop': getattr(ps, 'auto_rollback_on_loop', True),
+            # Inner-loop detection
             'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False),
-'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
+            'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
             'loop_max_chars': getattr(ps, 'loop_max_chars', 40960),
             'loop_score_threshold': getattr(ps, 'loop_score_threshold', 350),
             'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),
@@ -790,9 +800,7 @@ def build_state_from_pool(
             'loop_ngram_rep_enabled': getattr(ps, 'loop_ngram_rep_enabled', True),
             'loop_block_rep_enabled': getattr(ps, 'loop_block_rep_enabled', True),
             'loop_entropy_enabled': getattr(ps, 'loop_entropy_enabled', True),
-            'cache_pool_enabled': getattr(ps, 'cache_pool_enabled', True),
-            'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
-            'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
+            # Skills system
             'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
             'auto_skill_enabled': getattr(ps, 'auto_skill_enabled', True),
             # Retry policy settings (Phase 6)
@@ -800,7 +808,44 @@ def build_state_from_pool(
             'endpoint_max_retries': getattr(ps, 'endpoint_max_retries', 1),
             'retry_base_delay': getattr(ps, 'retry_base_delay', 1.0),
             'retry_max_delay': getattr(ps, 'retry_max_delay', 8.0),
+            # Code interpreter
+            'ci_execution_timeout': getattr(ps, 'ci_execution_timeout', 120),
+            'ci_watchdog_timeout': getattr(ps, 'ci_watchdog_timeout', 300),
+            'ci_stale_container_ttl': getattr(ps, 'ci_stale_container_ttl', 1200),
+            # Cache pool
+            'cache_pool_enabled': getattr(ps, 'cache_pool_enabled', True),
+            'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
+            'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
         })
+
+    # Add tool char limits from pool.llm_cfg if available
+    if hasattr(pool, 'llm_cfg'):
+        for key in ('tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
+                     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit'):
+            if key in pool.llm_cfg:
+                pool_settings[key] = pool.llm_cfg[key]
+
+    # Add approval timeout settings from operation_manager if available
+    if hasattr(pool, 'operation_manager') and pool.operation_manager:
+        om = pool.operation_manager
+        pool_settings['approval_timeout_seconds'] = getattr(om, 'approval_timeout_seconds', 300)
+        pool_settings['enable_approval_timeout'] = getattr(om, 'enable_timeout', True)
+
+    # Add disabled_tools from live cache if available
+    if hasattr(pool, '_ui_disabled_tools') and pool._ui_disabled_tools:
+        try:
+            with pool._ui_disabled_tools_lock:
+                if pool._ui_disabled_tools:
+                    pool_settings['disabled_tools'] = dict(pool._ui_disabled_tools)
+        except Exception:
+            pass  # Don't let lock issues break state broadcast
+
+    # Add work folders and default workspace from operation_manager
+    if hasattr(pool, 'operation_manager') and pool.operation_manager:
+        om = pool.operation_manager
+        pool_settings['work_access_folders_ro'] = [str(p) for p in om.extra_work_folders_ro]
+        pool_settings['work_access_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
+        pool_settings['default_workspace'] = str(om.base_dir)
 
     return {
         # Kept for backward compat — frontend fallback reads data.messages if root not in agent_instances
@@ -916,11 +961,21 @@ def build_stream_update_from_pool(
     # Get pending approvals (only include if non-empty to prevent UI flickering)
     pending_approvals = _get_approvals(pool)
 
-    # Extract pool settings for frontend sync (inner-loop detection tuning + cache pool)
+    # Extract pool settings for frontend sync (ALL non-cosmetic persistent settings)
     pool_settings = {}
     if hasattr(pool, 'settings'):
         ps = pool.settings
         pool_settings.update({
+            # Core pool/agent settings
+            'idle_timeout_seconds': getattr(ps, 'idle_timeout_seconds', 900.0),
+            'system_agent_idle_timeout_seconds': getattr(ps, 'system_agent_idle_timeout_seconds', 900.0),
+            'max_parallel_agents': getattr(ps, 'max_workers', 10),
+            'auto_continue': getattr(ps, 'auto_continue', True),
+            'enable_agent_budgeting': getattr(ps, 'enable_agent_budgeting', True),
+            'max_turns': getattr(ps, 'max_turns', 50),
+            'max_auto_rollbacks': getattr(ps, 'max_auto_rollbacks', 3),
+            'auto_rollback_on_loop': getattr(ps, 'auto_rollback_on_loop', True),
+            # Inner-loop detection
             'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False),
             'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
             'loop_max_chars': getattr(ps, 'loop_max_chars', 40960),
@@ -930,9 +985,7 @@ def build_stream_update_from_pool(
             'loop_ngram_rep_enabled': getattr(ps, 'loop_ngram_rep_enabled', True),
             'loop_block_rep_enabled': getattr(ps, 'loop_block_rep_enabled', True),
             'loop_entropy_enabled': getattr(ps, 'loop_entropy_enabled', True),
-            'cache_pool_enabled': getattr(ps, 'cache_pool_enabled', True),
-            'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
-            'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
+            # Skills system
             'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
             'auto_skill_enabled': getattr(ps, 'auto_skill_enabled', True),
             # Retry policy settings (Phase 6)
@@ -940,7 +993,44 @@ def build_stream_update_from_pool(
             'endpoint_max_retries': getattr(ps, 'endpoint_max_retries', 1),
             'retry_base_delay': getattr(ps, 'retry_base_delay', 1.0),
             'retry_max_delay': getattr(ps, 'retry_max_delay', 8.0),
+            # Code interpreter
+            'ci_execution_timeout': getattr(ps, 'ci_execution_timeout', 120),
+            'ci_watchdog_timeout': getattr(ps, 'ci_watchdog_timeout', 300),
+            'ci_stale_container_ttl': getattr(ps, 'ci_stale_container_ttl', 1200),
+            # Cache pool
+            'cache_pool_enabled': getattr(ps, 'cache_pool_enabled', True),
+            'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
+            'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
         })
+
+    # Add tool char limits from pool.llm_cfg if available
+    if hasattr(pool, 'llm_cfg'):
+        for key in ('tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
+                     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit'):
+            if key in pool.llm_cfg:
+                pool_settings[key] = pool.llm_cfg[key]
+
+    # Add approval timeout settings from operation_manager if available
+    if hasattr(pool, 'operation_manager') and pool.operation_manager:
+        om = pool.operation_manager
+        pool_settings['approval_timeout_seconds'] = getattr(om, 'approval_timeout_seconds', 300)
+        pool_settings['enable_approval_timeout'] = getattr(om, 'enable_timeout', True)
+
+    # Add disabled_tools from live cache if available
+    if hasattr(pool, '_ui_disabled_tools') and pool._ui_disabled_tools:
+        try:
+            with pool._ui_disabled_tools_lock:
+                if pool._ui_disabled_tools:
+                    pool_settings['disabled_tools'] = dict(pool._ui_disabled_tools)
+        except Exception:
+            pass  # Don't let lock issues break state broadcast
+
+    # Add work folders and default workspace from operation_manager
+    if hasattr(pool, 'operation_manager') and pool.operation_manager:
+        om = pool.operation_manager
+        pool_settings['work_access_folders_ro'] = [str(p) for p in om.extra_work_folders_ro]
+        pool_settings['work_access_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
+        pool_settings['default_workspace'] = str(om.base_dir)
 
     return {
         'instances': all_instances,
@@ -1697,15 +1787,7 @@ def _apply_ui_config(
     if 'max_turns' in ui_cfg:
         instance.max_turns = ui_cfg['max_turns']
 
-    # Apply auto_continue to pool settings (extracted from NON_LLM_KEYS, applied separately)
-    # This makes the setting available to execution_engine.py for conditional auto-continue logic
-    if 'auto_continue' in ui_cfg and hasattr(pool, 'settings'):
-        pool.settings.auto_continue = bool(ui_cfg['auto_continue'])
-
-    # Apply enable_agent_budgeting to pool settings (extracted from NON_LLM_KEYS, applied separately)
-    # This makes the setting available to lifecycle_manager.py for max_turns propagation logic
-    if 'enable_agent_budgeting' in ui_cfg and hasattr(pool, 'settings'):
-        pool.settings.enable_agent_budgeting = bool(ui_cfg['enable_agent_budgeting'])
+    # auto_continue and enable_agent_budgeting now handled via config_handlers.py centralized handlers
 
     # Update agent_pool.llm_cfg under thread-safe lock
     # (pool is passed as a parameter to this function — no need to look it up)

@@ -95,6 +95,12 @@
             <div id="defaultWorkspace" class="sidebar-info" style="font-size: 11px; word-break: break-all; opacity: 0.7; padding: 4px 0;">Loading...</div>
           </div>
 
+          <div style="display: flex; gap: 6px; margin-top: 8px;">
+            <button id="exportSettingsBtn" class="btn btn-secondary btn-small" style="flex: 1; font-size: 11px;" title="Export all persistent settings to JSON file">📥 Export Settings</button>
+            <button id="importSettingsBtn" class="btn btn-secondary btn-small" style="flex: 1; font-size: 11px;" title="Import settings from a JSON file">📤 Import Settings</button>
+          </div>
+          <input type="file" id="importSettingsInput" accept=".json" style="display: none;">
+
           <div class="sidebar-divider"></div>
 
           <div class="sidebar-section">

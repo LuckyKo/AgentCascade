@@ -101,6 +101,8 @@ class WsMessageHandler:
             'load_session': self.handle_load_session,
             'inject': self.handle_inject,
             'dismiss_queue': self.handle_dismiss_queue,
+            'export_settings': self.handle_export_settings,
+            'import_settings': self.handle_import_settings,
         }
 
     # ── Public dispatch entry point ───────────────────────────────────────
@@ -646,8 +648,9 @@ class WsMessageHandler:
 
         Also updates the live disabled_tools cache in agent_pool and applies UI config
         to all active instances immediately so tool assignment changes take effect in real time.
+        Persists ALL non-cosmetic settings to pool_settings.json (including disabled_tools).
         """
-        from agent_cascade.config_handlers import ConfigUpdateRouter
+        from agent_cascade.config_handlers import ConfigUpdateRouter, POOL_SETTINGS_KEYS, EXTRA_PERSIST_KEYS
         from agent_cascade.api_integration import _apply_ui_config
 
         if 'generate_cfg' in data:
@@ -657,15 +660,118 @@ class WsMessageHandler:
             router = ConfigUpdateRouter(self.agent_pool, self.agents)
             await router.apply(ui_cfg)
 
+            # Save PoolSettings once if any persistent settings were modified.
+            # Includes both POOL_SETTINGS_KEYS (PoolSettings fields) and EXTRA_PERSIST_KEYS (disabled_tools).
+            persist_keys_hit = {k for k in ui_cfg.keys() if k in POOL_SETTINGS_KEYS | EXTRA_PERSIST_KEYS}
+            if persist_keys_hit and self.agent_pool:
+                if hasattr(self.agent_pool, '_save_pool_settings'):
+                    self.agent_pool._save_pool_settings()
+
             # Update live disabled_tools config in agent_pool for real-time resolution
+            # (Handler already validates and sets this; apply to instances separately)
             if 'disabled_tools' in ui_cfg and self.agent_pool:
-                self.agent_pool.set_ui_disabled_tools(ui_cfg['disabled_tools'])
                 # Apply UI config to all active instances so changes take effect immediately.
                 # Snapshot keys first to avoid RuntimeError from dict changing during iteration.
                 for instance_name in list(self.agent_pool.instances.keys()):
                     _apply_ui_config(self.agent_pool, instance_name, ui_cfg)
 
         await self._broadcast()
+
+    async def handle_export_settings(self, data: dict) -> None:
+        """Handle 'export_settings' — return all persistent settings as JSON.
+
+        Returns pool_settings.json contents plus current disabled_tools config.
+        Sent back via WebSocket response message.
+        """
+        if not self.agent_pool or not hasattr(self.agent_pool, '_pool_settings_path'):
+            await self._send({'type': 'error', 'message': 'Agent pool not available for export'})
+            return
+
+        try:
+            # Load from disk (most authoritative source) and merge with live state
+            settings_data = {}
+
+            if self.agent_pool._pool_settings_path.exists():
+                try:
+                    with open(self.agent_pool._pool_settings_path, 'r', encoding='utf-8-sig') as f:
+                        content = f.read().strip()
+                        if content:
+                            settings_data = json.loads(content)
+                except Exception as e:
+                    logger.warning(f"[export_settings] Failed to read pool_settings.json: {e}")
+
+            # Merge live PoolSettings (in case runtime changes weren't persisted yet)
+            if hasattr(self.agent_pool, 'settings'):
+                settings_data.update(self.agent_pool.settings.to_dict())
+
+            # Add disabled_tools from live cache
+            with self.agent_pool._ui_disabled_tools_lock:
+                if self.agent_pool._ui_disabled_tools:
+                    settings_data['disabled_tools'] = dict(self.agent_pool._ui_disabled_tools)
+
+            # Add work folders and workspace from operation_manager
+            if hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
+                om = self.agent_pool.operation_manager
+                settings_data['work_access_folders_ro'] = [str(p) for p in om.extra_work_folders_ro]
+                settings_data['work_access_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
+                settings_data['default_workspace'] = str(om.base_dir)
+
+            await self._send({
+                'type': 'export_settings',
+                'settings': settings_data,
+            })
+        except Exception as e:
+            logger.error(f"[export_settings] Failed to export settings: {e}")
+            await self._send({'type': 'error', 'message': f'Export failed: {str(e)}'})
+
+    async def handle_import_settings(self, data: dict) -> None:
+        """Handle 'import_settings' — validate and apply settings from JSON blob.
+
+        Silently skips unknown fields for future-proofing. Validates types where possible.
+        For tool assignments: only applies tools that currently exist in the registry.
+        """
+        if not self.agent_pool:
+            await self._send({'type': 'error', 'message': 'Agent pool not available for import'})
+            return
+
+        settings_json = data.get('settings')
+        if not isinstance(settings_json, dict):
+            await self._send({'type': 'error', 'message': 'Invalid settings: must be a JSON object'})
+            return
+
+        try:
+            # Apply via update_config — this routes each key to its handler which validates types
+            from agent_cascade.config_handlers import ConfigUpdateRouter, POOL_SETTINGS_KEYS, EXTRA_PERSIST_KEYS
+            from agent_cascade.api_integration import _apply_ui_config
+
+            # Filter to known keys only (silently skip unknown fields)
+            known_keys = POOL_SETTINGS_KEYS | EXTRA_PERSIST_KEYS
+            filtered_cfg = {k: v for k, v in settings_json.items() if k in known_keys}
+
+            if not filtered_cfg:
+                await self._send({'type': 'error', 'message': 'No recognized settings found in import data'})
+                return
+
+            # Apply each setting through the router (handles validation)
+            router = ConfigUpdateRouter(self.agent_pool, self.agents)
+            await router.apply(filtered_cfg)
+
+            # Persist to disk
+            if hasattr(self.agent_pool, '_save_pool_settings'):
+                self.agent_pool._save_pool_settings()
+
+            # Apply to all active instances
+            for instance_name in list(self.agent_pool.instances.keys()):
+                _apply_ui_config(self.agent_pool, instance_name, filtered_cfg)
+
+            await self._send({
+                'type': 'import_settings',
+                'status': 'success',
+                'applied_keys': list(filtered_cfg.keys()),
+            })
+        except Exception as e:
+            logger.error(f"[import_settings] Failed to import settings: {e}")
+            await self._send({'type': 'error', 'message': f'Import failed: {str(e)}'})
 
     async def handle_set_work_folders(self, data: dict) -> None:
         """Handle 'set_work_folders' — explicit user action to set work folders.

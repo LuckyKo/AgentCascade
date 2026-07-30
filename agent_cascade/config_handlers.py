@@ -23,6 +23,51 @@ LLM_CONFIG_KEYS = frozenset({
     'presence_penalty', 'stop', 'timeout', 'model_type'
 })
 
+# ── PoolSettings keys — used by ws_handlers.py to trigger centralized save ────
+# Includes ALL non-cosmetic settings that should persist to pool_settings.json.
+POOL_SETTINGS_KEYS = frozenset({
+    # Core pool/agent settings
+    'idle_timeout_seconds', 'system_agent_idle_timeout_seconds', 'max_parallel_agents',
+    'auto_continue', 'enable_agent_budgeting', 'max_turns', 'max_auto_rollbacks',
+    'auto_rollback_on_loop',
+    # Inner-loop detection
+    'inner_loop_detect_enabled', 'loop_min_chars', 'loop_max_chars', 'loop_score_threshold',
+    'loop_char_run_enabled', 'loop_sentence_rep_enabled', 'loop_ngram_rep_enabled',
+    'loop_block_rep_enabled', 'loop_entropy_enabled',
+    # Skills system
+    'default_load_skill_mode', 'auto_skill_enabled',
+    # Retry policy
+    'retry_max_attempts', 'endpoint_max_retries', 'retry_base_delay', 'retry_max_delay',
+    # Code interpreter
+    'ci_execution_timeout', 'ci_watchdog_timeout', 'ci_stale_container_ttl',
+    # Cache pool
+    'cache_pool_enabled', 'cache_pool_size', 'cache_threshold_chars',
+    # Tool char limits (stored in pool.llm_cfg but persisted via pool_settings.json)
+    'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
+    'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
+    # Approval timeout settings
+    'approval_timeout_seconds', 'enable_approval_timeout',
+    # Work folders (persisted alongside PoolSettings fields)
+    'work_access_folders_ro', 'work_access_folders_rw',
+    # Default workspace
+    'default_workspace',
+    # Idle management
+    'idle_check_interval',
+    # Compression settings
+    'compression_force_threshold', 'compression_warning_threshold',
+    'compression_timeout', 'compression_force_cooldown', 'compression_max_attempts',
+    # Security
+    'security_check_timeout',
+    # Nesting/sleeping limits
+    'max_nesting_depth', 'sleeping_timeout', 'sleeping_wakeup_interval',
+    # Sync checks
+    'tail_sync_check_enabled',
+})
+
+# ── Non-PoolSettings keys that still trigger persistence (stored at top level of pool_settings.json) ────
+EXTRA_PERSIST_KEYS = frozenset({
+    'disabled_tools',  # Per-agent-class tool assignments from UI settings panel
+})
 
 # ── Registry of config key → handler function ────────────────────────────
 CONFIG_HANDLERS: Dict[str, Callable] = {}
@@ -357,6 +402,210 @@ def _handle_ci_stale_container_ttl(ui_cfg: dict, agent_pool: Optional[Any], agen
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         agent_pool.settings.ci_stale_container_ttl = max(
             CI_MIN_STALE_CONTAINER_TTL, int(ui_cfg['ci_stale_container_ttl']))
+
+
+@register_config_handler('max_turns')
+def _handle_max_turns(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update default max turns for new agent instances."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = int(ui_cfg.get('max_turns', 50))
+        agent_pool.settings.max_turns = max(1, val)
+
+
+@register_config_handler('max_auto_rollbacks')
+def _handle_max_auto_rollbacks(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update maximum automatic rollback attempts on detected loops."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = int(ui_cfg.get('max_auto_rollbacks', 3))
+        agent_pool.settings.max_auto_rollbacks = max(0, min(val, 10))
+
+
+@register_config_handler('auto_rollback_on_loop')
+def _handle_auto_rollback_on_loop(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle automatic rollback on detected loops."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.auto_rollback_on_loop = bool(ui_cfg.get('auto_rollback_on_loop', True))
+
+
+@register_config_handler('tool_result_max_chars')
+def _handle_tool_result_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update tool result truncation limit."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        val = int(ui_cfg.get('tool_result_max_chars', 10000))
+        agent_pool.llm_cfg['tool_result_max_chars'] = max(1000, val)
+
+
+@register_config_handler('grep_char_limit')
+def _handle_grep_char_limit(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update grep output character limit (-1 = unlimited)."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        val = int(ui_cfg.get('grep_char_limit', -1))
+        agent_pool.llm_cfg['grep_char_limit'] = val
+
+
+@register_config_handler('grep_spillover')
+def _handle_grep_spillover(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle grep spillover to logs."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        agent_pool.llm_cfg['grep_spillover'] = bool(ui_cfg.get('grep_spillover', True))
+
+
+@register_config_handler('shell_char_limit')
+def _handle_shell_char_limit(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update shell_cmd output character limit (-1 = unlimited)."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        val = int(ui_cfg.get('shell_char_limit', -1))
+        agent_pool.llm_cfg['shell_char_limit'] = val
+
+
+@register_config_handler('code_char_limit')
+def _handle_code_char_limit(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update code_interpreter output character limit (-1 = unlimited)."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        val = int(ui_cfg.get('code_char_limit', -1))
+        agent_pool.llm_cfg['code_char_limit'] = val
+
+
+@register_config_handler('list_dir_char_limit')
+def _handle_list_dir_char_limit(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update list_dir output character limit (-1 = unlimited)."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        val = int(ui_cfg.get('list_dir_char_limit', -1))
+        agent_pool.llm_cfg['list_dir_char_limit'] = val
+
+
+@register_config_handler('disabled_tools')
+def _handle_disabled_tools(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update per-agent-class disabled tools configuration from UI settings panel.
+
+    Validates tool names against the registry and silently ignores unknown tools
+    for backwards compatibility (tools may be added/removed over time).
+    """
+    if agent_pool is None or 'disabled_tools' not in ui_cfg:
+        return
+
+    from agent_cascade.log import logger as _logger
+    from agent_cascade.tools.base import TOOL_REGISTRY
+    from agent_cascade.utils.disabled_tools import normalize_disabled_tools, validate_tool_names
+
+    raw_dt = ui_cfg['disabled_tools']
+    if not raw_dt:
+        # Empty value — clear all disabled tools
+        agent_pool.set_ui_disabled_tools({})
+        return
+
+    known_tools = set(TOOL_REGISTRY.keys())
+
+    try:
+        if isinstance(raw_dt, dict):
+            validated_dict = {}
+            for agent_key, agent_tools in raw_dt.items():
+                normalized = normalize_disabled_tools(agent_tools)
+                # Silently filter out unknown tools (backwards compatibility)
+                valid_tools = [t for t in normalized if t in known_tools]
+                ignored = set(normalized) - set(valid_tools)
+                if ignored:
+                    _logger.debug(f"[disabled_tools] Ignoring unknown tools for '{agent_key}': {ignored}")
+                if isinstance(agent_tools, (list, tuple)):
+                    validated_dict[agent_key] = valid_tools
+                else:
+                    validated_dict[agent_key] = valid_tools
+            agent_pool.set_ui_disabled_tools(validated_dict)
+        else:
+            normalized = normalize_disabled_tools(raw_dt)
+            valid_tools = [t for t in normalized if t in known_tools]
+            ignored = set(normalized) - set(valid_tools)
+            if ignored:
+                _logger.debug(f"[disabled_tools] Ignoring unknown tools (global): {ignored}")
+            agent_pool.set_ui_disabled_tools(valid_tools)
+    except Exception as e:
+        _logger.warning(f"[disabled_tools] Failed to update disabled tools config: {e}")
+
+
+# ── PoolSettings handlers for fields without special logic ───────────────
+
+@register_config_handler('compression_force_threshold')
+def _handle_compression_force_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = float(ui_cfg['compression_force_threshold'])
+        agent_pool.settings.compression_force_threshold = val
+
+
+@register_config_handler('compression_warning_threshold')
+def _handle_compression_warning_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = float(ui_cfg['compression_warning_threshold'])
+        agent_pool.settings.compression_warning_threshold = val
+
+
+@register_config_handler('compression_timeout')
+def _handle_compression_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(1, int(ui_cfg['compression_timeout']))
+        agent_pool.settings.compression_timeout = val
+
+
+@register_config_handler('compression_force_cooldown')
+def _handle_compression_force_cooldown(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(0, int(ui_cfg['compression_force_cooldown']))
+        agent_pool.settings.compression_force_cooldown = val
+
+
+@register_config_handler('compression_max_attempts')
+def _handle_compression_max_attempts(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(1, int(ui_cfg['compression_max_attempts']))
+        agent_pool.settings.compression_max_attempts = val
+
+
+@register_config_handler('enable_agent_budgeting')
+def _handle_enable_agent_budgeting(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = bool(ui_cfg['enable_agent_budgeting'])
+        agent_pool.settings.enable_agent_budgeting = val
+
+
+@register_config_handler('idle_check_interval')
+def _handle_idle_check_interval(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(1, int(ui_cfg['idle_check_interval']))
+        agent_pool.settings.idle_check_interval = val
+
+
+@register_config_handler('max_nesting_depth')
+def _handle_max_nesting_depth(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(1, int(ui_cfg['max_nesting_depth']))
+        agent_pool.settings.max_nesting_depth = val
+
+
+@register_config_handler('security_check_timeout')
+def _handle_security_check_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(1, int(ui_cfg['security_check_timeout']))
+        agent_pool.settings.security_check_timeout = val
+
+
+@register_config_handler('sleeping_timeout')
+def _handle_sleeping_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(1, int(ui_cfg['sleeping_timeout']))
+        agent_pool.settings.sleeping_timeout = val
+
+
+@register_config_handler('sleeping_wakeup_interval')
+def _handle_sleeping_wakeup_interval(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(1, int(ui_cfg['sleeping_wakeup_interval']))
+        agent_pool.settings.sleeping_wakeup_interval = val
+
+
+@register_config_handler('tail_sync_check_enabled')
+def _handle_tail_sync_check_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = bool(ui_cfg['tail_sync_check_enabled'])
+        agent_pool.settings.tail_sync_check_enabled = val
 
 
 # LLM config keys — all share one handler (defense-in-depth optimization).
