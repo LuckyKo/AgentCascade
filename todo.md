@@ -29,8 +29,8 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] make shell_cmd automatically launch on async mode if the agent sets timeout bigger than 60s and doesn't specify the mode as sync.
 [x] check put shell_cmd async commands. add a `__wait` command to simply wait for next heartbeat - a no reply tool call basically (needed because most LLMs dont understand the concept of shutting up to get in SLEEPING state). make sure all these commands dont need justification field.
 [x] decouple `enable skills` toggle from auto-skill logic, add `enable auto-skill generation`
-[ ] make a way to elegantly acquire a skill at run time (beside agent init)
-[ ] add a `range` argument to edit_file tool for the delete_and_insert mode so its less confusing than reusing `old_contnet`
+[x] make a way to elegantly acquire a skill at run time (beside agent init)
+[x] add a `range` argument to edit_file tool for the delete_and_insert mode so its less confusing than reusing `old_contnet`
 
 
 # BUGS:
@@ -77,56 +77,3 @@ currency_limit=0
 2026-07-27 08:54:24,201 - agent_pool.py - 613 - DEBUG - Instance conversation cleanup key missing (expected): 'Security_op_dc743fe4'
 2026-07-27 08:54:24,204 - agent_pool.py - 2659 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_dc743fe4
 
-
-# Bad inner loop detect and error
-2026-07-30 04:11:05,288 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 36389, Available tokens: 123519
-2026-07-30 04:11:08,450 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 38369, Available tokens: 123519
-2026-07-30 04:11:11,542 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 41235, Available tokens: 123519
-2026-07-30 04:11:16,498 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 41323, Available tokens: 123519
-2026-07-30 04:11:18,686 - execution_engine.py - 2373 - INFO - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for settings_investigator. Retrying…
-2026-07-30 04:11:18,686 - execution_engine.py - 2423 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentWorkspace\logs\loop_samples\samples_2026-07-30.jsonl
-2026-07-30 04:11:18,689 - execution_engine.py - 2455 - DEBUG - [INNER_LOOP] Detection error for settings_investigator: inner_loop: repeated ngram
-2026-07-30 04:11:18,689 - execution_engine.py - 2218 - INFO - [INNER_LOOP] Detection triggered for 'settings_investigator' (reason: repeated ngram), but not strong enough to advance cursor. Retrying same endpoint.
-2026-07-30 04:11:18,690 - execution_engine.py - 2666 - WARNING - [ENDPOINT_RETRY] LLM call failed for settings_investigator, retry 1/3. Retrying in 1.1s... Error: inner_loop: repeated ngram
-2026-07-30 04:11:19,752 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 41323, Available tokens: 123519
-2026-07-30 04:11:21,657 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 42710, Available tokens: 123519
-2026-07-30 04:11:24,445 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 43240, Available tokens: 123519
-2026-07-30 04:11:27,019 - execution_engine.py - 2373 - INFO - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for settings_investigator. Retrying…
-2026-07-30 04:11:27,020 - execution_engine.py - 2423 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentWorkspace\logs\loop_samples\samples_2026-07-30.jsonl
-2026-07-30 04:11:27,021 - execution_engine.py - 2455 - DEBUG - [INNER_LOOP] Detection error for settings_investigator: inner_loop: repeated ngram
-2026-07-30 04:11:27,022 - execution_engine.py - 2218 - INFO - [INNER_LOOP] Detection triggered for 'settings_investigator' (reason: repeated ngram), but not strong enough to advance cursor. Retrying same endpoint.
-2026-07-30 04:11:27,023 - execution_engine.py - 2666 - WARNING - [ENDPOINT_RETRY] LLM call failed for settings_investigator, retry 1/3. Retrying in 1.0s... Error: inner_loop: repeated ngram
-2026-07-30 04:11:28,080 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 43240, Available tokens: 123519
-2026-07-30 04:11:30,132 - execution_engine.py - 2373 - INFO - [STREAM_GUARD] Detected generation loop: repeated ngram (score=424.9) for settings_investigator. Retrying…
-2026-07-30 04:11:30,132 - execution_engine.py - 2423 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentWorkspace\logs\loop_samples\samples_2026-07-30.jsonl
-2026-07-30 04:11:30,134 - execution_engine.py - 2455 - DEBUG - [INNER_LOOP] Detection error for settings_investigator: inner_loop: repeated ngram
-2026-07-30 04:11:30,134 - execution_engine.py - 2218 - INFO - [INNER_LOOP] Detection triggered for 'settings_investigator' (reason: repeated ngram), but not strong enough to advance cursor. Retrying same endpoint.
-2026-07-30 04:11:30,135 - execution_engine.py - 2666 - WARNING - [ENDPOINT_RETRY] LLM call failed for settings_investigator, retry 2/3. Retrying in 2.2s... Error: inner_loop: repeated ngram
-2026-07-30 04:11:32,300 - base.py - 986 - INFO - Agent [Researcher] - ALL tokens: 43240, Available tokens: 123519
-2026-07-30 04:11:34,609 - execution_engine.py - 2373 - INFO - [STREAM_GUARD] Detected generation loop: repeated ngram (score=360.0) for settings_investigator. Retrying…
-2026-07-30 04:11:34,609 - execution_engine.py - 2423 - DEBUG -   [LOOP_SAMPLE] Saved to n:\work\WD\AgentWorkspace\logs\loop_samples\samples_2026-07-30.jsonl
-2026-07-30 04:11:34,611 - execution_engine.py - 2455 - DEBUG - [INNER_LOOP] Detection error for settings_investigator: inner_loop_exhausted: retried 3 times, giving up — last reason: repeated ngram
-2026-07-30 04:11:34,612 - execution_engine.py - 1301 - ERROR - EXCEPTION - settings_investigator: CharacterRunDetected: inner_loop_exhausted: retried 3 times, giving up — inner_loop_exhausted: retried 3 times, giving up — last reason: repeated ngram
-Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 2427, in _execute_llm_call_with_retry
-    raise CharacterRunDetected(
-agent_cascade.exceptions.CharacterRunDetected: inner_loop_exhausted: retried 3 times, giving up — last reason: repeated ngram
-
-During handling of the above exception, another exception occurred:
-
-Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 1148, in run
-    for msg in gen:
-               ^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 2722, in _call_llm_with_injection
-    yield from self._execute_llm_call_with_retry(instance, llm_messages, template, active_functions)
-  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 2634, in _execute_llm_call_with_retry
-    self._handle_inner_loop_detection(instance, e, retry_count, loop_retry_count, _max_attempts)
-  File "n:\work\WD\AgentCascade\agent_cascade\execution_engine.py", line 2196, in _handle_inner_loop_detection
-    raise CharacterRunDetected(
-agent_cascade.exceptions.CharacterRunDetected: inner_loop_exhausted: retried 3 times, giving up — inner_loop_exhausted: retried 3 times, giving up — last reason: repeated ngram
-2026-07-30 04:11:34,615 - execution_engine.py - 1385 - DEBUG - EXIT - settings_investigator RUNNING→IDLE
-2026-07-30 04:11:34,616 - execution_engine.py - 4437 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=settings_investigator, reason=completed, inst_type=AgentInstance, conv_len=2, final_resp_len=1
-2026-07-30 04:11:34,619 - tool_dispatcher.py - 433 - DEBUG - [SLOT_SYNC_CHILD_COMPLETE] Sync child 'settings_investigator' completed in 107.97s
-2026-07-30 04:11:34,619 - tool_dispatcher.py - 446 - DEBUG - [SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for 'Maine' after sync child
-2026-07-30 04:11:34,619 - agent_pool.py - 2232 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0

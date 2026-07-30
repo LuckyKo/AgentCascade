@@ -544,6 +544,7 @@ class FileOpsMixin:
                   old_content: str,
                   new_content: str,
                   match_mode: str = 'exact',
+                  range_param: str = None,
                   justification: str = '') -> str:
         """Edit a file surgically — auto-approved for agent-owned files."""
         try:
@@ -611,7 +612,7 @@ class FileOpsMixin:
                 if start < 0:
                     start = total_lines + 1 + start  # 1-indexed: -1 → last line
                 if end < 0:
-                    end = total_lines + end  # exclusive end: -1 → stop before last
+                    end = total_lines + 1 + end  # consistent 1-indexed semantics
                 
                 # Clamp to valid bounds
                 start = max(0, min(start, total_lines + 1))
@@ -971,14 +972,16 @@ class FileOpsMixin:
             file_lines = file_content.splitlines(keepends=True)
             total_lines = len(file_lines)
 
-            # Check for empty file — only "0" (append) makes sense on an empty file
-            if total_lines == 0 and old_content.strip() != '0':
-                return f"ERROR: Cannot use delete_and_insert mode on an empty file unless old_content='0' (append)."
+            if not range_param:
+                return "ERROR: delete_and_insert mode requires the 'range' parameter (e.g., '5:10')."
+
+            # On empty files, any valid range that resolves to inserting at position 0 is fine;
+            # _parse_range clamps out-of-range values so this will work naturally.
 
             try:
-                start_idx, end_idx = _parse_range(old_content, total_lines)
+                start_idx, end_idx = _parse_range(range_param, total_lines)
             except (ValueError, IndexError) as e:
-                return f"ERROR: Invalid range '{old_content}' for delete_and_insert mode: {str(e)}"
+                return f"ERROR: Invalid range '{range_param}' for delete_and_insert mode: {str(e)}"
 
             # Split file into before/deleted/after sections
             before = file_lines[:start_idx]
@@ -1006,7 +1009,11 @@ class FileOpsMixin:
             return f"ERROR: Invalid match_mode '{match_mode}'."
 
         description = f"Surgical edit to: {path} (mode: {match_mode})"
-        tool_args = {'path': path, 'old_content': old_content, 'new_content': new_content, 'match_mode': match_mode, 'justification': justification}
+        if match_mode == 'delete_and_insert':
+            tool_args = {'path': path, 'range': range_param, 'new_content': new_content, 'match_mode': match_mode}
+        else:
+            tool_args = {'path': path, 'old_content': old_content, 'new_content': new_content, 'match_mode': match_mode}
+        tool_args['justification'] = justification
 
         if not self._is_auto_approved(path, agent_name):
             approved, reason = self.request_user_approval(

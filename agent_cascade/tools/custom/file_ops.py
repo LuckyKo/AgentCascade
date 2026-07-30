@@ -637,12 +637,16 @@ class EditFile(BaseTool, PathResolutionMixin):
                 'default': 'exact',
                 'description': TOOL_METADATA['edit_file']['parameters']['match_mode']
             },
+            'range': {
+                'type': 'string',
+                'description': TOOL_METADATA['edit_file']['parameters']['range']
+            },
             'justification': {
                 'type': 'string',
                 'description': 'Why you need to edit this file'
             }
         },
-        'required': ['path', 'old_content'],
+        'required': ['path'],
     }
 
     def __init__(self, cfg=None, **kwargs):
@@ -678,6 +682,7 @@ class EditFile(BaseTool, PathResolutionMixin):
         old_content = params_json.get('old_content')
         new_content = params_json.get('new_content')
         match_mode = params_json.get('match_mode', 'exact')
+        range_param = params_json.get('range')
         justification = params_json.get('justification', '')
         
         # Handle cases where model uses XML tags with old names
@@ -693,14 +698,15 @@ class EditFile(BaseTool, PathResolutionMixin):
 
         if not path:
             return "ERROR: Missing 'path'."
-        if not old_content:
-            return "ERROR: Missing 'old_content'. Please provide the exact text you want to replace."
-        # For delete_and_insert mode, empty new_content means delete-only
+
         if match_mode == 'delete_and_insert':
             if new_content is None:
                 new_content = ''
-        elif new_content is None:
-            return "ERROR: Missing 'new_content'. Please provide the text you want to replace old_content with."
+        else:
+            if not old_content:
+                return "ERROR: Missing 'old_content'. Please provide the exact text you want to replace."
+            if new_content is None:
+                return "ERROR: Missing 'new_content'. Please provide the text you want to replace old_content with."
 
         return self.agent_pool.operation_manager.edit_file(
             path=path,
@@ -708,6 +714,7 @@ class EditFile(BaseTool, PathResolutionMixin):
             old_content=old_content,
             new_content=new_content,
             match_mode=match_mode,
+            range_param=range_param,
             justification=justification,
         )
 
