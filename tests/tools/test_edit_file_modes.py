@@ -238,7 +238,8 @@ def test_delete_and_insert_mode():
 
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="3:5", new_content="X\nY\n", match_mode="delete_and_insert"
+            old_content="", new_content="X\nY\n", match_mode="delete_and_insert",
+            range_param="3:5"
         )
         assert "OK:" in res, f"Test 1 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -248,7 +249,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("a\nb\nc\nd\ne\nf\n", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="2:4", new_content="", match_mode="delete_and_insert"
+            old_content="", new_content="", match_mode="delete_and_insert",
+            range_param="2:4"
         )
         assert "OK:" in res, f"Test 2 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -258,7 +260,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("l1\nl2\nl3\nl4\nl5\n", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="3", new_content="inserted\n", match_mode="delete_and_insert"
+            old_content="", new_content="inserted\n", match_mode="delete_and_insert",
+            range_param="3"
         )
         assert "OK:" in res, f"Test 3 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -268,7 +271,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("a\nb\nc\nd\ne\n", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="0", new_content="footer\n", match_mode="delete_and_insert"
+            old_content="", new_content="footer\n", match_mode="delete_and_insert",
+            range_param="0"
         )
         assert "OK:" in res, f"Test 4 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -278,7 +282,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("l1\nl2\nl3\nl4\nl5\n", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="1", new_content="header\n", match_mode="delete_and_insert"
+            old_content="", new_content="header\n", match_mode="delete_and_insert",
+            range_param="1"
         )
         assert "OK:" in res, f"Test 5 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -288,7 +293,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="-1", new_content="near_end\n", match_mode="delete_and_insert"
+            old_content="", new_content="near_end\n", match_mode="delete_and_insert",
+            range_param="-1"
         )
         assert "OK:" in res, f"Test 6 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -299,7 +305,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="-3:-1", new_content="replaced\n", match_mode="delete_and_insert"
+            old_content="", new_content="replaced\n", match_mode="delete_and_insert",
+            range_param="-3:-1"
         )
         assert "OK:" in res, f"Test 7 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -311,7 +318,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("".join(lines), encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="1:10", new_content="", match_mode="delete_and_insert"
+            old_content="", new_content="", match_mode="delete_and_insert",
+            range_param="1:10"
         )
         assert "OK:" in res, f"Test 8 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -321,7 +329,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("".join(f"line{i}\n" for i in range(1, 11)), encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="5:20", new_content="end\n", match_mode="delete_and_insert"
+            old_content="", new_content="end\n", match_mode="delete_and_insert",
+            range_param="5:20"
         )
         assert "OK:" in res, f"Test 9 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -332,7 +341,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("".join(f"line{i}\n" for i in range(1, 9)), encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="4:4", new_content="new_line\n", match_mode="delete_and_insert"
+            old_content="", new_content="new_line\n", match_mode="delete_and_insert",
+            range_param="4:4"
         )
         assert "OK:" in res, f"Test 10 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -342,7 +352,8 @@ def test_delete_and_insert_mode():
         file_path.write_bytes(b"l1\r\nl2\r\nl3\r\nl4\r\nl5\r\nl6\r\n")
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="3:3", new_content="mid", match_mode="delete_and_insert"
+            old_content="", new_content="mid", match_mode="delete_and_insert",
+            range_param="3:3"
         )
         assert "OK:" in res, f"Test 11 failed: {res}"
         content = file_path.read_bytes()
@@ -353,7 +364,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("a\nb\nc\nd\n", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="5", new_content="x\ny\nz\n", match_mode="delete_and_insert"
+            old_content="", new_content="x\ny\nz\n", match_mode="delete_and_insert",
+            range_param="5"
         )
         assert "OK:" in res, f"Test 12 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -364,7 +376,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("a\nb\nc\nd\ne\n", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="abc:xyz", new_content="test\n", match_mode="delete_and_insert"
+            old_content="", new_content="test\n", match_mode="delete_and_insert",
+            range_param="abc:xyz"
         )
         assert "ERROR" in res, f"Test 13 failed (expected error): {res}"
 
@@ -372,7 +385,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("a\nb\nc\nd\ne\nf\ng\n", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content=":5", new_content="", match_mode="delete_and_insert"
+            old_content="", new_content="", match_mode="delete_and_insert",
+            range_param=":5"
         )
         assert "OK:" in res, f"Test 13b failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -383,7 +397,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("a\nb\nc\nd\ne\n", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="3:", new_content="", match_mode="delete_and_insert"
+            old_content="", new_content="", match_mode="delete_and_insert",
+            range_param="3:"
         )
         assert "OK:" in res, f"Test 13c failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -394,7 +409,8 @@ def test_delete_and_insert_mode():
         file_path.write_text("a\nb\nc\nd\ne\n", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="-100", new_content="start\n", match_mode="delete_and_insert"
+            old_content="", new_content="start\n", match_mode="delete_and_insert",
+            range_param="-100"
         )
         assert "OK:" in res, f"Test 14 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
@@ -405,7 +421,8 @@ def test_delete_and_insert_mode():
         file_path.write_bytes(b"l1\r\nl2\r\nl3\r\nl4\r\nl5\r\n")
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="3:3", new_content="X\nY", match_mode="delete_and_insert"
+            old_content="", new_content="X\nY", match_mode="delete_and_insert",
+            range_param="3:3"
         )
         assert "OK:" in res, f"Test 15 failed: {res}"
         content = file_path.read_bytes()
@@ -416,26 +433,32 @@ def test_delete_and_insert_mode():
         file_path.write_bytes(b"a\r\nb\r\nc\r\nd\r\nlast\r\n")
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="1:4", new_content="", match_mode="delete_and_insert"
+            old_content="", new_content="", match_mode="delete_and_insert",
+            range_param="1:4"
         )
         assert "OK:" in res, f"Test 16 failed: {res}"
         content = file_path.read_bytes()
         # Only "last\r\n" should remain — ending preserved from after[0]
         assert b"last\r\n" == content, f"Test 16 assertion: got [{content}]"
 
-        # ── Test 17: Empty file with non-zero range ─────────────────────
+        # ── Test 17: Empty file with non-zero range (clamped to append) ───
         file_path.write_text("", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="1:5", new_content="content\n", match_mode="delete_and_insert"
+            old_content="", new_content="content\n", match_mode="delete_and_insert",
+            range_param="1:5"
         )
-        assert "ERROR" in res, f"Test 17 failed (expected error): {res}"
+        assert "OK:" in res, f"Test 17 failed: {res}"
+        content = file_path.read_text(encoding='utf-8')
+        # Range clamped on empty file → effectively appends content
+        assert content == "content\n", f"Test 17 assertion: got [{content}]"
 
         # ── Test 18: Empty file with append (range "0") ────────────────
         file_path.write_text("", encoding='utf-8')
         res = op_mgr.edit_file(
             path="test_file.txt", agent_name="test_agent",
-            old_content="0", new_content="appended\n", match_mode="delete_and_insert"
+            old_content="", new_content="appended\n", match_mode="delete_and_insert",
+            range_param="0"
         )
         assert "OK:" in res, f"Test 18 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
