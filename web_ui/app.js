@@ -129,40 +129,40 @@ function clearAutoSecurityTimers() {
  * transform(value) is called to convert the server value before assignment. */
 const POOL_SETTINGS_MAP = [
   // Core agent settings
-  { id: 'setting-max-turns', prop: 'value', key: 'max_turns', localKey: 'max-turns' },
-  { id: 'setting-max-rollbacks', prop: 'value', key: 'max_auto_rollbacks', localKey: 'max-rollbacks' },
-  { id: 'setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop', localKey: 'auto_rollback_on_loop' },
-  { id: 'setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
+  { id: '#setting-max-turns', prop: 'value', key: 'max_turns', localKey: 'max-turns' },
+  { id: '#setting-max-rollbacks', prop: 'value', key: 'max_auto_rollbacks', localKey: 'max-rollbacks' },
+  { id: '#setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop', localKey: 'auto_rollback_on_loop' },
+  { id: '#setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
   // Inner-loop detection
-  { id: 'setting-inner-loop-detect', prop: 'checked', key: 'inner_loop_detect_enabled', localKey: 'inner-loop-detect' },
-  { id: 'setting-loop-min-chars', prop: 'value', key: 'loop_min_chars', localKey: 'loop-min-chars' },
-  { id: 'setting-loop-max-chars', prop: 'value', key: 'loop_max_chars', localKey: 'loop-max-chars' },
-  { id: 'setting-loop-score-threshold', prop: 'value', key: 'loop_score_threshold', localKey: 'loop-score-threshold' },
-  { id: 'setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled', localKey: 'loop-char-run-enabled' },
-  { id: 'setting-loop-sentence-rep', prop: 'checked', key: 'loop_sentence_rep_enabled', localKey: 'loop-sentence-rep-enabled' },
-  { id: 'setting-loop-ngram-rep', prop: 'checked', key: 'loop_ngram_rep_enabled', localKey: 'loop-ngram-rep-enabled' },
-  { id: 'setting-loop-block-rep', prop: 'checked', key: 'loop_block_rep_enabled', localKey: 'loop-block-rep-enabled' },
-  { id: 'setting-loop-entropy', prop: 'checked', key: 'loop_entropy_enabled', localKey: 'loop-entropy-enabled' },
+  { id: '#setting-inner-loop-detect', prop: 'checked', key: 'inner_loop_detect_enabled', localKey: 'inner-loop-detect' },
+  { id: '#setting-loop-min-chars', prop: 'value', key: 'loop_min_chars', localKey: 'loop-min-chars' },
+  { id: '#setting-loop-max-chars', prop: 'value', key: 'loop_max_chars', localKey: 'loop-max-chars' },
+  { id: '#setting-loop-score-threshold', prop: 'value', key: 'loop_score_threshold', localKey: 'loop-score-threshold' },
+  { id: '#setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled', localKey: 'loop-char-run-enabled' },
+  { id: '#setting-loop-sentence-rep', prop: 'checked', key: 'loop_sentence_rep_enabled', localKey: 'loop-sentence-rep-enabled' },
+  { id: '#setting-loop-ngram-rep', prop: 'checked', key: 'loop_ngram_rep_enabled', localKey: 'loop-ngram-rep-enabled' },
+  { id: '#setting-loop-block-rep', prop: 'checked', key: 'loop_block_rep_enabled', localKey: 'loop-block-rep-enabled' },
+  { id: '#setting-loop-entropy', prop: 'checked', key: 'loop_entropy_enabled', localKey: 'loop-entropy-enabled' },
   // Skills system
-  { id: 'setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode', localKey: 'enable-skills',
+  { id: '#setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode', localKey: 'enable-skills',
     transform: (v) => v === 'AUTO' },
-  { id: 'setting-auto-skill-gen', prop: 'checked', key: 'auto_skill_enabled', localKey: 'auto-skill-gen' },
+  { id: '#setting-auto-skill-gen', prop: 'checked', key: 'auto_skill_enabled', localKey: 'auto-skill-gen' },
   // Retry policy settings (Phase 6)
-  { id: 'setting-retry-max-attempts', prop: 'value', key: 'retry_max_attempts', localKey: 'retry-max-attempts' },
-  { id: 'setting-endpoint-max-retries', prop: 'value', key: 'endpoint_max_retries', localKey: 'endpoint-max-retries' },
-  { id: 'setting-retry-base-delay', prop: 'value', key: 'retry_base_delay', localKey: 'retry-base-delay' },
-  { id: 'setting-retry-max-delay', prop: 'value', key: 'retry_max_delay', localKey: 'retry-max-delay' },
+  { id: '#setting-retry-max-attempts', prop: 'value', key: 'retry_max_attempts', localKey: 'retry-max-attempts' },
+  { id: '#setting-endpoint-max-retries', prop: 'value', key: 'endpoint_max_retries', localKey: 'endpoint-max-retries' },
+  { id: '#setting-retry-base-delay', prop: 'value', key: 'retry_base_delay', localKey: 'retry-base-delay' },
+  { id: '#setting-retry-max-delay', prop: 'value', key: 'retry_max_delay', localKey: 'retry-max-delay' },
   // Cache pool
-  { id: 'setting-cache-pool-enabled', prop: 'checked', key: 'cache_pool_enabled', localKey: 'cache-pool-enabled' },
-  { id: 'setting-cache-pool-size', prop: 'value', key: 'cache_pool_size', localKey: 'cache-pool-size' },
-  { id: 'setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars', localKey: 'cache-threshold-chars' },
+  { id: '#setting-cache-pool-enabled', prop: 'checked', key: 'cache_pool_enabled', localKey: 'cache-pool-enabled' },
+  { id: '#setting-cache-pool-size', prop: 'value', key: 'cache_pool_size', localKey: 'cache-pool-size' },
+  { id: '#setting-cache-threshold-chars', prop: 'value', key: 'cache_threshold_chars', localKey: 'cache-threshold-chars' },
   // Tool char limits
-  { id: 'setting-tool-result-max-chars', prop: 'value', key: 'tool_result_max_chars', localKey: 'tool-result-max-chars' },
-  { id: 'setting-grep-char-limit', prop: 'value', key: 'grep_char_limit', localKey: 'grep-char-limit' },
-  { id: 'setting-grep-spillover', prop: 'checked', key: 'grep_spillover', localKey: 'grep-spillover' },
-  { id: 'setting-shell-char-limit', prop: 'value', key: 'shell_char_limit', localKey: 'shell-char-limit' },
-  { id: 'setting-code-char-limit', prop: 'value', key: 'code_char_limit', localKey: 'code-char-limit' },
-  { id: 'setting-list-dir-char-limit', prop: 'value', key: 'list_dir_char_limit', localKey: 'list-dir-char-limit' },
+  { id: '#setting-tool-result-max-chars', prop: 'value', key: 'tool_result_max_chars', localKey: 'tool-result-max-chars' },
+  { id: '#setting-grep-char-limit', prop: 'value', key: 'grep_char_limit', localKey: 'grep-char-limit' },
+  { id: '#setting-grep-spillover', prop: 'checked', key: 'grep_spillover', localKey: 'grep-spillover' },
+  { id: '#setting-shell-char-limit', prop: 'value', key: 'shell_char_limit', localKey: 'shell-char-limit' },
+  { id: '#setting-code-char-limit', prop: 'value', key: 'code_char_limit', localKey: 'code-char-limit' },
+  { id: '#setting-list-dir-char-limit', prop: 'value', key: 'list_dir_char_limit', localKey: 'list-dir-char-limit' },
 ];
 
 /** Sync pool settings from server state to UI elements.
@@ -1956,6 +1956,7 @@ function handleServerMessage(data) {
     case 'import_settings': {
       if (data.status === 'success') {
         showInSystemToastBar(`✅ Settings imported successfully (${data.applied_keys?.length || 0} keys applied)`);
+
         // Remove only pool settings from localStorage so syncPoolSettings will apply server values.
         // This preserves frontend-only settings (colors, font size, log-api-post, etc.) while still
         // allowing the next state message to sync imported pool settings into UI controls.
