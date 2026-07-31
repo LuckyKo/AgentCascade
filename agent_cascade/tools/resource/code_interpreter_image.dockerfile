@@ -6,29 +6,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /workspace
 
+COPY code_interpreter_requirements.txt .
 RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
-    requests \
-    ipykernel \
-    jupyter_client \
-    matplotlib \
-    numpy \
-    pandas \
-    Pillow \
-    seaborn \
-    sympy \
-    openpyxl \
-    pyyaml \
-    "pydantic>=2.3.0" \
-    tiktoken \
-    regex \
-    json5 \
-    jsonlines \
-    jsonschema \
-    python-dotenv \
-    openai \
-    "dashscope>=1.11.0" \
-    aiohttp \
-    eval_type_backport
+    -r code_interpreter_requirements.txt
 
 # fix font issue in matplotlib
 COPY AlibabaPuHuiTi-3-45-Light.ttf /usr/share/fonts/truetype/
