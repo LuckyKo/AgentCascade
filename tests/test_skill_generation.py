@@ -76,11 +76,22 @@ def _make_skill_content(
 
 
 def _cleanup_test_artifacts():
-    """Remove any pending-skills and promoted skills left by tests.
+    """Remove test-specific artifacts left by the skill generation tests.
 
-    Keeps canonical skill-creator and version-control skills intact.
+    - pending-skills/: deletes all entries (these are always test artifacts).
+    - .qwen/skills/: only deletes directories whose names match test patterns
+      ("test-*", "tmp-*"). Production skills must never be deleted here; we
+      cannot rely on a hardcoded whitelist of canonical skills because new
+      production skills get added over time.
     """
-    _CANONICAL = {"skill-creator", "version-control"}
+
+    def _is_test_skill(name: str) -> bool:
+        return (
+            name.startswith("test-")
+            or name.startswith("tmp-")
+            or "-test-skill-" in name
+            or name.endswith("-testing")
+        )
 
     pending_root = Path(".qwen/pending-skills")
     if pending_root.exists():
@@ -95,7 +106,10 @@ def _cleanup_test_artifacts():
     skills_root = Path(".qwen/skills")
     if skills_root.exists():
         for entry in list(skills_root.iterdir()):
-            if entry.is_dir() and entry.name not in _CANONICAL:
+            # Only remove directories that look like test artifacts.
+            # Never blindly delete non-canonical skills: production skills
+            # are added over time and a whitelist would always lag behind.
+            if entry.is_dir() and _is_test_skill(entry.name):
                 skill_file = entry / "SKILL.md"
                 if skill_file.exists():
                     skill_file.unlink()
@@ -241,7 +255,7 @@ class TestRegistration:
 
     def test_triggers_returned_by_get_all_metadata(self, fresh_manager):
         triggers = ["pytest", "unit-test", "mocking"]
-        name = f"metadata-triggers-skill-{_uid()}"
+        name = f"test-metadata-triggers-skill-{_uid()}"
         content = _make_skill_content(name=name, triggers=triggers)
         fresh_manager.register_skill_from_content(content)
         all_meta = fresh_manager.get_all_metadata()
@@ -425,8 +439,8 @@ class TestRateLimiting:
 
     def test_second_proposal_flag_mechanism(self, fresh_manager):
         """First proposal sets flag, second checks flag."""
-        name1 = f"rate-limit-skill-1-{_uid()}"
-        name2 = f"rate-limit-skill-2-{_uid()}"
+        name1 = f"test-rate-limit-skill-1-{_uid()}"
+        name2 = f"test-rate-limit-skill-2-{_uid()}"
         content1 = _make_skill_content(
             name=name1,
             description="First skill for rate limiting test",
@@ -468,7 +482,7 @@ class TestRateLimiting:
 
     def test_pending_file_cleaned_on_validation_failure(self, fresh_manager):
         """Pending file should be removed when validation fails."""
-        name = f"rate-limit-skill-{_uid()}"
+        name = f"test-rate-limit-skill-{_uid()}"
         content = _make_skill_content(
             name=name,
             description="x",
@@ -495,7 +509,7 @@ class TestHotReload:
     """New skill discoverable after registration without restart."""
 
     def test_new_skill_discoverable_after_registration(self, fresh_manager):
-        name = f"hot-reload-skill-{_uid()}"
+        name = f"test-hot-reload-skill-{_uid()}"
         content = _make_skill_content(
             name=name,
             description="Skill for testing hot-reload discovery",
@@ -518,7 +532,7 @@ class TestHotReload:
         assert name in names
 
     def test_index_rebuilt_after_registration(self, fresh_manager):
-        name = f"hot-reload-skill-{_uid()}"
+        name = f"test-hot-reload-skill-{_uid()}"
         content = _make_skill_content(
             name=name,
             description="Skill for testing hot-reload discovery",
@@ -535,7 +549,7 @@ class TestHotReload:
         assert "discovery" in fresh_manager._matcher._inverted_index
 
     def test_promoted_skill_matchable_via_manager(self, fresh_manager):
-        name = f"hot-reload-skill-{_uid()}"
+        name = f"test-hot-reload-skill-{_uid()}"
         content = _make_skill_content(
             name=name,
             description="Skill for testing hot-reload discovery",
