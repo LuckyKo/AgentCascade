@@ -31,7 +31,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] decouple `enable skills` toggle from auto-skill logic, add `enable auto-skill generation`
 [x] make a way to elegantly acquire a skill at run time (beside agent init)
 [x] add a `range` argument to edit_file tool for the delete_and_insert mode so its less confusing than reusing `old_contnet`
-[ ] add quick and easy requirements file for default docker containers
+[x] add quick and easy requirements file for default docker containers
 [x] pass the supervisor's log file together with the name in the system prompt metadata, like: `Supervisor: Maine (orchestrator_Maine_20260731_023711.jsonl)` so sub-agents can easily find it if instructions are unclear — DONE: Added `_get_supervisor_log_filename()` helper in execution_engine.py. Modified `_build_session_metadata()` to append supervisor's log filename (basename only) when available. Graceful fallback to name-only when logger unavailable.
 
 
@@ -61,7 +61,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] context token estimation (the one in base.py) is off by about 10% less than what llama.cpp reports as receiving. (fixed — added CHAT_TEMPLATE_TOKEN_OVERHEAD=5 per message to get_message_stats() in utils/utils.py, and unified _count_history_tokens() in execution_engine.py to use get_message_stats() instead of raw qwen_count(); error dropped from ~37% to ~4%)
 - [ ] approval timeout doesn't seem to take into account the enable toggle in UI 
 - [ ] loading settings did not properly set the disabled tools for each agent
-- [ ] fast grep fails and falls back to the slow python implementation on some cases like:
+- [x] fast grep fails and falls back to the slow python implementation on some cases like:
 ```
 {
   "pattern": "import.*secrets_loader|from.*secrets_loader",
@@ -69,6 +69,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
   "include": "*"
 }
 ```
+(fixed — added -E flag to system grep command in operation_manager/grep.py so extended regex features like alternation (|) work correctly instead of being treated as literal characters; previously basic regex mode silently failed on patterns with |, causing zero matches and fallback to Python)
 
 # Errors to investigate:
 

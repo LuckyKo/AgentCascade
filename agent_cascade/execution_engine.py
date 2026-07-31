@@ -511,7 +511,7 @@ def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=
         return False
 
     # Support both AgentInstance and direct Message object
-    from agent_cascade.models import AgentInstance
+    from agent_cascade.agent_instance import AgentInstance
     if isinstance(instance_or_sysmsg, AgentInstance):
         if not instance_or_sysmsg.conversation:
             return False

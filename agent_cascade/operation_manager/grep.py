@@ -134,6 +134,7 @@ class GrepMixin:
                     '-r',
                     '--include=' + include,
                     '-n',
+                    '-E',  # Extended regex to support alternation (|), groups, etc. — matches Python re semantics
                 ]
 
                 has_inline_case_flag = '(?-i:' in pattern or '(?i:' in pattern
