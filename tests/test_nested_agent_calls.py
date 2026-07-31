@@ -230,6 +230,71 @@ class TestBuildResourcesBlockFallback:
         result = _build_resources_block(mock_pool, tmpl, instance=None)
         assert "call_agent" in result or "Available Agent Types" in result
 
+    def test_empty_resources_returns_empty_string(self):
+        """When call_agent is disabled and cache_pool is disabled,
+        _build_resources_block should return empty string (no header alone)."""
+        func_secret = MagicMock()
+        func_secret.function = {"name": "secret_tool"}
+        
+        tmpl_llm = MagicMock()
+        tmpl_llm.generate_cfg = {"disabled_tools": ["call_agent"]}
+        
+        tmpl = _make_mock_template(
+            llm=tmpl_llm,
+            function_map={
+                "call_agent": MagicMock(function={"name": "call_agent"}),
+                "secret_tool": func_secret,
+            },
+        )
+        
+        mock_pool = MagicMock()
+        mock_pool.templates = {}
+        mock_pool.settings.cache_pool_enabled = False
+        
+        result = _build_resources_block(mock_pool, tmpl, instance=None)
+        
+        # Should return empty string, not just the header
+        assert result == ""
+
+    def test_empty_resources_no_call_agent_in_map(self):
+        """When call_agent is not in function_map and cache_pool is disabled,
+        _build_resources_block should return empty string."""
+        func_normal = MagicMock()
+        func_normal.function = {"name": "normal_tool"}
+        
+        tmpl = _make_mock_template(
+            llm=None,
+            function_map={"normal_tool": func_normal},
+        )
+        
+        mock_pool = MagicMock()
+        mock_pool.templates = {}
+        mock_pool.settings.cache_pool_enabled = False
+        
+        result = _build_resources_block(mock_pool, tmpl, instance=None)
+        
+        # Should return empty string since no agent types and cache disabled
+        assert result == ""
+
+    def test_missing_pool_settings_no_error(self):
+        """When pool lacks settings attribute, should not raise AttributeError.
+        Should default to cache_pool_enabled=True behavior."""
+        func_call_agent = MagicMock()
+        func_call_agent.function = {"name": "call_agent"}
+        
+        tmpl = _make_mock_template(
+            llm=None,
+            function_map={"call_agent": func_call_agent},
+        )
+        
+        # Use a real object without settings attribute to test the nested getattr
+        mock_pool = type("MockPool", (), {"templates": {}})()
+        
+        result = _build_resources_block(mock_pool, tmpl, instance=None)
+        
+        # Should not raise and should include cache pool info (default enabled)
+        assert "Available Agent Types" in result or "call_agent" in result
+
 
 # ──────────────────────────────────────────────
 # Bug #5: Settings propagation merges disabled_tools (not overwrites)

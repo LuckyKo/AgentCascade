@@ -415,7 +415,7 @@ def _build_resources_block(pool, template, instance=None) -> str:
     if not template or not hasattr(template, 'function_map'):
         return ""
 
-    res = "\n\n--- CURRENT AVAILABLE RESOURCES (Auto-Injected) ---\n"
+    content_parts = []
 
     # Get active functions — single source of truth for disabled_tools
     # resolution.
@@ -429,22 +429,22 @@ def _build_resources_block(pool, template, instance=None) -> str:
 
     # List available agent types only if this agent can call other agents
     if can_call_agents:
-        res += "\nAvailable Agent Types (call via call_agent):\n"
+        content_parts.append("\nAvailable Agent Types (call via call_agent):\n")
         has_agents = False
         templates_dict = getattr(pool, 'templates', {})
         for name in sorted(templates_dict.keys()):
             if name != getattr(template, 'agent_class', None):
                 agent_obj = templates_dict[name]
                 tagline = getattr(agent_obj, 'description', 'No description provided')
-                res += f"- **{name}**: {tagline}\n"
+                content_parts.append(f"- **{name}**: {tagline}\n")
                 has_agents = True
         if not has_agents:
-            res += "- None currently available.\n"
+            content_parts.append("- None currently available.\n")
 
     # Append Argument Caching Pool instructions only if the feature is enabled
-    cache_enabled = getattr(pool.settings, 'cache_pool_enabled', True)
+    cache_enabled = getattr(getattr(pool, 'settings', None), 'cache_pool_enabled', True)
     if cache_enabled:
-        res += (
+        content_parts.append(
             "\n### Advanced Feature: Argument Caching Pool\n"
             "The system maintains a rolling cache of tool arguments and large outputs (>1000 chars).\n"
             "Each cached entry is assigned a sequential index N. You can insert any cached entry by using\n"
@@ -455,7 +455,10 @@ def _build_resources_block(pool, template, instance=None) -> str:
             "Use system_info to view the current cache pool state. When entries are cached, you will see a [CACHE INFO] notification."
         )
 
-    return res
+    if not content_parts:
+        return ""
+
+    return "\n\n--- CURRENT AVAILABLE RESOURCES (Auto-Injected) ---\n" + "".join(content_parts)
 
 
 def _build_skills_block(loaded_skills: list) -> str:
