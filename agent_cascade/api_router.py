@@ -1561,8 +1561,29 @@ class APIRouter:
         return normalized
 
     def _load(self):
-        """Load config from disk if available."""
+        """Load config from disk if available.
+
+        If the file does not exist, it is created with an empty default
+        configuration and a warning is logged so the user knows to configure
+        at least one LLM endpoint.
+        """
         if not self._config_path.exists():
+            # Auto-create with safe defaults on first startup.
+            try:
+                self._config_dir.mkdir(parents=True, exist_ok=True)
+                default_config = {
+                    "endpoints": [],
+                    "agent_priorities": {},
+                    "agent_types_with_priorities": [],
+                }
+                with open(self._config_path, 'w', encoding='utf-8') as f:
+                    json.dump(default_config, f, indent=2)
+                logger.warning(
+                    "config/api_endpoints.json not found; created with empty default configuration. "
+                    "Please configure at least one LLM endpoint."
+                )
+            except OSError as e:
+                logger.error(f"[APIRouter] Failed to create config/api_endpoints.json: {e}")
             return
         try:
             with open(self._config_path, 'r', encoding='utf-8-sig') as f:

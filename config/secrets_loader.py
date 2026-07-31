@@ -10,15 +10,27 @@ This file is gitignored. If it does not exist, all lookups return None.
 """
 
 import json
+import logging
 import os
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 _SECRETS_CACHE: dict = {}
 _SECRETS_LOADED: bool = False
 
+_DEFAULT_SECRETS = {
+    "serper_api_key": "",
+    "search_backend_priority": ["serper", "duckduckgo"],
+}
+
 
 def _load_secrets() -> dict:
-    """Load secrets from config/secrets.json once and cache in memory."""
+    """Load secrets from config/secrets.json once and cache in memory.
+
+    If the file does not exist, it is created with safe default values and a
+    warning is logged so the user knows to configure their API keys.
+    """
     global _SECRETS_CACHE, _SECRETS_LOADED
     if _SECRETS_LOADED:
         return _SECRETS_CACHE
@@ -34,8 +46,17 @@ def _load_secrets() -> dict:
             if isinstance(data, dict):
                 _SECRETS_CACHE = data
     except FileNotFoundError:
-        # No secrets file is allowed; behave as empty config.
-        pass
+        # Auto-create with safe defaults on first startup.
+        try:
+            os.makedirs(base_dir, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(_DEFAULT_SECRETS, f, indent=2)
+            logger.warning(
+                "config/secrets.json not found; created with default values. "
+                "Please set your API keys."
+            )
+        except OSError as e:
+            logger.error(f"Failed to create config/secrets.json: {e}")
     except json.JSONDecodeError:
         # If invalid JSON, treat as empty to avoid crashing.
         _SECRETS_CACHE = {}
