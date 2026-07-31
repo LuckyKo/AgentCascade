@@ -110,3 +110,48 @@ def test_web_search_fallback_to_ddg():
                 # Fallback to DDG should occur
                 mock_ddg.assert_called_once_with('test query')
                 assert len(result) > 0, "WebSearch fallback result should not be empty"
+
+
+def test_web_search_no_api_key_uses_ddg():
+    """Verify web_search uses DuckDuckGo directly when no API key is configured."""
+    from unittest.mock import patch
+
+    # Ensure no API key via env or secrets config
+    with patch.dict(os.environ, {}, clear=False):
+        with patch('agent_cascade.tools.web_search.get_secret', return_value=None):
+            with patch(
+                'agent_cascade.tools.web_search.search_duckduckgo'
+            ) as mock_ddg:
+                mock_ddg.return_value = "Mocked DuckDuckGo result"
+
+                tool = WebSearch()
+                result = tool.call({'query': 'test query'})
+
+                # DDG should be called directly (no Serper attempt)
+                mock_ddg.assert_called_once_with('test query')
+                assert len(result) > 0, "WebSearch with no key should use DDG"
+
+
+def test_web_search_both_backends_fail_raises():
+    """Verify web_search raises RuntimeError when both Serper and DDG fail."""
+    from unittest.mock import patch
+
+    # Serper configured but fails
+    with patch.dict(os.environ, {'SERPER_API_KEY': 'fake_key'}, clear=False):
+        with patch('agent_cascade.tools.web_search.requests.post') as mock_serper:
+            mock_serper.side_effect = requests.exceptions.ConnectionError("Serper unreachable")
+
+            # DDG also fails
+            with patch(
+                'agent_cascade.tools.web_search.search_duckduckgo'
+            ) as mock_ddg:
+                mock_ddg.side_effect = RuntimeError("DuckDuckGo search failed: timeout")
+
+                tool = WebSearch()
+
+                with pytest.raises(RuntimeError, match="all backends unavailable"):
+                    tool.call({'query': 'test query'})
+
+                # Both backends should have been attempted
+                mock_serper.assert_called_once()
+                mock_ddg.assert_called_once_with('test query')

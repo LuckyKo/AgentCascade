@@ -45,8 +45,8 @@ def search_duckduckgo(query: str) -> str:
         if results:
             return '\n\n'.join(results)
         return 'No results found.'
-    except Exception as e:
-        return f'Search failed: {str(e)}'
+    except requests.RequestException as e:
+        raise RuntimeError(f"DuckDuckGo search failed: {e}") from e
 
 
 class DDGSearch(BaseTool):

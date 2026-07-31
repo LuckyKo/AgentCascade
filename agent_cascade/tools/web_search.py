@@ -45,7 +45,6 @@ def _resolve_serper_api_key() -> str:
     return os.getenv('SERPER_API_KEY', '').strip()
 
 
-SERPER_API_KEY = _resolve_serper_api_key()
 SERPER_URL = os.getenv('SERPER_URL', 'https://google.serper.dev/search')
 
 
@@ -90,25 +89,32 @@ class WebSearch(BaseTool):
         params = self._verify_json_format_args(params)
         query = params['query']
 
+        # Resolve API key dynamically on each call (not frozen at import time)
+        api_key = _resolve_serper_api_key()
+
         # Try Serper first if configured
-        if SERPER_API_KEY:
+        if api_key:
             try:
-                search_results = self._search_serper(query)
+                search_results = self._search_serper(query, api_key)
                 return self._format_serper_results(search_results)
-            except Exception as e:
+            except (requests.RequestException, ValueError) as e:
                 # Log fallback reason for debugging; fall through to DDG
                 logger.info("Serper failed (%s), falling back to DuckDuckGo", e)
 
         # Fallback to DuckDuckGo (or primary if no Serper key)
-        return search_duckduckgo(query)
+        try:
+            return search_duckduckgo(query)
+        except RuntimeError as e:
+            # DDG is the final fallback; wrap and propagate
+            raise RuntimeError(f"Web search failed (all backends unavailable): {e}") from e
 
     @staticmethod
-    def _search_serper(query: str) -> List[Any]:
+    def _search_serper(query: str, api_key: str) -> List[Any]:
         """Perform search via Serper API.
 
         Raises on any failure so caller can fall back to DDG.
         """
-        headers = {'Content-Type': 'application/json', 'X-API-KEY': SERPER_API_KEY}
+        headers = {'Content-Type': 'application/json', 'X-API-KEY': api_key}
         payload = {'q': query}
         response = requests.post(SERPER_URL, json=payload, headers=headers, timeout=15)
         response.raise_for_status()

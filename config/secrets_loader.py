@@ -13,13 +13,14 @@ import json
 import os
 from typing import Any, Optional
 
-_SECRETS_CACHE: Optional[dict] = None
+_SECRETS_CACHE: dict = {}
+_SECRETS_LOADED: bool = False
 
 
 def _load_secrets() -> dict:
     """Load secrets from config/secrets.json once and cache in memory."""
-    global _SECRETS_CACHE
-    if _SECRETS_CACHE is not None:
+    global _SECRETS_CACHE, _SECRETS_LOADED
+    if _SECRETS_LOADED:
         return _SECRETS_CACHE
 
     # config/ is a package root; resolve relative to this file's directory.
@@ -39,6 +40,7 @@ def _load_secrets() -> dict:
         # If invalid JSON, treat as empty to avoid crashing.
         _SECRETS_CACHE = {}
 
+    _SECRETS_LOADED = True
     return _SECRETS_CACHE
 
 
