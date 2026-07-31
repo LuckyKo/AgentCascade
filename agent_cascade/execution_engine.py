@@ -572,6 +572,23 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
     return _inject_skills_to_system_message(pool, instance, skills_to_inject if skills_to_inject else None)
 
 
+def _get_supervisor_log_filename(pool: Any, supervisor_name: str) -> Optional[str]:
+    """Get the log filename for a supervisor instance by name.
+
+    Returns None if any step fails; never raises exceptions.
+    """
+    loggers = getattr(pool, 'instance_loggers', None)
+    if not loggers:
+        return None
+    logger_inst = loggers.get(supervisor_name)
+    if not logger_inst:
+        return None
+    log_path = getattr(logger_inst, 'log_path', None)
+    if not log_path:
+        return None
+    return os.path.basename(str(log_path))
+
+
 def _build_session_metadata(pool, instance) -> str:
     """Build the '## Session Metadata' section reflecting current workspace state.
 
@@ -598,7 +615,12 @@ def _build_session_metadata(pool, instance) -> str:
     if instance.parent_instance is None:
         meta_lines.append("- Supervisor: User")
     else:
-        meta_lines.append(f"- Supervisor: {instance.parent_instance}")
+        supervisor = instance.parent_instance
+        log_filename = _get_supervisor_log_filename(pool, supervisor)
+        if log_filename:
+            meta_lines.append(f"- Supervisor: {supervisor} ({log_filename})")
+        else:
+            meta_lines.append(f"- Supervisor: {supervisor}")
 
     # Get workspace config from operation_manager (live source of truth),
     # falling back to logger metadata

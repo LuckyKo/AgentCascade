@@ -31,6 +31,8 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] decouple `enable skills` toggle from auto-skill logic, add `enable auto-skill generation`
 [x] make a way to elegantly acquire a skill at run time (beside agent init)
 [x] add a `range` argument to edit_file tool for the delete_and_insert mode so its less confusing than reusing `old_contnet`
+[ ] add quick and easy requirements file for default docker containers
+[x] pass the supervisor's log file together with the name in the system prompt metadata, like: `Supervisor: Maine (orchestrator_Maine_20260731_023711.jsonl)` so sub-agents can easily find it if instructions are unclear — DONE: Added `_get_supervisor_log_filename()` helper in execution_engine.py. Modified `_build_session_metadata()` to append supervisor's log filename (basename only) when available. Graceful fallback to name-only when logger unavailable.
 
 
 # BUGS:
@@ -55,8 +57,18 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] extra work paths need to be tied to each session, they have to be loaded when we load existing sessions from the metadata entry.
 - [x] sub agent kicked back to caller when the API connection dropped mid normal assistant message streaming (fixed — broadened retry_model_service_iterator in llm/base.py to catch all Exceptions during streaming, not just ModelServiceError; network errors now retry with exponential backoff up to max_retries)
 - [ ] inner loop detection does not seem to pick up if loop is happening within a tool call.
-- [ ] Write a proper README.md that describes the project as a whole and offers easy install & use instructions
+- [x] Write a proper README.md that describes the project as a whole and offers easy install & use instructions (completed — comprehensive README covering architecture, features, installation, usage with correct port/endpoints, programmatic access, and troubleshooting)
 - [x] context token estimation (the one in base.py) is off by about 10% less than what llama.cpp reports as receiving. (fixed — added CHAT_TEMPLATE_TOKEN_OVERHEAD=5 per message to get_message_stats() in utils/utils.py, and unified _count_history_tokens() in execution_engine.py to use get_message_stats() instead of raw qwen_count(); error dropped from ~37% to ~4%)
+- [ ] approval timeout doesn't seem to take into account the enable toggle in UI 
+- [ ] loading settings did not properly set the disabled tools for each agent
+- [ ] fast grep fails and falls back to the slow python implementation on some cases like:
+```
+{
+  "pattern": "import.*secrets_loader|from.*secrets_loader",
+  "path": "/workspace",
+  "include": "*"
+}
+```
 
 # Errors to investigate:
 
@@ -77,3 +89,35 @@ currency_limit=0
 2026-07-27 08:54:24,201 - agent_pool.py - 613 - DEBUG - Instance conversation cleanup key missing (expected): 'Security_op_dc743fe4'
 2026-07-27 08:54:24,204 - agent_pool.py - 2659 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Security_op_dc743fe4
 
+
+# loader call spam during regression test
+
+[32mINFO[0m:     127.0.0.1:54850 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54898 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54900 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54901 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54902 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54903 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54904 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54922 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54934 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54990 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54991 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54989 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54992 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54993 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:54994 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55010 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55018 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55081 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55082 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55084 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55085 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55083 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55086 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55087 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55102 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55165 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55166 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55167 - "[1mGET /v1/models HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:55168 - "[1mGET /v1/models/Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf HTTP/1.1[0m" [32m200 OK[0m
