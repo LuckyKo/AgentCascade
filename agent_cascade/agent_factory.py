@@ -17,7 +17,8 @@ from agent_cascade.tools.custom import (
     ProposeSkill, LoadSkill,
 )
 from agent_cascade.tools.custom.compression_tools import CompressContext
-from agent_cascade.tools.custom import DDGSearch, SystemInfo as _SystemInfo
+from agent_cascade.tools.custom import SystemInfo as _SystemInfo
+from agent_cascade.tools.web_search import WebSearch
 from agent_cascade.soul_loader import create_agent_from_soul
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
@@ -114,8 +115,8 @@ def register_standard_tools(agent, agent_pool, agent_name: str):
                     logger.warning("Skipping CodeInterpreter for agent %s: operation_manager is None", agent_name)
             except Exception as e:
                 logger.warning(f"Failed to load CodeInterpreter for agent {agent_name}: {e}")
-        elif tool_name == 'ddg_search':
-            tools_to_register[tool_name] = (DDGSearch(), False, False)
+        elif tool_name == 'web_search':
+            tools_to_register[tool_name] = (WebSearch(), False, False)
         elif tool_name == 'web_extractor':
             tools_to_register[tool_name] = (WebExtractor(cfg={'work_dir': DEFAULT_WORKSPACE}), False, False)
         elif tool_name == 'system_info':

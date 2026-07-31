@@ -1,3 +1,7 @@
+# Environment and secrets (never commit these)
+.env
+.env.local
+.env.*.local
 env
 *.pyc
 __pycache__
@@ -72,8 +76,9 @@ temp/
 # Logs
 logs/ 
 
-# API config (contains secrets)
+# API configs (contain secrets)
 config/api_endpoints.json
+config/secrets.json
 
 # Agent lessons
 .agent_lessons/ 

@@ -16,6 +16,7 @@ import json
 import os
 
 import pytest
+import requests
 
 from agent_cascade.tools import AmapWeather, CodeInterpreter, ImageGen, Retrieval, WebSearch
 
@@ -78,3 +79,34 @@ def test_web_search():
         if 'SERPER' in str(e):
             pytest.skip(f'Web search requires SERPER_API_KEY: {e}')
         raise
+
+
+def test_web_search_fallback_to_ddg():
+    """Verify web_search falls back to DuckDuckGo when Serper fails.
+
+    Mocks both Serper HTTP calls (to simulate failure) and DDG calls (to avoid
+    real network access), then checks that:
+      - No exception is raised.
+      - The result is non-empty.
+    """
+    from unittest.mock import patch, MagicMock
+
+    # Simulate Serper being configured but failing on the HTTP call
+    with patch.dict(os.environ, {'SERPER_API_KEY': 'fake_key'}, clear=False):
+        with patch('agent_cascade.tools.web_search.requests.post') as mock_serper:
+            # Make Serper raise an exception (e.g., connection error)
+            mock_serper.side_effect = requests.exceptions.ConnectionError("Serper unreachable")
+
+            with patch(
+                'agent_cascade.tools.web_search.search_duckduckgo'
+            ) as mock_ddg:
+                mock_ddg.return_value = "Mocked DuckDuckGo result"
+
+                tool = WebSearch()
+                result = tool.call({'query': 'test query'})
+
+                # Serper should have been attempted
+                mock_serper.assert_called_once()
+                # Fallback to DDG should occur
+                mock_ddg.assert_called_once_with('test query')
+                assert len(result) > 0, "WebSearch fallback result should not be empty"

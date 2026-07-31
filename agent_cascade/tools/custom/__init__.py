@@ -32,7 +32,6 @@ __all__ = [
     'CodeMap',
     'ForgetLast',
     'SyntaxCheck',
-    'DDGSearch',
     'ScanSkills',
     'ProposeSkill',
     'LoadSkill',

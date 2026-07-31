@@ -32,7 +32,7 @@ AVAILABLE_TOOLS: List[str] = [
     'shell_cmd',        # Execute host shell commands
 
     # Web & search
-    'ddg_search',       # DuckDuckGo web search
+    'web_search',       # Internet search (auto-selects Serper or DuckDuckGo backend)
     'web_extractor',    # Extract webpage content
 
     # Context management
@@ -347,9 +347,12 @@ TOOL_METADATA = {
         }
     },
     'web_search': {
-        'description': 'Search for information from the internet.',
+        'description': (
+            'Search for information from the internet. Automatically selects the best '
+            'available backend: Serper (when SERPER_API_KEY is configured) or DuckDuckGo (fallback).'
+        ),
         'parameters': {
-            'query': 'The search query to use.'
+            'query': 'The search query.'
         }
     },
     'amap_weather': {
