@@ -55,6 +55,51 @@ def ensure_workspace(workspace_dir: str) -> Path:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+#  1b. Config file initialization (secrets.json, api_endpoints.json)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def ensure_config_files(project_root_path: Path):
+    """
+    Ensure config files exist at startup by triggering their auto-generation logic.
+
+    Calls existing loaders so secrets.json and api_endpoints.json are created
+    deterministically on server start if missing, surfacing warnings immediately.
+    """
+    # 1) Trigger secrets_loader to create secrets.json if missing
+    secrets_ok = True
+    try:
+        from config.secrets_loader import _load_secrets
+        _load_secrets()
+    except ImportError as e:
+        logger.error("[INIT] Failed to import config.secrets_loader: %s", e)
+        secrets_ok = False
+    except Exception as e:
+        logger.error("[INIT] Failed to ensure secrets.json: %s", e)
+        secrets_ok = False
+
+    # 2) Ensure api_endpoints.json via lightweight helper (no APIRouter instantiation)
+    endpoints_ok = True
+    try:
+        from agent_cascade.api_router import ensure_api_endpoints_config
+        if not ensure_api_endpoints_config(config_dir=str(project_root_path / 'config')):
+            endpoints_ok = False
+    except ImportError as e:
+        logger.error("[INIT] Failed to import agent_cascade.api_router.ensure_api_endpoints_config: %s", e)
+        endpoints_ok = False
+
+    # 3) Accurate summary logging based on actual outcomes
+    if secrets_ok and endpoints_ok:
+        logger.info("[INIT] Config files ensured: secrets.json, api_endpoints.json")
+    else:
+        failed = []
+        if not secrets_ok:
+            failed.append("secrets.json")
+        if not endpoints_ok:
+            failed.append("api_endpoints.json")
+        logger.warning("[INIT] Config initialization issues with: %s", ", ".join(failed))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 #  2. OperationManager & AgentPool initialization
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -193,6 +238,9 @@ def initialize_infrastructure(project_root: Path, llm_cfg):
     """
     workspace_dir = detect_workspace_dir(project_root)
     ensure_workspace(workspace_dir)
+
+    # Ensure config files exist before any agent/infrastructure that depends on them
+    ensure_config_files(project_root)
 
     idle_timeout = float(os.getenv('QWEN_AGENT_IDLE_TIMEOUT', 900.0))
     system_agent_idle_timeout = float(os.getenv('QWEN_AGENT_SYSTEM_AGENT_IDLE_TIMEOUT', 900.0))
