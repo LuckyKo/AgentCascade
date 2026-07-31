@@ -527,7 +527,7 @@ def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=
 
     # Log with appropriate identifier
     if isinstance(instance_or_sysmsg, AgentInstance):
-        logger.info(f"[SKILLS] Injected {len(skills_to_inject)} skill(s) into instance '{instance_or_sysmsg.name}' system message")
+        logger.info(f"[SKILLS] Injected {len(skills_to_inject)} skill(s) into instance '{instance_or_sysmsg.instance_name}' system message")
     else:
         logger.info(f"[SKILLS] Injected {len(skills_to_inject)} skill(s) into system message")
 
@@ -561,13 +561,24 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
 
     skill_manager = getattr(pool, 'skill_manager', None)
     skills_to_inject = []
-    if skill_manager and load_skill_value_upper != LOAD_SKILL_NONE:
-        skill_manager._ensure_discovered()
+    if not skill_manager:
+        logger.debug("[SKILLS] _inject_self_augmentation_skill: no skill_manager on pool, skipping")
+        return False
+    if load_skill_value_upper == LOAD_SKILL_NONE:
+        logger.debug("[SKILLS] _inject_self_augmentation_skill: default_load_skill_mode is NONE, skipping")
+        return False
+    if load_skill_value_upper != LOAD_SKILL_AUTO:
+        logger.debug("[SKILLS] _inject_self_augmentation_skill: mode '%s' not AUTO, skipping self-augmentation",
+                     load_skill_value_upper)
+        return False
 
-        if load_skill_value_upper == LOAD_SKILL_AUTO:
-            self_augmentation_instructions = skill_manager.load_full_instructions("self-augmentation")
-            if self_augmentation_instructions:
-                skills_to_inject.append(self_augmentation_instructions)
+    skill_manager._ensure_discovered()
+    self_augmentation_instructions = skill_manager.load_full_instructions("self-augmentation")
+    if not self_augmentation_instructions:
+        logger.warning("[SKILLS] _inject_self_augmentation_skill: 'self-augmentation' skill not found in registry")
+        return False
+
+    skills_to_inject.append(self_augmentation_instructions)
 
     return _inject_skills_to_system_message(pool, instance, skills_to_inject if skills_to_inject else None)
 
