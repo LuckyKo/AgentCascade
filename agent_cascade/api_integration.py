@@ -302,34 +302,14 @@ def create_main_agent_instance(
         conversation=conversation,
     )
 
-    # ── Skills System: Inject skills into new main agent instance's system message ──
-    # Mirrors load_session_from_log behavior to ensure consistency between new and restored sessions.
+    # ── Skills System: Inject self-augmentation skill into main agent's system message ──
+    # Self-augmentation is the foundational root skill that teaches agents how to
+    # discover and load specialized skills at runtime. Every main agent instance must
+    # receive it so they can bootstrap their own capability expansion. This mirrors
+    # the injection in load_session_from_log for consistency between new/restored sessions.
     try:
-        from agent_cascade.execution_engine import _build_skills_block
-        from agent_cascade.settings import DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE, LOAD_SKILL_AUTO
-
-        load_skill_value = getattr(pool.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
-        if isinstance(load_skill_value, str):
-            load_skill_value_upper = load_skill_value.strip().upper()
-        else:
-            load_skill_value_upper = "AUTO"
-
-        skill_manager = getattr(pool, 'skill_manager', None)
-        loaded_skills = []
-        if skill_manager and load_skill_value_upper != LOAD_SKILL_NONE and instance.conversation:
-            skill_manager._ensure_discovered()
-
-            if load_skill_value_upper == LOAD_SKILL_AUTO:
-                _self_aug_body = skill_manager.load_full_instructions("self-augmentation")
-                if _self_aug_body:
-                    loaded_skills.append(_self_aug_body)
-
-            if loaded_skills:
-                skills_block = _build_skills_block(loaded_skills)
-                sys_msg = instance.conversation[0]
-                if sys_msg.role == SYSTEM and "## Active Skills" not in sys_msg.content:
-                    sys_msg.content += skills_block
-                    logger.info(f"[SKILLS] Injected {len(loaded_skills)} skill(s) into main agent instance '{instance_name}' system message")
+        from agent_cascade.execution_engine import _inject_self_augmentation_skill
+        _inject_self_augmentation_skill(pool, instance)
     except Exception as e:
         logger.warning(f"[SKILLS] Skill injection failed for main agent instance '{instance_name}': {e}")
 

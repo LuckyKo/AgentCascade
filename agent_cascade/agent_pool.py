@@ -1855,40 +1855,14 @@ class AgentPool:
         except Exception as e:
             logger.warning(f"Logger setup after load (non-critical): {e}")
 
-        # ── Skills System: Inject skills into loaded instance's system message ──
+        # ── Skills System: Inject self-augmentation skill into loaded instance's system message ──
         # On restart, only inject self-augmentation (the default root skill).
         # Do NOT run AUTO matching against old conversation history — that would
         # match stale tasks from the previous session. AUTO matching is handled
         # by _create_and_run_agent when a new agent is spawned with a fresh task.
         try:
-            from agent_cascade.execution_engine import _build_skills_block
-            from agent_cascade.settings import DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE, LOAD_SKILL_AUTO
-
-            load_skill_value = getattr(self.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
-            if isinstance(load_skill_value, str):
-                load_skill_value_upper = load_skill_value.strip().upper()
-            else:
-                load_skill_value_upper = "AUTO"
-
-            skill_manager = getattr(self, 'skill_manager', None)
-            loaded_skills = []
-            if skill_manager and load_skill_value_upper != LOAD_SKILL_NONE and new_inst.conversation:
-                # Ensure skills are discovered before attempting to load them
-                skill_manager._ensure_discovered()
-
-                # Only inject self-augmentation on restart (no AUTO matching against stale history)
-                if load_skill_value_upper == LOAD_SKILL_AUTO:
-                    _self_aug_body = skill_manager.load_full_instructions("self-augmentation")
-                    if _self_aug_body:
-                        loaded_skills.append(_self_aug_body)
-
-                # Append skills block to the existing system message content
-                if loaded_skills:
-                    skills_block = _build_skills_block(loaded_skills)
-                    sys_msg = new_inst.conversation[0]
-                    if sys_msg.role == SYSTEM and "## Active Skills" not in sys_msg.content:
-                        sys_msg.content += skills_block
-                        logger.info(f"[SKILLS] Injected {len(loaded_skills)} skill(s) into loaded instance '{instance_name}' system message")
+            from agent_cascade.execution_engine import _inject_self_augmentation_skill
+            _inject_self_augmentation_skill(self, new_inst)
         except Exception as e:
             logger.warning(f"[SKILLS] Skill injection on load failed for {instance_name}: {e}")
 

@@ -486,6 +486,92 @@ def _build_skills_block(loaded_skills: list) -> str:
     return '\n'.join(parts)
 
 
+def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=None):
+    """Inject given skills into a system message.
+
+    General-purpose helper used by both main agent and sub-agent paths to inject
+    skill instructions into a system message. Checks for existing '## Active Skills'
+    block to avoid duplicate injection.
+
+    Accepts either:
+      - an AgentInstance with conversation[0] as the system message, or
+      - a Message object directly (used during instance creation before conversation exists).
+
+    Args:
+        pool: AgentPool providing skill_manager and settings.
+        instance_or_sysmsg: Either an AgentInstance or a Message object whose content is modified in-place.
+        skills_to_inject: Optional list of instruction strings to inject.
+            If None or empty, nothing is injected (returns False).
+
+    Returns:
+        True if skills were injected, False otherwise.
+        Safe to call multiple times (checks for existing '## Active Skills' block).
+    """
+    if not skills_to_inject:
+        return False
+
+    # Support both AgentInstance and direct Message object
+    from agent_cascade.models import AgentInstance
+    if isinstance(instance_or_sysmsg, AgentInstance):
+        if not instance_or_sysmsg.conversation:
+            return False
+        sys_msg = instance_or_sysmsg.conversation[0]
+    else:
+        sys_msg = instance_or_sysmsg
+
+    if sys_msg.role != SYSTEM or "## Active Skills" in sys_msg.content:
+        return False
+
+    skills_block = _build_skills_block(skills_to_inject)
+    sys_msg.content += skills_block
+
+    # Log with appropriate identifier
+    if isinstance(instance_or_sysmsg, AgentInstance):
+        logger.info(f"[SKILLS] Injected {len(skills_to_inject)} skill(s) into instance '{instance_or_sysmsg.name}' system message")
+    else:
+        logger.info(f"[SKILLS] Injected {len(skills_to_inject)} skill(s) into system message")
+
+    return True
+
+
+def _inject_self_augmentation_skill(pool, instance) -> bool:
+    """Inject self-augmentation skill into instance's system message if AUTO mode.
+
+    Self-augmentation is the foundational root skill that teaches agents how to
+    discover and load specialized skills at runtime. It must be injected into every
+    main agent instance so they can bootstrap their own capability expansion.
+    On session restore, only self-augmentation is injected (no AUTO matching against
+    stale history); new agents spawned with fresh tasks get full AUTO matching.
+
+    Args:
+        pool: AgentPool instance providing skill_manager and settings.
+        instance: AgentInstance whose system message may be modified in-place.
+
+    Returns:
+        True if self-augmentation skill was injected, False otherwise.
+        Safe to call multiple times (checks for existing '## Active Skills' block).
+    """
+    from agent_cascade.settings import DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE, LOAD_SKILL_AUTO
+
+    load_skill_value = getattr(pool.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
+    if isinstance(load_skill_value, str):
+        load_skill_value_upper = load_skill_value.strip().upper()
+    else:
+        load_skill_value_upper = "AUTO"
+
+    skill_manager = getattr(pool, 'skill_manager', None)
+    skills_to_inject = []
+    if skill_manager and load_skill_value_upper != LOAD_SKILL_NONE:
+        skill_manager._ensure_discovered()
+
+        if load_skill_value_upper == LOAD_SKILL_AUTO:
+            self_augmentation_instructions = skill_manager.load_full_instructions("self-augmentation")
+            if self_augmentation_instructions:
+                skills_to_inject.append(self_augmentation_instructions)
+
+    return _inject_skills_to_system_message(pool, instance, skills_to_inject if skills_to_inject else None)
+
+
 def _build_session_metadata(pool, instance) -> str:
     """Build the '## Session Metadata' section reflecting current workspace state.
 
@@ -4281,14 +4367,12 @@ class ExecutionEngine:
 
             # Always include self-augmentation skill when skills are enabled (AUTO mode)
             if load_skill_value_upper == LOAD_SKILL_AUTO:
-                _self_aug_body = skill_manager.load_full_instructions("self-augmentation")
-                if _self_aug_body and _self_aug_body not in loaded_skills:
-                    loaded_skills.append(_self_aug_body)
+                self_augmentation_instructions = skill_manager.load_full_instructions("self-augmentation")
+                if self_augmentation_instructions and self_augmentation_instructions not in loaded_skills:
+                    loaded_skills.append(self_augmentation_instructions)
 
-        # Inject skill instructions into system prompt if any were loaded
-        if loaded_skills:
-            skills_block = _build_skills_block(loaded_skills)
-            sys_msg.content += skills_block
+        # Inject skills into system message using general-purpose helper
+        _inject_skills_to_system_message(self.pool, sys_msg, loaded_skills if loaded_skills else None)
 
         # Build task message using lifecycle manager
         task_msg = self.lifecycle.build_task_message(args, caller, agent_class=inst.agent_class)
