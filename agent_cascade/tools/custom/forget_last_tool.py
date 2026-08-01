@@ -3,13 +3,14 @@
 import logging
 from typing import Union
 
-from agent_cascade.tools.base import BaseTool
+from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.settings import DEFAULT_FORGET_LAST_TRUNCATE_MAX_CHARS, DEFAULT_FORGET_LAST_MIN_CHAR_LIMIT
 from agent_cascade.compression import rebuild_working_set
 
 logger = logging.getLogger(__name__)
 
 
+@register_tool('forget_last')
 class ForgetLast(BaseTool):
     """Truncates the output of the last N tool call responses in the agent's conversation history.
     
