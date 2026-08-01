@@ -932,7 +932,7 @@ class AgentPool:
             self._clear_state_label(inst)
 
     def _clear_state_label(self, inst) -> None:
-        """Clear the state label on an instance to avoid stale references.
+        """Clear the state label and cached endpoint config on an instance to avoid stale references.
 
         Best-effort — silent failure if lock acquisition fails.
         Used during termination and dismissal cleanup.
@@ -940,6 +940,7 @@ class AgentPool:
         try:
             with inst._state_lock:
                 inst._state_label = None
+                inst._last_endpoint_config = None
         except Exception as e:
             logger.debug(f"Clearing state label for {inst.instance_name} failed (non-critical): {e}")
 
@@ -2422,6 +2423,16 @@ class AgentPool:
                     child_depth=nest_depth,
                     prefix="Parallel Agent",
                 )
+
+                # Save child's state after async completion (state save/restore flow step 4).
+                try:
+                    from agent_cascade.state_ops import save_instance_state
+                    child_inst = self.get_instance(child_instance_name)
+                    if child_inst:
+                        save_instance_state(child_inst)
+                except Exception as e:
+                    logger.debug("Failed to save async child state for %s: %s", child_instance_name, e)
+
                 return result
             except Exception as e:
                 # Catch generic exceptions to preserve the structured agent-specific prefix

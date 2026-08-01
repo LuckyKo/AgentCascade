@@ -23,27 +23,27 @@ def _normalize_api_base(api_base: str) -> str:
     return base
 
 
-def save_instance_state(instance: 'AgentInstance', pool: 'AgentPool') -> bool:
+def save_instance_state(instance: 'AgentInstance') -> bool:
     """Save KV cache state for an instance.
 
-    Looks up endpoint config from pool's API router, saves state via autoloader,
-    and stores the label on the instance under lock.
+    Uses cached endpoint config from the instance (set during endpoint allocation),
+    saves state via autoloader, and stores the label on the instance under lock.
 
     Args:
         instance: AgentInstance to save state for.
-        pool: AgentPool for API router access.
 
     Returns:
         True if state was saved and label stored, False otherwise.
     """
     try:
-        router = pool.api_router
-        if not router:
-            logger.debug("No API router available for state save on %s", instance.instance_name)
+        with instance._state_lock:
+            endpoint_cfg = instance._last_endpoint_config
+        
+        if not endpoint_cfg or not isinstance(endpoint_cfg, dict):
+            logger.debug("No cached endpoint config for %s", instance.instance_name)
             return False
-
-        endpoint_cfg = router.get_llm_config(instance.agent_class)
-        if not endpoint_cfg or not endpoint_cfg.get('state_save_enabled'):
+        
+        if not endpoint_cfg.get('state_save_enabled'):
             logger.debug("State save not enabled for %s (%s)", instance.instance_name, instance.agent_class)
             return False
 
@@ -61,7 +61,7 @@ def save_instance_state(instance: 'AgentInstance', pool: 'AgentPool') -> bool:
             logger.debug("Saved state %s for instance %s", label, instance.instance_name)
             return True
 
-        logger.warning("State save returned no label for instance %s", instance.instance_name)
+        logger.debug("State save returned no label for %s", instance.instance_name)
         return False
 
     except Exception as e:
@@ -69,15 +69,15 @@ def save_instance_state(instance: 'AgentInstance', pool: 'AgentPool') -> bool:
         return False
 
 
-def restore_instance_state(instance: 'AgentInstance', pool: 'AgentPool') -> bool:
+def restore_instance_state(instance: 'AgentInstance') -> bool:
     """Restore KV cache state for an instance.
 
-    Reads the label from the instance under lock, restores state via autoloader,
-    and clears the label on failure to avoid retrying stale state.
+    Reads the label and endpoint config from the instance under lock, uses cached
+    endpoint config to restore state via autoloader, and clears the label on failure
+    to avoid retrying stale state.
 
     Args:
         instance: AgentInstance to restore state for.
-        pool: AgentPool for API router access.
 
     Returns:
         True if state was restored successfully, False otherwise.
@@ -85,19 +85,20 @@ def restore_instance_state(instance: 'AgentInstance', pool: 'AgentPool') -> bool
     try:
         with instance._state_lock:
             label = instance._state_label
+            endpoint_cfg = instance._last_endpoint_config
+
+        logger.debug("Attempting restore for %s, label=%s", instance.instance_name, label)
 
         if not label:
             logger.debug("No state label to restore for %s", instance.instance_name)
             return False
 
-        router = pool.api_router
-        if not router:
-            logger.debug("No API router available for state restore on %s", instance.instance_name)
+        if not endpoint_cfg or not isinstance(endpoint_cfg, dict):
+            logger.debug("No cached endpoint config for %s", instance.instance_name)
             return False
 
-        endpoint_cfg = router.get_llm_config(instance.agent_class)
-        api_base = endpoint_cfg.get('api_base', '') if endpoint_cfg else ''
-        model = endpoint_cfg.get('model', '') if endpoint_cfg else ''
+        api_base = endpoint_cfg.get('api_base', '')
+        model = endpoint_cfg.get('model', '')
 
         if not api_base or not model or not is_autoloader_endpoint(api_base):
             logger.debug("Not an autoloader endpoint for state restore on %s", instance.instance_name)
@@ -108,10 +109,14 @@ def restore_instance_state(instance: 'AgentInstance', pool: 'AgentPool') -> bool
             # Restore failed — clear the label to avoid retrying stale state
             with instance._state_lock:
                 instance._state_label = None
-            logger.warning("State restore failed for %s (label=%s), cleared label", instance.instance_name, label)
+            logger.warning("State restore failed for %s (label=%s), cleared label", 
+                          instance.instance_name, label)
             return False
 
-        logger.debug("Restored state %s for instance %s", label, instance.instance_name)
+        # Clear the label after successful restore to prevent double-restore.
+        with instance._state_lock:
+            instance._state_label = None
+        logger.debug("Restored state for %s (label=%s)", instance.instance_name, label)
         return True
 
     except Exception as e:

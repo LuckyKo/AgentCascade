@@ -64,7 +64,13 @@ class ToolDispatcher:
     def _save_parent_state_before_delegation(self, instance: 'AgentInstance') -> bool:
         """Save parent's state before delegating via call_agent. Returns True if saved."""
         from agent_cascade.state_ops import save_instance_state
-        return save_instance_state(instance, self.pool)
+        
+        try:
+            return save_instance_state(instance)
+        except Exception as e:
+            logger.warning("[STATE_SAVE] Exception saving state for %s: %s", 
+                          instance.instance_name, e)
+            return False
 
     # ── Session Name Resolution ───────────────────────────────────────────────
 
@@ -445,10 +451,18 @@ class ToolDispatcher:
                 prefix="Agent",
             )
 
+            # Save child's state before restoring parent (state save/restore flow step 4).
+            try:
+                from agent_cascade.state_ops import save_instance_state
+                child_inst = self.pool.get_instance(instance_name)
+                if child_inst:
+                    save_instance_state(child_inst)
+            except Exception as e:
+                logger.debug("Failed to save child state for %s: %s", instance_name, e)
+
             # Restore parent's state if it was saved before delegation.
-            # Clear label on failure so we don't retry stale state.
             from agent_cascade.state_ops import restore_instance_state
-            restore_instance_state(caller_slot_holder, self.pool)
+            restore_instance_state(caller_slot_holder)
 
             logger.debug(
                 f"[SLOT_SYNC_CHILD_COMPLETE] Sync child '{instance_name}' completed in {time.monotonic() - sync_path_start:.2f}s"

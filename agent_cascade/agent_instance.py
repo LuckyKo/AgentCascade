@@ -280,6 +280,7 @@ class AgentInstance:
 
     # ── Slot State Tracking (KV cache save/restore) ────────────────────────
     _state_label: Optional[str] = None   # Last saved state label for this instance
+    _last_endpoint_config: Optional[dict] = None  # Cached endpoint config (api_base, model, state_save_enabled) for state save/restore decisions
     _cached_llm_messages: List[Message] = field(default_factory=list)  # Sliced working set for LLM
     _last_config_version: int = field(default=-1)                      # Pool config version at last rebuild
     

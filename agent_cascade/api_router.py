@@ -137,6 +137,7 @@ class APIEndpoint:
             # NOTE: max_retries intentionally excluded — endpoint retry config controls L2 (API router) only.
             # L1 retries are disabled (see llm/base.py). Including this here was the source of coupling.
             'vision_enabled': self.vision_enabled,  # Vision capability flag for routing decisions
+            'state_save_enabled': self.state_save_enabled,  # KV cache state save/restore toggle (autoloader only)
         }
 
         # Signal to _build_merged_cfg whether custom sampling is enabled for this endpoint.

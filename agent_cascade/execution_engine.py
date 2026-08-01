@@ -1531,7 +1531,7 @@ class ExecutionEngine:
         # Restore state if agent has a saved label.
         # Clear label on failure so we don't retry stale state.
         from agent_cascade.state_ops import restore_instance_state
-        restore_instance_state(instance, self.pool)
+        restore_instance_state(instance)
 
         # Load conversation from pool (single source of truth)
         with instance._compression_lock:
@@ -2980,7 +2980,18 @@ class ExecutionEngine:
                 # use_custom_sampling=True) win
                 merged_cfg = self._build_merged_cfg(llm, instance, endpoint_cfg=llm_cfg)
                 merged_cfg['agent_name'] = template.name
-
+# Cache endpoint config for state save/restore decisions.
+                # This is the actual endpoint being used (may differ from template
+                # due to fallbacks/load balancing), so state_ops uses this instead
+                # of doing a fresh router lookup by agent_class.
+                api_base = llm_cfg.get('api_base', '') or ''
+                model = llm_cfg.get('model', '') or ''
+                with instance._state_lock:
+                    instance._last_endpoint_config = {
+                        'api_base': api_base,
+                        'model': model,
+                        'state_save_enabled': llm_cfg.get('state_save_enabled', False)
+                    }
                 # Store allocated max_input_tokens in instance for compression
                 # check (ground-truth tracking)
                 self._store_allocated_max_input_tokens(instance, merged_cfg)
@@ -3017,6 +3028,19 @@ class ExecutionEngine:
             # path:
             merged_cfg = self._build_merged_cfg(llm, instance)  # no endpoint config layer in direct call
             merged_cfg['agent_name'] = template.name
+
+            # Cache endpoint config from template LLM for state save/restore decisions.
+            # In direct call mode there's no router to select endpoints dynamically,
+            # so we use the template's configured api_base/model. State save only works
+            # if this happens to be an autoloader endpoint with state_save_enabled=True.
+            api_base = getattr(llm, 'api_base', '') or ''
+            model = getattr(llm, 'model', '') or ''
+            with instance._state_lock:
+                instance._last_endpoint_config = {
+                    'api_base': api_base,
+                    'model': model,
+                    'state_save_enabled': False  # Direct call mode doesn't support state save config from router
+                }
 
             # Store allocated max_input_tokens in instance for compression
             # check (ground-truth tracking)
@@ -4447,6 +4471,7 @@ class ExecutionEngine:
             # execution
             # and no WebSocket events arrive until the sub-agent finishes.
             logger.debug("starting engine.run() for %s", instance_name)
+
             final_resp = []
             _update_counter = 0
             _last_sub_send = 0.0
