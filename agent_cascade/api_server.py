@@ -327,7 +327,7 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
                 logger.warning("Server starting without main agent instance — first user message may fail")
 
     # ── Unified token cache (coexists with old _cached_hist_stats during transition) ──
-    from config.token_cache import AgentTokenCache
+    from agent_cascade.utils.token_cache import AgentTokenCache
     unified_token_cache = AgentTokenCache(ttl=300)
 
     # ── E2E Encryption State ─────────────────────────────────────────────

@@ -1,4 +1,4 @@
-"""Unit tests for config.token_cache.AgentTokenCache.
+"""Unit tests for agent_cascade.utils.token_cache.AgentTokenCache.
 
 Covers basic set/get, TTL expiration, invalidate/clear_all, cleanup_expired,
 and thread-safety under concurrent reads/writes.
@@ -7,7 +7,7 @@ and thread-safety under concurrent reads/writes.
 import threading
 import time
 
-from config.token_cache import AgentTokenCache
+from agent_cascade.utils.token_cache import AgentTokenCache
 
 
 # ===========================================================================

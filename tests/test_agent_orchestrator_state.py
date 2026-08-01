@@ -78,7 +78,7 @@ class TestBuildStateLogic:
 
     def test_build_state_writes_to_unified_token_cache(self):
         """Token cache can store and retrieve agent stats (unit test for AgentTokenCache)."""
-        from config.token_cache import AgentTokenCache
+        from agent_cascade.utils.token_cache import AgentTokenCache
 
         cache = AgentTokenCache(ttl=300)
         if cache._cleanup_timer:
@@ -158,7 +158,7 @@ class TestTokenCacheIntegration:
 
     def test_cache_ttl_is_300(self):
         """The api_server creates a token cache with 300s TTL."""
-        from config.token_cache import AgentTokenCache
+        from agent_cascade.utils.token_cache import AgentTokenCache
         cache = AgentTokenCache(ttl=300)
         if cache._cleanup_timer:
             cache._cleanup_timer.cancel()
@@ -166,7 +166,7 @@ class TestTokenCacheIntegration:
 
     def test_cache_stores_and_retrieves_primary_agent_stats(self):
         """Token cache stores and retrieves stats for primary agent."""
-        from config.token_cache import AgentTokenCache
+        from agent_cascade.utils.token_cache import AgentTokenCache
         cache = AgentTokenCache(ttl=60)
         if cache._cleanup_timer:
             cache._cleanup_timer.cancel()
@@ -179,7 +179,7 @@ class TestTokenCacheIntegration:
 
     def test_cache_entry_expires_and_can_be_refreshed(self):
         """After TTL expires, a fresh entry can be written."""
-        from config.token_cache import AgentTokenCache
+        from agent_cascade.utils.token_cache import AgentTokenCache
         import time
 
         cache = AgentTokenCache(ttl=1)
