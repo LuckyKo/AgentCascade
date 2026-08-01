@@ -2016,12 +2016,27 @@ function handleServerMessage(data) {
           console.warn('[Import] Failed to clean pool settings from localStorage:', e);
         }
 
+        // Clear disabled_tools from localStorage so imported values can take effect.
+        if (data.settings && data.settings.disabled_tools) {
+          localStorage.removeItem('agent-cascade-disabled-tools');
+          localStorage.removeItem('qwen-disabled-tools');
+        }
+
         // Apply imported settings directly to UI controls (no need to wait for state message).
         if (data.settings) {
           for (const { id, prop, key, transform } of POOL_SETTINGS_MAP) {
             const el = $(id);
             if (el && data.settings[key] !== undefined) {
               el[prop] = transform ? transform(data.settings[key]) : data.settings[key];
+            }
+          }
+
+          // Apply imported disabled_tools to agentDisabledTools and re-render checkboxes.
+          if (data.settings.disabled_tools && typeof agentDisabledTools !== 'undefined') {
+            Object.assign(agentDisabledTools, data.settings.disabled_tools);
+            localStorage.setItem('agent-cascade-disabled-tools', JSON.stringify(agentDisabledTools));
+            if (settingToolsList && settingAgentSelect) {
+              renderToolsForSelectedAgent();
             }
           }
         }
