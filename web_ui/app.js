@@ -1901,6 +1901,19 @@ function handleServerMessage(data) {
 
     case 'security_response': {
       const { request_id, response, verdict, reason } = data;
+      
+      // Check if this approval still exists in state.approvals. If not, it was already
+      // processed/approved (e.g., user toggled Auto-Security off during processing and
+      // manually approved). Skip storing stale security response data.
+      const approvalStillExists = state.approvals.some(a => a.request_id === request_id);
+      if (!approvalStillExists) {
+          state.activeSecurityChecks.delete(request_id);
+          // Remove any leftover card for this request_id from the DOM to prevent re-rendering
+          const staleCard = document.querySelector(`.approval-card[data-request-id="${request_id}"]`);
+          if (staleCard) staleCard.remove();
+          break;
+      }
+
       state.activeSecurityChecks.delete(request_id);
       state.securityResponses[request_id] = { response, verdict, reason };
 
@@ -3038,6 +3051,8 @@ function renderApprovals() {
 // Global functions for inline onclick handlers
 window.approveRequest = function (requestId) {
   send({ type: 'approve', request_id: requestId });
+  delete state.securityResponses[requestId];
+  state.activeSecurityChecks.delete(requestId);
 };
 
 window.askSecurity = function (requestId, btn) {
@@ -3068,6 +3083,8 @@ window.rejectRequest = function (requestId) {
   const input = document.getElementById(`reject-${requestId}`);
   const reason = input ? input.value.trim() : 'Rejected by user';
   send({ type: 'reject', request_id: requestId, reason: reason || 'Rejected by user' });
+  delete state.securityResponses[requestId];
+  state.activeSecurityChecks.delete(requestId);
 };
 
 // ── Sub-agents ───────────────────────────────────────────────────────────────

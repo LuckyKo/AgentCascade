@@ -62,7 +62,8 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] approval timeout doesn't seem to take into account the enable toggle in UI 
 - [ ] loading settings did not properly set the disabled tools for each agent
 - [ ] if the compressor assigned model does not have enough context window we dont fallback to next endpoint, we keep retrying the same point over and over
-- [ ] in UI change `Auto-Ask` to `Auto-Security` and make sure its also saved over refresh/restart like the other settings
+- [x] in UI change `Auto-Ask` to `Auto-Security` and make sure its also saved over refresh/restart like the other settings. Fixed: renamed label in index.html line 225, persistence was already working via localStorage key 'auto-security'.
+- [x] switching auto-ask off during Security processing makes the notification tab pop back up again once the process has been aproved/denied, and it can't be closed back without refresh. Fixed: added guard in security_response handler to skip stale responses when approval already processed, plus cleanup of securityResponses/activeSecurityChecks in approveRequest/rejectRequest functions.
 - [x] grep fails to use the fast version: `--glob '*'` only matched root-level files (ripgrep bug), causing zero files searched and fallback to Python. Fixed in grep.py by skipping include glob when it's "*" and making exclude globs conditional. Searches now complete in ~30ms.
 
 # Errors to investigate:
