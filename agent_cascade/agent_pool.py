@@ -929,6 +929,20 @@ class AgentPool:
             except Exception as e:
                 logger.debug(f"Clearing streaming responses for {instance_name} failed (non-critical): {e}")
 
+            self._clear_state_label(inst)
+
+    def _clear_state_label(self, inst) -> None:
+        """Clear the state label on an instance to avoid stale references.
+
+        Best-effort — silent failure if lock acquisition fails.
+        Used during termination and dismissal cleanup.
+        """
+        try:
+            with inst._state_lock:
+                inst._state_label = None
+        except Exception as e:
+            logger.debug(f"Clearing state label for {inst.instance_name} failed (non-critical): {e}")
+
     def dismiss_instance(self, instance_name: str):
         """Remove an instance from the pool. If active, terminate it; otherwise clean up.
 
@@ -959,6 +973,11 @@ class AgentPool:
             # Bug5 Fix: Pass set_global_stopped=False to ensure only THIS instance
             # is terminated, not all agents via the global _stopped_event.
             self.terminate_instance(instance_name, set_global_stopped=False)
+
+        # Clear state label before removing from pool (terminate already clears it if active).
+        if inst:
+            self._clear_state_label(inst)
+
         # Always remove the instance from the pool so its tab disappears from the UI
         # remove_instance() handles terminated_instances.discard() (Issue #4 fix)
         self.remove_instance(instance_name)

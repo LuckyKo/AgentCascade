@@ -59,6 +59,13 @@ class ToolDispatcher:
         """Set engine reference after all handlers constructed (two-phase init)."""
         self._engine = engine
 
+    # ── State Save/Restore Helpers ────────────────────────────────────────────
+
+    def _save_parent_state_before_delegation(self, instance: 'AgentInstance') -> bool:
+        """Save parent's state before delegating via call_agent. Returns True if saved."""
+        from agent_cascade.state_ops import save_instance_state
+        return save_instance_state(instance, self.pool)
+
     # ── Session Name Resolution ───────────────────────────────────────────────
 
     def _resolve_session_name(self, instance: 'AgentInstance') -> str:
@@ -207,6 +214,13 @@ class ToolDispatcher:
         depth_error = self._check_nesting_depth(instance, child_depth)
         if depth_error:
             return depth_error
+
+        # Save parent's state before delegating via call_agent.
+        # Best-effort — silent on failure, never blocks execution.
+        try:
+            self._save_parent_state_before_delegation(instance)
+        except Exception:
+            pass
 
         # ── Active Instance Guard ────────────────────────────────────────────
         # Prevent calling an instance name that's already in use by an active agent.
@@ -430,6 +444,12 @@ class ToolDispatcher:
                 child_depth=child_depth,
                 prefix="Agent",
             )
+
+            # Restore parent's state if it was saved before delegation.
+            # Clear label on failure so we don't retry stale state.
+            from agent_cascade.state_ops import restore_instance_state
+            restore_instance_state(caller_slot_holder, self.pool)
+
             logger.debug(
                 f"[SLOT_SYNC_CHILD_COMPLETE] Sync child '{instance_name}' completed in {time.monotonic() - sync_path_start:.2f}s"
             )

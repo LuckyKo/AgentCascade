@@ -4759,6 +4759,7 @@ function renderApiEndpoints() {
       // Defaults for new fields (backward compat: old endpoints may not have these)
       const epVision = ep.vision_enabled !== false;       // default True
       const epCustomSampling = !!ep.use_custom_sampling;  // default False
+      const epStateSave = !!ep.state_save_enabled;        // default False
 
       return `
          <div class="api-endpoint-card ${ep.enabled ? '' : 'disabled'}" data-id="${escapeHtml(ep.id)}">
@@ -4824,6 +4825,10 @@ function renderApiEndpoints() {
              <label class="setting-field toggle-field" style="margin:4px 0 0 0;font-size:12px;cursor:pointer;" title="When enabled, per-endpoint sampler params override global settings">
                <span>🎲 Custom Sampling</span>
                <input type="checkbox" class="ep-input-custom-sampling" ${epCustomSampling ? 'checked' : ''}>
+             </label>
+             <label class="setting-field toggle-field" style="margin:4px 0 0 0;font-size:12px;cursor:pointer;" title="Enable KV cache state save/restore for this endpoint (autoloader only)">
+               <span>💾 State Save</span>
+               <input type="checkbox" class="ep-input-state-save" ${epStateSave ? 'checked' : ''}>
              </label>
              
              <!-- Collapsible Sampling Parameters section (shown/hidden based on custom sampling toggle) -->
@@ -4991,6 +4996,18 @@ function handleApiEndpointToggle(e) {
       sendApiRouterUpdate();
     }
   }
+
+  // State save toggle — just save state immediately
+  const stateSaveToggle = e.target.closest('.ep-input-state-save');
+  if (stateSaveToggle) {
+    const card = stateSaveToggle.closest('.api-endpoint-card');
+    const endpoints = state.api_router?.endpoints || [];
+    const ep = endpoints.find(ep => ep.id === card.dataset.id);
+    if (ep) {
+      ep.state_save_enabled = e.target.checked;
+      sendApiRouterUpdate();
+    }
+  }
 }
 
 // Helper: safely read a numeric value from an input element within a card.
@@ -5031,6 +5048,8 @@ function handleApiEndpointBlur(e) {
   if (visionCb) ep.vision_enabled = visionCb.checked;
   const customSamplingCb = card.querySelector('.ep-input-custom-sampling');
   if (customSamplingCb) ep.use_custom_sampling = customSamplingCb.checked;
+  const stateSaveCb = card.querySelector('.ep-input-state-save');
+  if (stateSaveCb) ep.state_save_enabled = stateSaveCb.checked;
 
   // Sampler parameters (NaN-safe, zero means "use default")
   ep.temperature = _epVal(card, '.ep-input-temperature', parseFloat, 0);

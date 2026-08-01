@@ -115,6 +115,7 @@ class APIEndpoint:
 
     vision_enabled: bool = True        # Whether this endpoint supports vision
     use_custom_sampling: bool = False  # Master toggle — if False, all sampler params above are ignored
+    state_save_enabled: bool = False   # Enable KV cache state save/restore (autoloader only)
 
     def __post_init__(self):
         if not self.id:

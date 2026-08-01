@@ -1528,6 +1528,11 @@ class ExecutionEngine:
         """
         inst_name = instance.instance_name
 
+        # Restore state if agent has a saved label.
+        # Clear label on failure so we don't retry stale state.
+        from agent_cascade.state_ops import restore_instance_state
+        restore_instance_state(instance, self.pool)
+
         # Load conversation from pool (single source of truth)
         with instance._compression_lock:
             conv = list(instance.conversation)

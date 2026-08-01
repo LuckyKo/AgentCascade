@@ -277,6 +277,9 @@ class AgentInstance:
     # These fields cache the working set to preserve LLM prefix caching across turns.
     # Simple model: if config unchanged, extend with new messages; otherwise rebuild.
     _cached_messages: List[Message] = field(default_factory=list)      # Full conversation working set
+
+    # ── Slot State Tracking (KV cache save/restore) ────────────────────────
+    _state_label: Optional[str] = None   # Last saved state label for this instance
     _cached_llm_messages: List[Message] = field(default_factory=list)  # Sliced working set for LLM
     _last_config_version: int = field(default=-1)                      # Pool config version at last rebuild
     
