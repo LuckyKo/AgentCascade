@@ -188,6 +188,26 @@ function syncPoolSettings(ps) {
       changed = true;
     }
   }
+
+  // Sync disabled_tools from server if available and we have agent data to apply it to.
+  // Only sync if localStorage doesn't already have a saved value (respect user's local preferences).
+  // This ensures pool_settings.json disabled_tools are reflected in UI on first load.
+  if (ps.disabled_tools && typeof ps.disabled_tools === 'object' && state.agents?.length > 0) {
+    const disabledToolsKey = 'agent-cascade-disabled-tools';
+    const fallbackKey = 'qwen-disabled-tools';
+    const hasLocalDisabledTools = localStorage.getItem(disabledToolsKey) || localStorage.getItem(fallbackKey);
+
+    if (!hasLocalDisabledTools) {
+      // No local preference exists - use server's disabled_tools as the source of truth
+      Object.assign(agentDisabledTools, ps.disabled_tools);
+      localStorage.setItem(disabledToolsKey, JSON.stringify(agentDisabledTools));
+      // Re-render tool checkboxes if settings panel is visible
+      if (settingToolsList && settingAgentSelect) {
+        renderToolsForSelectedAgent();
+      }
+    }
+  }
+
   // Preserve frontend-only settings that aren't in backend pool_settings
   const logApiPostEl = $('#setting-log-api-post');
   if (logApiPostEl && saved['log-api-post'] !== undefined) {
@@ -1503,7 +1523,13 @@ function handleServerMessage(data) {
         const firstLoad = state.agents.length === 0;
         state.agents = data.agents;
         if (firstLoad) state.viewingAgentIndex = state.agentIndex;
-        renderAgentSelect();
+        // Defer renderAgentSelect until after syncPoolSettings applies server's disabled_tools on first load.
+        // On subsequent loads, render immediately since disabled_tools are already synced.
+        if (!firstLoad) {
+          renderAgentSelect();
+        } else {
+          state._firstAgentLoad = true;
+        }
       }
       if (data.session_name && state.sessionName !== data.session_name) { state.sessionName = data.session_name; localStorage.setItem('agent-cascade-session-name', state.sessionName); }
       if (data.agent_index !== undefined) state.agentIndex = data.agent_index;
@@ -1586,7 +1612,14 @@ function handleServerMessage(data) {
 
       // Sync pool settings from server state to UI elements
       syncPoolSettings(data.pool_settings);
-
+      
+      // After syncing pool settings, render agent select if this was the first load
+      // (so server's disabled_tools are applied before initializing UI)
+      if (state._firstAgentLoad) {
+        state._firstAgentLoad = false;
+        renderAgentSelect();
+      }
+      
       if (data.current_model && statusModel) {
         statusModel.textContent = data.current_model;
       }
