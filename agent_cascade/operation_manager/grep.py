@@ -53,19 +53,6 @@ def _check_tool_availability():
 class GrepMixin:
     """Grep/search methods. Expects self to have __init__-set attributes including class-level exclude constants."""
 
-    # Default exclude patterns for ripgrep (glob-style) - prevents timeout on large directories
-    _RG_DEFAULT_EXCLUDES = [
-        '!node_modules/**',
-        '!__pycache__/**',
-        '!.git/**',
-        '!*.pyc',
-        '!*.so',
-        '!*.dll',
-        '!*.exe',
-        '!*.zip',
-        '!*.egg-info/**',
-    ]
-
     # Default exclude patterns for standard grep (basename matching)
     _GREP_DEFAULT_EXCLUDES = [
         '*.pyc', '*.so', '*.dll', '*.exe', '*.zip',
@@ -118,19 +105,11 @@ class GrepMixin:
                     if not re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
                         cmd.append('-i')
 
-                # Only add include glob for specific patterns; "*" with --glob breaks ripgrep
-                # (it only matches root-level files, causing 0 files searched).
-                # Ripgrep searches everything by default when no include filter is given.
+                # "*" with --glob breaks ripgrep (matches only root files). Searches all by default.
                 if include and include != '*':
                     cmd.extend(['--glob', include])
 
-                # Add exclude globs only when we have an explicit include filter or excludes requested.
-                # Without any --glob at all, ripgrep's built-in ignore rules already handle .git, etc.
-                needs_exclude_globs = (include and include != '*') or bool(exclude)
-                if needs_exclude_globs:
-                    for _exc in self._RG_DEFAULT_EXCLUDES:
-                        cmd.extend(['--glob', _exc])
-
+                # Built-in ignores handle .git/node_modules/__pycache__. Only add user-specified excludes.
                 if exclude:
                     cmd.extend(['--glob', f'!{exclude}'])
 
@@ -155,8 +134,9 @@ class GrepMixin:
                 if exclude:
                     cmd.append('--exclude=' + exclude)
 
-                for _dir in self._GREP_DEFAULT_EXCLUDE_DIRS:
-                    cmd.extend(['--exclude-dir', _dir])
+                if ignore_vcs:
+                    for _dir in self._GREP_DEFAULT_EXCLUDE_DIRS:
+                        cmd.extend(['--exclude-dir', _dir])
 
                 for _exc in self._GREP_DEFAULT_EXCLUDES:
                     cmd.append('--exclude=' + _exc)
