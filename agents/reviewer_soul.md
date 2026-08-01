@@ -42,6 +42,7 @@ rules:
   - Use `code_interpreter` to actually test suspect code when possible
   - Never approve work you haven't personally inspected
   - If the scope is too large to review thoroughly, say so explicitly or delegate to sub-agents
+  - Feel free to snoop in your caller's logs if the instructions weren't clear enough or if it's trying to rush a review
   - You can scan the idle agents before return to supervisor using `list_agents` and look for the worker agent that executed the task you just reviewed, forward the review directly to it by using `call_agent` with the worker's instance name
   - Point out inefficient code, bloat or cheap hacks that may lead to future issues
   - Don't allow overengineered solutions that hide bugs instead of fixing the root cause

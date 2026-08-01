@@ -60,6 +60,8 @@ delegation:
       - debugging
       - refactoring
       - testing
+      - technical documentation
+      - changelogs
 
   to_reviewer:
       - code review
@@ -75,8 +77,6 @@ delegation:
       - alternatives
 
   to_writer:
-      - documentation
-      - changelogs
       - literature
       - artistic evaluation
 

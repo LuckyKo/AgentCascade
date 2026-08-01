@@ -5,10 +5,11 @@ Same agent initialization as start_multi_agent.py, but launches the
 WebSocket/REST API server instead of Gradio.
 
 Usage:
-    python start_api_server.py
-    Open http://127.0.0.1:8765 in your browser.
+    python start_api_server.py [--port PORT] [--auto_security]
+    Open http://127.0.0.1:12345 in your browser.
 
 CLI Flags:
+    --port            Port to bind to (default: 12345).
     --auto_security   Start with Auto-Ask Security mode enabled. The security advisor
                       will auto-check all tool calls before execution (same as toggling
                       "Auto-Ask Security" on in the UI). By default, security checks run
@@ -68,9 +69,19 @@ def initialize_agents():
 if __name__ == '__main__':
     import sys
 
-    # ── CLI argument parsing (shared) ────────────────────────────────────────
-    from agent_cascade.shared_init import parse_cli_args
-    args = parse_cli_args(description='AgentCascade Multi-Agent API Server')
+    # ── CLI argument parsing ───────────────────────────────────────────────────
+    import argparse
+    from agent_cascade.shared_init import parse_cli_args as _parse_base
+
+    parser = argparse.ArgumentParser(description='AgentCascade Multi-Agent API Server')
+    parser.add_argument("--port", type=int, default=12345, help="Port to bind to (default: 12345)")
+    args, remaining = parser.parse_known_args()
+    base_args = _parse_base(remaining)
+    # Merge: port from this parser, auto_security from shared
+    if hasattr(base_args, 'auto_security'):
+        args.auto_security = base_args.auto_security
+    else:
+        args.auto_security = False
 
     try:
         all_agents, agent_pool, chatbot_config = initialize_agents()
@@ -111,7 +122,7 @@ if __name__ == '__main__':
         logger.error("[FATAL] Failed to create API server app: %s", e)
         raise SystemExit(1)
 
-    port = int(os.getenv('QWEN_AGENT_PORT', 8765))
+    port = args.port
     logger.info("\n[OK] API Server ready!")
     logger.info("    -> Open http://127.0.0.1:%d in your browser", port)
     logger.info("    -> WebSocket at ws://127.0.0.1:%d/ws/chat", port)
@@ -134,7 +145,7 @@ if __name__ == '__main__':
         server.run()
     except OSError as e:
         if e.errno == 98 or 'address already in use' in str(e).lower():
-            logger.error("[FATAL] Port %d is already in use. Change QWEN_AGENT_PORT env var or stop the other process.", port)
+            logger.error("[FATAL] Port %d is already in use. Use --port <PORT> or stop the other process.", port)
         else:
             logger.error("[FATAL] Server failed to start: %s", e)
         raise SystemExit(1)

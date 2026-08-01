@@ -14,9 +14,8 @@
 
 """Unified web search tool with automatic backend selection.
 
-Backend priority:
-  1. Serper (when SERPER_API_KEY is configured via config/secrets.json or env var)
-  2. DuckDuckGo (fallback when no key or Serper call fails)
+Backend priority is configurable via config/secrets.json:
+  - "search_backend_priority": ["serper", "duckduckgo"]  (default order)
 
 Configuration:
   - Preferred: set "serper_api_key" in config/secrets.json (gitignored).
@@ -33,6 +32,23 @@ from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.tools.custom.ddg_search import search_duckduckgo
 from config.secrets_loader import get_secret
+
+_KNOWN_BACKENDS = {"serper", "duckduckgo"}
+_DEFAULT_PRIORITY = ["serper", "duckduckgo"]
+
+
+def get_search_backend_priority() -> List[str]:
+    """Get configured search backend priority from secrets.json.
+
+    Returns a list of backend names in priority order, filtered to known backends.
+    Falls back to default ["serper", "duckduckgo"] if missing or invalid.
+    """
+    value = get_secret("search_backend_priority")
+    if not isinstance(value, list):
+        return list(_DEFAULT_PRIORITY)
+
+    filtered = [b for b in value if isinstance(b, str) and b in _KNOWN_BACKENDS]
+    return filtered if filtered else list(_DEFAULT_PRIORITY)
 
 
 def _resolve_serper_api_key() -> str:
@@ -71,13 +87,12 @@ class WebSearch(BaseTool):
     }
 
     def call(self, params: Union[str, dict], **kwargs) -> str:
-        """Execute a web search using the best available backend.
+        """Execute a web search using configured backend priority.
 
         Backend selection logic:
-          1. Serper API key is resolved from config/secrets.json ("serper_api_key") or SERPER_API_KEY env var.
-          2. If key is present → use Serper.
-          3. If Serper call fails (network error, auth error, etc.) → fall back to DuckDuckGo.
-          4. If no key configured → use DuckDuckGo directly.
+          - Uses "search_backend_priority" from config/secrets.json (default: ["serper", "duckduckgo"]).
+          - Iterates through backends in order until one succeeds.
+          - Serper requires an API key; skipped if unavailable.
 
         Args:
             params: JSON string or dict containing 'query'.
@@ -85,28 +100,37 @@ class WebSearch(BaseTool):
 
         Returns:
             Formatted search results string.
+
+        Raises:
+            RuntimeError: If all configured backends fail or are unavailable.
         """
         params = self._verify_json_format_args(params)
         query = params['query']
 
-        # Resolve API key dynamically on each call (not frozen at import time)
-        api_key = _resolve_serper_api_key()
+        priority = get_search_backend_priority()
+        last_error = None
 
-        # Try Serper first if configured
-        if api_key:
+        for backend in priority:
             try:
-                search_results = self._search_serper(query, api_key)
-                return self._format_serper_results(search_results)
-            except (requests.RequestException, ValueError) as e:
-                # Log fallback reason for debugging; fall through to DDG
-                logger.info("Serper failed (%s), falling back to DuckDuckGo", e)
+                if backend == "serper":
+                    api_key = _resolve_serper_api_key()
+                    if not api_key:
+                        logger.info(f"Serper in priority but no API key configured, skipping")
+                        continue
+                    search_results = self._search_serper(query, api_key)
+                    return self._format_serper_results(search_results)
 
-        # Fallback to DuckDuckGo (or primary if no Serper key)
-        try:
-            return search_duckduckgo(query)
-        except RuntimeError as e:
-            # DDG is the final fallback; wrap and propagate
-            raise RuntimeError(f"Web search failed (all backends unavailable): {e}") from e
+                elif backend == "duckduckgo":
+                    return search_duckduckgo(query)
+
+            except (requests.RequestException, ValueError, RuntimeError) as e:
+                last_error = e
+                logger.info(f"{backend.capitalize()} failed ({e}), trying next backend")
+
+        raise RuntimeError(
+            f"Web search failed: all configured backends unavailable ({', '.join(priority)}). "
+            f"Last error: {last_error}"
+        ) from last_error
 
     @staticmethod
     def _search_serper(query: str, api_key: str) -> List[Any]:

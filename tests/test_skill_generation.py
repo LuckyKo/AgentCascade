@@ -93,15 +93,19 @@ def _cleanup_test_artifacts():
             or name.endswith("-testing")
         )
 
+    def _remove_empty_dir(entry: Path) -> None:
+        """Remove a skill directory if empty after deleting its SKILL.md."""
+        skill_file = entry / "SKILL.md"
+        if skill_file.exists():
+            skill_file.unlink()
+        if not list(entry.iterdir()):
+            entry.rmdir()
+
     pending_root = Path(".qwen/pending-skills")
     if pending_root.exists():
         for entry in list(pending_root.iterdir()):
             if entry.is_dir():
-                skill_file = entry / "SKILL.md"
-                if skill_file.exists():
-                    skill_file.unlink()
-                if not list(entry.iterdir()):
-                    entry.rmdir()
+                _remove_empty_dir(entry)
 
     skills_root = Path(".qwen/skills")
     if skills_root.exists():
@@ -110,11 +114,7 @@ def _cleanup_test_artifacts():
             # Never blindly delete non-canonical skills: production skills
             # are added over time and a whitelist would always lag behind.
             if entry.is_dir() and _is_test_skill(entry.name):
-                skill_file = entry / "SKILL.md"
-                if skill_file.exists():
-                    skill_file.unlink()
-                if not list(entry.iterdir()):
-                    entry.rmdir()
+                _remove_empty_dir(entry)
 
 
 # ===========================================================================

@@ -49,6 +49,8 @@ else:
 PROCESS_KILL_SETTLE_DELAY = 0.3     # Allow Windows console to process kill/Ctrl+C signal
 DRAIN_THREAD_FLUSH_DELAY = 0.2     # Allow drain threads to flush remaining output after kill
 LAUNCH_POLL_INTERVAL = 0.05        # Brief interval between launch completion checks
+VIEWER_EXIT_WAIT_TIMEOUT = 1.5     # Allow viewer to flush final output before force-killing on normal completion
+KILL_WAIT_TIMEOUT = 5.0            # Give tracking thread time to detect kill flag and terminate process
 
 
 def _send_windows_ctrl_c(pid: int) -> bool:
@@ -494,7 +496,9 @@ class AsyncShellTracker:
         # When console_window=True and stdout/stderr are piped, Windows doesn't show
         # a visible conhost window even with CREATE_NEW_CONSOLE. Workaround: spawn a
         # secondary cmd.exe WITHOUT pipes that inherits console output to display visibly.
-        # The viewer is killed in _kill_process_tree when the main process completes or is terminated.
+        # The viewer is killed in _kill_process_tree only on timeout or external kill.
+        # On normal completion, the viewer is left to exit naturally so the console
+        # window stays visible until the command truly finishes.
         if ON_WINDOWS and task.console_window:
             try:
                 # Reuse configure_windows_utf8 to get consistent chcp prefix
@@ -572,10 +576,8 @@ class AsyncShellTracker:
             elapsed = time.time() - task.start_time
             if elapsed > task.timeout:
                 timed_out = True
-                self._kill_process_tree(proc, agent_name, tool_id)
-                # Wait briefly for drain threads to flush after kill
-                t_out.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
-                t_err.join(timeout=DRAIN_THREAD_JOIN_TIMEOUT)
+                # Don't kill here — let _track_task be the single owner of process termination.
+                # Just break so it can handle cleanup consistently.
                 break
 
             # Send heartbeat if interval configured and enough time passed.
@@ -605,6 +607,35 @@ class AsyncShellTracker:
         if proc.returncode is not None:
             with task._lock:
                 task.return_code = proc.returncode
+
+    @staticmethod
+    def _cleanup_viewer(viewer: Optional[subprocess.Popen], tool_id: int) -> None:
+        """Wait for viewer to exit naturally, force-kill if it doesn't.
+
+        Called after normal task completion to avoid leaving orphaned viewer processes.
+        The viewer_process reference on the task must already be cleared before calling.
+        """
+        if viewer is None:
+            return
+
+        try:
+            viewer.wait(timeout=VIEWER_EXIT_WAIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # Viewer didn't exit in time — kill it directly to avoid orphaned processes.
+            if viewer.poll() is None:
+                try:
+                    if ON_WINDOWS:
+                        subprocess.run(
+                            ['taskkill', '/F', '/T', '/PID', str(viewer.pid)],
+                            capture_output=True, timeout=5, text=True,
+                        )
+                    else:
+                        viewer.kill()
+                    logger.debug(f"[AsyncShell] Killed viewer PID {viewer.pid}")
+                except Exception as e:
+                    logger.debug(f"[AsyncShell] Failed to kill viewer PID {viewer.pid}: {e}")
+        except Exception as e:
+            logger.debug(f"[AsyncShell] Viewer wait failed for tool_id={tool_id}: {e}")
 
     # ────────────────────────────────────────────────────────────────
     def _track_task(self, agent_name: str, tool_id: int, command: str, cwd: Optional[str]):
@@ -649,15 +680,34 @@ class AsyncShellTracker:
             # ── Poll loop: start immediately to detect fast completions ───
             timed_out = self._poll_loop(agent_name, tool_id, proc, task, t_out, t_err)
 
-            # If killed externally, ensure process is dead and use appropriate return code.
+            # If killed externally or timed out, kill process tree (main + viewer).
+            # For normal completion, don't kill the viewer — let it finish naturally
+            # so the console window stays visible until the command is actually done.
             with task._lock:
                 killed_externally = task.killed
-            if killed_externally and proc.poll() is None:
+            if killed_externally:
+                # External kill requested. Only kill main process if still alive;
+                # always ensure viewer is cleaned up (even if main already finished).
+                if proc.poll() is None:
+                    self._kill_process_tree(proc, agent_name, tool_id)
+                    time.sleep(PROCESS_KILL_SETTLE_DELAY)
+                else:
+                    # Main process already finished but kill was requested — just kill viewer.
+                    self._kill_viewer_process(task)
+            elif timed_out:
+                # Timeout — kill both main process tree and viewer
                 self._kill_process_tree(proc, agent_name, tool_id)
                 time.sleep(PROCESS_KILL_SETTLE_DELAY)
-            elif not timed_out and not killed_externally:
-                # Normal completion — ensure viewer is cleaned up
-                self._kill_process_tree(proc, agent_name, tool_id)
+            else:
+                # Normal completion: main process has finished (poll_loop exited).
+                # Don't kill the viewer — let it complete on its own so the console
+                # window stays visible until the command is truly done. The viewer
+                # will exit naturally when its copy of the command finishes.
+                with task._lock:
+                    viewer = task.viewer_process
+                    task.viewer_process = None  # Cleanup reference before waiting
+
+                self._cleanup_viewer(viewer, tool_id)
 
             # ── Mark completed immediately so _get_launch_result() can detect it ───
             # Set completed and return_code right after poll_loop exits (process finished).
@@ -1039,7 +1089,11 @@ class AsyncShellTracker:
 
     # ────────────────────────────────────────────────────────────────
     def kill_task(self, agent_name: str, tool_id: int) -> Optional[str]:
-        """Kill a running shell task.
+        """Request termination of a running async shell task and wait briefly for confirmation.
+
+        Sets the killed flag so the tracking thread can detect it and perform actual
+        process cleanup via _kill_process_tree. Then waits up to ~5 seconds to verify
+        the process actually terminated; if not, force-kills directly.
 
         Args:
             agent_name: Owner agent name
@@ -1057,10 +1111,21 @@ class AsyncShellTracker:
                 proc = task.process
                 pid = task.pid
             if proc and proc.poll() is None:
-                # Set killed flag before killing so heartbeat loop exits immediately.
+                # Set killed flag — tracking thread will detect this, exit poll loop,
+                # and handle the actual process termination via _kill_process_tree.
                 with task._lock:
                     task.killed = True
-                self._kill_process_tree(proc, agent_name, tool_id)
+
+                # Wait briefly for the tracking thread to actually terminate the process.
+                # If it hasn't terminated within KILL_WAIT_TIMEOUT, force-kill directly.
+                deadline = time.time() + KILL_WAIT_TIMEOUT
+                while proc.poll() is None and time.time() < deadline:
+                    time.sleep(0.1)
+
+                if proc.poll() is None:
+                    logger.warning(f"[AsyncShell] kill_task timeout for {agent_name} tool_id={tool_id}; force-killing PID {pid}")
+                    self._kill_process_tree(proc, agent_name, tool_id)
+
                 return f"Shell killed [Tool ID: {tool_id}, PID: {pid}]."
             else:
                 with task._lock:
@@ -1202,10 +1267,13 @@ class AsyncShellTracker:
 
     # ────────────────────────────────────────────────────────────────
     def kill_all(self, agent_name: str) -> int:
-        """Kill all async shell tasks for a specific agent.
+        """Kill all async shell tasks for a specific agent (primarily async).
 
         Called during agent dismissal to clean up background processes.
-        Waits briefly for tracking threads to finish after killing each process.
+        Sets killed flags on all active tasks; tracking threads detect these and
+        perform the actual process termination. Waits briefly after setting flags
+        to allow tracking threads time to propagate kills, but does not block until
+        every process has fully terminated (use kill_task() for synchronous waits).
 
         Args:
             agent_name: Agent whose shells should be killed
@@ -1222,26 +1290,27 @@ class AsyncShellTracker:
                 with task._lock:
                     proc = task.process
 
-                # Kill main process (and viewer via _kill_process_tree)
+                # Set killed flag — tracking thread will detect this and handle
+                # the actual process termination via _kill_process_tree.
                 if proc and proc.poll() is None:
-                    # Set killed flag before killing so heartbeat loop exits immediately.
                     with task._lock:
                         task.killed = True
-                    self._kill_process_tree(proc, agent_name, tool_id)
-                    # Wait briefly so drain threads flush remaining output
-                    time.sleep(DRAIN_THREAD_FLUSH_DELAY)
                     count += 1
             except Exception as e:
                 logger.debug(
                     f"[AsyncShell] Kill-all error for {agent_name} tool_id={tool_id}: {e}"
                 )
 
+        # Wait briefly so tracking threads can propagate the kill and flush output.
+        if count > 0:
+            time.sleep(DRAIN_THREAD_FLUSH_DELAY)
+
         with self._lock:
             if agent_name in self._tasks:
-                # Mark all remaining tasks as completed to prevent stale heartbeats
+                # Mark all remaining tasks as completed to prevent stale heartbeats.
+                # Don't delete entries — let tracking threads' finally blocks handle cleanup.
                 for task in self._tasks[agent_name].values():
                     with task._lock:
                         task.completed = True
-                del self._tasks[agent_name]
 
         return count

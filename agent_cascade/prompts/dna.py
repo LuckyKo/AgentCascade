@@ -298,14 +298,13 @@ TOOL_METADATA = {
             '**Async Mode**: Set async_mode=true to run commands in the background — returns immediately with a tool_id and PID. '
             'The command runs while you continue working, sending periodic heartbeat updates (if heartbeat_interval > 0) and a final result message when done. '
             'Use the tool_id parameter to manage running shells: send input, check status (__status), kill (__kill), update heartbeat (__heartbeat=N seconds), or send Ctrl+C (__ctrl_c). '
-            '**IMPORTANT**: When tool_id is provided, the command field contains either a control command (__kill, __status, etc.) or stdin input text — neither should be validated as a shell command. '
             'Max 5 concurrent async shells per agent.'
         ),
         'parameters': {
             'command': 'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
             'justification': 'Why you need to execute this command.',
             'cwd': 'Optional working directory, absolute or relative to workspace root.',
-            'timeout': 'Optional timeout in seconds (default: 30 for sync mode, 3600 for async mode). Use a higher value for long-running commands.',
+            'timeout': 'Optional timeout in seconds (over 60s will automatically switch it to async mode). Use a higher value for long-running commands.',
             'async_mode': 'Run the command in background and return immediately with tool_id + PID. The agent continues working while the command runs. Heartbeat updates are injected as user messages at intervals. Default: false (blocking/synchronous execution).',
             'heartbeat_interval': 'Seconds between heartbeat output updates (-1 means only notify on completion, 0 or positive = periodic heartbeats). Only effective when async_mode=true. Default: -1.',
             'tool_id': 'Reference an existing running shell by its tool_id to send input, update settings, or kill it. Returned in the initial response when launching with async_mode=true.'

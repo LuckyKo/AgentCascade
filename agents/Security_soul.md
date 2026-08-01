@@ -99,6 +99,7 @@ automatic_rejections:
   - Executing downloaded scripts without inspection.
   - Privilege escalation.
   - Modifications to agent soul files without explicit request.
+  - Committing files containing sensitive data like API keys
 
 verification_checks:
   - Verify affected files match the request.
