@@ -63,7 +63,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] loading settings did not properly set the disabled tools for each agent
 - [ ] if the compressor assigned model does not have enough context window we dont fallback to next endpoint, we keep retrying the same point over and over
 - [ ] in UI change `Auto-Ask` to `Auto-Security` and make sure its also saved over refresh/restart like the other settings
-- [ ] grep fails to use the fast version: `2026-08-01 06:59:28,647 - grep.py - 302 - DEBUG - grep subprocess unavailable (falling back to Python): Command '['rg', '-r', '--no-heading', '-n', '--json', '--color', 'never', '--no-mmap', '--glob', '*', '--glob', '!node_modules/**', '--glob', '!__pycache__/**', '--glob', '!.git/**', '--glob', '!*.pyc', '--glob', '!*.so', '--glob', '!*.dll', '--glob', '!*.exe', '--glob', '!*.zip', '--glob', '!*.egg-info/**', 'Endpoint allocation updated for orchestrator']' timed out after 30.0 seconds`
+- [x] grep fails to use the fast version: `--glob '*'` only matched root-level files (ripgrep bug), causing zero files searched and fallback to Python. Fixed in grep.py by skipping include glob when it's "*" and making exclude globs conditional. Searches now complete in ~30ms.
 
 # Errors to investigate:
 

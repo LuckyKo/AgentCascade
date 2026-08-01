@@ -3,6 +3,7 @@
 import json
 import re
 import time
+import fnmatch
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -117,12 +118,18 @@ class GrepMixin:
                     if not re.search(r'[A-Z]', pattern) and not has_inline_case_flag:
                         cmd.append('-i')
 
-                cmd.extend([
-                    '--glob', include,
-                ])
+                # Only add include glob for specific patterns; "*" with --glob breaks ripgrep
+                # (it only matches root-level files, causing 0 files searched).
+                # Ripgrep searches everything by default when no include filter is given.
+                if include and include != '*':
+                    cmd.extend(['--glob', include])
 
-                for _exc in self._RG_DEFAULT_EXCLUDES:
-                    cmd.extend(['--glob', _exc])
+                # Add exclude globs only when we have an explicit include filter or excludes requested.
+                # Without any --glob at all, ripgrep's built-in ignore rules already handle .git, etc.
+                needs_exclude_globs = (include and include != '*') or bool(exclude)
+                if needs_exclude_globs:
+                    for _exc in self._RG_DEFAULT_EXCLUDES:
+                        cmd.extend(['--glob', _exc])
 
                 if exclude:
                     cmd.extend(['--glob', f'!{exclude}'])
@@ -308,7 +315,6 @@ class GrepMixin:
                           agent_name: str = "unknown",
                           spill_file_path: Optional[str] = None, timeout: float = 30.0) -> str:
         """Search a single file for a regex pattern. Used when path is a file instead of directory."""
-        import fnmatch
 
         try:
             normalized_rel_path = str(file_path.relative_to(self.base_dir)).replace('\\', '/')
@@ -408,7 +414,6 @@ class GrepMixin:
         Uses subprocess-based grep (ripgrep or system grep) as a fast path,
         falling back to pure Python if the subprocess approach fails/times out.
         """
-        import fnmatch
 
         try:
             from agent_cascade.log import logger
@@ -461,6 +466,8 @@ class GrepMixin:
                     return f"{summary}:\n\n" + output_text
 
             # ── Slow path: pure Python fallback ──
+            import os
+            
             _rg_avail, _grep_avail = _check_tool_availability()
             logger.debug(f"grep: subprocess fast path unavailable (rg={_rg_avail}, grep={_grep_avail}), falling back to Python")
             results = []
@@ -486,77 +493,126 @@ class GrepMixin:
 
             skip_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build', '.tox'}
 
-            for file_path in resolved.rglob(include):
+            # Default file excludes for Python fallback — aligns with subprocess behavior.
+            # Match against basename only (fnmatch).
+            _PY_DEFAULT_EXCLUDES = {'*.pyc', '*.so', '*.dll', '*.exe', '*.zip'}
+
+            # When include is "*" (all files), use os.walk with directory skipping to match
+            # subprocess behavior. rglob("*") doesn't respect ignores and only matches root level.
+            if include == '*':
+                # Mutate dirs in-place to skip unwanted directories during walk
+                def _walk_with_skips():
+                    for root, dirs, files in os.walk(resolved):
+                        if ignore_vcs:
+                            dirs[:] = [d for d in dirs if d not in skip_dirs]
+                        yield root, dirs, files
+                file_iter_gen = (Path(os.path.join(root, f)) for root, dirs, files in _walk_with_skips() for f in files)
+            else:
+                file_iter_gen = resolved.rglob(include)
+
+            for file_path in file_iter_gen:
                 if time.time() - start_time > timeout:
                     was_timed_out = True
                     break
-                if file_path.is_file():
-                    if ignore_vcs:
+                if not file_path.is_file():
+                    continue
+                
+                # Skip files under ignored directories (for rglob path; os.walk already prunes dirs)
+                if ignore_vcs:
+                    try:
                         parts = file_path.relative_to(resolved).parts
                         if any(p in skip_dirs for p in parts):
                             continue
-                    if exclude:
-                        try:
-                            rel = file_path.relative_to(resolved)
-                            if fnmatch.fnmatch(str(rel), exclude):
-                                continue
-                        except ValueError as e:
-                            logger.debug(f"Relative path resolution failed for {file_path} (using fallback): {e}")
-                    try:
-                        content = file_path.read_text(encoding='utf-8', errors='ignore')
-                        lines = content.split('\n')
-
-                        if context > 0:
-                            try:
-                                normalized_rel_path = str(file_path.relative_to(resolved)).replace('\\', '/')
-                            except ValueError:
-                                try:
-                                    normalized_rel_path = str(file_path.relative_to(self.base_dir)).replace('\\', '/')
-                                except ValueError:
-                                    normalized_rel_path = file_path.name
-
-                            for line_num, line in enumerate(lines, 1):
-                                if pattern_re.search(line):
-                                    match_count += 1
-                                    start = max(1, line_num - context)
-                                    end = min(len(lines), line_num + context)
-                                    for ctx_line in range(start - 1, end):
-                                        prefix = ">>>" if ctx_line + 1 == line_num else "    "
-                                        results.append(f"{normalized_rel_path}:{ctx_line + 1}: {prefix}{lines[ctx_line]}")
-                                    results.append("---")
-                                if len(results) % 200 == 0 and time.time() - start_time > timeout:
-                                    was_timed_out = True
-                                    break
-                                if len(results) > 5000:
-                                    hit_result_limit = True
-                                    break
-                        else:
-                            try:
-                                rel_path = file_path.relative_to(resolved)
-                            except ValueError:
-                                try:
-                                    rel_path = file_path.relative_to(self.base_dir)
-                                except ValueError:
-                                    rel_path = file_path.name
-                            normalized_rel_path = str(rel_path).replace('\\', '/')
-
-                            for line_num, line in enumerate(lines, 1):
-                                if pattern_re.search(line):
-                                    match_count += 1
-                                    results.append(f"{normalized_rel_path}:{line_num}: {line}")
-                                if len(results) % 500 == 0 and time.time() - start_time > timeout:
-                                    was_timed_out = True
-                                    break
-                            if was_timed_out:
-                                break
-
-                        file_count += 1
-                        if len(results) > 5000:
-                            hit_result_limit = True
-                            break
-                    except Exception as e:
-                        logger.debug(f"Error reading file during grep (skipping): {e}")
+                    except ValueError:
+                        # File path is not relative to resolved search root — skip it
                         continue
+                
+                # Apply default excludes (aligns with subprocess behavior)
+                if any(fnmatch.fnmatch(file_path.name, pat) for pat in _PY_DEFAULT_EXCLUDES):
+                    continue
+
+                # Apply exclude pattern. Align with grep/rg semantics:
+                # - If pattern has no path separator → match only against basename
+                #   (e.g., "test*" excludes "test.py" but NOT "tests/main.py")
+                # - If pattern has separators → match against full relative path
+                if exclude:
+                    try:
+                        rel = file_path.relative_to(resolved)
+                        should_exclude = False
+
+                        if '/' not in exclude and '\\' not in exclude:
+                            # No separator: match only basename (like grep --exclude)
+                            if fnmatch.fnmatch(file_path.name, exclude):
+                                should_exclude = True
+                        else:
+                            # Has separator: match against full relative path
+                            rel_str = str(rel).replace('\\', '/')
+                            if fnmatch.fnmatch(rel_str, exclude):
+                                should_exclude = True
+
+                        if should_exclude:
+                            continue
+                    except ValueError:
+                        # If we can't compute a relative path and exclude is set, skip the file.
+                        # Conservative: better to miss a match than process files outside scope.
+                        continue
+
+                # File reading and pattern matching — OUTSIDE the exclude block so it runs regardless
+                try:
+                    content = file_path.read_text(encoding='utf-8', errors='ignore')
+                    lines = content.split('\n')
+
+                    if context > 0:
+                        try:
+                            normalized_rel_path = str(file_path.relative_to(resolved)).replace('\\', '/')
+                        except ValueError:
+                            try:
+                                normalized_rel_path = str(file_path.relative_to(self.base_dir)).replace('\\', '/')
+                            except ValueError:
+                                normalized_rel_path = file_path.name
+
+                        for line_num, line in enumerate(lines, 1):
+                            if pattern_re.search(line):
+                                match_count += 1
+                                start = max(1, line_num - context)
+                                end = min(len(lines), line_num + context)
+                                for ctx_line in range(start - 1, end):
+                                    prefix = ">>>" if ctx_line + 1 == line_num else "    "
+                                    results.append(f"{normalized_rel_path}:{ctx_line + 1}: {prefix}{lines[ctx_line]}")
+                                results.append("---")
+                            if len(results) % 200 == 0 and time.time() - start_time > timeout:
+                                was_timed_out = True
+                                break
+                            if len(results) > 5000:
+                                hit_result_limit = True
+                                break
+                    else:
+                        try:
+                            rel_path = file_path.relative_to(resolved)
+                        except ValueError:
+                            try:
+                                rel_path = file_path.relative_to(self.base_dir)
+                            except ValueError:
+                                rel_path = file_path.name
+                        normalized_rel_path = str(rel_path).replace('\\', '/')
+
+                        for line_num, line in enumerate(lines, 1):
+                            if pattern_re.search(line):
+                                match_count += 1
+                                results.append(f"{normalized_rel_path}:{line_num}: {line}")
+                            if len(results) % 500 == 0 and time.time() - start_time > timeout:
+                                was_timed_out = True
+                                break
+                        if was_timed_out:
+                            break
+
+                    file_count += 1
+                    if len(results) > 5000:
+                        hit_result_limit = True
+                        break
+                except Exception as e:
+                    logger.debug(f"Error reading file during grep (skipping): {e}")
+                    continue
 
             if not results and not was_timed_out:
                 logger.debug(f"grep: Python fallback also found no matches for '{pattern}' (subprocess already confirmed)")
