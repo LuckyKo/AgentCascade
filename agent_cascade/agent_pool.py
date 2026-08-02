@@ -270,6 +270,7 @@ class AgentPool:
         else:
             self._pool_settings_path = self.api_router._config_dir / 'pool_settings.json'
         self._settings_save_lock = threading.Lock()     # Protect concurrent save operations
+        self._loaded_auto_security = None               # Persisted auto-security toggle loaded from pool_settings.json
         self._load_pool_settings()                      # Load persisted values, overriding defaults
         self._apply_pending_config()                    # Apply work folders/workspace that need operation_manager
 
@@ -351,9 +352,6 @@ class AgentPool:
         # ── Agent discovery (unchanged) ──────────────────────────────────────
         self.agents_dir = Path(agents_dir)
         self._discover_agents(agents_dir)
-
-        # Persisted settings loaded from pool_settings.json, applied later by create_app()
-        self._loaded_auto_security = None
 
     # ── PoolSettings persistence methods ───────────────────────────────────────
 
