@@ -133,8 +133,8 @@ class AsyncToolRegistry:
                     if entry.error:
                         result_msg = f"[Background Tool Error]:\n{entry.error}"
                     else:
-                        # Don't double-wrap if result is already formatted with a prefix like [Parallel Agent ...]
-                        if entry.result and entry.result.strip().startswith('[Parallel Agent '):
+                        # Don't double-wrap if result is already formatted with a prefix like [Agent ...]
+                        if entry.result and entry.result.strip().startswith('[Agent '):
                             result_msg = entry.result
                         elif entry.result:
                             result_msg = f"[Background Tool Result]:\n{entry.result}"

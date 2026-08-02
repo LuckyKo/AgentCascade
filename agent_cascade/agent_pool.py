@@ -2421,7 +2421,7 @@ class AgentPool:
                     args=args,
                     caller_name=caller,
                     child_depth=nest_depth,
-                    prefix="Parallel Agent",
+                    prefix="Agent",
                 )
 
                 # Save child's state after async completion (state save/restore flow step 4).
@@ -2436,7 +2436,7 @@ class AgentPool:
                 return result
             except Exception as e:
                 # Catch generic exceptions to preserve the structured agent-specific prefix
-                return f"[Parallel Agent '{child_instance_name}' Failed]:\n{str(e)}"
+                return f"[Agent '{child_instance_name}' Failed]:\n{str(e)}"
 
         self._async_registry.register(instance_name, run_child_agent, function_id=function_id)
 

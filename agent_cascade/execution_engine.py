@@ -987,6 +987,9 @@ class ExecutionEngine:
         stripped = result_content.strip()
         if stripped.startswith('⟨shell_cmd'):
             return Message(role=USER, content=result_content)
+        # Don't double-wrap agent results that already have [Agent ...] prefix
+        if stripped.startswith('[Agent '):
+            return Message(role=USER, content=result_content)
         prefix = f"[BACKGROUND TOOL RESULT for {function_id}]" if function_id else "[BACKGROUND TOOL RESULT]"
         return Message(role=USER, content=f"{prefix}: {result_content}")
 
