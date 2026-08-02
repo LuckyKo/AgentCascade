@@ -495,7 +495,8 @@ def _handle_disabled_tools(ui_cfg: dict, agent_pool: Optional[Any], agents: list
         agent_pool.set_ui_disabled_tools({})
         return
 
-    known_tools = set(TOOL_REGISTRY.keys())
+    from agent_cascade.constants import RUNTIME_REGISTERED_TOOLS
+    known_tools = set(TOOL_REGISTRY.keys()) | RUNTIME_REGISTERED_TOOLS
 
     try:
         if isinstance(raw_dt, dict):

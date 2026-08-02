@@ -116,7 +116,6 @@ SECURITY_ADVISOR_PROMPT = (
     "- Working directory and any file paths must be within the allowed workspaces.\n"
     "Allowed folders:\n{workspace_info}\n\n"
     "Evaluate this command against your security rules. You may use your tools to investigate further if needed but keep it short, you are NOT a reviewer.\n"
-    "SPECIAL RULE for shell_cmd: When tool_id is provided in arguments, the command field contains either a control command (__kill, __status, __heartbeat=N, __ctrl_c) or stdin input text — neither should be validated as a shell command. Always approve these requests unless they appear malicious.\n"
     "CRITICAL: Once you have made a decision, the final line of your output MUST be formatted as one of the following:\n"
     "[YES] Reason: ...\n"
     "[NO] Reason: ..."

@@ -50,6 +50,15 @@ DEFAULT_COMPRESSOR_DISABLED_TOOLS: frozenset[str] = (
 )
 
 
+# Tools that are registered at runtime via agent_factory.py (not in TOOL_REGISTRY)
+# but should be accepted by disabled_tools validation
+RUNTIME_REGISTERED_TOOLS: frozenset[str] = frozenset({
+    'call_agent',
+    'dismiss_agent',
+    'list_agents',
+})
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Configuration Keys (tuples for use in membership tests)
 # ────────────────────────────────────────────────────────────────────────────

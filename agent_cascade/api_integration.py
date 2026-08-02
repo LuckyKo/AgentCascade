@@ -1777,7 +1777,8 @@ def _apply_ui_config(
             # Preserve per-agent structure — the resolver handles dict lookups.
             # Validate each agent's tool list individually.
             validated_dict = {}
-            known_tools = set(TOOL_REGISTRY.keys())
+            from agent_cascade.constants import RUNTIME_REGISTERED_TOOLS
+            known_tools = set(TOOL_REGISTRY.keys()) | RUNTIME_REGISTERED_TOOLS
             for agent_key, agent_tools in raw_dt.items():
                 normalized = normalize_disabled_tools(agent_tools)
                 validate_tool_names(normalized, known_tools=known_tools)
@@ -1789,7 +1790,7 @@ def _apply_ui_config(
             llm_cfg_copy['disabled_tools'] = validated_dict
         else:
             normalized = normalize_disabled_tools(raw_dt)
-            validate_tool_names(normalized, known_tools=set(TOOL_REGISTRY.keys()))
+            validate_tool_names(normalized, known_tools=set(TOOL_REGISTRY.keys()) | RUNTIME_REGISTERED_TOOLS)
             llm_cfg_copy['disabled_tools'] = list(normalized)  # Convert back to list for storage
 
     instance._generate_cfg_override = llm_cfg_copy

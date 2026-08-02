@@ -454,8 +454,9 @@ class AgentPool:
         """
         from agent_cascade.tools.base import TOOL_REGISTRY
         from agent_cascade.utils.disabled_tools import normalize_disabled_tools
+        from agent_cascade.constants import RUNTIME_REGISTERED_TOOLS
 
-        known_tools = set(TOOL_REGISTRY.keys())
+        known_tools = set(TOOL_REGISTRY.keys()) | RUNTIME_REGISTERED_TOOLS
 
         try:
             if isinstance(disabled_tools_raw, dict):
