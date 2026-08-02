@@ -13,8 +13,9 @@
 3. [Core Components](#3-core-components)
 4. [Data Flow](#4-data-flow)
 5. [Key Mechanisms](#5-key-mechanisms)
-6. [Agent Templates & DNA](#6-agent-templates--dna)
-7. [WebUI Architecture](#7-webui-architecture)
+6. [Parallel Instance Separation](#6-parallel-instance-separation)
+7. [Agent Templates & DNA](#7-agent-templates--dna)
+8. [WebUI Architecture](#8-webui-architecture)
 
 ---
 
@@ -819,7 +820,73 @@ This means auto-dismissal is **non-destructive**. Only the in-memory state is cl
 
 ---
 
-## 6. Agent Templates & DNA
+## 6. Parallel Instance Separation
+
+Multiple AgentCascade processes can run on the same machine simultaneously without file collisions. Each instance gets its own isolated paths for logs, pool settings, telemetry data, and agent session files.
+
+### Problem Solved
+
+Without instance separation, running two AC processes (e.g., one for development testing and one for production) causes:
+- Shared console log → interleaved output that's unreadable
+- Shared pool_settings.json → race conditions when either process saves state
+- Shared telemetry directories → metrics from different environments mixed together
+- Shared agent logs → impossible to distinguish which instance owns which session
+
+### How It Works
+
+Instance ID is configured via:
+- **CLI flag:** `--instance-id <name>` (e.g., `python start_api_server.py --instance-id prod`)
+- **Environment variable:** `AGENT_CASCADE_INSTANCE_ID=<name>`
+
+The CLI flag takes precedence over the environment variable. When an instance ID is set, paths are modified as follows:
+
+| Path Type | Default (no ID) | With Instance ID "prod" |
+|-----------|-----------------|-------------------------|
+| Console log | `logs/console_log.log` | `logs/console_log_prod.log` |
+| Pool settings | `config/pool_settings.json` | `config/pool_settings_prod.json` |
+| Telemetry dir | `logs/telemetry/` | `logs/telemetry_prod/` |
+| Agent logs | `logs/orchestrator_main_*.jsonl` | `logs/orchestrator_main_prod_*.jsonl` |
+
+### Example: Running Two Instances
+
+Terminal 1 (development):
+```bash
+python start_api_server.py --instance-id dev --port 12345
+```
+
+Terminal 2 (production):
+```bash
+python start_api_server.py --instance-id prod --port 12346
+```
+
+Each instance now operates independently:
+- Console output goes to separate log files
+- Pool settings are loaded/saved from separate JSON files
+- Telemetry metrics are isolated per environment
+- Agent sessions are distinguishable by their log filenames
+
+### Implementation Details
+
+The logic lives in `agent_cascade/instance_id.py`:
+- `get_instance_id()` → returns the configured ID or empty string
+- `get_instance_aware_path(base_path, instance_id)` → appends `<id>` before file extension or as subdirectory for telemetry
+
+Components using instance-aware paths:
+- `log.py` — console logger and agent log filenames
+- `agent_pool.py` — pool_settings.json load/save
+- `telemetry.py` — telemetry directory creation
+- `start_api_server.py` / `start_multi_agent.py` — CLI argument parsing and initialization
+
+### Backward Compatibility
+
+Leaving the instance ID empty (the default) preserves legacy behavior:
+- All paths remain unchanged from pre-separation versions
+- Existing log files, pool settings, and telemetry data continue to work without migration
+- No breaking changes for single-instance deployments
+
+---
+
+## 7. Agent Templates & DNA
 
 ### What Are Agent Templates?
 
@@ -900,7 +967,7 @@ These two messages form the foundation of every agent's conversation history.
 
 ---
 
-## 7. WebUI Architecture
+## 8. WebUI Architecture
 
 ### Overview
 

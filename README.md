@@ -20,15 +20,16 @@ At the core of AgentCascade is a tree-like structure of agent interaction. Rathe
 
 AgentCascade is built to be robust and fault-tolerant, ensuring that complex workflows do not fail silently:
 
-- Error Recovery: The system features automatic loop detection. If agents begin repeating themselves or get stuck in a logic cycle, the system identifies the pattern and rolls back to a previous stable state to try a different approach.
+- Error Recovery: The system features automatic loop detection and rollback. If agents begin repeating themselves or get stuck in a logic cycle, the system identifies the pattern and rolls back to a previous stable state to try a different approach.
 - Session Persistence: Every interaction is recorded in append-only logs. This allows for session resurrection, where a crashed or interrupted task can be resumed exactly where it left off.
-- Adaptive Context: To maintain precision over long tasks, the system automatically compresses old conversation history, ensuring the agents always have the most relevant information without exceeding memory limits.
+- Adaptive Context: To maintain precision over long tasks, the system automatically compresses old conversation history, ensuring the agents always have the most relevant information without exceeding memory limits. Logs always retain full message history and every summary generated, no message is lost.
+- Automated backups: All mutable operations keep timestamped file backups for easy restore.
 
 ## Production Quality and Automated Security
 
 Designed for professional environments, AgentCascade prioritizes the quality of the output and the safety of the host system:
 
-- Production-Grade Output: By utilizing specialized agent types for different domains (such as mathematics, document analysis, or coding), the system avoids the generalist pitfalls of standard LLMs and delivers precise, expert-level results.
+- Production-Grade Output: By utilizing specialized agent types for different domains (such as orchestrating, document analysis, or coding), the system avoids the generalist pitfalls of standard LLMs and delivers precise, expert-level results.
 - Automated Security Advisor: A dedicated security layer reviews sensitive tool calls. If an agent attempts a potentially dangerous operation, a Security Advisor agent evaluates the risk and approves/rejects the operation, or advises the user on the safety of the operation if set on manual mode.
 - Safe Execution: All code execution is isolated within Docker containers, ensuring that the agents can write and test code without ever risking the integrity of the host machine.
 
