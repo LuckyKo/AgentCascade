@@ -706,10 +706,35 @@ class WsMessageHandler:
             if hasattr(self.agent_pool, 'settings'):
                 settings_data.update(self.agent_pool.settings.to_dict())
 
-            # Add disabled_tools from live cache
+            # Add complete effective disabled_tools for each agent template.
+            # Use _ui_disabled_tools as instance_override (same as runtime resolution) so
+            # the export includes both UI toggles AND backend defaults like DEFAULT_COMPRESSOR_DISABLED_TOOLS.
+            from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
+
             with self.agent_pool._ui_disabled_tools_lock:
-                if self.agent_pool._ui_disabled_tools:
-                    settings_data['disabled_tools'] = dict(self.agent_pool._ui_disabled_tools)
+                ui_disabled_tools = dict(self.agent_pool._ui_disabled_tools) if self.agent_pool._ui_disabled_tools else {}
+
+            effective_disabled = {}
+            for name, template in self.agent_pool.templates.items():
+                try:
+                    agent_name = getattr(template, 'name', name)
+                    agent_type = getattr(template, 'agent_type', '') or ''
+
+                    # Resolve same way as runtime: UI config + defense-in-depth defaults
+                    disabled = resolve_disabled_tools_for_agent(
+                        instance_override={'disabled_tools': ui_disabled_tools},
+                        template_cfg=None,
+                        agent_name=agent_name,
+                        agent_type=agent_type,
+                    )
+
+                    if disabled:
+                        effective_disabled[agent_name] = sorted(disabled)
+                except Exception as e:
+                    logger.debug(f"[export_settings] Failed to resolve disabled_tools for template '{name}': {e}")
+
+            if effective_disabled:
+                settings_data['disabled_tools'] = effective_disabled
 
             # Add work folders and workspace from operation_manager
             if hasattr(self.agent_pool, 'operation_manager') and self.agent_pool.operation_manager:
