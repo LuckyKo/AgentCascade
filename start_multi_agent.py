@@ -18,9 +18,31 @@ CLI Flags:
                       will auto-check all tool calls before execution (same as toggling
                       "Auto-Ask Security" on in the UI). By default, security checks run
                       only when triggered by agent prompts.
+    --instance-id     Instance ID for parallel AC instances (alphanumeric + underscore, max 64 chars).
 """
 
+import argparse
 import os
+
+# ── Parse instance-id BEFORE any agent_cascade imports ───────────────────────
+parser = argparse.ArgumentParser(description='AgentCascade Multi-Agent Orchestrator')
+parser.add_argument("--instance-id", type=str, default="", 
+                    help="Instance ID for parallel AC instances (alphanumeric + underscore, max 64 chars)")
+
+args_instance, remaining = parser.parse_known_args()
+
+# Determine raw ID: CLI overrides env var; validate ALWAYS (even env-only source)
+from agent_cascade.instance_id import validate_instance_id
+raw_id = args_instance.instance_id if args_instance.instance_id else os.getenv("AGENT_CASCADE_INSTANCE_ID", "")
+
+try:
+    validated_id = validate_instance_id(raw_id)
+    os.environ["AGENT_CASCADE_INSTANCE_ID"] = validated_id  # Always set normalized value
+except ValueError as e:
+    print(f"[FATAL] {e}")
+    raise SystemExit(1)
+
+# ── NOW safe to import agent_cascade modules ────────────────────────────────
 from pathlib import Path
 from agent_cascade.log import logger
 
@@ -45,9 +67,9 @@ llm_cfg = {
 if __name__ == '__main__':
     import sys
 
-    # ── CLI argument parsing (shared) ────────────────────────────────────────
-    from agent_cascade.shared_init import parse_cli_args
-    args = parse_cli_args(description='AgentCascade Multi-Agent Orchestrator')
+    # ── Parse remaining args for --auto_security (instance-id already parsed above) ────
+    from agent_cascade.shared_init import parse_cli_args as _parse_base
+    args = _parse_base(remaining, description='AgentCascade Multi-Agent Orchestrator')
 
     logger.info("Initializing Agent Orchestrator...")
     logger.info("=" * 50)

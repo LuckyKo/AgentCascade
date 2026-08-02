@@ -26,6 +26,8 @@ _logger = logging.getLogger('agent_cascade.telemetry')
 # Telemetry is not on the hot path, so a single coarse-grained lock avoids complexity.
 _telemetry_lock = threading.RLock()
 
+from agent_cascade.instance_id import get_instance_id, make_instance_dir
+
 from agent_cascade.settings import (
     SYSTEM_PROMPT_HASH_MAX_CHARS,
     DEFAULT_RECENT_EVENT_COUNT,
@@ -36,9 +38,16 @@ from agent_cascade.settings import (
 class TelemetryCollector:
     """Collects and persists telemetry events for agent performance tracking."""
 
-    def __init__(self, log_dir: str = "workspace/telemetry"):
-        self.log_dir = Path(log_dir)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, log_dir: str = "workspace/telemetry", instance_id: str = ""):
+        if not instance_id:
+            instance_id = get_instance_id()
+
+        self.log_dir = Path(make_instance_dir(log_dir)) if instance_id else Path(log_dir)
+
+        try:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise RuntimeError(f"Cannot create telemetry directory {self.log_dir}: {e}") from e
 
         # Session-level tracking — use _now_iso() for consistent UTC timestamps
         now_dt = datetime.datetime.now(datetime.timezone.utc)

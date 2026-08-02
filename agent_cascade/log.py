@@ -18,6 +18,8 @@ import sys
 import threading
 from pathlib import Path
 
+from agent_cascade.instance_id import get_instance_id
+
 
 class _CapturingStream:
     """
@@ -73,28 +75,43 @@ def setup_logger(level=None):
     _original_stdout = sys.stdout
     _original_stderr = sys.stderr
 
+    instance_id = get_instance_id()
+
     handler = logging.StreamHandler(stream=_original_stdout)
     # Do not run handler.setLevel(level) so that users can change the level via logger.setLevel later
     formatter = logging.Formatter('%(asctime)s - %(filename)s - %(lineno)d - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
 
-    _logger = logging.getLogger('agent_cascade_logger')
+    _logger_name = "agent_cascade_logger"
+    if instance_id:
+        _logger_name += f".{instance_id}"
+    _logger = logging.getLogger(_logger_name)
     _logger.setLevel(level)
-    
+
     # Only add handlers once (prevent duplicates on restart/reload)
     if not _logger.handlers:
         _logger.addHandler(handler)
 
-        # File handler — console log to logs/console.log (RotatingFileHandler with max 10MB per file, 5 backups)
+        # File handler — instance-specific console log (RotatingFileHandler with max 10MB per file, 5 backups)
         log_dir = Path(__file__).resolve().parent.parent / 'logs'
-        log_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise RuntimeError(f"Cannot create log directory {log_dir}: {e}") from e
+
+        log_filename = f"console_{instance_id}.log" if instance_id else "console.log"
+
         from logging.handlers import RotatingFileHandler
-        file_handler = RotatingFileHandler(
-            log_dir / 'console.log', 
-            maxBytes=10 * 1024 * 1024,  # 10MB per file
-            backupCount=5,
-            encoding='utf-8'
-        )
+        try:
+            file_handler = RotatingFileHandler(
+                log_dir / log_filename, 
+                maxBytes=10 * 1024 * 1024,  # 10MB per file
+                backupCount=5,
+                encoding='utf-8'
+            )
+        except OSError as e:
+            raise RuntimeError(f"Cannot open console log file {log_dir / log_filename}: {e}") from e
+
         file_handler.setFormatter(formatter)
         _logger.addHandler(file_handler)
 

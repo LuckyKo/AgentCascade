@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent_cascade.agents import Assistant
+from agent_cascade.instance_id import get_instance_id, make_instance_dir
 from agent_cascade.llm.schema import FUNCTION, Message, ROLE, SYSTEM, USER
 from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
@@ -263,7 +264,11 @@ class AgentPool:
         self.settings = PoolSettings()                  # Configurable thresholds and timeouts
 
         # ── PoolSettings persistence ────────────────────────────────────────
-        self._pool_settings_path = self.api_router._config_dir / 'pool_settings.json'
+        instance_id = get_instance_id()
+        if instance_id:
+            self._pool_settings_path = self.api_router._config_dir / f"pool_settings_{instance_id}.json"
+        else:
+            self._pool_settings_path = self.api_router._config_dir / 'pool_settings.json'
         self._settings_save_lock = threading.Lock()     # Protect concurrent save operations
         self._load_pool_settings()                      # Load persisted values, overriding defaults
         self._apply_pending_config()                    # Apply work folders/workspace that need operation_manager
@@ -2712,9 +2717,14 @@ class LoggerManager:
     def __init__(self, pool: AgentPool, workspace_dir: Optional[str]):
         self.pool = pool
         self.workspace_dir = Path(workspace_dir) if workspace_dir else Path(DEFAULT_WORKSPACE)
-        # Ensure log directory exists
-        self.log_dir = self.workspace_dir / "logs"
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+        # Instance-specific log directory
+        instance_log_base = make_instance_dir(str(self.workspace_dir / "logs"))
+        self.log_dir = Path(instance_log_base)
+
+        try:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise RuntimeError(f"Cannot create agent log directory {self.log_dir}: {e}") from e
         self._loggers: Dict[Tuple[str, str], Any] = {}  # (instance_name, agent_class.lower()) → logger instance
         self._lock = threading.Lock()  # Protects _loggers dict access
 
