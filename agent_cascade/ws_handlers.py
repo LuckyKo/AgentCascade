@@ -714,8 +714,10 @@ class WsMessageHandler:
             with self.agent_pool._ui_disabled_tools_lock:
                 ui_disabled_tools = dict(self.agent_pool._ui_disabled_tools) if self.agent_pool._ui_disabled_tools else {}
 
+            # Snapshot templates to avoid concurrent modification during iteration.
+            # Templates are only modified during reload (rare), so this is low-risk but good practice.
             effective_disabled = {}
-            for name, template in self.agent_pool.templates.items():
+            for name, template in dict(self.agent_pool.templates).items():
                 try:
                     agent_name = getattr(template, 'name', name)
                     agent_type = getattr(template, 'agent_type', '') or ''
