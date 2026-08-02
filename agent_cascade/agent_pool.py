@@ -352,6 +352,9 @@ class AgentPool:
         self.agents_dir = Path(agents_dir)
         self._discover_agents(agents_dir)
 
+        # Persisted settings loaded from pool_settings.json, applied later by create_app()
+        self._loaded_auto_security = None
+
     # ── PoolSettings persistence methods ───────────────────────────────────────
 
     def _save_pool_settings(self):
@@ -384,6 +387,10 @@ class AgentPool:
                 if hasattr(self, 'operation_manager') and self.operation_manager:
                     data['default_workspace'] = str(self.operation_manager.base_dir)
 
+                # Add auto_security if explicitly set
+                if self._loaded_auto_security is not None:
+                    data['auto_security'] = self._loaded_auto_security
+
                 with open(self._pool_settings_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
@@ -414,6 +421,7 @@ class AgentPool:
             work_folders_ro_raw = data.pop('work_access_folders_ro', None)
             work_folders_rw_raw = data.pop('work_access_folders_rw', None)
             default_workspace_raw = data.pop('default_workspace', None)
+            auto_security_raw = data.pop('auto_security', None)
 
             # Replace settings with loaded values (defaults fill gaps for new fields)
             self.settings = PoolSettings.from_dict(data)
@@ -433,6 +441,10 @@ class AgentPool:
             # Store default_workspace for later application
             if default_workspace_raw:
                 self._pending_default_workspace = default_workspace_raw
+
+            # Store auto_security for later application in create_app()
+            if auto_security_raw is not None:
+                self._loaded_auto_security = bool(auto_security_raw)
 
         except Exception as e:
             logger.error(f"[PoolSettings] Failed to load settings from {self._pool_settings_path}: {e}. Using defaults.")

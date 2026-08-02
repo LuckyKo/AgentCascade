@@ -120,9 +120,14 @@ if __name__ == '__main__':
             'verbose': False,
         }
 
+        # Use loaded auto_security from pool_settings.json if available, otherwise CLI flag
+        effective_auto_security = getattr(agent_pool, '_loaded_auto_security', None)
+        if effective_auto_security is None:
+            effective_auto_security = args.auto_security
+
         app = create_app(
             all_agents, agent_pool, chatbot_config,
-            auto_security=args.auto_security,
+            auto_security=effective_auto_security,
         )
         logger.debug("FastAPI app created successfully")
         if args.auto_security:
