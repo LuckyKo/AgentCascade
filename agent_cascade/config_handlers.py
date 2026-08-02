@@ -67,6 +67,7 @@ POOL_SETTINGS_KEYS = frozenset({
 # ── Non-PoolSettings keys that still trigger persistence (stored at top level of pool_settings.json) ────
 EXTRA_PERSIST_KEYS = frozenset({
     'disabled_tools',  # Per-agent-class tool assignments from UI settings panel
+    'auto_security',   # Auto-Ask security mode toggle state
 })
 
 # ── Registry of config key → handler function ────────────────────────────

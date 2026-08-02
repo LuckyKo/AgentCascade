@@ -34,6 +34,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] add quick and easy requirements file for default docker containers
 [x] pass the supervisor's log file together with the name in the system prompt metadata, like: `Supervisor: Maine (orchestrator_Maine_20260731_023711.jsonl)` so sub-agents can easily find it if instructions are unclear — DONE: Added `_get_supervisor_log_filename()` helper in execution_engine.py. Modified `_build_session_metadata()` to append supervisor's log filename (basename only) when available. Graceful fallback to name-only when logger unavailable.
 [x] check for multiple AC instances launched in parallel — implemented instance separation via AGENT_CASCADE_INSTANCE_ID env var + --instance-id CLI flag. Instance-specific paths for console logs, pool settings, telemetry dirs, agent logs. Validation prevents path traversal. 33 unit tests passing. See INSTANCE_SEPARATION_PLAN.md and agent_cascade/instance_id.py
+[ ] extra work paths could be tied to each session, they'd have to be loaded when we load existing sessions from the metadata entry.
 
 
 # BUGS:
@@ -55,7 +56,6 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] add inner loop counter to telemetry's loop detected
 - [x] odd useless truncation message on `list_dir` tool, should contain spillover path (should use helper truncation function like other tools, is there another one?): [TRUNCATED — Character limit exceeded.]. also needs the char limit added to the UI
 - [x] overly aggressive stick to bottom function, active when streaming even when the user is actively scrolling up. it should NOT be fighting the user (fixed — immediate unlock on scroll up, visibility guard prevents auto-scroll on hidden tabs, lock released when tab becomes invisible)
-- [ ] extra work paths need to be tied to each session, they have to be loaded when we load existing sessions from the metadata entry.
 - [x] sub agent kicked back to caller when the API connection dropped mid normal assistant message streaming (fixed — broadened retry_model_service_iterator in llm/base.py to catch all Exceptions during streaming, not just ModelServiceError; network errors now retry with exponential backoff up to max_retries)
 - [ ] inner loop detection does not seem to pick up if loop is happening within a tool call.
 - [x] Write a proper README.md that describes the project as a whole and offers easy install & use instructions (completed — comprehensive README covering architecture, features, installation, usage with correct port/endpoints, programmatic access, and troubleshooting)
@@ -66,7 +66,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] in UI change `Auto-Ask` to `Auto-Security` and make sure its also saved over refresh/restart like the other settings. Fixed: renamed label in index.html line 225, persistence was already working via localStorage key 'auto-security'.
 - [x] switching auto-ask off during Security processing makes the notification tab pop back up again once the process has been aproved/denied, and it can't be closed back without refresh. Fixed: added guard in security_response handler to skip stale responses when approval already processed, plus cleanup of securityResponses/activeSecurityChecks in approveRequest/rejectRequest functions.
 - [x] grep fails to use the fast version: Fixed in agent_cascade/operation_manager/grep.py - removed _RG_DEFAULT_EXCLUDES constant (10 glob patterns evaluated per-file causing timeout on large dirs). Now relies on ripgrep's built-in ignore rules for .git, node_modules, __pycache__, etc. Only adds --glob when user explicitly provides include/exclude parameters. Also fixed standard grep path to respect ignore_vcs flag (was always excluding VCS dirs regardless of setting).
-- [ ] call_agent and dismiss_agent tool toggles do not get exported properly when we export/import settings. same for Auto-Security
+- [x] call_agent and dismiss_agent tool toggles do not get exported properly when we export/import settings. same for Auto-Security. Fixed: added auto_security to EXTRA_PERSIST_KEYS in config_handlers.py, included it in export payload (ws_handlers.py handle_export_settings), restored on import with defensive hasattr check (handle_import_settings), added bounded retry loops in app.js for both tool toggle re-render and auto-security toggle update when importing while settings panel may not be visible.
 
 # Errors to investigate:
 

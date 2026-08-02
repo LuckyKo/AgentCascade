@@ -57,6 +57,11 @@ const THROTTLE = Object.freeze({
 
 const AUTO_SCROLL_THRESHOLD = 50; // Distance from bottom (px) to consider user "at bottom" for auto-scroll
 
+// ── Import retry configuration ──
+const IMPORT_RETRY_MAX_ATTEMPTS = 10;
+const IMPORT_RETRY_INTERVAL_MS = 100;
+const IMPORT_RETRY_INITIAL_DELAY_MS = 50;
+
 // Pre-compiled regexes for thinking blocks (consistent with backend)
 const _TAG_THINK = 'think';
 const _TAG_THOUGHT = 'thought';
@@ -1470,6 +1475,25 @@ function playSound(type) {
 
 // ── Server message handlers ──────────────────────────────────────────────────
 
+/**
+ * Retry helper for deferred DOM operations during settings import.
+ * Retries conditionFn until it returns true or maxAttempts exhausted, then calls actionFn.
+ */
+function withRetry(conditionFn, actionFn) {
+  let attempts = 0;
+  const execute = () => {
+    if (conditionFn()) {
+      actionFn();
+    } else if (attempts < IMPORT_RETRY_MAX_ATTEMPTS) {
+      attempts++;
+      setTimeout(execute, IMPORT_RETRY_INTERVAL_MS);
+    } else {
+      showInSystemToastBar('⚠️ Some imported settings could not be applied — UI elements not ready');
+    }
+  };
+  setTimeout(execute, IMPORT_RETRY_INITIAL_DELAY_MS);
+}
+
 function handleServerMessage(data) {
   const wasGenerating = state.generating;
   const prevApprovalsCount = (state.approvals || []).length;
@@ -2035,9 +2059,27 @@ function handleServerMessage(data) {
           if (data.settings.disabled_tools && typeof agentDisabledTools !== 'undefined') {
             Object.assign(agentDisabledTools, data.settings.disabled_tools);
             localStorage.setItem('agent-cascade-disabled-tools', JSON.stringify(agentDisabledTools));
-            if (settingToolsList && settingAgentSelect) {
-              renderToolsForSelectedAgent();
-            }
+
+            withRetry(
+              () => settingToolsList && settingAgentSelect,
+              () => renderToolsForSelectedAgent()
+            );
+          }
+
+          // Apply imported auto_security to toggle UI immediately (with retry if DOM not ready)
+          if (data.settings && data.settings.auto_security !== undefined) {
+            withRetry(
+              () => autoSecurityToggle,
+              () => {
+                const newMode = Boolean(data.settings.auto_security);
+                state.autoSecurity = newMode;
+                autoSecurityToggle.checked = newMode;
+                // Also update localStorage so it persists across refresh
+                const saved = JSON.parse(localStorage.getItem('agent-cascade-settings')) || {};
+                saved['auto-security'] = newMode;
+                localStorage.setItem('agent-cascade-settings', JSON.stringify(saved));
+              }
+            );
           }
         }
       } else {

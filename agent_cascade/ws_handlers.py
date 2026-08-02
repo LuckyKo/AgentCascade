@@ -718,6 +718,9 @@ class WsMessageHandler:
                 settings_data['work_access_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
                 settings_data['default_workspace'] = str(om.base_dir)
 
+            # Add auto_security from app state
+            settings_data['auto_security'] = getattr(self.app, 'current_auto_security', False)
+
             await self.broadcast_fn({
                 'type': 'export_settings',
                 'settings': settings_data,
@@ -767,6 +770,14 @@ class WsMessageHandler:
             # Apply to all active instances
             for instance_name in list(self.agent_pool.instances.keys()):
                 _apply_ui_config(self.agent_pool, instance_name, filtered_cfg)
+
+            # Handle auto_security if present in import data
+            if 'auto_security' in settings_json:
+                if hasattr(self.app, 'current_auto_security'):
+                    self.app.current_auto_security = bool(settings_json['auto_security'])
+                    await self.broadcast_fn({'type': 'info', 'message': f"Auto-security mode {'enabled' if settings_json['auto_security'] else 'disabled'}"})
+                else:
+                    logger.warning("App missing current_auto_security attribute during import")
 
             await self.broadcast_fn({
                 'type': 'import_settings',
