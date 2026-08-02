@@ -29,6 +29,7 @@ from agent_cascade.settings import (
     ENDPOINT_COOLDOWN_SECONDS,
     ENDPOINT_FAILURE_CLEANUP_HOURS,
 )
+from agent_cascade.exceptions import ContextWindowExceeded
 from agent_cascade.retry_policy import calculate_backoff, RetryPolicy, POLICY_DEFAULT
 
 
@@ -1114,6 +1115,37 @@ class APIRouter:
                     f"position {old_pos} → 0 (cleaned up)."
                 )
 
+    @staticmethod
+    def _is_context_exceeded_error(error: Exception) -> bool:
+        """Check if an error indicates the input exceeded the model's context window.
+
+        llama.cpp returns HTTP 400 with "exceed_context_size_error" in body.
+        Other servers may use different patterns — catch them too.
+        """
+        # Already a typed ContextWindowExceeded exception
+        if isinstance(error, ContextWindowExceeded):
+            return True
+
+        err_str = str(error).lower()
+        from agent_cascade.llm.base import ModelServiceError
+        code = getattr(error, 'code', None)
+
+        # llama.cpp and similar servers: HTTP 400 with context-size patterns
+        if code == '400' and any(
+            pattern in err_str
+            for pattern in ('exceed_context_size', 'context length', 'maximum input context', 'context window')
+        ):
+            return True
+
+        # Generic patterns from various servers
+        if any(
+            pattern in err_str
+            for pattern in ('prompt is too long', 'input tokens exceed', 'max_tokens exceeded', 'exceeds the context limit')
+        ):
+            return True
+
+        return False
+
     def _cleanup_stale_failure_records(self, now: float) -> None:
         """Remove failure records older than ENDPOINT_FAILURE_CLEANUP_HOURS to prevent unbounded growth."""
         if not self._endpoint_failure_times:
@@ -1322,6 +1354,19 @@ class APIRouter:
                     
                 except Exception as e:
                     err_msg = str(e)
+
+                    # Detect context window exceeded errors and advance cursor.
+                    # Unlike CharacterRunDetected/MaxTokenExceeded (which occur during streaming
+                    # in execution_engine), context-exceeded happens here at API call time.
+                    # Advance the per-instance cursor so engine-level retries skip past this endpoint.
+                    _inst_name_for_cursor = kwargs.get('agent_instance_name')
+                    if _inst_name_for_cursor and self._is_context_exceeded_error(e):
+                        new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
+                        logger.warning(
+                            f"[APIRouter] Context window exceeded for '{_inst_name_for_cursor}' "
+                            f"on endpoint '{endpoint_name}'. Cursor advanced to {new_pos}. "
+                            f"Next engine-level retry will use a different endpoint."
+                        )
 
                     # NOTE: CharacterRunDetected/MaxTokenExceeded exceptions are raised during
                     # generator iteration inside execution_engine.py, after this method has returned.

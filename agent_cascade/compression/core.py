@@ -130,23 +130,35 @@ def compress_context(
 
     # ── 3b. Determine compressor context window limit (for overfeeding check later) ──
     available_for_messages = None
+    max_compressor_tokens = None
     try:
-        comp_agent = agent_pool.get_agent('Compressor')
-        if comp_agent:
-            if hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'generate_cfg'):
-                max_tokens = comp_agent.llm.generate_cfg.get('max_input_tokens')
-            elif hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'cfg'):
-                max_tokens = comp_agent.llm.cfg.get('max_input_tokens')
-            else:
+        # Find the largest context window among all compressor endpoints in the fallback chain
+        if agent_pool.api_router:
+            comp_chain = agent_pool.api_router.get_endpoint_chain('Compressor')
+            for cfg in comp_chain:
+                ep_limit = cfg.get('max_input_tokens', 0)
+                if ep_limit and (max_compressor_tokens is None or ep_limit > max_compressor_tokens):
+                    max_compressor_tokens = ep_limit
+
+        # Use the largest available endpoint's context window
+        if max_compressor_tokens:
+            available_for_messages = int(max_compressor_tokens * 0.85)  # Reserve ~85% for input messages
+        else:
+            # Fallback: check compressor agent config directly (old behavior)
+            comp_agent = agent_pool.get_agent('Compressor')
+            if comp_agent:
                 max_tokens = None
+                if hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'generate_cfg'):
+                    max_tokens = comp_agent.llm.generate_cfg.get('max_input_tokens')
+                elif hasattr(comp_agent, 'llm') and hasattr(comp_agent.llm, 'cfg'):
+                    max_tokens = comp_agent.llm.cfg.get('max_input_tokens')
+                if max_tokens:
+                    available_for_messages = int(max_tokens * 0.85)
 
-            if max_tokens:
-                available_for_messages = int(max_tokens * 0.9)  # Reserve ~90% for input messages
-
-            # Cap discard count so compressor can handle the messages (~500 tokens/msg estimate)
-            if available_for_messages is not None:
-                max_discardable = available_for_messages // 500
-                target_discard_count = min(target_discard_count, max_discardable)
+        # Cap discard count so compressor can handle the messages (~500 tokens/msg estimate)
+        if available_for_messages is not None:
+            max_discardable = available_for_messages // 500
+            target_discard_count = min(target_discard_count, max_discardable)
     except Exception:
         pass  # If we can't determine the limit, proceed with original count
 
@@ -255,20 +267,67 @@ def compress_context(
             # existing summary text (extracted at step 7) is prepended by agent_invoker.py.
             total_estimated = target_token_count + prompt_overhead_tokens
             if total_estimated > available_for_messages:
-                return CompressResult(
-                    success=False,
-                    summary_text=None,
-                    marker_message=None,
-                    messages_discarded=0,
-                    tail_count=len(active_set),
-                    error=(
-                        f"True overfeeding detected: target messages are {target_token_count} tokens "
-                        f"(+~{prompt_overhead_tokens} prompt overhead = ~{total_estimated} total). "
-                        f"Compressor context window allows only ~{available_for_messages} tokens. "
-                        f"Agent context is filling faster than compression can reduce it."
-                    ),
-                    mode=mode,
+                # Calculate how many messages we need to drop
+                excess_tokens = total_estimated - available_for_messages
+                logger.warning(
+                    f"Compression payload ({total_estimated} tokens) exceeds compressor context "
+                    f"({available_for_messages} tokens). Reducing discard count by ~{excess_tokens} tokens."
                 )
+
+                # Greedily remove oldest messages until we fit.
+                # IMPORTANT: target_messages[0] is U0 (first user message) on first compression — NEVER remove it.
+                # Only reduce from active_set portion (target_messages[1:] or all if not first compression).
+                reduced_count = target_discard_count
+                running_tokens = target_token_count
+
+                # Determine where active_set messages start in target_messages
+                # If latest_summary_idx == -1 (first compression), U0 is at index 0, active_set starts at index 1
+                # Otherwise, all of target_messages are from active_set
+                active_start_in_target = 0 if latest_summary_idx != -1 else 1
+
+                for i in range(active_start_in_target, len(target_messages)):
+                    if running_tokens + prompt_overhead_tokens <= available_for_messages:
+                        break
+                    # Remove message i from target_messages (from the active_set portion)
+                    msg = target_messages[i]
+                    if isinstance(msg, dict):
+                        wrapped = Message(**msg)
+                    else:
+                        wrapped = msg
+                    content = extract_text_from_message(wrapped, add_upload_info=False)
+                    running_tokens -= qwen_count(content)
+                    reduced_count -= 1
+
+                # Apply the reduced count — rebuild target_messages preserving U0 if present
+                if reduced_count < target_discard_count:
+                    active_portion = list(active_set[:reduced_count]) if reduced_count > 0 else []
+                    if latest_summary_idx == -1:
+                        # First compression: preserve U0 at front
+                        u0_index = active_start_idx - 1
+                        target_messages = [history[u0_index]] + active_portion
+                    else:
+                        target_messages = active_portion
+                    target_token_count = running_tokens
+                    total_estimated = target_token_count + prompt_overhead_tokens
+                    target_discard_count = reduced_count
+
+                # If we still can't fit after reduction, give up with clear error
+                if total_estimated > available_for_messages or target_discard_count < 1:
+                    return CompressResult(
+                        success=False,
+                        summary_text=None,
+                        marker_message=None,
+                        messages_discarded=0,
+                        tail_count=len(active_set),
+                        error=(
+                            f"True overfeeding detected: even after reducing to {target_discard_count} "
+                            f"messages ({target_token_count} tokens + ~{prompt_overhead_tokens} overhead = "
+                            f"~{total_estimated} total), still exceeds compressor context window of "
+                            f"~{available_for_messages} tokens. Agent context is filling faster than "
+                            f"compression can reduce it."
+                        ),
+                        mode=mode,
+                    )
         except Exception as e:
             logger.debug(f"Token counting for overfeeding check failed (non-fatal): {e}")
 

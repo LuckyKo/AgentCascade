@@ -41,7 +41,7 @@ from agent_cascade.llm.schema import (
     ASSISTANT, FUNCTION, SYSTEM, USER, Message,
 )
 from agent_cascade.log import logger
-from agent_cascade.exceptions import CharacterRunDetected, MaxTokenExceeded
+from agent_cascade.exceptions import CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded
 from agent_cascade.tool_utils import (
     MAX_SPILL_SIZE,  # Use shared constant for consistency
     mark_tool_call_truncated,
@@ -2335,7 +2335,7 @@ class ExecutionEngine:
         # — without this, retries would try the same (failing) endpoint
         # again because call_with_fallback builds a fresh chain each time.
         _reason = getattr(e, 'detection_reason', '')
-        if isinstance(e, MaxTokenExceeded) or _reason.startswith('character run'):
+        if isinstance(e, (MaxTokenExceeded, ContextWindowExceeded)) or _reason.startswith('character run'):
             new_pos = self.pool.api_router.advance_instance_endpoint(inst_name)
             logger.warning(
                 f"[INNER_LOOP] Endpoint cursor advanced for '{inst_name}' "
@@ -2583,7 +2583,7 @@ class ExecutionEngine:
                         logger.debug(f"[INNER_LOOP] Detection error for {inst_name}: {e}")
                         # Re-raise if this is an explicit inner-loop or
                         # max-tokens detection exception
-                        if isinstance(e, (CharacterRunDetected, MaxTokenExceeded)):
+                        if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
                             raise
 
                     # Telemetry: record Time To First Token (TTFT) on the first streaming chunk
@@ -2736,6 +2736,8 @@ class ExecutionEngine:
                         display_msg = f"LLM generation loop detected (tried {_max_attempts} times)"
                     elif isinstance(e, MaxTokenExceeded):
                         display_msg = f"LLM exceeded token limit (tried {_max_attempts} times)"
+                    elif isinstance(e, ContextWindowExceeded):
+                        display_msg = f"LLM context window exceeded (tried {_max_attempts} times)"
                     else:
                         display_msg = f"LLM call failed after {_max_attempts} retry attempts — {error_msg}"
                     logger.error(f"[ENDPOINT_RETRY] LLM call failed for {inst_name} after {_max_attempts} retry attempts: {e}")
@@ -2754,11 +2756,11 @@ class ExecutionEngine:
                     # didn't do it).
                     # We know _abort_stream incremented if the error message
                     # contains our markers.
-                    if not isinstance(e, (CharacterRunDetected, MaxTokenExceeded)):
+                    if not isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
                         retry_count += 1
 
                     # Handle inner-loop detection: budget check and endpoint advancement
-                    if isinstance(e, (CharacterRunDetected, MaxTokenExceeded)):
+                    if isinstance(e, (CharacterRunDetected, MaxTokenExceeded, ContextWindowExceeded)):
                         self._handle_inner_loop_detection(instance, e, retry_count, loop_retry_count, _max_attempts)
 
                 # Classify error type using centralized policy (Phase 4a)
@@ -2786,7 +2788,7 @@ class ExecutionEngine:
                 # advance the cursor; other detections (sentence, ngram, block, entropy)
                 # retry the same endpoint. Non-inner-loop errors also retry same endpoint.
                 _det_reason = getattr(e, 'detection_reason', '')
-                advancing_endpoint = isinstance(e, MaxTokenExceeded) or (
+                advancing_endpoint = isinstance(e, (MaxTokenExceeded, ContextWindowExceeded)) or (
                     isinstance(e, CharacterRunDetected) and _det_reason.startswith('character run')
                 )
                 endpoint_str = " with new endpoint" if advancing_endpoint else ""

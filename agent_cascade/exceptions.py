@@ -25,3 +25,12 @@ class MaxTokenExceeded(Exception):
     looping — switch endpoints rather than retry the same one.
     """
     pass
+
+
+class ContextWindowExceeded(Exception):
+    """Raised when input exceeds the model's context window.
+
+    Indicates the current endpoint cannot handle this payload size — switch to
+    an endpoint with larger context window rather than retrying the same one.
+    """
+    pass
