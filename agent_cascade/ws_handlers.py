@@ -1033,13 +1033,21 @@ class WsMessageHandler:
             logger.debug(f"Failed to read metadata from {path}: {e}, using default instance name")
 
         with self._session_lock:
-            # Preserve the current session (caller) so its UI tab isn't lost
+            # Preserve caller UI tab only when multiple root instances exist (user-created sessions).
+            # Single root is auto-loaded on restart and should be replaced cleanly.
             caller_name = self.session.get('session_name')
+            root_count = sum(1 for inst in self.agent_pool.instances.values() if inst.parent_instance is None)
+            exclude_caller = (
+                root_count > 1
+                and caller_name is not None
+                and caller_name != instance_name
+                and caller_name in self.agent_pool.instances
+            )
             status = self.agent_pool.load_session_from_log(
-                str(path),
+                path,
                 target_instance=instance_name,
                 clear_sub_agents_before_load=True,
-                caller_name=caller_name
+                caller_name=caller_name if exclude_caller else None
             )
         if status.startswith("Error"):
             await self.broadcast_fn({'type': 'error', 'message': status})
