@@ -252,43 +252,67 @@ class ToolDispatcher:
                     f"'{instance_name}_child' or wait for '{instance_name}' to complete."
                 )
 
-        # ── Slot Collision Detection: Fake Sync Mode ────────────────────────
-        # When the caller holds a concurrency slot, using ASYNC path causes deadlock:
-        # 1. Caller holds the slot and continues making LLM calls
-        # 2. Child is submitted to ThreadPoolExecutor but can't acquire the slot
-        # 3. Child's engine.run() tries to acquire the slot at line 348, but same thread
-        #    already holds it via run_child_agent() (agent_pool.py:1284) → DEADLOCK with Semaphore(1)
+        # ── Slot Collision Detection (Target Architecture) ────────────────
+        # Determine whether A calling B requires sync or async execution based on
+        # slot pool membership, not just "does A hold a slot".
         #
-        # Fix: Check if caller holds a slot. If so, use SYNC mode — run child directly
-        # and return actual result. This avoids deadlock and ensures child can make progress.
-        
-        # Check if caller currently holds the concurrency slot
-        # BUG FIX: Read _slot_release under state lock to prevent race conditions
-        # where another thread modifies it between check and decision
+        # Rules:
+        # 1. If child needs no slot (conc=-1): always ASYNC, even if caller holds a slot
+        # 2. If B uses conc=0 (shared sequential pool): always SYNC
+        #    - Only one agent can use the shared sequential slot at a time
+        # 3. If A holds no slot: ASYNC is safe (A doesn't block anything)
+        # 4. If A holds a parallel slot (conc>0) and B uses a DIFFERENT slot pool:
+        #    - ASYNC: A keeps its slot, B acquires its own in engine.run()
+        # 5. If B would need the SAME slot pool as A (same api_base with limited conc):
+        #    - SYNC: A releases, B acquires that slot, runs to completion
+
         caller_slot_holder = self.pool.get_instance(caller_name)
-        caller_holds_slot = False
-        if caller_slot_holder and hasattr(caller_slot_holder, '_state_lock'):
-            with caller_slot_holder._state_lock:
-                if caller_slot_holder._slot_release is not None:
-                    caller_holds_slot = True
-        
-        # ── Sequential Endpoint Guard ────────────────────────────────────────
-        # For concurrency_limit=0 endpoints, ALL agent classes share the same slot.
-        # Taking ASYNC path causes the child to compete with the caller for the
-        # single shared slot, leading to 30s timeouts. Force SYNC path for
-        # sequential endpoints to avoid this race condition.
-        if caller_slot_holder:
-            router = self.pool.api_router
-            if router:
-                child_concurrency = router.get_effective_concurrency(agent_class)
-                if child_concurrency == 0:
-                    caller_holds_slot = True  # Force SYNC for sequential child
-        
+        router = self.pool.api_router
+
+        # Get child's slot info
+        child_slot_info = router.get_agent_slot_info(agent_class) if router else None
+
+        # Case 1: Child needs no slot (conc=-1) → always ASYNC, caller_holds_slot forced False
+        if not child_slot_info or not child_slot_info.get('needs_slot'):
+            caller_holds_slot = False
+        else:
+            # Case 2: Child uses conc=0 (shared sequential pool) → always SYNC
+            if child_slot_info['is_sequential']:
+                caller_holds_slot = True  # Force sync for sequential child
+            else:
+                # Check if caller holds a slot
+                # Locks are deliberately released before router calls to avoid nested locking.
+                caller_holds_slot = False
+                if caller_slot_holder and hasattr(caller_slot_holder, '_state_lock'):
+                    with caller_slot_holder._state_lock:
+                        if caller_slot_holder._slot_release is not None:
+                            caller_holds_slot = True
+                
+                # Case 3: Caller holds no slot → ASYNC is safe (handled by else branch below)
+                
+                # Case 4/5: Caller holds a slot. Check for collision.
+                if caller_holds_slot and child_slot_info and child_slot_info['needs_slot']:
+                    # Get caller's slot key (computed inline—see Change 3)
+                    caller_concurrency = router.get_effective_concurrency(caller_slot_holder.agent_class)
+                    caller_llm_cfg = router.get_llm_config(caller_slot_holder.agent_class)
+                    caller_api_base = caller_llm_cfg.get('api_base') or caller_llm_cfg.get('model_server', 'unknown')
+                    
+                    # Compute caller's slot key using same logic as EndpointScheduler.acquire()
+                    caller_is_sequential = (caller_concurrency == 0)
+                    caller_slot_key = '_shared_sequential_slot_' if caller_is_sequential else caller_api_base
+                    
+                    child_slot_key = child_slot_info['slot_key']
+                    
+                    # Case 5: Same slot pool → collision → SYNC
+                    if caller_slot_key == child_slot_key:
+                        caller_holds_slot = True  # Keep sync path (collision detected)
+                    else:
+                        # Case 4: Different slot pools → no collision → ASYNC is safe
+                        caller_holds_slot = False
+
         if caller_holds_slot:
-            # Extracted to _run_child_sync() - Phase 4.3
             return self._run_child_sync(agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth)
         else:
-            # Extracted to _run_child_async() - Phase 4.3
             return self._run_child_async(caller_name, function_id, agent_class, instance_name, args, child_depth)
 
     def handle_dismiss_agent(

@@ -576,6 +576,23 @@ class EndpointScheduler:
                         )
         
         return stuck_slots
+    
+    def get_slot_info(self, api_base: str, concurrency_limit: int) -> dict:
+        """Get slot information for an endpoint without acquiring.
+        
+        Returns dict with:
+          - slot_key: The internal key used ('_shared_sequential_slot_' or api_base)
+          - is_sequential: True if conc=0 (shared sequential pool)
+          - concurrency_limit: The effective limit (-1, 0, or N>0)
+        """
+        is_sequential = (concurrency_limit == 0)
+        slot_key = '_shared_sequential_slot_' if is_sequential else api_base
+        
+        return {
+            'slot_key': slot_key,
+            'is_sequential': is_sequential,
+            'concurrency_limit': concurrency_limit,
+        }
 
 
 # ── API Router ───────────────────────────────────────────────────────────────
@@ -788,6 +805,35 @@ class APIRouter:
             return 0
         # Truly no config at all — unlimited
         return -1
+    
+    def get_agent_slot_info(self, agent_class: str) -> dict:
+        """Get the slot type that an agent_class would use.
+        
+        Args:
+            agent_class: The class name of the agent
+            
+        Returns:
+            Dict with keys: slot_key, is_sequential, concurrency_limit, api_base, needs_slot.
+            When concurrency_limit is -1 (unlimited), slot_key and api_base will be None.
+        """
+        concurrency = self.get_effective_concurrency(agent_class)
+        if concurrency == -1:
+            return {
+                'slot_key': None,
+                'is_sequential': False,
+                'concurrency_limit': -1,
+                'api_base': None,
+                'needs_slot': False,
+            }
+        
+        llm_cfg = self.get_llm_config(agent_class)
+        api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
+        
+        slot_info = self.scheduler.get_slot_info(api_base, concurrency)
+        slot_info['api_base'] = api_base
+        slot_info['needs_slot'] = True
+        
+        return slot_info
 
     # ── LLM Config Resolution ────────────────────────────────────────────
 
