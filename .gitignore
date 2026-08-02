@@ -80,6 +80,9 @@ logs/
 config/api_endpoints.json
 config/secrets.json
 
+# Pool settings (runtime-generated, user-specific)
+config/pool_settings*.json
+
 # Agent lessons
 .agent_lessons/ 
 
