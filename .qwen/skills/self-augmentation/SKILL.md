@@ -15,9 +15,9 @@ Agents must discover and load specialized skills when working on tasks that requ
 
 ## WHEN TO ACT (Concrete Triggers)
 
-- **When task mentions any technology, framework, library, or tool** (Docker, React, TensorFlow, etc.) → `scan_skills(query='that technology')` immediately
+- **When task mentions any technology, framework, library, or tool** (Docker, React, TensorFlow, etc.) → invoke the `scan_skills` tool with query='that technology' immediately
 - **When delegating to sub-agents** → ALWAYS include `load_skill=[...]` parameter in call_agent
-- **When recurring patterns emerge** → Create new skill via `skill-creator`
+- **When you notice a recurring pattern worth capturing as a skill** (multi-step procedure, domain-specific knowledge not covered by existing skills, at least 5 tool calls with coherent workflow) → invoke `load_skill` with `skill_names=['skill-creator']` to get instructions, then create the new skill.
 
 ## TOOL REFERENCE
 
