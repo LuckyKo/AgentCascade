@@ -408,7 +408,7 @@ class GrepMixin:
                                              spill_file_path=spill_file_path, timeout=timeout)
             
             # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
-            results, count, was_timed_out, _sub_truncated, _orig_output_size = self._try_subprocess_grep(
+            results, count, was_timed_out, _sub_truncated = self._try_subprocess_grep(
                 pattern=pattern, path=resolved, include=include,
                 char_limit=char_limit, timeout=timeout,  # Use configurable timeout
                 agent_name=agent_name,
@@ -417,13 +417,12 @@ class GrepMixin:
             )
             if results is not None:
                 if count == 0 and not _sub_truncated:
-                    logger.debug(f"grep: subprocess found no matches for '{pattern}', trying Python fallback")
+                    logger.debug(f"grep: subprocess found no matches for '{pattern}'")
+                    summary = f"No matches found for '{pattern}' in {path}"
+                    return f"{summary}:\n\n"
                 else:
                     output_text = '\n'.join(results)
-                    if _sub_truncated and count == 0:
-                        summary = f"Matches found for '{pattern}' [TRUNCATED]"
-                    else:
-                        summary = f"Found {count} matches for '{pattern}'"
+                    summary = f"Found {count} matches for '{pattern}'"
                     if context > 0:
                         summary += f" (with {context} line(s) of context)"
                     if was_timed_out:
