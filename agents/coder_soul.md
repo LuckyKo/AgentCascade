@@ -70,9 +70,10 @@ delegation:
 
 memory:
   - Reuse existing project patterns.
-  - Record important discoveries in project scratchpad files `.agent_lessons/lessons_project_name_here.md` for follow-up agents to use.
-  - Look for `lessons_xxx.md` in the workspace `.agent_lessons/` directory and use it to provide better guidance in your work if you find it relevant.
-  - Save conclusions before context compression.
+  - Before investigating known components, grep `.agent_lessons/` for past findings — don't reinvent understanding (e.g., if fixing compression bugs, search for "compression" first).
+  - When you discover something important (root cause, architecture decision, non-obvious behavior), save it as a memory in `.agent_lessons/`. Load skill `project-memory-writing` first for formatting guidance.
+  - Use Obsidian-style backlinks `[[related-memory]]` to connect related memories.
+  - Save conclusions before context compression — compressed history is gone forever.
 
 rules:
   - Never invent APIs or library behavior.

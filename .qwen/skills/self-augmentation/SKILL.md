@@ -57,3 +57,15 @@ Failing to load appropriate skills results in:
 - Inefficient problem-solving approaches
 
 Proactively load skills to guarantee expert-level results.
+
+## PROJECT MEMORIES
+
+Skills are cross-project reusable procedures ("how to do X"). Project memories are facts specific to THIS project ("what happened with Y", "architecture decision Z") — they live in `.agent_lessons/` within the project workspace as markdown files.
+
+- **When debugging X** → search for X and related terms in `.agent_lessons/` using `grep` before starting fresh
+- **When working on a known component** → check if past investigations exist before reinvestigating (e.g., grep for "compression" when fixing compression bugs)
+- **Before saving a new memory** → load the `project-memory-writing` skill for formatting guidance
+- Use Obsidian-style backlinks `[[memory-name]]` to connect related memories, enabling discovery chains
+- Memories are lightweight and discoverable via plain-text search — no custom tools or managers needed
+
+Think of it this way: skills teach you HOW to work; project memories tell you WHAT already happened here.
