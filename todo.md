@@ -35,6 +35,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] pass the supervisor's log file together with the name in the system prompt metadata, like: `Supervisor: Maine (orchestrator_Maine_20260731_023711.jsonl)` so sub-agents can easily find it if instructions are unclear — DONE: Added `_get_supervisor_log_filename()` helper in execution_engine.py. Modified `_build_session_metadata()` to append supervisor's log filename (basename only) when available. Graceful fallback to name-only when logger unavailable.
 [x] check for multiple AC instances launched in parallel — implemented instance separation via AGENT_CASCADE_INSTANCE_ID env var + --instance-id CLI flag. Instance-specific paths for console logs, pool settings, telemetry dirs, agent logs. Validation prevents path traversal. 33 unit tests passing. See INSTANCE_SEPARATION_PLAN.md and agent_cascade/instance_id.py
 [ ] extra work paths could be tied to each session, they'd have to be loaded when we load existing sessions from the metadata entry.
+[ ] full inner loop mode audit, case by case investigation. make sure all modes add value or if they need trimming. they all need to catch actual loops (like [A,B,C,D,D,D] and never fall for repetitions that are NOT loops, like [A,D,B,C,D,E,D])
 
 
 # BUGS:
@@ -65,8 +66,14 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] if the compressor assigned model does not have enough context window we dont fallback to next endpoint, we keep retrying the same point over and over
 - [x] in UI change `Auto-Ask` to `Auto-Security` and make sure its also saved over refresh/restart like the other settings. Fixed: renamed label in index.html line 225, persistence was already working via localStorage key 'auto-security'.
 - [x] switching auto-ask off during Security processing makes the notification tab pop back up again once the process has been aproved/denied, and it can't be closed back without refresh. Fixed: added guard in security_response handler to skip stale responses when approval already processed, plus cleanup of securityResponses/activeSecurityChecks in approveRequest/rejectRequest functions.
-- [x] grep fails to use the fast version and falls back on python on generic wide searches, sometimes locking the whole system. Fixed: added missing return statement in grep.py line 423 when subprocess finds zero matches (was falling through to Python fallback), removed dead `_sub_truncated and count == 0` branch at lines 426-427 that was unreachable since truncation only happens when count > 0.
+- [x] grep fails with `Error searching: too many values to unpack (expected 4)`. Fixed: updated unpacking in grep.py line 411 to capture all 5 return values from _try_subprocess_grep() instead of only 4.
 - [x] call_agent and dismiss_agent tool toggles do not get exported properly when we export/import settings. same for Auto-Security. Fixed: added auto_security to EXTRA_PERSIST_KEYS in config_handlers.py, included it in export payload (ws_handlers.py handle_export_settings), restored on import with defensive hasattr check (handle_import_settings), added bounded retry loops in app.js for both tool toggle re-render and auto-security toggle update when importing while settings panel may not be visible.
+- [ ] Need to improve `Self-Augmentation` skill, i never seen agents actually look for existing skills or attempt to make new ones.
+- [ ] async agent calls that fail due to slot limitations leaves started child processes hanging. should have used the fallback to another API or not start the instance at all.
+```
+[Agent 'phase1_reviewer_worker_child2' Failed]:
+Timed out after 30s waiting for endpoint slot on https://opencode.ai/zen/v1. Current active count: 1, max allowed: 1. Currently held by: phase1_reviewer_worker (generalist)
+```
 
 # Errors to investigate:
 

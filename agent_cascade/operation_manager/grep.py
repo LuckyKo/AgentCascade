@@ -408,7 +408,7 @@ class GrepMixin:
                                              spill_file_path=spill_file_path, timeout=timeout)
             
             # ── Fast path: try subprocess-based grep (ripgrep or system grep) ──
-            results, count, was_timed_out, _sub_truncated = self._try_subprocess_grep(
+            results, count, was_timed_out, _sub_truncated, _original_output_size = self._try_subprocess_grep(
                 pattern=pattern, path=resolved, include=include,
                 char_limit=char_limit, timeout=timeout,  # Use configurable timeout
                 agent_name=agent_name,
