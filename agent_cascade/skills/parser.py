@@ -11,11 +11,27 @@ Parses SKILL.md files following the standard YAML frontmatter format:
     Markdown instructions...
 """
 
+import re
 import yaml
 from pathlib import Path
 from typing import Tuple, Dict, Any
 
 from agent_cascade.log import logger
+from .common import SEMVER_RE as _SEMVER_RE
+
+
+def normalize_version(raw) -> str:
+    """Return valid semver string or default '1.0.0'.
+
+    Args:
+        raw: Version value from frontmatter (any type).
+
+    Returns:
+        Normalized semver string like "1.0.0".
+    """
+    if isinstance(raw, str) and _SEMVER_RE.match(raw):
+        return raw
+    return "1.0.0"
 
 
 def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
@@ -105,6 +121,7 @@ def parse_skill_file(skill_path: Path) -> Dict[str, Any]:
         "frontmatter": frontmatter,
         "body": body,
         "path": str(skill_path),
+        "version": normalize_version(frontmatter.get("version")),
     }
 
     logger.debug("[SKILLS] Parsed skill file: %s (name=%s)", skill_path, frontmatter.get('name', 'unknown'))

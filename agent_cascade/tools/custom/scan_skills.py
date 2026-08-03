@@ -80,7 +80,8 @@ class ScanSkills(BaseTool):
             lines = ["## Available Skills"]
             for skill in all_skills:
                 source = skill.get('source', 'system')
-                lines.append(f"- **{skill['name']}** [{source}]: {skill.get('description', 'No description')}")
+                version = skill.get('version', '1.0.0')
+                lines.append(f"- **{skill['name']}** [{source}] v{version}: {skill.get('description', 'No description')}")
             return '\n'.join(lines)
 
         # Use public API to score skills against the query
@@ -98,6 +99,9 @@ class ScanSkills(BaseTool):
             meta = skill_manager.get_skill_metadata(name)
             desc = meta.get('description', 'No description') if meta else 'Unknown'
             source = meta.get('source', 'system') if meta else 'unknown'
-            lines.append(f"- **{name}** [{source}] (score: {score:.2f}): {desc}")
+            version = meta.get('version', '1.0.0') if meta else '1.0.0'
+            metrics = skill_manager.get_metrics(name)
+            loads = metrics.get('total_loads', 0)
+            lines.append(f"- **{name}** [{source}] v{version} (score: {score:.2f}, loads: {loads}): {desc}")
 
         return '\n'.join(lines)

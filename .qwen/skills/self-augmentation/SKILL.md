@@ -1,6 +1,6 @@
 ---
 name: self-augmentation
-description: Guide for discovering and loading specialized skills at runtime using scan_skills and load_skill tools.
+description: Mandatory protocol for discovering, loading, and creating specialized skills at runtime. Agents MUST scan for and load relevant skills before executing tasks requiring domain expertise.
 triggers:
   - skill discovery
   - loading skills
@@ -9,64 +9,51 @@ triggers:
   - how to use skills
 ---
 
-# Self-Augmentation via Runtime Skill Loading
+# Self-Augmentation Protocol
 
-When working on tasks that require specialized knowledge or unfamiliar workflows, you can dynamically load skills into your context at runtime.
+Agents must discover and load specialized skills when working on tasks that require domain expertise.
 
-## When to Load a Skill
+## WHEN TO ACT (Concrete Triggers)
 
-Consider loading a skill when:
+- **When task mentions any technology, framework, library, or tool** (Docker, React, TensorFlow, etc.) → `scan_skills(query='that technology')` immediately
+- **When delegating to sub-agents** → ALWAYS include `load_skill=[...]` parameter in call_agent
+- **When recurring patterns emerge** → Create new skill via `skill-creator`
 
-- The task involves a domain you're not deeply familiar with (e.g., Docker, Kubernetes, Terraform).
-- The task requires following specific conventions or best practices.
-- You notice repeated patterns suggesting a reusable expertise would help.
-- A sub-agent task seems to need targeted guidance beyond your base instructions.
+## TOOL REFERENCE
 
-## How to Discover Skills
+- **`load_skill` tool**: Loads skills into YOUR context. Accepts either a list of skill names (e.g., `["docker-best-practices"]`), the string `"AUTO"`, or the string `"NONE"`.
+- **`call_agent` with `load_skill` parameter**: Loads skills into SUB-AGENT context. Use same format as above.
 
-Use `scan_skills(query)` to find available skills:
-
-```json
-{"name": "scan_skills", "arguments": {"query": "docker containerization"}}
+Example call_agent usage:
+```
+call_agent(agent_class="coder", task="Set up Dockerfile", load_skill=["docker-best-practices"])
 ```
 
-This returns a list of matching skills with relevance scores and descriptions. Use the score and description to decide which skill(s) are relevant.
+## REQUIRED WORKFLOW
 
-To list all registered skills (no query):
+1. **Scan**: Invoke the `scan_skills` tool with a query matching the technology name
+2. **Load**: Invoke the `load_skill` tool to inject expertise
+3. **Execute**: Follow loaded guidelines in your task
+4. **Delegate**: Pass `load_skill=[...]` to sub-agents when needed
 
-```json
-{"name": "scan_skills", "arguments": {}}
-```
+## EXAMPLE PATTERNS
 
-## How to Load Skills
+**INCORRECT**
+Agent receives "Set up Kubernetes deployment" and proceeds without skill discovery. Result: Generic, potentially flawed guidance.
 
-Once you've identified a skill, load it into your context:
+**CORRECT**
+Invoke the `scan_skills` tool with query="kubernetes", then invoke the `load_skill` tool with skill_names=["kubernetes-best-practices"] before executing task.
 
-```json
-{"name": "load_skill", "arguments": {"skill_names": ["docker-best-practices"]}}
-```
+## EDGE CASES
 
-You can load multiple skills at once:
+- **No relevant skills found**: Proceed with caution, explicitly note limitations in output
+- **Multiple skills match**: Choose based on relevance score from scan_skills results
 
-```json
-{"name": "load_skill", "arguments": {"skill_names": ["code-review", "security-checklist"]}}
-```
+## OUTPUT QUALITY RISK
 
-The skill's full instructions are injected as a user message and you should apply them to your current task.
+Failing to load appropriate skills results in:
+- Generic or inaccurate guidance
+- Potential best practice violations requiring rework
+- Inefficient problem-solving approaches
 
-## Typical Workflow
-
-1. **Scan**: `scan_skills(query="your task domain")` → see what's available.
-2. **Evaluate**: Check scores and descriptions for relevance.
-3. **Load**: `load_skill(skill_names=[...])` → inject into context.
-4. **Apply**: Follow the loaded skill's guidelines while working on the task.
-
-## For Sub-Agent Delegation
-
-When delegating to sub-agents via `call_agent`, you can also load skills at init time using the `load_skill` parameter:
-
-```json
-{"name": "call_agent", "arguments": {"agent_class": "coder", "instance_name": "worker1", "task": "...", "load_skill": ["code-review"]}}
-```
-
-This injects the skill into the sub-agent's system prompt at initialization. Use runtime `load_skill` when you need to augment your own context mid-task.
+Proactively load skills to guarantee expert-level results.

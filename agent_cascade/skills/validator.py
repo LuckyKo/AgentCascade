@@ -17,6 +17,7 @@ from agent_cascade.settings import (
 )
 
 from .parser import parse_frontmatter
+from .common import SEMVER_RE as _SEMVER_RE
 
 
 # Snake-case pattern: starts with lowercase letter, allows lowercase digits, underscore, hyphen
@@ -53,9 +54,10 @@ def validate_skill(
         check_injection: If True (default), run prompt injection check.
 
     Returns:
-        Tuple of (passed, error_list). If passed is True, error_list is empty.
+        Tuple of (passed, error_list). If passed is True, error_list contains only warnings.
     """
     errors: List[str] = []
+    warnings: List[str] = []  # Soft checks that don't block registration
 
     # Size check (raw content)
     max_bytes = AUTO_SKILL_MAX_SIZE_KB * 1024
@@ -88,6 +90,11 @@ def validate_skill(
     if not triggers or not isinstance(triggers, list) or len(triggers) < 1:
         errors.append("Missing or empty 'triggers' list (requires at least 1 entry)")
 
+    # Version format check (soft — warns but allows registration, defaults to 1.0.0 if invalid)
+    version = frontmatter.get('version')
+    if version and not _SEMVER_RE.match(str(version)):
+        warnings.append(f"Skill '{skill_name}': Version '{version}' is not valid semver (X.Y.Z) — will default to '1.0.0'")
+
     # Uniqueness check
     if name and name in existing_names:
         errors.append(f"Skill name '{name}' already exists in registry")
@@ -107,7 +114,7 @@ def validate_skill(
 
     if errors:
         logger.debug("[SKILLS] Tier 1 validation failed for '%s': %s", skill_name, errors)
-        return False, errors
+        return False, errors + warnings
 
     if task_text:
         # Lightweight self-match: check if enough skill keywords appear in the task text.
@@ -129,7 +136,8 @@ def validate_skill(
 
     if errors:
         logger.debug("[SKILLS] Tier 2 validation failed for '%s': %s", skill_name, errors)
-        return False, errors
+        return False, errors + warnings
 
-    logger.info("[SKILLS] Validation passed for skill '%s'", skill_name)
-    return True, []
+    logger.info("[SKILLS] Validation passed for skill '%s'%s",
+                skill_name, f" (warnings: {', '.join(warnings)})" if warnings else "")
+    return True, warnings

@@ -8,12 +8,19 @@ Handles:
   - Resolving load_skill arguments (list / AUTO / NONE)
 """
 
+import json as _json
+import os as _os
 import sys as _sys
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None  # No-op on Windows; we accept the limitation
 
 from agent_cascade.log import logger
 from agent_cascade.settings import (
@@ -83,6 +90,94 @@ class SkillManager:
         self._cache_ttl: float = SKILL_CACHE_TTL_SECONDS  # from settings
         self._disabled_names: set = set(SKILLS_DISABLED)
         self._skill_paths: List[Path] = []  # stored for _ensure_discovered()
+
+        # Metrics infrastructure (batched activation tracking)
+        self._metrics_file = Path(".qwen/skills-metrics.json")
+        self._metrics: Dict[str, Dict[str, Any]] = {}  # skill_name -> {total_loads, by_version}
+        self._metrics_lock = threading.Lock()
+        self._pending_flush_count = 0       # tracks buffered increments
+        self._last_flush_time = time.monotonic()  # for timer-based flush
+        self._FLUSH_THRESHOLD = 5           # flush after N pending increments
+        self._FLUSH_INTERVAL = 30.0         # flush every N seconds (whichever comes first)
+        self._load_metrics()  # load on startup
+
+    # ── Metrics Persistence (Batched Writes) ────────────────────────────────
+
+    def _load_metrics(self) -> None:
+        """Load activation metrics from disk (best-effort)."""
+        if not self._metrics_file.exists():
+            return
+        try:
+            data = _json.loads(self._metrics_file.read_text(encoding='utf-8'))
+            self._metrics = data.get("skills", {})
+            logger.debug("[SKILLS] Loaded metrics for %d skills", len(self._metrics))
+        except Exception as e:
+            logger.warning("[SKILLS] Failed to load metrics file: %s — starting fresh", e)
+            self._metrics = {}
+
+    def _flush_metrics_to_disk(self) -> None:
+        """Atomically write buffered metrics to disk with file-level locking.
+
+        Uses fcntl.flock on POSIX for multi-process safety. On Windows, flock is a
+        no-op — we accept the limitation and rely on os.replace() atomicity.
+        Metrics are best-effort in multi-process scenarios.
+        """
+        try:
+            # Ensure parent directory exists before writing
+            self._metrics_file.parent.mkdir(parents=True, exist_ok=True)
+
+            tmp_path = self._metrics_file.with_suffix('.tmp')
+            data = {"schema_version": "1.0", "skills": self._metrics}
+
+            # Open temp file for writing with exclusive lock (POSIX only)
+            fd = _os.open(str(tmp_path), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o644)
+            try:
+                if _fcntl is not None:
+                    _fcntl.flock(fd, _fcntl.LOCK_EX)  # no-op on Windows
+                _os.write(fd, _json.dumps(data, indent=2).encode('utf-8'))
+                _os.fsync(fd)
+            finally:
+                if _fcntl is not None:
+                    _fcntl.flock(fd, _fcntl.LOCK_UN)
+                _os.close(fd)
+
+            # Atomic rename (cross-platform via os.replace)
+            _os.replace(str(tmp_path), str(self._metrics_file))
+        except Exception as e:
+            logger.warning("[SKILLS] Failed to flush metrics to disk: %s", e)
+            # Clean up orphaned temp file if it exists
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _increment_load_count(self, skill_name: str, version: str) -> None:
+        """Increment load counter for a skill+version combo (buffered).
+
+        Flushes to disk when pending count reaches threshold OR 30 seconds have elapsed.
+        """
+        with self._metrics_lock:
+            entry = self._metrics.setdefault(skill_name, {"total_loads": 0, "by_version": {}})
+            entry["total_loads"] += 1
+            entry["by_version"][version] = entry["by_version"].get(version, 0) + 1
+
+            self._pending_flush_count += 1
+            now = time.monotonic()
+            should_flush = (
+                self._pending_flush_count >= self._FLUSH_THRESHOLD or
+                (now - self._last_flush_time) >= self._FLUSH_INTERVAL
+            )
+
+            if should_flush:
+                self._pending_flush_count = 0
+                self._last_flush_time = now
+                # Flush outside lock to avoid holding it during I/O
+                flush_needed = True
+            else:
+                flush_needed = False
+
+        if flush_needed:
+            self._flush_metrics_to_disk()
 
     # ── Discovery ────────────────────────────────────────────────────────────
 
@@ -241,11 +336,13 @@ class SkillManager:
                          name, priority, existing_priority)
 
         # Store parsed data in registry (Tier 1: frontmatter only; body is lazy-loaded)
+        version = parsed.get("version", "1.0.0")  # Already normalized by parser
         self._skills_registry[name] = {
             'name': name,
             'description': frontmatter.get('description', ''),
             'source': frontmatter.get('source', ''),
             'triggers': frontmatter.get('triggers', []),
+            'version': version,
             'file_path': str(skill_file),
             '_priority': priority,
             # Keep a reference to the full parsed data for lazy loading
@@ -314,8 +411,23 @@ class SkillManager:
                     'description': data.get('description', ''),
                     'triggers': data.get('triggers', []),
                     'source': data.get('source', 'system'),
+                    'version': data.get('version', '1.0.0'),
                 })
             return result
+
+    def get_metrics(self, skill_name: Optional[str] = None) -> Dict[str, Any]:
+        """Return activation metrics.
+
+        Args:
+            skill_name: If provided, return only that skill's metrics.
+                        If None, return all metrics.
+        Returns:
+            Metrics dict matching the JSON structure.
+        """
+        with self._metrics_lock:
+            if skill_name:
+                return self._metrics.get(skill_name, {"total_loads": 0, "by_version": {}})
+            return dict(self._metrics)
 
     # ── Tier 2 Loading (Full Instructions) ───────────────────────────────────
 
@@ -330,45 +442,50 @@ class SkillManager:
         Returns:
             Full markdown instructions string, or None if skill not found.
         """
-        # Exact match first
-        reg = self._skills_registry.get(skill_name)
-        if reg is not None:
-            pass
-        else:
-            # Case-insensitive fallback (handles LLM capitalizing names like "Self-Augmentation")
-            lower = skill_name.lower()
-            for key, entry in self._skills_registry.items():
-                if key.lower() == lower:
-                    reg = entry
-                    logger.debug("[SKILLS] load_full_instructions: case-insensitive match '%s' -> '%s'",
-                                 skill_name, key)
-                    break
-        if reg is None:
-            logger.debug("[SKILLS] load_full_instructions: skill '%s' not in registry (registry has %d skills)",
-                         skill_name, len(self._skills_registry))
-            return None
+        with self._write_lock:
+            # Exact match first
+            reg = self._skills_registry.get(skill_name)
+            if reg is not None:
+                pass
+            else:
+                # Case-insensitive fallback (handles LLM capitalizing names like "Self-Augmentation")
+                lower = skill_name.lower()
+                for key, entry in self._skills_registry.items():
+                    if key.lower() == lower:
+                        reg = entry
+                        logger.debug("[SKILLS] load_full_instructions: case-insensitive match '%s' -> '%s'",
+                                     skill_name, key)
+                        break
+            if reg is None:
+                logger.debug("[SKILLS] load_full_instructions: skill '%s' not in registry (registry has %d skills)",
+                             skill_name, len(self._skills_registry))
+                return None
 
-        # Try lazy load from parsed data first
-        parsed = reg.get('_parsed_data')
-        if parsed and 'body' in parsed:
-            body = parsed['body']
-            logger.debug("[SKILLS] Loaded Tier 2 instructions for '%s' (%d chars)",
-                         skill_name, len(body))
-            return body
+            version = reg.get('version', '1.0.0')
 
-        # Fallback: re-read from disk
-        file_path = reg.get('file_path')
-        if file_path:
-            try:
-                parsed = parse_skill_file(Path(file_path))
-                reg['_parsed_data'] = parsed
-                body = parsed.get('body', '')
-                logger.debug("[SKILLS] Re-parsed '%s' from disk (%d chars)", skill_name, len(body))
+            # Try lazy load from parsed data first
+            parsed = reg.get('_parsed_data')
+            if parsed and 'body' in parsed:
+                body = parsed['body']
+                logger.debug("[SKILLS] Loaded Tier 2 instructions for '%s' (%d chars)",
+                             skill_name, len(body))
+                self._increment_load_count(skill_name, version)
                 return body
-            except (FileNotFoundError, OSError) as e:
-                logger.warning("[SKILLS] Failed to re-parse '%s': %s", skill_name, e)
 
-        return None
+            # Fallback: re-read from disk
+            file_path = reg.get('file_path')
+            if file_path:
+                try:
+                    parsed = parse_skill_file(Path(file_path))
+                    reg['_parsed_data'] = parsed
+                    body = parsed.get('body', '')
+                    logger.debug("[SKILLS] Re-parsed '%s' from disk (%d chars)", skill_name, len(body))
+                    self._increment_load_count(skill_name, version)
+                    return body
+                except (FileNotFoundError, OSError) as e:
+                    logger.warning("[SKILLS] Failed to re-parse '%s': %s", skill_name, e)
+
+            return None
 
     # ── Resolution (load_skill argument handling) ────────────────────────────
 
@@ -511,6 +628,7 @@ class SkillManager:
                     'description': frontmatter.get('description', ''),
                     'source': source,
                     'triggers': frontmatter.get('triggers', []),
+                    'version': parsed.get("version", "1.0.0"),
                     'file_path': str(pending_file),
                     '_priority': _PRIORITY_SYSTEM,
                     '_parsed_data': parsed,

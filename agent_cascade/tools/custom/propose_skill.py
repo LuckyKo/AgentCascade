@@ -67,6 +67,37 @@ class ProposeSkill(BaseTool):
         if skill_manager is None:
             return "No skills system available. Skills may not have been initialized."
 
+        # Check for duplicate name before registration (provide actionable guidance)
+        try:
+            fm, _ = parse_frontmatter(skill_content)
+            proposed_name = fm.get('name', '') if fm else ''
+
+            if proposed_name and proposed_name in skill_manager.get_skill_names():
+                existing_meta = skill_manager.get_skill_metadata(proposed_name)
+                existing_version = existing_meta.get('version', '1.0.0') if existing_meta else '1.0.0'
+
+                # Suggest next patch version (safely handle malformed versions like "1.0")
+                try:
+                    parts = existing_version.split('.')
+                    if len(parts) >= 3:
+                        suggested_version = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}"
+                    else:
+                        # Pad with zeros for incomplete semver (e.g., "1.0" -> "1.0.1")
+                        padded = parts + ['0'] * (3 - len(parts))
+                        suggested_version = f"{padded[0]}.{padded[1]}.{int(padded[2]) + 1}"
+                except (ValueError, IndexError):
+                    suggested_version = "1.0.1"
+
+                return (
+                    f"Skill '{proposed_name}' already exists (current version: v{existing_version}).\n\n"
+                    f"To update it, either:\n"
+                    f"1. Edit the existing SKILL.md file directly and increment its version field.\n"
+                    f"2. Use a different name (e.g., '{proposed_name}-v2' or '{proposed_name}-updated').\n\n"
+                    f"Suggested version for update: v{suggested_version}"
+                )
+        except Exception:
+            pass  # Continue with normal registration if pre-check fails
+
         # Register the skill
         success, errors = skill_manager.register_skill_from_content(
             skill_content=skill_content,
