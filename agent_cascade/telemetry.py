@@ -13,6 +13,7 @@ import datetime
 import hashlib
 import json
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -117,6 +118,62 @@ class TelemetryCollector:
     # ── Config Fingerprinting ─────────────────────────────────────────────
 
     @staticmethod
+    def _normalize_system_prompt(prompt: str) -> str:
+        """Remove instance-specific identifiers from system prompt for fingerprinting.
+
+        System prompts are constructed as "You are {instance_name}." where instance_name
+        includes unique suffixes (e.g., Security_op_091f048b). This strips those unique
+        parts so all instances of the same agent class share a fingerprint.
+
+        Example: "You are Security_op_091f048b.\nRole: ..." → "You are Security_op.\nRole: ..."
+        """
+        if not prompt:
+            return prompt
+
+        lines = prompt.split('\n', 1)
+        first_line = lines[0]
+
+        # Match "You are <identifier>." where identifier may contain underscores
+        match = re.match(r'^(You are\s+)([A-Za-z][A-Za-z0-9_]*?)(\..*)$', first_line)
+        if not match:
+            return prompt
+
+        prefix_text = match.group(1)  # "You are "
+        name = match.group(2)         # e.g., "Security_op_091f048b" or "Maine"
+        rest = match.group(3)         # "." or remaining text after period
+
+        parts = name.split('_')
+        if len(parts) == 1:
+            # Simple name like "Maine" — keep as is
+            normalized_name = name
+        else:
+            # Multi-part name like "Security_op_091f048b" — strip unique suffixes.
+            # Strip trailing underscore-separated parts that look like unique identifiers:
+            # - Pure hex strings (e.g., 091f048b)
+            # - Pure numeric strings (e.g., 1, 42)
+            # - Mixed alphanumeric strings longer than 3 chars (e.g., worker1, abc123)
+            # Keep short all-letter parts that look like meaningful names (e.g., "op").
+            keep_parts = [parts[0]]  # Always keep the first part (agent class)
+            for part in parts[1:]:
+                is_unique = False
+                if part.isdigit():
+                    # Pure numeric suffix like "_1", "_42"
+                    is_unique = True
+                elif part.isalpha() and len(part) <= 3:
+                    # Short all-letter part like "op" — keep it
+                    pass
+                elif len(part) > 3 and any(c.isdigit() for c in part):
+                    # Mixed alphanumeric or long hex-like string (e.g., worker1, 091f048b)
+                    is_unique = True
+                if is_unique:
+                    break
+                keep_parts.append(part)
+            normalized_name = '_'.join(keep_parts)
+
+        lines[0] = f"{prefix_text}{normalized_name}{rest}"
+        return '\n'.join(lines)
+
+    @staticmethod
     def fingerprint_config(
         model: str = "",
         generate_cfg: Optional[Dict] = None,
@@ -139,12 +196,15 @@ class TelemetryCollector:
         ]
         params = {k: cfg.get(k) for k in relevant_keys if cfg.get(k) is not None}
 
+        # Normalize system prompt to group by agent class, not instance
+        normalized_prompt = TelemetryCollector._normalize_system_prompt(system_prompt)
+
         # Group by API endpoint (api_base) rather than specific model,
         # so that all models from the same provider/endpoint share a fingerprint.
         fingerprint_data = {
             "api_base": api_base or model,  # fallback to model if api_base empty
             "params": params,
-            "system_prompt_hash": hashlib.md5(system_prompt[:SYSTEM_PROMPT_HASH_MAX_CHARS].encode()).hexdigest()[:8],
+            "system_prompt_hash": hashlib.md5(normalized_prompt[:SYSTEM_PROMPT_HASH_MAX_CHARS].encode()).hexdigest()[:8],
             "tools": sorted(tools or []),
         }
 
