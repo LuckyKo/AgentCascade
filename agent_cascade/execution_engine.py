@@ -182,6 +182,24 @@ def _make_token_count_callback(instance):
     return _on_token_count
 
 
+def _make_usage_callback(instance, telemetry_collector):
+    """Create a callback for capturing response token usage from LLM streaming layer."""
+    def _on_usage(prompt_tokens: int, completion_tokens: int, details=None):
+        """Called by streaming layer when usage data arrives from API."""
+        # Update compression tracking with ground-truth prompt tokens
+        instance._last_actual_token_count = prompt_tokens
+        
+        # Record in telemetry (non-blocking) — use same defensive pattern as _telemetry() helper
+        if telemetry_collector is not None:
+            try:
+                tel_name = instance.instance_name
+                telemetry_collector.record_token_usage(tel_name, prompt_tokens, completion_tokens, details)
+            except Exception as e:
+                from agent_cascade.log import logger
+                logger.debug("Telemetry usage callback error for %s: %s", instance.instance_name, e)
+    return _on_usage
+
+
 def _invalidate_token_cache(instance):
     """Invalidate all token count caches after conversation mutation."""
     instance._last_actual_token_count = 0
@@ -2368,7 +2386,8 @@ class ExecutionEngine:
                 if event_type == 'start':
                     tel.record_llm_call_start(inst_name, **kwargs)
                 elif event_type == 'end':
-                    tel.record_llm_call_end(inst_name, **kwargs)
+                    last_output = kwargs.pop('last_output', None)
+                    tel.record_llm_call_end(inst_name, output_tokens_est=kwargs.get('output_tokens_est', 0), last_output=last_output)
                 elif event_type == 'first_token':
                     tel.record_llm_first_token(inst_name, **kwargs)
         except Exception:
@@ -2653,72 +2672,9 @@ class ExecutionEngine:
                     yield None
 
                 if last_output is not None:
-                    # Telemetry: record LLM call end for successful completion
-                    # (non-blocking)
-                    # Bug
-                    _output_tokens_est = 0
-                    _found_usage = False
-
-                    # Try to get actual completion_tokens from first message
-                    # with usage data
-                    # (multiple messages in same chunk share usage, so assign
-                    # not sum)
-                    for m in last_output:
-                        extra = getattr(m, 'extra', None) or {}
-                        usage = extra.get('usage') if isinstance(extra, dict) else None
-                        if usage and isinstance(usage, dict) and 'completion_tokens' in usage:
-                            ct = usage['completion_tokens']
-                            if isinstance(ct, (int, float)) and ct > 0:
-                                _output_tokens_est = int(ct)
-                                _found_usage = True
-                            break  # Only need first valid usage entry
-
-                    # Try completion_tokens_details as alternative if
-                    # completion_tokens not available
-                    if not _found_usage:
-                        for m in last_output:
-                            extra = getattr(m, 'extra', None) or {}
-                            usage = extra.get('usage') if isinstance(extra, dict) else None
-                            if usage and isinstance(usage, dict):
-                                details = usage.get('completion_tokens_details', {})
-                                if details:
-                                    reasoning_t = details.get('reasoning_tokens', 0) or 0
-                                    tool_t = details.get('tool_calls_tokens', 0) or 0
-                                    accepted_pred_t = details.get('accepted_prediction_tokens', 0) or 0
-                                    audio_t = details.get('audio_tokens', 0) or 0
-                                    total_from_details = reasoning_t + tool_t + accepted_pred_t + audio_t
-                                    if total_from_details > 0:
-                                        _output_tokens_est = total_from_details
-                                        _found_usage = True
-                                        break
-
-                    if not _found_usage:
-                        # Fallback: char-based estimate including
-                        # reasoning_content and function_call arguments
-                        for m in last_output:
-                            c = getattr(m, 'content', '') or ''
-                            rc = getattr(m, 'reasoning_content', '') or ''
-                            fc = getattr(m, 'function_call', None)
-                            # Normalize list content to string (multimodal
-                            # messages)
-                            if isinstance(c, list):
-                                c = ' '.join(str(x) for x in c if isinstance(x, str))
-                            else:
-                                c = str(c)
-                            if isinstance(rc, list):
-                                rc = ' '.join(str(x) for x in rc if isinstance(x, str))
-                            else:
-                                rc = str(rc)
-                            # Include function call arguments in token estimate
-                            fc_str = ''
-                            if fc:
-                                if isinstance(fc, dict):
-                                    fc_str = str(fc.get('name', '')) + str(fc.get('arguments', ''))
-                                elif hasattr(fc, 'name'):
-                                    fc_str = str(getattr(fc, 'name', '')) + str(getattr(fc, 'arguments', ''))
-                            _output_tokens_est += (len(c) + len(rc) + len(fc_str)) // TOKEN_ESTIMATE_CHAR_DIVISOR
-
-                    self._record_telemetry_event(inst_name, 'end', output_tokens_est=_output_tokens_est)
+                    # Token counts captured at streaming layer via _on_usage callback.
+                    # record_llm_call_end uses ground-truth values if available, falls back to char-count estimate of last_output.
+                    self._record_telemetry_event(inst_name, 'end', output_tokens_est=0, last_output=last_output)
                     break
 
                 # Telemetry: record LLM call end for empty response before retrying (non-blocking)
@@ -3005,6 +2961,11 @@ class ExecutionEngine:
                 # from LLM (ground-truth tracking)
                 merged_cfg['_on_token_count'] = _make_token_count_callback(instance)
 
+                # Register usage callback to capture response tokens at streaming layer (ground-truth tracking)
+                _telemetry_collector = getattr(self.pool, 'telemetry', None)  # Same pattern as self._telemetry() helper
+                if _telemetry_collector is not None:
+                    merged_cfg['_on_usage'] = _make_usage_callback(instance, _telemetry_collector)
+
                 return llm.chat(
                     messages=messages,
                     functions=active_functions,
@@ -3054,6 +3015,11 @@ class ExecutionEngine:
             # Register token count callback to capture actual token usage from
             # LLM (ground-truth tracking)
             merged_cfg['_on_token_count'] = _make_token_count_callback(instance)
+
+            # Register usage callback to capture response tokens at streaming layer (ground-truth tracking)
+            _telemetry_collector = getattr(self.pool, 'telemetry', None)  # Same pattern as self._telemetry() helper
+            if _telemetry_collector is not None:
+                merged_cfg['_on_usage'] = _make_usage_callback(instance, _telemetry_collector)
 
             return llm.chat(
                 messages=messages,
@@ -3686,22 +3652,6 @@ class ExecutionEngine:
                     )
                     self._append_and_log(instance, saved)
                     instance._continue_fallback_append = True
-
-        # Extract ground-truth usage info from LLM response (ground-truth token
-        # tracking)
-        # This replaces manual token counting with actual API-reported values
-        for msg in turn_output:
-            extra = msg_field(msg, 'extra')
-            if extra and isinstance(extra, dict) and 'usage' in extra:
-                usage = extra['usage']
-                if isinstance(usage, dict):
-                    # Update ground-truth token counts from LLM API response
-                    if 'prompt_tokens' in usage:
-                        instance._last_actual_token_count = usage['prompt_tokens']
-                    if 'total_tokens' in usage and 'prompt_tokens' not in usage:
-                        # Some APIs only return total_tokens
-                        instance._last_actual_token_count = usage['total_tokens']
-                    break  # Only need to extract from first message with usage info
 
         # Extracted to _check_and_handle_truncation() - Phase 3.3
         if self._check_and_handle_truncation(is_truncated, turn_output, instance, inst_name, messages, llm_messages, response):

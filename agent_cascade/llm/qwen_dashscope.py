@@ -20,7 +20,7 @@ from typing import Dict, Iterator, List, Optional
 
 import dashscope
 
-from agent_cascade.llm.base import ModelServiceError, register_llm
+from agent_cascade.llm.base import ModelServiceError, register_llm, _fire_usage_callback
 from agent_cascade.llm.function_calling import BaseFnCallModel
 from agent_cascade.llm.oai import _extract_usage
 from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
@@ -76,11 +76,16 @@ class QwenChatAtDS(BaseFnCallModel):
             **generate_cfg)
         if response.status_code == HTTPStatus.OK:
             # Extract usage info from DashScope response (includes completion_tokens_details if available)
+            extracted = _extract_usage(getattr(response, 'usage', None))
+            
+            # Fire callback for non-streaming usage data
+            _fire_usage_callback(extracted)
+            
             return [
                 Message(role=ASSISTANT,
                         content=response.output.choices[0].message.content,
                         reasoning_content=response.output.choices[0].message.get('reasoning_content', ''),
-                        extra={'model_service_info': response, 'usage': _extract_usage(getattr(response, 'usage', None))})
+                        extra={'model_service_info': response, 'usage': extracted})
             ]
         else:
             raise ModelServiceError(code=response.code,
@@ -104,6 +109,9 @@ class QwenChatAtDS(BaseFnCallModel):
                 extracted = _extract_usage(getattr(chunk, 'usage', None))
                 if extracted:
                     last_usage = extracted
+                    
+                    # Fire usage callback (set by base.py chat() via thread-local)
+                    _fire_usage_callback(extracted)
                 extra = {'model_service_info': chunk}
                 if last_usage:
                     extra['usage'] = last_usage
@@ -129,6 +137,9 @@ class QwenChatAtDS(BaseFnCallModel):
                 extracted = _extract_usage(getattr(chunk, 'usage', None))
                 if extracted:
                     last_usage = extracted
+                    
+                    # Fire usage callback (set by base.py chat() via thread-local)
+                    _fire_usage_callback(extracted)
                 if chunk.output.choices[0].message.get('reasoning_content', ''):
                     full_reasoning_content += chunk.output.choices[0].message.reasoning_content
                 if chunk.output.choices[0].message.content:

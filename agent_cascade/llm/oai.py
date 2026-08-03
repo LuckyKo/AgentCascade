@@ -29,7 +29,7 @@ if openai.__version__.startswith('0.'):
 else:
     from openai import OpenAIError
 
-from agent_cascade.llm.base import ModelServiceError, register_llm
+from agent_cascade.llm.base import ModelServiceError, register_llm, _fire_usage_callback
 from agent_cascade.llm.function_calling import BaseFnCallModel
 from agent_cascade.llm.schema import ASSISTANT, FunctionCall, Message
 from agent_cascade.log import logger
@@ -454,6 +454,8 @@ class TextChatAtOAI(BaseFnCallModel):
                 full_reasoning_content = ''
                 full_tool_calls = []
                 _first_chunk = True
+                last_usage = None  # Track most recent usage; may arrive in a chunk without choices
+                _usage_emitted = False
                 # Use _iter_events() to fully drain SSE stream so connection is returned to pool
                 for sse in response._iter_events():
                     if sse.data == "[DONE]":
@@ -468,7 +470,16 @@ class TextChatAtOAI(BaseFnCallModel):
                             self.model = chunk.model
                             if self.dynamic_model and cur_base:
                                 self._detect_context_window(cur_base, cur_key)
-                        
+
+                    # Capture this chunk's usage BEFORE processing choices so it's available immediately
+                    _chunk_usage = None
+                    if hasattr(chunk, 'usage') and chunk.usage:
+                        _chunk_usage = _extract_usage(chunk.usage)
+                        last_usage = _chunk_usage
+
+                        # Fire usage callback with ground-truth data from API (set by base.py chat())
+                        _fire_usage_callback(_chunk_usage)
+
                     if chunk.choices:
                         if hasattr(chunk.choices[0].delta,
                                    'reasoning_content') and chunk.choices[0].delta.reasoning_content:
@@ -532,11 +543,14 @@ class TextChatAtOAI(BaseFnCallModel):
                                     
                         res = []
                         finish_reason = getattr(chunk.choices[0], 'finish_reason', None)
-                        extra = {'finish_reason': finish_reason} if finish_reason else {}
-                        
-                        # Feature 006: Capture usage info from OpenAI streaming response (last chunk)
-                        if hasattr(chunk, 'usage') and chunk.usage:
-                            extra['usage'] = _extract_usage(chunk.usage)
+                        extra = {}
+                        if finish_reason:
+                            extra['finish_reason'] = finish_reason
+                        # Prefer current chunk's usage; fall back to last seen usage from prior chunks
+                        usage_to_attach = _chunk_usage or last_usage
+                        if usage_to_attach:
+                            extra['usage'] = usage_to_attach
+                            _usage_emitted = True
                         
                         if full_reasoning_content or full_response:
                             res.append(Message(
@@ -552,6 +566,24 @@ class TextChatAtOAI(BaseFnCallModel):
                                 tc.extra.update(extra)
                             res += full_tool_calls
                         yield res
+
+                # If usage arrived after the last choices chunk (usage-only final chunk),
+                # emit it now so telemetry can pick it up
+                if last_usage and not _usage_emitted and (full_response or full_reasoning_content or full_tool_calls):
+                    # Fire callback for late-arriving usage data
+                    _fire_usage_callback(last_usage)
+                    
+                    extra = {'usage': last_usage}
+                    res = []
+                    if full_reasoning_content or full_response:
+                        res.append(Message(role=ASSISTANT, content=full_response, reasoning_content=full_reasoning_content, extra=extra))
+                    if full_tool_calls:
+                        for tc in full_tool_calls:
+                            if not tc.extra:
+                                tc.extra = {}
+                            tc.extra.update(extra)
+                        res += full_tool_calls
+                    yield res
         except OpenAIError as ex:
             code = str(getattr(ex, 'code', None) or getattr(ex, 'status_code', None) or '')
             raise ModelServiceError(exception=ex, code=code if code else None)
@@ -632,6 +664,9 @@ class TextChatAtOAI(BaseFnCallModel):
             # Feature 006: Capture usage info from OpenAI non-streaming response
             if hasattr(response, 'usage') and response.usage:
                 extra['usage'] = _extract_usage(response.usage)
+
+                # Fire callback for non-streaming usage data
+                _fire_usage_callback(extra['usage'])
 
             msg = response.choices[0].message
             result = []

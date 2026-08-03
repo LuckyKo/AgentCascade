@@ -111,10 +111,9 @@ ENDPOINT_FAILURE_CLEANUP_HOURS: int = int(os.getenv(
 
 # Settings for token estimation
 # Aggressive estimate used for telemetry and output estimation.
-# Based on typical English text (~4 chars/token), this is more optimistic
-# than CHARS_PER_TOKEN_ESTIMATE (5.0) which accounts for system prompt overhead.
+# Based on typical English text (~4 chars/token).
 TOKEN_ESTIMATE_CHAR_DIVISOR: float = float(os.getenv(
-    'QWEN_AGENT_TOKEN_ESTIMATE_CHAR_DIVISOR', 5.0))
+    'QWEN_AGENT_TOKEN_ESTIMATE_CHAR_DIVISOR', 4.0))
 IMAGE_TOKEN_ESTIMATE: int = int(os.getenv(
     'QWEN_AGENT_IMAGE_TOKEN_ESTIMATE', 255))  # Estimated tokens per image in message counting
 CHAT_TEMPLATE_TOKEN_OVERHEAD: int = int(os.getenv(

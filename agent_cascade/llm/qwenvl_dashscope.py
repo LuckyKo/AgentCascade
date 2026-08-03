@@ -22,7 +22,7 @@ from typing import Dict, Iterator, List, Optional
 
 import dashscope
 
-from agent_cascade.llm.base import ModelServiceError, register_llm
+from agent_cascade.llm.base import ModelServiceError, register_llm, _fire_usage_callback
 from agent_cascade.llm.function_calling import BaseFnCallModel
 from agent_cascade.llm.oai import _extract_usage
 from agent_cascade.llm.qwen_dashscope import initialize_dashscope
@@ -82,6 +82,9 @@ class QwenVLChatAtDS(BaseFnCallModel):
                 extracted = _extract_usage(getattr(chunk, 'usage', None))
                 if extracted:
                     last_usage = extracted
+                    
+                    # Fire usage callback (set by base.py chat() via thread-local)
+                    _fire_usage_callback(extracted)
                 if chunk.output.choices:
                     if 'reasoning_content' in chunk.output.choices[0].message and chunk.output.choices[
                             0].message.reasoning_content:
@@ -245,6 +248,10 @@ class QwenVLChatAtDS(BaseFnCallModel):
         if response.status_code == HTTPStatus.OK:
             # Extract usage info from DashScope VL response (includes completion_tokens_details if available)
             resp_usage = _extract_usage(getattr(response, 'usage', None))
+            
+            # Fire callback for non-streaming usage data
+            _fire_usage_callback(resp_usage)
+        
             full_content = response.output.choices[0].message.content[0]['text']
             msg_extra = {'model_service_info': response}
             if resp_usage:

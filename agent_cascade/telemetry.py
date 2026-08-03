@@ -26,6 +26,9 @@ _logger = logging.getLogger('agent_cascade.telemetry')
 # Telemetry is not on the hot path, so a single coarse-grained lock avoids complexity.
 _telemetry_lock = threading.RLock()
 
+# Truncation limit for error messages in telemetry events to avoid bloating logs
+MAX_ERROR_MESSAGE_LENGTH = 200
+
 from agent_cascade.instance_id import get_instance_id, make_instance_dir
 
 from agent_cascade.settings import (
@@ -190,6 +193,7 @@ class TelemetryCollector:
                 "total_streaming_time_ms": 0,
                 "loops_detected": 0,
                 "retries": 0,
+                "total_compressions": 0,
                 "tool_calls_by_name": defaultdict(int),
                 "tool_failures_by_name": defaultdict(int),
             }
@@ -224,6 +228,7 @@ class TelemetryCollector:
                 "output_tokens_est": 0,
                 "loops_detected": 0,
                 "retries": 0,
+                "compressions": 0,
             }
 
             # Initialize per-config stats on first turn — use helper method
@@ -263,6 +268,7 @@ class TelemetryCollector:
                 "output_tokens_est": turn["output_tokens_est"],
                 "loops_detected": turn["loops_detected"],
                 "retries": turn["retries"],
+                "compressions": turn["compressions"],
                 "timestamp": _now_iso(),
             }
 
@@ -282,6 +288,7 @@ class TelemetryCollector:
                 cs["total_duration_ms"] += duration_ms
                 cs["loops_detected"] += turn["loops_detected"]
                 cs["retries"] += turn["retries"]
+                cs["total_compressions"] += turn["compressions"]
                 for td in turn["tool_calls_detail"]:
                     cs["tool_calls_by_name"][td["tool_name"]] += 1
                     if not td.get("success", True):
@@ -297,6 +304,8 @@ class TelemetryCollector:
                 "input_tokens_est": input_tokens_est,
                 "model": model,
                 "first_token_time": 0,
+                "completion_tokens": 0,  # Will be updated by record_token_usage callback if available
+                "usage_details": None,
             }
 
     def record_llm_first_token(self, instance_name: str):
@@ -306,12 +315,77 @@ class TelemetryCollector:
             if call and call["first_token_time"] == 0:
                 call["first_token_time"] = time.perf_counter()
 
-    def record_llm_call_end(self, instance_name: str, output_tokens_est: int = 0):
+    def record_token_usage(
+        self,
+        instance_name: str,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        details: Optional[Dict] = None,
+    ):
+        """Record actual token usage from LLM API response.
+        
+        Called by the streaming layer when usage data arrives on the wire via _on_usage callback.
+        Updates the active LLM call's input_tokens_est with ground-truth prompt_tokens,
+        and stores completion_tokens for use in record_llm_call_end.
+        """
+        with _telemetry_lock:
+            call = self._active_llm_calls.get(instance_name)
+            if not call:
+                _logger.debug("record_token_usage called without active LLM call for %s", instance_name)
+                return
+            
+            # Update input_tokens_est with ground-truth value (was char-count estimate at call start)
+            if prompt_tokens > 0:
+                call["input_tokens_est"] = prompt_tokens
+            
+            # Store completion_tokens on the active call for use in record_llm_call_end
+            call["completion_tokens"] = completion_tokens
+            if details:
+                call["usage_details"] = details
+
+    def record_llm_call_end(self, instance_name: str, output_tokens_est: int = 0, last_output=None):
         """Mark the end of an LLM API call."""
         with _telemetry_lock:
             call = self._active_llm_calls.pop(instance_name, None)
             if not call:
                 return
+
+            # Three-tier priority for output tokens:
+            # (1) Ground-truth from streaming layer callback via record_token_usage()
+            # (2) Caller-provided value if > 0 (backward compat during transition)
+            # (3) Char-count estimate of last_output as final fallback
+            actual_output = call.get("completion_tokens", 0) or output_tokens_est
+
+            # Final fallback: char-count estimate if nothing else available and we have output messages
+            if actual_output == 0 and last_output:
+                total_chars = 0
+                for m in last_output:
+                    c = getattr(m, 'content', '') or ''
+                    rc = getattr(m, 'reasoning_content', '') or ''
+                    fc = getattr(m, 'function_call', None)
+                    
+                    # Normalize content fields to strings
+                    if isinstance(c, list):
+                        c = ' '.join(str(x) for x in c if isinstance(x, str))
+                    elif c:
+                        c = str(c)
+                    
+                    if isinstance(rc, list):
+                        rc = ' '.join(str(x) for x in rc if isinstance(x, str))
+                    elif rc:
+                        rc = str(rc)
+                    
+                    # Handle function_call (dict or object with name/arguments)
+                    fc_str = ''
+                    if fc:
+                        if isinstance(fc, dict):
+                            fc_str = str(fc.get('name', '')) + str(fc.get('arguments', ''))
+                        elif hasattr(fc, 'name'):
+                            fc_str = str(getattr(fc, 'name', '')) + str(getattr(fc, 'arguments', ''))
+                    
+                    total_chars += len(c) + len(rc) + len(fc_str)
+                
+                actual_output = max(total_chars // 4, 1) if total_chars > 0 else 0
 
             end_time = time.perf_counter()
             latency_ms = (end_time - call["start_time"]) * 1000
@@ -325,18 +399,18 @@ class TelemetryCollector:
                 "instance": instance_name,
                 "model": call["model"],
                 "input_tokens_est": call["input_tokens_est"],
-                "output_tokens_est": output_tokens_est,
+                "output_tokens_est": actual_output,
                 "latency_ms": round(latency_ms, 1),
                 "ttft_ms": round(ttft_ms, 1),
                 "streaming_time_ms": round(streaming_time_ms, 1),
-                "tps": round(output_tokens_est / (streaming_time_ms / 1000), 1) if streaming_time_ms > 0 and output_tokens_est > 0 else 0,
+                "tps": round(actual_output / (streaming_time_ms / 1000), 1) if streaming_time_ms > 0 and actual_output > 0 else 0,
                 "timestamp": _now_iso(),
             }
 
             # Update session stats
             self._session_stats["total_llm_calls"] += 1
             self._session_stats["total_input_tokens_est"] += call["input_tokens_est"]
-            self._session_stats["total_output_tokens_est"] += output_tokens_est
+            self._session_stats["total_output_tokens_est"] += actual_output
             self._session_stats["total_llm_latency_ms"] += latency_ms
             self._session_stats["total_ttft_ms"] += ttft_ms
             self._session_stats["total_streaming_time_ms"] += streaming_time_ms
@@ -347,7 +421,7 @@ class TelemetryCollector:
             if turn:
                 turn["llm_calls"] += 1
                 turn["input_tokens_est"] += call["input_tokens_est"]
-                turn["output_tokens_est"] += call["output_tokens_est"]
+                turn["output_tokens_est"] += actual_output
                 # Update per-config latency fields (BUG 5 fix)
                 fp = turn.get("config_fingerprint", "")
                 if fp and fp in self._config_stats:
@@ -397,7 +471,7 @@ class TelemetryCollector:
                 "timestamp": _now_iso(),
             }
             if error:
-                event["error"] = error[:200]
+                event["error"] = error[:MAX_ERROR_MESSAGE_LENGTH]
 
             # Update session stats (call_agent excluded from avg tool latency)
             self._session_stats["total_tool_calls"] += 1
@@ -484,6 +558,15 @@ class TelemetryCollector:
                 "timestamp": _now_iso(),
             }
             self._session_stats["total_compressions"] += 1
+
+            # Update active turn compression counter if one exists
+            turn = self._active_turns.get(instance_name)
+            if turn:
+                turn["compressions"] += 1
+                # Also update per-config stats for this compression
+                fp = turn.get("config_fingerprint", "")
+                if fp and fp in self._config_stats:
+                    self._config_stats[fp]["total_compressions"] += 1
 
         self._write_event(event)
 
@@ -634,42 +717,25 @@ class TelemetryCollector:
                 summary["total_tool_calls"], summary.get("write_failures", 0), e,
             )
 
-    def _write_critical_event(self, event: Dict):
-        """Append an event to the JSONL log file; raise on I/O failure.
+    def _write_to_file(self, event: Dict, raise_on_error: bool = False):
+        """Write a single event to the JSONL log file and in-memory buffer.
 
-        Unlike ``_write_event`` this does not swallow exceptions — use for
-        events that should be guaranteed to persist (e.g., session_end).
-        Thread-safe via module-level lock. Uses cached file handle.
+        Thread-safe via module-level lock. Uses cached file handle with reopen fallback.
+        Both events.append() and file write are inside the lock for atomicity: an event
+        is either fully persisted (in-memory + on disk) or neither, preventing inconsistency on crash.
+
+        Args:
+            event: The event dict to persist.
+            raise_on_error: If True, raises on I/O failure (for critical events like session_end).
+                           If False, logs warning and increments write_failures counter.
         """
-        self.events.append(event)
-
         line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
-        with _telemetry_lock:
-            if self._log_file is not None and not self._log_file.closed:
-                self._log_file.write(line)
-                self._log_file.flush()
-            else:
-                # Fallback: reopen file handle so subsequent writes don't pay open/close cost
-                try:
-                    fh = open(self.log_path, "a", encoding="utf-8")
-                    fh.write(line)
-                    fh.flush()
-                    self._log_file = fh  # Update cached handle for future writes
-                except Exception:
-                    raise
 
-    def _write_event(self, event: Dict):
-        """Append an event to the JSONL log file and in-memory buffer.
-
-        Thread-safe via module-level lock. Uses cached file handle.
-        Failures are logged at WARNING level with a failure counter.
-        Every write is flushed to avoid data loss on crash.
-        """
-        self.events.append(event)
-
-        line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
         try:
             with _telemetry_lock:
+                # Append to in-memory buffer inside lock for atomicity with file write
+                self.events.append(event)
+
                 if self._log_file is not None and not self._log_file.closed:
                     self._log_file.write(line)
                     self._log_file.flush()  # Flush to avoid data loss on crash
@@ -680,10 +746,32 @@ class TelemetryCollector:
                     fh.flush()
                     self._log_file = fh  # Update cached handle for future writes
         except Exception as e:
-            _logger.warning(  # Upgraded from debug to warning for visibility
+            if raise_on_error:
+                raise
+            _logger.warning(
                 "Failed to write telemetry event [%s]: %s", event.get("type", "unknown"), e,
             )
-            self._session_stats["write_failures"] += 1
+            # Increment under lock since this runs outside the main with block above (exception path)
+            with _telemetry_lock:
+                self._session_stats["write_failures"] += 1
+
+    def _write_critical_event(self, event: Dict):
+        """Append an event to the JSONL log file; raise on I/O failure.
+
+        Unlike ``_write_event`` this does not swallow exceptions — use for
+        events that should be guaranteed to persist (e.g., session_end).
+        Thread-safe via module-level lock. Uses cached file handle.
+        """
+        self._write_to_file(event, raise_on_error=True)
+
+    def _write_event(self, event: Dict):
+        """Append an event to the JSONL log file and in-memory buffer.
+
+        Thread-safe via module-level lock. Uses cached file handle.
+        Failures are logged at WARNING level with a failure counter.
+        Every write is flushed to avoid data loss on crash.
+        """
+        self._write_to_file(event, raise_on_error=False)
 
     def close(self):
         """Flush and close the log file handle. Call during shutdown cleanup."""
@@ -694,6 +782,19 @@ class TelemetryCollector:
                     self._log_file.close()
                 except Exception as e:
                     _logger.warning("Error closing telemetry log file: %s", e)
+
+    def __del__(self):
+        """Cleanup guarantee: close file handle if still open (handles crashes/uncaught exceptions)."""
+        # Defensive no-op if already closed or not yet initialized
+        try:
+            if hasattr(self, "_log_file") and self._log_file is not None and not self._log_file.closed:
+                try:
+                    self._log_file.close()
+                except Exception as e:
+                    _logger.warning("Error in __del__ closing telemetry log file: %s", e)
+        except Exception:
+            # Last resort: never let __del__ raise (avoids interpreter shutdown issues)
+            pass
 
     # ── Aggregation & Reporting (moved above persistence for logical grouping) ─
 

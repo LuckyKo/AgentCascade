@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import random
+import threading  # For thread-local usage callback storage
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -32,6 +33,46 @@ from agent_cascade.utils.utils import (extract_text_from_message, format_as_mult
                                     merge_generate_cfgs, print_traceback)
 
 LLM_REGISTRY = {}
+
+# Thread-local storage for usage callback — isolates callbacks per-thread.
+# Used by streaming methods to access the _on_usage callback set by chat() without adding parameters.
+_chat_on_usage_cb = threading.local()
+
+
+def _get_on_usage_cb():
+    """Get the current thread's usage callback, or None."""
+    return getattr(_chat_on_usage_cb, 'cb', None)
+
+
+def _set_on_usage_cb(cb):
+    """Set the current thread's usage callback."""
+    _chat_on_usage_cb.cb = cb
+
+
+def _fire_usage_callback(usage_data: Optional[Dict]) -> None:
+    """Fire the usage callback if registered, passing extracted token counts from API response.
+    
+    Called by streaming backends when usage data arrives on the wire.
+    Thread-safe via thread-local storage; never raises (telemetry must not break streaming).
+    
+    Args:
+        usage_data: Dict with prompt_tokens, completion_tokens, optional details breakdowns
+    """
+    if not usage_data or not isinstance(usage_data, dict):
+        return
+    
+    _on_usage_cb = _get_on_usage_cb()
+    if not callable(_on_usage_cb):
+        return
+    
+    try:
+        pt = usage_data.get('prompt_tokens', 0)
+        ct = usage_data.get('completion_tokens', 0)
+        details = (usage_data.get('completion_tokens_details') or 
+                   usage_data.get('prompt_tokens_details'))
+        _on_usage_cb(pt, ct, details)
+    except Exception as e:
+        logger.debug("Telemetry usage callback failed: %s", e)  # Never break streaming
 
 
 def register_llm(model_type):
@@ -271,6 +312,10 @@ class BaseChatModel(ABC):
 
         # Feature 006: Extract token count callback BEFORE agent_settings loop
         on_token_count_cb = generate_cfg.pop('_on_token_count', None)
+
+        # Extract usage callback (for response token tracking at streaming layer) and store in thread-local
+        on_usage_cb = generate_cfg.pop('_on_usage', None)
+        _set_on_usage_cb(on_usage_cb)
 
         agent_settings = [
             'disabled_tools', 'max_turns', 'auto_continue', 'auto_rollback_on_loop',
