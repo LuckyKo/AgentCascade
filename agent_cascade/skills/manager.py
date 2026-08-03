@@ -662,6 +662,103 @@ class SkillManager:
                 pending_dir.rmdir()
             return False, [f"Registration failed: {e}"]
 
+    def update_skill_in_place(
+        self,
+        name: str,
+        skill_content: str,
+        source: str = "auto-generated",
+    ) -> Tuple[bool, List[str]]:
+        """Update an existing skill's content and version in-place.
+
+        Writes new SKILL.md to the same file path, updates registry entry,
+        preserves old version metrics, and rebuilds matcher index.
+
+        Args:
+            name: Skill name (must exist in registry).
+            skill_content: New full SKILL.md content.
+            source: Provenance label.
+
+        Returns:
+            Tuple of (success, error_messages).
+        """
+        from agent_cascade.skills.parser import parse_skill_file, normalize_version
+
+        with self._write_lock:
+            existing = self._skills_registry.get(name)
+            if not existing:
+                return False, [f"Skill '{name}' not found in registry"]
+
+            old_version = existing.get('version', '1.0.0')
+            file_path = Path(existing.get('file_path', ''))
+
+            # Validate file exists before attempting update
+            if not file_path.exists():
+                return False, [f"Skill file not found for '{name}': {file_path}"]
+
+            # Parse new content to extract version and validate
+            tmp_dir = None
+            try:
+                # Temporarily write to temp for parsing (reuse register pattern)
+                import uuid as _uuid
+                tmp_dir = Path(f".qwen/pending-skills/{_uuid.uuid4().hex}")
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                tmp_file = tmp_dir / "SKILL.md"
+                tmp_file.write_text(skill_content, encoding='utf-8')
+
+                parsed = parse_skill_file(tmp_file)
+                new_version = normalize_version(parsed.get('frontmatter', {}).get('version', '1.0.0'))
+            except Exception as e:
+                # Clean up temp directory on parse failure
+                if tmp_dir and tmp_dir.exists():
+                    try:
+                        tmp_file.unlink(missing_ok=True)
+                        tmp_dir.rmdir()
+                    except OSError:
+                        pass  # Best-effort cleanup
+                return False, [f"Failed to parse updated skill content: {e}"]
+
+            # Clean up temp directory after successful parse
+            if tmp_dir and tmp_dir.exists():
+                try:
+                    (tmp_dir / "SKILL.md").unlink(missing_ok=True)
+                    tmp_dir.rmdir()
+                except OSError:
+                    pass  # Best-effort cleanup
+
+            # Preserve metrics for old version under a sub-key
+            with self._metrics_lock:
+                if name in self._metrics:
+                    metrics = self._metrics[name]
+                    metrics.setdefault('by_version', {})
+                    # Archive old version's load count (not total_loads, which is the running sum)
+                    old_loads = metrics['by_version'].get(old_version, 0)
+                    metrics['by_version'][old_version] = old_loads
+                    metrics['by_version'][new_version] = 0
+
+            # Write new content to same file path (atomic via temp + replace)
+            try:
+                tmp_out = file_path.with_suffix('.tmp')
+                tmp_out.write_text(skill_content, encoding='utf-8')
+                import os as _os
+                _os.replace(str(tmp_out), str(file_path))
+            except Exception as e:
+                return False, [f"Failed to write updated skill file: {e}"]
+
+            # Update registry entry
+            frontmatter = parsed.get('frontmatter', {})
+            self._skills_registry[name].update({
+                'description': frontmatter.get('description', existing.get('description', '')),
+                'version': new_version,
+                'triggers': frontmatter.get('triggers', existing.get('triggers', [])),
+                '_parsed_data': parsed,
+            })
+
+            # Rebuild matcher index
+            self._rebuild_index()
+
+            logger.info("[SKILLS] Updated skill '%s' from v%s to v%s", name, old_version, new_version)
+            return True, []
+
     # ── Auto-skill trigger hook ──────────────────────────────────────────────
 
     def check_and_inject_auto_skill_prompt(
