@@ -384,7 +384,7 @@ class TextChatAtOAI(BaseFnCallModel):
             # If the user didn't specify a model, and we are using our internal state,
             # send the generic 'original_model' name to allow the server to use whatever is loaded.
             request_model = self.original_model
-            
+
         log_api_post = generate_cfg.pop('log_api_post', False)
 
         # Update local infrastructure state if changed in UI

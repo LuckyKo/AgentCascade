@@ -26,14 +26,19 @@ import os
 
 # ── Parse instance-id BEFORE any agent_cascade imports ───────────────────────
 parser = argparse.ArgumentParser(description='AgentCascade Multi-Agent Orchestrator')
-parser.add_argument("--instance-id", type=str, default="", 
-                    help="Instance ID for parallel AC instances (alphanumeric + underscore, max 64 chars)")
+parser.add_argument("--instance-id", type=str, default=None, 
+                    help="Instance ID for parallel AC instances (alphanumeric + underscore, max 64 chars). "
+                         "Use --instance-id= to explicitly clear instance mode and ignore AGENT_CASCADE_INSTANCE_ID env var.")
 
 args_instance, remaining = parser.parse_known_args()
 
 # Determine raw ID: CLI overrides env var; validate ALWAYS (even env-only source)
+# None means "not provided" → fall back to env var. Empty string means "explicitly clear".
 from agent_cascade.instance_id import validate_instance_id
-raw_id = args_instance.instance_id if args_instance.instance_id else os.getenv("AGENT_CASCADE_INSTANCE_ID", "")
+if args_instance.instance_id is not None:
+    raw_id = args_instance.instance_id  # CLI provided (including explicit empty string to clear)
+else:
+    raw_id = os.getenv("AGENT_CASCADE_INSTANCE_ID", "")  # Fall back to env var
 
 try:
     validated_id = validate_instance_id(raw_id)
