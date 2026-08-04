@@ -68,7 +68,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] grep fails to use fast path sometimes. example: `{"pattern": "--swa-full", "path": "N:\\work\\WD\\llama.cpp"}`. Fixed: patterns starting with `-`/`--` were interpreted as CLI flags by ripgrep (exit code 2), causing silent fallback to slow Python path. Applied `-e` flag in `_try_subprocess_grep()` for both ripgrep and GNU grep branches to protect patterns from CLI parsing, plus added warning log for unexpected exit codes instead of silently falling back.
 - [x] call_agent and dismiss_agent tool toggles do not get exported properly when we export/import settings. same for Auto-Security. Fixed: added auto_security to EXTRA_PERSIST_KEYS in config_handlers.py, included it in export payload (ws_handlers.py handle_export_settings), restored on import with defensive hasattr check (handle_import_settings), added bounded retry loops in app.js for both tool toggle re-render and auto-security toggle update when importing while settings panel may not be visible.
 - [x] Improved `Self-Augmentation` skill to be prescriptive instead of aspirational. Key changes: concrete triggers ("when task mentions technology/framework/library/tool → scan_skills immediately"), clear distinction between load_skill tool (self-context) vs call_agent load_skill parameter (sub-agent context), proper tool invocation syntax, edge case guidance (no skills found, multiple matches), AUTO/NONE mode documentation, imperative language for skill creation. Went through 3 review iterations before commit.
-- [ ] lazy forced compression logic, it launches the compressor after an agent send a message past that limit, instead of checking right after a function return that it would put it past the threshold.
+- [x] lazy forced compression logic, it launches the compressor after an agent send a message past that limit, instead of checking right after a function return that it would put it past the threshold. Fixed: 4-layer defense-in-depth (see docs/compression_fix_plan.md). Phase 1: proactive post-tool check at end of _execute_detected_tools (88% threshold with reserve tokens). Phase 2: proactive check inside _drain_and_inject for async child results. Phase 3: hardened pre-LLM guard — fresh max_tokens, full recount when cache invalidated near threshold, cooldown override at 95%+, raises ContextWindowExceeded on max-attempts exceeded. Phase 4: non-destructive overflow detection in llm/base.py before silent truncation (3% tolerance). New settings: COMPRESSION_PROACTIVE_THRESHOLD=88%, COMPRESSION_CONTEXT_RESERVE_TOKENS=3000. All checks use _compression_lock around counts, wrapped in try/except. Passed full review cycle with critical fixes applied.
 - [x] make sure `--- CURRENT AVAILABLE RESOURCES (Auto-Injected) ---` gets added to the system prompt before the skills, and simplify to `## AVAILABLE AGENTS`
 - [ ] i think dismissing all idle agents clears the UI tabs or running async agents too. needs a check.
 - [ ] async agent calls that fail due to slot limitations leaves started child processes hanging. should have used the fallback to another API if the slot is busy, that was the whole job of the router.
@@ -84,4 +84,122 @@ Timed out after 30s waiting for endpoint slot on https://opencode.ai/zen/v1. Cur
 
 # Errors to investigate:
 
+# root agent dropped out of sleeping during a long async call? (maybe because the child agent ran a compression that switched the model?)
+2026-08-04 10:04:03,235 - config_handlers.py - 625 - DEBUG - [update_config] LLM config unchanged
+2026-08-04 10:04:03,235 - config_handlers.py - 625 - DEBUG - [update_config] LLM config unchanged
+2026-08-04 10:04:03,236 - config_handlers.py - 625 - DEBUG - [update_config] LLM config unchanged
+2026-08-04 10:04:03,236 - config_handlers.py - 243 - WARNING - [THREAD_POOL] resize_executor skipped — executor is None (pool just initialized?)
+2026-08-04 10:04:03,237 - __init__.py - 128 - INFO - [Workspace] Tiered folders updated: RO=0, RW=3
+2026-08-04 10:04:03,237 - agent_pool.py - 2026 - DEBUG - [CONFIG] Global configuration version incremented to 1
+2026-08-04 10:04:03,237 - config_handlers.py - 148 - DEBUG - [work_folders] Extra work folders unchanged
+2026-08-04 10:04:32,722 - agent_pool.py - 692 - DEBUG - Idle checker restarted
+2026-08-04 10:04:32,722 - agent_pool.py - 708 - DEBUG - Async registry executor recreated
+2026-08-04 10:04:32,724 - agent_pool.py - 711 - DEBUG - Stopped flag cleared — ready for new execution
+2026-08-04 10:04:32,724 - ws_handlers.py - 208 - DEBUG - Starting generation gen_id=1, instances={'Maine': 'IDLE'}, active_stack=0
+2026-08-04 10:04:32,725 - agent_pool.py - 692 - DEBUG - Idle checker restarted
+2026-08-04 10:04:32,725 - agent_pool.py - 708 - DEBUG - Async registry executor recreated
+2026-08-04 10:04:32,726 - agent_pool.py - 711 - DEBUG - Stopped flag cleared — ready for new execution
+2026-08-04 10:04:32,726 - execution_engine.py - 1051 - DEBUG - engine.run() ENTRY - instance=Maine
+2026-08-04 10:04:32,726 - agent_pool.py - 2413 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
+2026-08-04 10:04:32,726 - execution_engine.py - 857 - DEBUG - [SLOT_ACQUIRE] initial - instance=Maine, class=orchestrator
+2026-08-04 10:04:32,727 - execution_engine.py - 1129 - DEBUG - [TURN_START] Calling _setup_turn for Maine
+2026-08-04 10:04:32,734 - execution_engine.py - 1629 - INFO - [CACHE_REBUILD] Rebuilding working set for Maine (conv_len=1)
+2026-08-04 10:04:32,735 - execution_engine.py - 1740 - INFO - [CACHE_REBUILD] System prompt content CHANGED for Maine (len 7587→8453, first_diff@8: orig='You are Orchestrator.
+Technical lead a' new='You are Maine.
+Technical lead and oper')
+2026-08-04 10:04:32,737 - agent_instance_logger.py - 486 - INFO - Rewrote agent log n:\work\WD\AgentWorkspace\logs\orchestrator_Maine_20260804_100402.jsonl with 1 messages.
+2026-08-04 10:04:32,737 - execution_engine.py - 1164 - DEBUG - [TURN_DONE] Got messages=1, llm_messages=1
+2026-08-04 10:04:32,746 - execution_engine.py - 1247 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
+2026-08-04 10:04:32,749 - execution_engine.py - 2951 - INFO - Endpoint allocation updated for orchestrator: {'endpoint': 'LMS-27B-unc-MTP', 'api_base': 'http://127.0.0.1:1234/v1', 'model': 'qwen3.6-27b-fable-fus-mtp', 'max_input_tokens': 90000, 'rate_limit_rpm': 0, 'concurrency_limit': 0, 'prev_max_input_tokens': 0}
+2026-08-04 10:04:32,749 - base.py - 1031 - INFO - Agent [Orchestrator] - ALL tokens: 30, Available tokens: 88152
+2026-08-04 10:04:32,750 - oai.py - 77 - DEBUG - [CACHE] MISS creating new client key=('http://127.0.0.1:1234/v1', 'EMPTY')
+2026-08-04 10:04:45,860 - base.py - 1031 - INFO - Agent [Orchestrator] - ALL tokens: 907, Available tokens: 88152
+2026-08-04 10:04:54,716 - execution_engine.py - 1546 - DEBUG - EXIT - Maine RUNNING→IDLE
+2026-08-04 10:05:48,850 - agent_pool.py - 692 - DEBUG - Idle checker restarted
+2026-08-04 10:05:48,850 - agent_pool.py - 708 - DEBUG - Async registry executor recreated
+2026-08-04 10:05:48,853 - agent_pool.py - 711 - DEBUG - Stopped flag cleared — ready for new execution
+2026-08-04 10:05:48,853 - ws_handlers.py - 208 - DEBUG - Starting generation gen_id=2, instances={'Maine': 'IDLE'}, active_stack=0
+2026-08-04 10:05:48,854 - agent_pool.py - 692 - DEBUG - Idle checker restarted
+2026-08-04 10:05:48,854 - agent_pool.py - 708 - DEBUG - Async registry executor recreated
+2026-08-04 10:05:48,855 - agent_pool.py - 711 - DEBUG - Stopped flag cleared — ready for new execution
+2026-08-04 10:05:48,855 - execution_engine.py - 1051 - DEBUG - engine.run() ENTRY - instance=Maine
+2026-08-04 10:05:48,855 - agent_pool.py - 2413 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=orchestrator, instance_name=Maine, api_base=http://127.0.0.1:1234/v1, concurrency_limit=0
+2026-08-04 10:05:48,856 - execution_engine.py - 857 - DEBUG - [SLOT_ACQUIRE] initial - instance=Maine, class=orchestrator
+2026-08-04 10:05:48,856 - execution_engine.py - 1129 - DEBUG - [TURN_START] Calling _setup_turn for Maine
+2026-08-04 10:05:48,856 - execution_engine.py - 1624 - DEBUG - [CACHE_HIT] Reusing cached messages=5, llm_messages=5
+2026-08-04 10:05:48,857 - execution_engine.py - 1164 - DEBUG - [TURN_DONE] Got messages=5, llm_messages=5
+2026-08-04 10:05:48,867 - execution_engine.py - 1247 - DEBUG - [PRE_LLM_CHECK] Condition met, continuing loop
+2026-08-04 10:05:48,869 - base.py - 1031 - INFO - Agent [Orchestrator] - ALL tokens: 1086, Available tokens: 88152
+2026-08-04 10:06:27,506 - tool_dispatcher.py - 665 - DEBUG - call_agent nesting - Maine depth=1/10
+2026-08-04 10:06:28,834 - tool_dispatcher.py - 538 - DEBUG - Taking ASYNC path - Maine calls compression_timing_investigator/researcher at depth 1
+2026-08-04 10:06:28,837 - tool_dispatcher.py - 552 - DEBUG - ASYNC - compression_timing_investigator launched by Maine
+2026-08-04 10:06:28,837 - tool_dispatcher.py - 130 - DEBUG - handle_call_agent returned type=str
+2026-08-04 10:06:28,843 - base.py - 1031 - INFO - Agent [Orchestrator] - ALL tokens: 1879, Available tokens: 88152
+2026-08-04 10:06:28,869 - execution_engine.py - 4389 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent ENTRY — target=compression_timing_investigator, class=researcher, caller=Maine, nest_depth=1, force_fresh=False
+2026-08-04 10:06:28,869 - lifecycle_manager.py - 194 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for compression_timing_investigator
+2026-08-04 10:06:28,887 - execution_engine.py - 4476 - DEBUG - starting engine.run() for compression_timing_investigator
+2026-08-04 10:06:28,888 - execution_engine.py - 1051 - DEBUG - engine.run() ENTRY - instance=compression_timing_investigator
+2026-08-04 10:06:28,888 - agent_pool.py - 2413 - DEBUG - [CALL_AGENT_DEBUG] _acquire_slot — agent_class=researcher, instance_name=compression_timing_investigator, api_base=https://opencode.ai/zen/v1, concurrency_limit=1
+2026-08-04 10:06:28,889 - execution_engine.py - 857 - DEBUG - [SLOT_ACQUIRE] initial - instance=compression_timing_investigator, class=researcher
+2026-08-04 10:06:28,889 - execution_engine.py - 1129 - DEBUG - [TURN_START] Calling _setup_turn for compression_timing_investigator
+2026-08-04 10:06:28,889 - execution_engine.py - 1629 - INFO - [CACHE_REBUILD] Rebuilding working set for compression_timing_investigator (conv_len=2)
+2026-08-04 10:06:28,890 - execution_engine.py - 1740 - INFO - [CACHE_REBUILD] System prompt content CHANGED for compression_timing_investigator (len 4167→4698, tail_diff)
+2026-08-04 10:06:28,890 - agent_instance_logger.py - 486 - INFO - Rewrote agent log n:\work\WD\AgentWorkspace\logs\researcher_compression_timing_investigator_20260804_100628.jsonl with 2 messages.
+2026-08-04 10:06:28,891 - execution_engine.py - 1164 - DEBUG - [TURN_DONE] Got messages=2, llm_messages=2
+2026-08-04 10:06:28,894 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 579, Available tokens: 164502
+2026-08-04 10:06:28,897 - oai.py - 77 - DEBUG - [CACHE] MISS creating new client key=('https://opencode.ai/zen/v1', 'sk-jnrvmjpYtgqgzOGcImpuN4rJwiLmCQKimU9gCOG6ksDYhMoOaVylobuWHopaEHnv')
+2026-08-04 10:06:31,364 - execution_engine.py - 3842 - DEBUG - Pending async tools for Maine. Transitioning to SLEEPING.
+2026-08-04 10:06:31,365 - execution_engine.py - 4152 - DEBUG - WAITING for background tools - Maine (0.0s)
+2026-08-04 10:06:32,158 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 2738, Available tokens: 164502
+2026-08-04 10:06:35,990 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 10323, Available tokens: 164502
+2026-08-04 10:06:36,417 - execution_engine.py - 4146 - INFO - SLEEPING - Maine waiting 5.0s for background tools
+2026-08-04 10:06:36,417 - execution_engine.py - 4152 - DEBUG - WAITING for background tools - Maine (5.0s)
+2026-08-04 10:06:41,461 - execution_engine.py - 4146 - INFO - SLEEPING - Maine waiting 10.1s for background tools
+2026-08-04 10:06:41,461 - execution_engine.py - 4152 - DEBUG - WAITING for background tools - Maine (10.1s)
+2026-08-04 10:06:43,103 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 15409, Available tokens: 164502
+2026-08-04 10:06:46,509 - execution_engine.py - 4146 - INFO - SLEEPING - Maine waiting 15.1s for background tools
+2026-08-04 10:06:46,509 - execution_engine.py - 4152 - DEBUG - WAITING for background tools - Maine (15.1s)
+...
+2026-08-04 10:13:37,213 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 141575, Available tokens: 164502
+2026-08-04 10:14:47,281 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 142932, Available tokens: 164502
+2026-08-04 10:16:27,364 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 144218, Available tokens: 164502
+2026-08-04 10:16:32,103 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 148111, Available tokens: 164502
+2026-08-04 10:17:46,671 - lifecycle_manager.py - 194 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for Compressor_1
+2026-08-04 10:17:46,827 - execution_engine.py - 1051 - DEBUG - engine.run() ENTRY - instance=Compressor_1
+2026-08-04 10:17:46,840 - execution_engine.py - 1129 - DEBUG - [TURN_START] Calling _setup_turn for Compressor_1
+2026-08-04 10:17:46,842 - execution_engine.py - 1629 - INFO - [CACHE_REBUILD] Rebuilding working set for Compressor_1 (conv_len=2)
+2026-08-04 10:17:46,842 - execution_engine.py - 1767 - DEBUG - [CACHE_REBUILD] System prompt for Compressor_1 textually identical — skipping pool update
+2026-08-04 10:17:46,842 - execution_engine.py - 1164 - DEBUG - [TURN_DONE] Got messages=2, llm_messages=2
+2026-08-04 10:17:46,845 - base.py - 1031 - INFO - Agent [Compressor] - ALL tokens: 91745, Available tokens: 124582
+2026-08-04 10:19:26,448 - execution_engine.py - 1546 - DEBUG - EXIT - Compressor_1 RUNNING→IDLE
+2026-08-04 10:19:26,553 - handler.py - 427 - DEBUG - Logger sync after compress_context tool for 'compression_timing_investigator': pool_len=104, using reset_history() for full sync
+2026-08-04 10:19:26,594 - agent_instance_logger.py - 594 - INFO - Synced compression marker in n:\work\WD\AgentWorkspace\logs\researcher_compression_timing_investigator_20260804_100628.jsonl (204 messages).
+2026-08-04 10:19:26,619 - execution_engine.py - 2190 - DEBUG - Rebuilt working sets for compression_timing_investigator: messages=104, llm_messages=104
+2026-08-04 10:19:26,628 - execution_engine.py - 2190 - DEBUG - Rebuilt working sets for compression_timing_investigator: messages=104, llm_messages=104
+2026-08-04 10:19:26,643 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 59915, Available tokens: 164502
+2026-08-04 10:19:58,144 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 62985, Available tokens: 164502
+2026-08-04 10:20:02,001 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 64173, Available tokens: 164502
+2026-08-04 10:20:06,448 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 65850, Available tokens: 164502
+2026-08-04 10:21:02,480 - agent_pool.py - 2977 - INFO - [idle_checker] Auto-dismissing idle system agent (Compressor) 'Compressor_1' (idle for 96s, threshold=60s)
+2026-08-04 10:21:02,480 - agent_pool.py - 810 - DEBUG - Instance conversation cleanup key missing (expected): 'Compressor_1'
+2026-08-04 10:21:02,481 - agent_pool.py - 2902 - INFO - [idle_checker] Auto-dismissed 1 idle agent(s): Compressor_1
+2026-08-04 10:21:33,660 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 75740, Available tokens: 164502
+2026-08-04 10:21:39,526 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 77234, Available tokens: 164502
+2026-08-04 10:21:44,840 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 77841, Available tokens: 164502
+2026-08-04 10:21:50,527 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 78593, Available tokens: 164502
+2026-08-04 10:21:56,706 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 79825, Available tokens: 164502
+2026-08-04 10:22:10,417 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 80604, Available tokens: 164502
+2026-08-04 10:22:14,466 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 81133, Available tokens: 164502
+2026-08-04 10:22:18,687 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 81574, Available tokens: 164502
+2026-08-04 10:22:23,641 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 82253, Available tokens: 164502
+2026-08-04 10:22:28,939 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 82925, Available tokens: 164502
+2026-08-04 10:22:33,236 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 83466, Available tokens: 164502
+2026-08-04 10:22:38,012 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 84282, Available tokens: 164502
+2026-08-04 10:22:41,901 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 84636, Available tokens: 164502
+2026-08-04 10:22:47,389 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 84964, Available tokens: 164502
+2026-08-04 10:22:53,241 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 85336, Available tokens: 164502
+2026-08-04 10:22:59,865 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 85967, Available tokens: 164502
+2026-08-04 10:23:04,020 - base.py - 1031 - INFO - Agent [Researcher] - ALL tokens: 87132, Available tokens: 164502
+2026-08-04 10:23:14,814 - execution_engine.py - 1546 - DEBUG - EXIT - compression_timing_investigator RUNNING→IDLE
+2026-08-04 10:23:14,841 - execution_engine.py - 4591 - DEBUG - [CALL_AGENT_DEBUG] _create_and_run_agent EXIT — target=compression_timing_investigator, reason=completed, inst_type=AgentInstance, conv_len=2, final_resp_len=262
 

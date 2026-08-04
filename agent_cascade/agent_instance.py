@@ -19,6 +19,7 @@ from agent_cascade.llm.schema import Message
 from agent_cascade.settings import (
     DEFAULT_COMPRESSION_COOLDOWN_SECONDS, DEFAULT_COMPRESSION_MAX_ATTEMPTS,
     COMPRESSION_FORCE_THRESHOLD, COMPRESSION_WARNING_THRESHOLD, COMPRESSION_TIMEOUT,
+    DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD, DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS,
     COMPRESSION_SECURITY_CHECK_TIMEOUT,
     AGENT_IDLE_TIMEOUT, SYSTEM_AGENT_IDLE_TIMEOUT, AGENT_IDLE_CHECK_INTERVAL,
     AGENT_MAX_AUTO_ROLLBACKS, AGENT_MAX_NESTING_DEPTH, AGENT_MAX_WORKERS,
@@ -611,6 +612,8 @@ class PoolSettings:
     idle_check_interval: float = AGENT_IDLE_CHECK_INTERVAL  # Check every N seconds
     compression_force_threshold: float = COMPRESSION_FORCE_THRESHOLD  # Force compress at X% usage
     compression_warning_threshold: float = COMPRESSION_WARNING_THRESHOLD  # Warn at X% usage
+    compression_proactive_threshold: float = DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD  # Proactive compress at X% (post-tool, async drain)
+    compression_context_reserve_tokens: int = DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS  # Tokens reserved for LLM overhead
     compression_timeout: float = COMPRESSION_TIMEOUT  # Max seconds for compression to complete
     compression_force_cooldown: float = DEFAULT_COMPRESSION_COOLDOWN_SECONDS  # Minimum seconds between forced compressions (prevent thrashing)
     compression_max_attempts: int = DEFAULT_COMPRESSION_MAX_ATTEMPTS  # Safety net max forced compressions (overridable via env var)

@@ -55,6 +55,10 @@ COMPRESSION_WARNING_THRESHOLD: float = float(os.getenv(
     'QWEN_AGENT_COMPRESSION_WARNING_THRESHOLD', 90.0))  # Warn at X% token usage
 COMPRESSION_TIMEOUT: float = float(os.getenv(
     'QWEN_AGENT_COMPRESSION_TIMEOUT', 120.0))  # Max seconds for compression to complete
+DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD: float = float(os.getenv(
+    'QWEN_AGENT_DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD', 88.0))  # Proactive compress at X% usage (post-tool, async drain checks)
+DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS: int = int(os.getenv(
+    'QWEN_AGENT_COMPRESSION_CONTEXT_RESERVE_TOKENS', 3000))  # Tokens reserved for LLM call overhead (system prompt, function schemas, reasoning)
 COMPRESSION_DEFAULT_FRACTION: float = float(os.getenv(
     'QWEN_AGENT_COMPRESSION_DEFAULT_FRACTION', 0.7))  # Default fraction of history to discard (70%)
 COMPRESSION_MIN_FRACTION: float = float(os.getenv(

@@ -464,7 +464,7 @@ class CompressionHandler:
     def check_cooldown(
         self,
         instance: AgentInstance,
-        llm_messages: List[Message],
+        llm_messages: Optional[List[Message]],
         usage_pct: float
     ) -> bool:
         """Check if compression cooldown is active.
@@ -473,7 +473,7 @@ class CompressionHandler:
         
         Args:
             instance: Agent instance
-            llm_messages: Working set for warning injection
+            llm_messages: Working set for warning injection (may be None in proactive checks)
             usage_pct: Current token usage percentage
             
         Returns:
@@ -491,9 +491,12 @@ class CompressionHandler:
                     f"Forced compression cooldown active for {inst_name}: "
                     f"{elapsed:.1f}s / {cooldown:.1f}s — skipping this cycle"
                 )
-                current_tokens = self.engine._count_history_tokens(instance.conversation, instance)
-                max_tokens = self.engine._get_max_tokens(instance)
-                self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens)
+                # Only inject warning if llm_messages is available (Phase 3 path).
+                # Proactive checks (Phase 1/2) may not have llm_messages readily available.
+                if llm_messages is not None:
+                    current_tokens = self.engine._count_history_tokens(instance.conversation, instance)
+                    max_tokens = self.engine._get_max_tokens(instance)
+                    self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens)
                 return True
             
             # Mark this compression attempt (under lock for thread safety)
@@ -506,7 +509,7 @@ class CompressionHandler:
     def check_overfeeding(
         self,
         instance: AgentInstance,
-        llm_messages: List[Message],
+        llm_messages: Optional[List[Message]],
         response: Optional[List[Message]] = None
     ) -> bool:
         """Check if overfeeding threshold exceeded.
@@ -546,7 +549,7 @@ class CompressionHandler:
         self,
         instance: AgentInstance,
         messages: List[Message],
-        llm_messages: List[Message],
+        llm_messages: Optional[List[Message]],
         usage_pct: float,
         response: Optional[List[Message]] = None
     ) -> bool:
