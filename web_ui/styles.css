@@ -524,6 +524,11 @@ body {
   animation: subtab-pulse 1.5s ease-in-out infinite;
 }
 
+/* Non-blinking variant for active-but-not-streaming agents */
+.sub-tab-pulse.static {
+  animation: none;
+}
+
 @keyframes subtab-pulse {
   0%,
   100% {

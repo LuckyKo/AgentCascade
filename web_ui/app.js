@@ -3266,18 +3266,25 @@ function renderSubAgents() {
     // Update tab content safely (preserves handlers on closeBtn)
     const iconSpan = tabBtn.querySelector('.tab-icon-container');
     if (iconSpan) {
-      // Show pulsing indicator only when actively streaming LLM output
+      // Show dot for active agents, pulse only when streaming
       const isStreaming = agentData?.is_partial ?? false;
+      const agentState = (agentData?.agent_state || 'idle').toLowerCase();
+      const shouldShowDot = !['idle', 'terminated'].includes(agentState);
       
-      // Only update icon innerHTML when active state actually changed to avoid GPU churn
+      // Only update icon innerHTML when active state or streaming status actually changes to avoid GPU churn
       const prevActive = tabBtn.dataset.isActive === 'true';
-      if (prevActive !== isStreaming) {
+      const prevStreaming = tabBtn.dataset.isStreaming === 'true';
+      if (prevActive !== shouldShowDot || (shouldShowDot && prevStreaming !== isStreaming)) {
         const icon = agentData?.agent_class === 'orchestrator' ? '💬' : '🤖';
-        iconSpan.innerHTML = isStreaming 
-          ? '<span class="sub-tab-pulse"></span> ' + `<span class="main-tab-icon">${icon}</span>` 
-          : `<span class="main-tab-icon">${icon}</span>`;
+        if (shouldShowDot) {
+          const pulseClass = isStreaming ? 'sub-tab-pulse' : 'sub-tab-pulse static';
+          iconSpan.innerHTML = '<span class="' + pulseClass + '"></span> ' + `<span class="main-tab-icon">${icon}</span>`;
+        } else {
+          iconSpan.innerHTML = `<span class="main-tab-icon">${icon}</span>`;
+        }
       }
-      tabBtn.dataset.isActive = String(isStreaming);
+      tabBtn.dataset.isActive = String(shouldShowDot);
+      tabBtn.dataset.isStreaming = String(isStreaming);
     }
     
     // Update agent state class for colored activity indicator (needed for CSS selectors)
@@ -3768,14 +3775,22 @@ function updateControls() {
       if (activeTabEl) {
         const iconContainer = activeTabEl.querySelector('.tab-icon-container');
         if (iconContainer) {
-          const icon = state.subAgents[activeAgentName]?.agent_class === 'orchestrator' ? '💬' : '🤖';
-          const isStreaming = state.subAgents[activeAgentName]?.is_partial ?? false;
+          const agentData = state.subAgents[activeAgentName];
+          const icon = agentData?.agent_class === 'orchestrator' ? '💬' : '🤖';
+          const isStreaming = agentData?.is_partial ?? false;
+          const agentState = (agentData?.agent_state || 'idle').toLowerCase();
+          const shouldShowDot = !['idle', 'terminated'].includes(agentState);
           const prevActive = activeTabEl.dataset.isActive === 'true';
-          if (prevActive !== isStreaming) {
-            iconContainer.innerHTML = isStreaming
-              ? '<span class="sub-tab-pulse"></span> ' + `<span class="main-tab-icon">${icon}</span>`
-              : `<span class="main-tab-icon">${icon}</span>`;
-            activeTabEl.dataset.isActive = String(isStreaming);
+          const prevStreaming = activeTabEl.dataset.isStreaming === 'true';
+          if (prevActive !== shouldShowDot || (shouldShowDot && prevStreaming !== isStreaming)) {
+            if (shouldShowDot) {
+              const pulseClass = isStreaming ? 'sub-tab-pulse' : 'sub-tab-pulse static';
+              iconContainer.innerHTML = '<span class="' + pulseClass + '"></span> ' + `<span class="main-tab-icon">${icon}</span>`;
+            } else {
+              iconContainer.innerHTML = `<span class="main-tab-icon">${icon}</span>`;
+            }
+            activeTabEl.dataset.isActive = String(shouldShowDot);
+            activeTabEl.dataset.isStreaming = String(isStreaming);
           }
         }
       }
@@ -3790,14 +3805,22 @@ function updateControls() {
       if (activeTabEl) {
         const iconContainer = activeTabEl.querySelector('.tab-icon-container');
         if (iconContainer) {
-          const icon = state.subAgents[activeAgentName]?.agent_class === 'orchestrator' ? '💬' : '🤖';
-          const isStreaming = state.subAgents[activeAgentName]?.is_partial ?? false;
+          const agentData = state.subAgents[activeAgentName];
+          const icon = agentData?.agent_class === 'orchestrator' ? '💬' : '🤖';
+          const isStreaming = agentData?.is_partial ?? false;
+          const agentState = (agentData?.agent_state || 'idle').toLowerCase();
+          const shouldShowDot = !['idle', 'terminated'].includes(agentState);
           const prevActive = activeTabEl.dataset.isActive === 'true';
-          if (prevActive !== isStreaming) {
-            iconContainer.innerHTML = isStreaming
-              ? '<span class="sub-tab-pulse"></span> ' + `<span class="main-tab-icon">${icon}</span>`
-              : `<span class="main-tab-icon">${icon}</span>`;
-            activeTabEl.dataset.isActive = String(isStreaming);
+          const prevStreaming = activeTabEl.dataset.isStreaming === 'true';
+          if (prevActive !== shouldShowDot || (shouldShowDot && prevStreaming !== isStreaming)) {
+            if (shouldShowDot) {
+              const pulseClass = isStreaming ? 'sub-tab-pulse' : 'sub-tab-pulse static';
+              iconContainer.innerHTML = '<span class="' + pulseClass + '"></span> ' + `<span class="main-tab-icon">${icon}</span>`;
+            } else {
+              iconContainer.innerHTML = `<span class="main-tab-icon">${icon}</span>`;
+            }
+            activeTabEl.dataset.isActive = String(shouldShowDot);
+            activeTabEl.dataset.isStreaming = String(isStreaming);
           }
         }
       }
