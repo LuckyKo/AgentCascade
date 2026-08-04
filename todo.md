@@ -35,7 +35,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [x] pass the supervisor's log file together with the name in the system prompt metadata, like: `Supervisor: Maine (orchestrator_Maine_20260731_023711.jsonl)` so sub-agents can easily find it if instructions are unclear — DONE: Added `_get_supervisor_log_filename()` helper in execution_engine.py. Modified `_build_session_metadata()` to append supervisor's log filename (basename only) when available. Graceful fallback to name-only when logger unavailable.
 [x] check for multiple AC instances launched in parallel — implemented instance separation via AGENT_CASCADE_INSTANCE_ID env var + --instance-id CLI flag. Instance-specific paths for console logs, pool settings, telemetry dirs, agent logs. Validation prevents path traversal. 33 unit tests passing. See INSTANCE_SEPARATION_PLAN.md and agent_cascade/instance_id.py
 [ ] extra work paths could be tied to each session, they'd have to be loaded when we load existing sessions from the metadata entry.
-[ ] full inner loop mode audit, case by case investigation. make sure all modes add value or if they need trimming. they all need to catch actual loops (like [A,B,C,D,D,D] and never fall for repetitions that are NOT loops, like [A,D,B,C,D,E,D])
+[x] full inner loop mode audit — DONE: Replaced all scoring-based modes (sentence/ngram/block/entropy) with two-phase semantic loop detector (heuristic suspicion → exact match confirmation → cooldown on failure). Char_run + max_chars preserved unchanged as last line of defense. 62 tests passing. See docs/inner_loop_audit_plan.md and docs/inner_loop_phase0_baseline.md for details.
 
 
 # BUGS:

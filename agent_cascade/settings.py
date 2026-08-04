@@ -160,42 +160,62 @@ LM_STUDIO_KEEPALIVE_SECONDS: float = float(os.getenv(
 class InnerLoopSettings:
     """Tunable parameters for the inner-loop repetition detector.
 
+    After Phase 3 cleanup, only char_run and max_chars guards plus the
+    two-phase semantic loop detector remain active. All scoring-based fields
+    below are DEPRECATED and kept only for backward compatibility with existing
+    code that constructs InnerLoopSettings with explicit values.
+
+    Active detection modes:
+    - Character run detection (char_run_enabled, char_run_limit)
+    - Max chars guard (default_max_chars)
+    - Two-phase semantic loop detector (configured via two_phase_loop_detect.py settings)
+
     All fields have defaults matching current production values. Override by
     constructing a custom instance and passing it to ``InnerLoopDetector``.
     """
 
-    # Memory bounds
-    max_counter_entries: int = 200          # Max entries per Counter before pruning
-    max_tokens: int = 1000                 # Max tokens in the sliding window
+    # ── Active settings ────────────────────────────────────────────────
+
+    # Character run detection (last line of defense against degenerate output)
+    char_run_enabled: bool = os.getenv('QWEN_AGENT_LOOP_CHAR_RUN', '1') != '0'
+    char_run_limit: int = 129              # Max consecutive identical chars before alert
 
     # Activation thresholds
-    default_min_chars: int = 4000          # Min chars to accumulate before full detection
-    default_batch_interval: int = 1        # Run heavy checks every N-th feed call
+    default_min_chars: int = 4000          # Min chars to accumulate before full detection (kept for compatibility)
     default_max_chars: int = 40960         # Hard character limit — force-trigger detection if exceeded (~8K tokens)
 
-    # Structural parameters (passed to InnerLoopDetector constructor)
-    ngram_size: int = 64                   # Token window size for n-gram repetition
-    block_size: int = 128                  # Token window size for block repetition
-    entropy_window: int = 128             # Token window for Shannon entropy calculation
-    char_run_limit: int = 70              # Max consecutive identical chars before alert
-    score_threshold: int = 350            # Cumulative score to trigger loop detection. Kept at original value; FP reduction comes from higher repetition thresholds (sentence=15, ngram=7, block=6). A single repeating pattern maxes ~290 points with one-time scoring, so raising this above 350 would make single-pattern loops undetectable.
+    # ── Deprecated settings (scoring-based modes removed in Phase 3) ────
+    # These fields are no longer used by InnerLoopDetector but kept for backward
+    # compatibility with code that passes explicit values when constructing settings.
 
-    # Detection thresholds (hardcoded in detection logic)
-    sentence_repetition_threshold: int = 15  # Sentence count to flag repetition (raised from 9 to reduce FPs on fragmented similar phrases in technical writing)
-    ngram_repetition_threshold: int = 7      # N-gram count to flag repetition (raised from 5 to require stronger repetition signal)
-    block_repetition_threshold: int = 6      # Block count to flag repetition (raised from 4; blocks of 128 tokens repeating 4x was too aggressive)
-    entropy_threshold: float = 2.0          # Shannon entropy below which a loop is suspected
+    # Memory bounds (deprecated — scoring counters removed)
+    max_counter_entries: int = 200          # DEPRECATED: was max entries per Counter before pruning
+    max_tokens: int = 1000                 # DEPRECATED: was max tokens in the sliding window
 
-    # Scoring
-    score_decay_rate: float = 0.97         # Multiplicative decay per feed cycle
-    max_score: int = 500                   # Hard cap to prevent unbounded score growth (defensive safety net)
+    # Activation thresholds (deprecated)
+    default_batch_interval: int = 1        # DEPRECATED: was run heavy checks every N-th feed call
 
-    # Per-mode toggles — disable individual detection modes via env vars
-    char_run_enabled: bool = os.getenv('QWEN_AGENT_LOOP_CHAR_RUN', '1') != '0'
-    sentence_rep_enabled: bool = os.getenv('QWEN_AGENT_LOOP_SENTENCE_REP', '1') != '0'
-    ngram_rep_enabled: bool = os.getenv('QWEN_AGENT_LOOP_NGRAM_REP', '1') != '0'
-    block_rep_enabled: bool = os.getenv('QWEN_AGENT_LOOP_BLOCK_REP', '1') != '0'
-    entropy_collapse_enabled: bool = os.getenv('QWEN_AGENT_LOOP_ENTROPY', '1') != '0'
+    # Structural parameters (deprecated — scoring modes removed)
+    ngram_size: int = 64                   # DEPRECATED: was token window size for n-gram repetition scoring
+    block_size: int = 128                  # DEPRECATED: was token window size for block repetition scoring
+    entropy_window: int = 128             # DEPRECATED: was token window for Shannon entropy calculation
+
+    # Scoring system (deprecated — entirely removed)
+    score_threshold: int = 350            # DEPRECATED: was cumulative score to trigger loop detection
+    score_decay_rate: float = 0.97         # DEPRECATED: was multiplicative decay per feed cycle
+    max_score: int = 500                   # DEPRECATED: was hard cap to prevent unbounded score growth
+
+    # Detection thresholds (deprecated — scoring modes removed)
+    sentence_repetition_threshold: int = 15  # DEPRECATED: was sentence count to flag repetition
+    ngram_repetition_threshold: int = 7      # DEPRECATED: was n-gram count to flag repetition
+    block_repetition_threshold: int = 6      # DEPRECATED: was block count to flag repetition
+    entropy_threshold: float = 2.0          # DEPRECATED: was Shannon entropy below which a loop is suspected
+
+    # Per-mode toggles for removed modes (deprecated)
+    sentence_rep_enabled: bool = os.getenv('QWEN_AGENT_LOOP_SENTENCE_REP', '1') != '0'   # DEPRECATED: sentence scoring removed
+    ngram_rep_enabled: bool = os.getenv('QWEN_AGENT_LOOP_NGRAM_REP', '1') != '0'          # DEPRECATED: n-gram scoring removed
+    block_rep_enabled: bool = os.getenv('QWEN_AGENT_LOOP_BLOCK_REP', '1') != '0'          # DEPRECATED: block scoring removed
+    entropy_collapse_enabled: bool = os.getenv('QWEN_AGENT_LOOP_ENTROPY', '1') != '0'     # DEPRECATED: entropy detection removed
 
 # ── Code interpreter settings (Feature: CI session sharing) ────────────────
 CI_EXECUTION_TIMEOUT: int = int(os.getenv('M6_CODE_INTERPRETER_EXEC_TIMEOUT', '120'))   # Per-call execution timeout (seconds)

@@ -2618,19 +2618,13 @@ class ExecutionEngine:
                 last_streaming_update_time = time.monotonic()
 
                 # Inner-loop detector: fresh instance per retry attempt to
-                # catch generation loops mid-stream
-                # Build settings from pool (UI-overridable) so per-mode toggles
-                # apply in real time
+                # catch generation loops mid-stream. Uses char_run + max_chars
+                # (last line of defense) and optional two-phase semantic detection.
                 _ps = self.pool.settings
                 _inner_settings = _InnerLoopSettings(
                     default_min_chars=getattr(_ps, 'loop_min_chars', 4000),
                     default_max_chars=getattr(_ps, 'loop_max_chars', 40960),
-                    score_threshold=getattr(_ps, 'loop_score_threshold', 350),
                     char_run_enabled=getattr(_ps, 'loop_char_run_enabled', True),
-                    sentence_rep_enabled=getattr(_ps, 'loop_sentence_rep_enabled', True),
-                    ngram_rep_enabled=getattr(_ps, 'loop_ngram_rep_enabled', True),
-                    block_rep_enabled=getattr(_ps, 'loop_block_rep_enabled', True),
-                    entropy_collapse_enabled=getattr(_ps, 'loop_entropy_enabled', True),
                 )
                 _inner_detector = InnerLoopDetector(settings=_inner_settings)
                 _prev_text_len = 0  # Tracks accumulated text length for delta extraction (delta_stream=False)
