@@ -168,6 +168,9 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-shell-char-limit', prop: 'value', key: 'shell_char_limit', localKey: 'shell-char-limit' },
   { id: '#setting-code-char-limit', prop: 'value', key: 'code_char_limit', localKey: 'code-char-limit' },
   { id: '#setting-list-dir-char-limit', prop: 'value', key: 'list_dir_char_limit', localKey: 'list-dir-char-limit' },
+  // Approval timeout settings
+  { id: '#settingApprovalTimeoutEnabled', prop: 'checked', key: 'enable_approval_timeout', localKey: 'approval-timeout-enabled' },
+  { id: '#settingApprovalTimeoutSeconds', prop: 'value', key: 'approval_timeout_seconds', localKey: 'approval-timeout-seconds' },
 ];
 
 /** Sync pool settings from server state to UI elements.
@@ -4596,7 +4599,7 @@ function getGenerateCfg() {
 
   // Approval timeout settings
   if (approvalTimeoutSeconds && approvalTimeoutSeconds.value) cfg.approval_timeout_seconds = parseInt(approvalTimeoutSeconds.value) || 300;
-  if (approvalTimeoutEnabled.length) cfg.enable_approval_timeout = approvalTimeoutEnabled.checked;
+  if (approvalTimeoutEnabled) cfg.enable_approval_timeout = approvalTimeoutEnabled.checked;
 
   // Cache pool settings
   if ($('#setting-cache-pool-enabled')) cfg.cache_pool_enabled = $('#setting-cache-pool-enabled').checked;

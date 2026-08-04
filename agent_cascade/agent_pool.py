@@ -389,6 +389,14 @@ class AgentPool:
                 if self._loaded_auto_security is not None:
                     data['auto_security'] = self._loaded_auto_security
 
+                # Add approval timeout settings from operation_manager if available
+                if hasattr(self, 'operation_manager') and self.operation_manager:
+                    om = self.operation_manager
+                    if hasattr(om, 'enable_timeout'):
+                        data['enable_approval_timeout'] = om.enable_timeout
+                    if hasattr(om, 'approval_timeout_seconds'):
+                        data['approval_timeout_seconds'] = om.approval_timeout_seconds
+
                 with open(self._pool_settings_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
@@ -420,6 +428,8 @@ class AgentPool:
             work_folders_rw_raw = data.pop('work_access_folders_rw', None)
             default_workspace_raw = data.pop('default_workspace', None)
             auto_security_raw = data.pop('auto_security', None)
+            enable_approval_timeout_raw = data.pop('enable_approval_timeout', None)
+            approval_timeout_seconds_raw = data.pop('approval_timeout_seconds', None)
 
             # Replace settings with loaded values (defaults fill gaps for new fields)
             self.settings = PoolSettings.from_dict(data)
@@ -443,6 +453,15 @@ class AgentPool:
             # Store auto_security for later application in create_app()
             if auto_security_raw is not None:
                 self._loaded_auto_security = bool(auto_security_raw)
+
+            # Store approval timeout settings for later application in _apply_pending_config
+            if enable_approval_timeout_raw is not None:
+                self._pending_enable_approval_timeout = bool(enable_approval_timeout_raw)
+            if approval_timeout_seconds_raw is not None:
+                try:
+                    self._pending_approval_timeout_seconds = int(approval_timeout_seconds_raw)
+                except (ValueError, TypeError):
+                    logger.warning(f"[PoolSettings] Invalid approval_timeout_seconds value, ignoring.")
 
         except Exception as e:
             logger.error(f"[PoolSettings] Failed to load settings from {self._pool_settings_path}: {e}. Using defaults.")
@@ -507,6 +526,17 @@ class AgentPool:
                         logger.info(f"[PoolSettings] Applied saved default workspace: {ws_path}")
                 except Exception as e:
                     logger.warning(f"[PoolSettings] Failed to apply saved default workspace: {e}")
+
+        # Restore approval timeout settings from pool_settings.json
+        om = getattr(self, 'operation_manager', None)
+        if om:
+            try:
+                if hasattr(self, '_pending_enable_approval_timeout'):
+                    om.set_enable_timeout(self._pending_enable_approval_timeout)
+                if hasattr(self, '_pending_approval_timeout_seconds'):
+                    om.set_approval_timeout(self._pending_approval_timeout_seconds)
+            except Exception as e:
+                logger.warning(f"[PoolSettings] Failed to restore approval timeout settings: {e}")
 
     # ── Child relationship helper (centralized mutation for Bug41 fix) ────────
 
