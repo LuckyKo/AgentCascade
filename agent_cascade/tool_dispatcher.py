@@ -12,6 +12,7 @@ Design Pattern: Lazy Initialization (same as AgentLifecycleManager, CompressionH
 - self.engine property raises RuntimeError if accessed before initialization
 """
 
+import os
 import time
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
@@ -549,7 +550,12 @@ class ToolDispatcher:
         )
 
         logger.debug("ASYNC - %s launched by %s", instance_name, caller_name)
-        return f"Agent '{instance_name}' launched asynchronously. You can continue working or stop, you will be woken up when the result is available."
+        
+        # Get the logger to include filename in the response
+        child_logger = self.pool.get_logger(instance_name, agent_class)
+        log_filename = os.path.basename(child_logger.log_path)
+        
+        return f"Agent '{instance_name}' ({log_filename}) launched asynchronously. You can continue working or stop, you will be woken up when the result is available."
 
     def _reacquire_caller_slot(
         self,

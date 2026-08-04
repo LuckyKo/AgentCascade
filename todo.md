@@ -54,11 +54,10 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] compression task message included in image embeds of a message that is was not even in the compressed range of messages. the image embeds should not be sent at all to compressor, it already receives the caption data (fixed — added agent_class param to build_task_message, skip image embedding for Compressor, removed post-hoc stripping code)
 - [x] add truncation with helper to list_dir, keep head mode. (done - uses truncate_with_spillover, head mode, char_limit=3000 default)
 - [x] UI issue: auto scroll to bottom keeps dropping after long tool outputs or reasoning (fixed — replaced requestAnimationFrame with immediate scroll, added programmaticScrollCount guard, debounce timer cleanup, tab switch lock reset)
-- [ ] add inner loop counter to telemetry's loop detected
 - [x] odd useless truncation message on `list_dir` tool, should contain spillover path (should use helper truncation function like other tools, is there another one?): [TRUNCATED — Character limit exceeded.]. also needs the char limit added to the UI
 - [x] overly aggressive stick to bottom function, active when streaming even when the user is actively scrolling up. it should NOT be fighting the user (fixed — immediate unlock on scroll up, visibility guard prevents auto-scroll on hidden tabs, lock released when tab becomes invisible)
 - [x] sub agent kicked back to caller when the API connection dropped mid normal assistant message streaming (fixed — broadened retry_model_service_iterator in llm/base.py to catch all Exceptions during streaming, not just ModelServiceError; network errors now retry with exponential backoff up to max_retries)
-- [ ] inner loop detection does not seem to pick up if loop is happening within a tool call.
+- [ ] inner loop detection does not seem to pick up if loop is happening within a tool call streaming. (very rare event, but worth noting)
 - [x] Write a proper README.md that describes the project as a whole and offers easy install & use instructions (completed — comprehensive README covering architecture, features, installation, usage with correct port/endpoints, programmatic access, and troubleshooting)
 - [x] context token estimation (the one in base.py) is off by about 10% less than what llama.cpp reports as receiving. (fixed — added CHAT_TEMPLATE_TOKEN_OVERHEAD=5 per message to get_message_stats() in utils/utils.py, and unified _count_history_tokens() in execution_engine.py to use get_message_stats() instead of raw qwen_count(); error dropped from ~37% to ~4%)
 - [ ] approval timeout doesn't seem to take into account the enable toggle in UI 
@@ -67,7 +66,6 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] in UI change `Auto-Ask` to `Auto-Security` and make sure its also saved over refresh/restart like the other settings. Fixed: renamed label in index.html line 225, persistence was already working via localStorage key 'auto-security'.
 - [x] switching auto-ask off during Security processing makes the notification tab pop back up again once the process has been aproved/denied, and it can't be closed back without refresh. Fixed: added guard in security_response handler to skip stale responses when approval already processed, plus cleanup of securityResponses/activeSecurityChecks in approveRequest/rejectRequest functions.
 - [x] grep fails to use fast path sometimes. example: `{"pattern": "--swa-full", "path": "N:\\work\\WD\\llama.cpp"}`. Fixed: patterns starting with `-`/`--` were interpreted as CLI flags by ripgrep (exit code 2), causing silent fallback to slow Python path. Applied `-e` flag in `_try_subprocess_grep()` for both ripgrep and GNU grep branches to protect patterns from CLI parsing, plus added warning log for unexpected exit codes instead of silently falling back.
-```
 - [x] call_agent and dismiss_agent tool toggles do not get exported properly when we export/import settings. same for Auto-Security. Fixed: added auto_security to EXTRA_PERSIST_KEYS in config_handlers.py, included it in export payload (ws_handlers.py handle_export_settings), restored on import with defensive hasattr check (handle_import_settings), added bounded retry loops in app.js for both tool toggle re-render and auto-security toggle update when importing while settings panel may not be visible.
 - [x] Improved `Self-Augmentation` skill to be prescriptive instead of aspirational. Key changes: concrete triggers ("when task mentions technology/framework/library/tool → scan_skills immediately"), clear distinction between load_skill tool (self-context) vs call_agent load_skill parameter (sub-agent context), proper tool invocation syntax, edge case guidance (no skills found, multiple matches), AUTO/NONE mode documentation, imperative language for skill creation. Went through 3 review iterations before commit.
 - [ ] lazy forced compression logic, it launches the compressor after an agent send a message past that limit, instead of checking right after a function return that it would put it past the threshold.
@@ -79,8 +77,10 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 Timed out after 30s waiting for endpoint slot on https://opencode.ai/zen/v1. Current active count: 1, max allowed: 1. Currently held by: phase1_reviewer_worker (generalist)
 ```
 - [x] the `Self-Augmentation` skill does not always get inserted on new agent call — fixed: now always injected when skills toggle is enabled, regardless of load_skill mode (AUTO or explicit list). Previously gated behind AUTO-only check.
-- [ ] add launched agent's log file name to the async call agent reply. Like: `Agent 'grep_investigator' (researcher_grep_investigator_20260804_062314.jsonl) launched asynchronously...``
+- [x] add launched agent's log file name to the async call agent reply. Fixed: in _run_child_async() (tool_dispatcher.py), call pool.get_logger() before returning the confirmation message, include os.path.basename(log_path) in the message format.
 - [ ] remove the tools info from `list_agents`, make sure we catch all agent states (it's missing some)
+- [ ] UI refine: make the blinking motion of the activity bubble in the agent tabs (the dot in front of the name) only blink for the ones actively streaming
+- [ ] telemetry: add `Malformed` info to session-stats telemetry (how many times we hit the Auto-continue logic); in `loops detected` count the inner loops too
 
 # Errors to investigate:
 
