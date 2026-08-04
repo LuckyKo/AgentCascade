@@ -3264,17 +3264,16 @@ function renderSubAgents() {
     if (iconSpan) {
       // Show pulsing indicator only when actively streaming LLM output
       const isStreaming = agentData?.is_partial ?? false;
-      const shouldShowIndicator = isStreaming;
       
       // Only update icon innerHTML when active state actually changed to avoid GPU churn
       const prevActive = tabBtn.dataset.isActive === 'true';
-      if (prevActive !== shouldShowIndicator) {
+      if (prevActive !== isStreaming) {
         const icon = agentData?.agent_class === 'orchestrator' ? '💬' : '🤖';
-        iconSpan.innerHTML = shouldShowIndicator 
+        iconSpan.innerHTML = isStreaming 
           ? '<span class="sub-tab-pulse"></span> ' + `<span class="main-tab-icon">${icon}</span>` 
           : `<span class="main-tab-icon">${icon}</span>`;
       }
-      tabBtn.dataset.isActive = String(shouldShowIndicator);
+      tabBtn.dataset.isActive = String(isStreaming);
     }
     
     // Update agent state class for colored activity indicator (needed for CSS selectors)
@@ -3770,8 +3769,8 @@ function updateControls() {
           const prevActive = activeTabEl.dataset.isActive === 'true';
           if (prevActive !== isStreaming) {
             iconContainer.innerHTML = isStreaming
-              ? '<span class="sub-tab-pulse"></span> <span class="main-tab-icon">' + icon + '</span>'
-              : '<span class="main-tab-icon">' + icon + '</span>';
+              ? '<span class="sub-tab-pulse"></span> ' + `<span class="main-tab-icon">${icon}</span>`
+              : `<span class="main-tab-icon">${icon}</span>`;
             activeTabEl.dataset.isActive = String(isStreaming);
           }
         }
@@ -3792,8 +3791,8 @@ function updateControls() {
           const prevActive = activeTabEl.dataset.isActive === 'true';
           if (prevActive !== isStreaming) {
             iconContainer.innerHTML = isStreaming
-              ? '<span class="sub-tab-pulse"></span> <span class="main-tab-icon">' + icon + '</span>'
-              : '<span class="main-tab-icon">' + icon + '</span>';
+              ? '<span class="sub-tab-pulse"></span> ' + `<span class="main-tab-icon">${icon}</span>`
+              : `<span class="main-tab-icon">${icon}</span>`;
             activeTabEl.dataset.isActive = String(isStreaming);
           }
         }
