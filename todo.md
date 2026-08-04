@@ -66,12 +66,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] if the compressor assigned model does not have enough context window we dont fallback to next endpoint, we keep retrying the same point over and over
 - [x] in UI change `Auto-Ask` to `Auto-Security` and make sure its also saved over refresh/restart like the other settings. Fixed: renamed label in index.html line 225, persistence was already working via localStorage key 'auto-security'.
 - [x] switching auto-ask off during Security processing makes the notification tab pop back up again once the process has been aproved/denied, and it can't be closed back without refresh. Fixed: added guard in security_response handler to skip stale responses when approval already processed, plus cleanup of securityResponses/activeSecurityChecks in approveRequest/rejectRequest functions.
-- [ ] grep fails to use fast path sometimes. example:
-```
-{
-  "pattern": "--swa-full",
-  "path": "N:\\work\\WD\\llama.cpp"
-}
+- [x] grep fails to use fast path sometimes. example: `{"pattern": "--swa-full", "path": "N:\\work\\WD\\llama.cpp"}`. Fixed: patterns starting with `-`/`--` were interpreted as CLI flags by ripgrep (exit code 2), causing silent fallback to slow Python path. Applied `-e` flag in `_try_subprocess_grep()` for both ripgrep and GNU grep branches to protect patterns from CLI parsing, plus added warning log for unexpected exit codes instead of silently falling back.
 ```
 - [x] call_agent and dismiss_agent tool toggles do not get exported properly when we export/import settings. same for Auto-Security. Fixed: added auto_security to EXTRA_PERSIST_KEYS in config_handlers.py, included it in export payload (ws_handlers.py handle_export_settings), restored on import with defensive hasattr check (handle_import_settings), added bounded retry loops in app.js for both tool toggle re-render and auto-security toggle update when importing while settings panel may not be visible.
 - [x] Improved `Self-Augmentation` skill to be prescriptive instead of aspirational. Key changes: concrete triggers ("when task mentions technology/framework/library/tool → scan_skills immediately"), clear distinction between load_skill tool (self-context) vs call_agent load_skill parameter (sub-agent context), proper tool invocation syntax, edge case guidance (no skills found, multiple matches), AUTO/NONE mode documentation, imperative language for skill creation. Went through 3 review iterations before commit.
@@ -84,6 +79,8 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 Timed out after 30s waiting for endpoint slot on https://opencode.ai/zen/v1. Current active count: 1, max allowed: 1. Currently held by: phase1_reviewer_worker (generalist)
 ```
 - [x] the `Self-Augmentation` skill does not always get inserted on new agent call — fixed: now always injected when skills toggle is enabled, regardless of load_skill mode (AUTO or explicit list). Previously gated behind AUTO-only check.
+- [ ] add launched agent's log file name to the async call agent reply. Like: `Agent 'grep_investigator' (researcher_grep_investigator_20260804_062314.jsonl) launched asynchronously...``
+- [ ] remove the tools info from `list_agents`, make sure we catch all agent states (it's missing some)
 
 # Errors to investigate:
 

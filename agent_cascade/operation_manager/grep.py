@@ -113,7 +113,7 @@ class GrepMixin:
                 if exclude:
                     cmd.extend(['--glob', f'!{exclude}'])
 
-                cmd.append(pattern)
+                cmd.extend(['-e', pattern])
             else:
                 cmd = [
                     'grep',
@@ -141,7 +141,7 @@ class GrepMixin:
                 for _exc in self._GREP_DEFAULT_EXCLUDES:
                     cmd.append('--exclude=' + _exc)
 
-                cmd.append(pattern)
+                cmd.extend(['-e', pattern])
 
             result = subprocess.run(
                 cmd,
@@ -284,6 +284,11 @@ class GrepMixin:
             # Non-zero return code (e.g., grep returns 1 for no matches) — still valid
             if result.returncode == 1:
                 return [], 0, False, False, 0
+
+            # Unexpected non-zero exit code (e.g., rg returns 2 for usage errors like unrecognized flags)
+            stderr_msg = (result.stderr or "").strip()[:500]
+            logger.warning(f"grep subprocess failed with exit code {result.returncode} (falling back to Python): {stderr_msg}")
+            return None, 0, False, False, 0
 
         except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError) as e:
             logger.debug(f"grep subprocess unavailable (falling back to Python): {e}")
