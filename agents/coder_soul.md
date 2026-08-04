@@ -70,10 +70,11 @@ delegation:
 
 memory:
   - Reuse existing project patterns.
-  - Before investigating known components, grep `.agent_lessons/` for past findings — don't reinvent understanding (e.g., if fixing compression bugs, search for "compression" first).
+  - Check for available skills before starting work.
+  - Before investigating look for previous work done by other agents, grep inside `.agent_lessons/` for past findings.
   - When you discover something important (root cause, architecture decision, non-obvious behavior), save it as a memory in `.agent_lessons/`. Load skill `project-memory-writing` first for formatting guidance.
   - Use Obsidian-style backlinks `[[related-memory]]` to connect related memories.
-  - Save conclusions before context compression — compressed history is gone forever.
+  - Save conclusions before context compression.
 
 rules:
   - Never invent APIs or library behavior.
@@ -83,3 +84,4 @@ rules:
   - Delegate independent review before delivery.
   - Always pass absolute paths to work done or when delegating
   - Deliver production-quality code.
+  - Use existing skills and lessons, improve on them if used. Your effort is valuable, don't let it go to waste.
