@@ -635,13 +635,13 @@ class PoolSettings:
     inner_loop_detect_enabled: bool = False   # Enable in-message loop detection during streaming
     loop_min_chars: int = 4000                # Min chars before activating heavy checks
     loop_max_chars: int = 40960               # Hard char limit — force-trigger detection if exceeded (~8K tokens)
-    loop_score_threshold: int = 350           # Cumulative score to trigger detection (aligned with InnerLoopSettings.default; FP reduction comes from higher repetition thresholds, not inflated score threshold)
+    loop_score_threshold: int = 350           # DEPRECATED — scoring-based detection removed in Phase 3
 
     # Per-mode toggles for inner-loop detector (individual detection modes)
     loop_char_run_enabled: bool = True        # Character run detection
-    loop_sentence_rep_enabled: bool = True    # Sentence repetition detection
-    loop_ngram_rep_enabled: bool = True       # N-gram repetition detection
-    loop_block_rep_enabled: bool = True       # Block repetition detection
+    loop_sentence_rep_enabled: bool = True    # DEPRECATED — sentence repetition detection removed in Phase 3
+    loop_ngram_rep_enabled: bool = True       # DEPRECATED — n-gram repetition detection removed in Phase 3
+    loop_block_rep_enabled: bool = True       # DEPRECATED — block repetition detection removed in Phase 3
     loop_entropy_enabled: bool = True         # Entropy collapse detection
 
     # Retry policy settings (Phase 6 — exposed via UI/Config with validation)

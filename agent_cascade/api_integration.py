@@ -805,11 +805,7 @@ def build_state_from_pool(
             'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False),
             'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
             'loop_max_chars': getattr(ps, 'loop_max_chars', 40960),
-            'loop_score_threshold': getattr(ps, 'loop_score_threshold', 350),
             'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),
-            'loop_sentence_rep_enabled': getattr(ps, 'loop_sentence_rep_enabled', True),
-            'loop_ngram_rep_enabled': getattr(ps, 'loop_ngram_rep_enabled', True),
-            'loop_block_rep_enabled': getattr(ps, 'loop_block_rep_enabled', True),
             'loop_entropy_enabled': getattr(ps, 'loop_entropy_enabled', True),
             # Skills system
             'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
@@ -990,11 +986,7 @@ def build_stream_update_from_pool(
             'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False),
             'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
             'loop_max_chars': getattr(ps, 'loop_max_chars', 40960),
-            'loop_score_threshold': getattr(ps, 'loop_score_threshold', 350),
             'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),
-            'loop_sentence_rep_enabled': getattr(ps, 'loop_sentence_rep_enabled', True),
-            'loop_ngram_rep_enabled': getattr(ps, 'loop_ngram_rep_enabled', True),
-            'loop_block_rep_enabled': getattr(ps, 'loop_block_rep_enabled', True),
             'loop_entropy_enabled': getattr(ps, 'loop_entropy_enabled', True),
             # Skills system
             'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),

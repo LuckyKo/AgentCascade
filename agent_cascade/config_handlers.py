@@ -31,9 +31,8 @@ POOL_SETTINGS_KEYS = frozenset({
     'auto_continue', 'enable_agent_budgeting', 'max_turns', 'max_auto_rollbacks',
     'auto_rollback_on_loop',
     # Inner-loop detection
-    'inner_loop_detect_enabled', 'loop_min_chars', 'loop_max_chars', 'loop_score_threshold',
-    'loop_char_run_enabled', 'loop_sentence_rep_enabled', 'loop_ngram_rep_enabled',
-    'loop_block_rep_enabled', 'loop_entropy_enabled',
+    'inner_loop_detect_enabled', 'loop_min_chars', 'loop_max_chars',
+    'loop_char_run_enabled', 'loop_entropy_enabled',
     # Skills system
     'default_load_skill_mode', 'auto_skill_enabled',
     # Retry policy
@@ -292,45 +291,6 @@ def _handle_loop_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list
     """Update maximum character limit for inner loop detection."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         agent_pool.settings.loop_max_chars = max(1000, int(ui_cfg.get('loop_max_chars', 40960)))
-
-
-@register_config_handler('loop_score_threshold')
-def _handle_loop_score_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Update cumulative score threshold for loop detection."""
-    if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.loop_score_threshold = max(50, int(ui_cfg.get('loop_score_threshold', 350)))
-
-
-@register_config_handler('loop_char_run_enabled')
-def _handle_loop_char_run(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Toggle character run detection mode."""
-    if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.loop_char_run_enabled = bool(
-            ui_cfg.get('loop_char_run_enabled', True))
-
-
-@register_config_handler('loop_sentence_rep_enabled')
-def _handle_loop_sentence_rep(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Toggle sentence repetition detection mode."""
-    if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.loop_sentence_rep_enabled = bool(
-            ui_cfg.get('loop_sentence_rep_enabled', True))
-
-
-@register_config_handler('loop_ngram_rep_enabled')
-def _handle_loop_ngram_rep(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Toggle n-gram repetition detection mode."""
-    if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.loop_ngram_rep_enabled = bool(
-            ui_cfg.get('loop_ngram_rep_enabled', True))
-
-
-@register_config_handler('loop_block_rep_enabled')
-def _handle_loop_block_rep(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Toggle block repetition detection mode."""
-    if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.loop_block_rep_enabled = bool(
-            ui_cfg.get('loop_block_rep_enabled', True))
 
 
 @register_config_handler('loop_entropy_enabled')

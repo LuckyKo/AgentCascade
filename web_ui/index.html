@@ -540,32 +540,16 @@
                         <input type="number" id="setting-loop-max-chars" min="1000" max="100000" step="1000" value="40960" />
                       </label>
                       <label class="setting-field">
-                        <span title="Cumulative score to trigger loop detection">Score Threshold</span>
-                        <input type="number" id="setting-loop-score-threshold" min="50" max="500" step="10" value="300" />
-                      </label>
-                      <label class="setting-field">
-                        <span title="Number of retries after inner-loop detection before giving up (separate from LLM retry budget)">Inner Loop Retries</span>
-                        <input type="number" id="setting-loop-max-retries" min="0" max="20" step="1" value="2" />
+                      <span title="Number of retries after inner-loop detection before giving up (separate from LLM retry budget)">Inner Loop Retries</span>
+                      <input type="number" id="setting-loop-max-retries" min="0" max="20" step="1" value="2" />
                       </label>
                       <label class="setting-field toggle-field">
-                        <span title="Detect consecutive identical characters">Char Run</span>
-                        <input type="checkbox" id="setting-loop-char-run" checked />
+                      <span title="Detect consecutive identical characters">Char Run</span>
+                      <input type="checkbox" id="setting-loop-char-run" checked />
                       </label>
                       <label class="setting-field toggle-field">
-                        <span title="Detect repeated sentences in output">Sentence Rep</span>
-                        <input type="checkbox" id="setting-loop-sentence-rep" checked />
-                      </label>
-                      <label class="setting-field toggle-field">
-                        <span title="Detect repeated n-gram token patterns">N-Gram Rep</span>
-                        <input type="checkbox" id="setting-loop-ngram-rep" checked />
-                      </label>
-                      <label class="setting-field toggle-field">
-                        <span title="Detect repeated block patterns in output">Block Rep</span>
-                        <input type="checkbox" id="setting-loop-block-rep" checked />
-                      </label>
-                      <label class="setting-field toggle-field">
-                        <span title="Detect low Shannon entropy (degenerate generation)">Entropy Collapse</span>
-                        <input type="checkbox" id="setting-loop-entropy" checked />
+                      <span title="Detect low Shannon entropy (degenerate generation)">Entropy Collapse</span>
+                      <input type="checkbox" id="setting-loop-entropy" checked />
                       </label>
                     </div>
                     <!-- End Loop Tuning -->
