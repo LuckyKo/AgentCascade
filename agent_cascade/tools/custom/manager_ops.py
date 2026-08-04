@@ -1,5 +1,30 @@
+from typing import Tuple
+
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.prompts.dna import TOOL_METADATA
+
+
+def _format_agent_status(state_name: str, is_halted: bool) -> Tuple[str, str]:
+    """Map AgentState + halted overlay to display emoji and text.
+
+    Args:
+        state_name: The agent's state name (e.g., "RUNNING", "IDLE").
+        is_halted: Whether the instance is halted (overrides normal state).
+
+    Returns:
+        Tuple[str, str]: (emoji, status_text) for display.
+    """
+    base = {
+        "IDLE": ("⚪", "Idle"),
+        "RUNNING": ("🟢", "Running"),
+        "SLEEPING": ("🟡", "Sleeping"),
+        "COMPLETING": ("🔵", "Completing"),
+        "TERMINATED": ("🔴", "Terminated"),
+    }.get(state_name, ("⚫", state_name))
+
+    if is_halted and state_name not in ("TERMINATED",):
+        return ("🟣", f"{base[1]} (Halted)")
+    return base
 
 
 @register_tool('list_agents', allow_overwrite=True)
@@ -27,51 +52,43 @@ class ListAgents(BaseTool):
         lines = ["# Agent Management Inventory\n"]
         lines.append("Use this list to monitor context usage and status of your workers. "
                      "To delegate a new task, use `call_agent`. To free up resources, use `dismiss_agent`.\n")
-        
+
         # 1. Available Agent Templates
         lines.append("## 1. Agent Templates (Available Classes)")
         for agent_name in self.agent_pool.list_agents():
             info = self.agent_pool.get_agent_info(agent_name)
             tagline = (info.get('tagline') or 'No tagline available.') if info else 'No template info available.'
-            # description = info.get('description', '') if info else ''
-            tools = info.get('tools', []) if info else []
-            tools_str = f" [Capabilities: {', '.join(tools)}]" if tools else ""
-            
-            lines.append(f"- **{agent_name}**: {tagline}{tools_str}")
-            # if description:
-            #     # Add truncated background for context
-            #     short_desc = description.strip().split('\n')[0]
-            #     if len(short_desc) > 200: short_desc = short_desc[:197] + "..."
-            #     lines.append(f"  _{short_desc}_")
+            lines.append(f"- **{agent_name}**: {tagline}")
         lines.append("")
 
         # 2. Active & Persistent Instances
         lines.append("## 2. Active Instances (Sessions)")
-        
+
         # Get all known instances from classes or conversations
-        all_instances = sorted(list(set(self.agent_pool.instance_classes.keys()) | 
+        all_instances = sorted(list(set(self.agent_pool.instance_classes.keys()) |
                                     set(self.agent_pool.instance_conversations.keys())))
-        
+
         if not all_instances:
             lines.append("- No active or persistent instances.")
         else:
             for inst_name in all_instances:
                 cls_name = self.agent_pool.instance_classes.get(inst_name, "Unknown")
                 inst_obj = self.agent_pool.instances.get(inst_name)
-                is_executing = inst_obj.is_running if inst_obj else False
-                status_emoji = "🟢" if is_executing else "⚪"
-                status_text = "ACTIVE" if is_executing else "IDLE"
-                
+                state_name = inst_obj.get_state_name() if inst_obj else "UNKNOWN"
+                is_halted = self.agent_pool.is_instance_halted(inst_name) if self.agent_pool else False
+
+                status_emoji, status_text = _format_agent_status(state_name, is_halted)
+
                 # Context Metrics
                 msgs = self.agent_pool.get_conversation(inst_name)
                 # We slice history to show exactly what the LLM is currently working with
                 active_msgs = self.agent_pool.slice_history_for_llm(msgs) if self.agent_pool else msgs
                 stats = get_history_stats(active_msgs)
-                
+
                 # Metadata & Traceability
                 logger_inst = self.agent_pool.instance_loggers.get(inst_name)
                 log_path = logger_inst.log_path if logger_inst and hasattr(logger_inst, 'log_path') else "N/A"
-                
+
                 last_active = "Unknown"
                 if logger_inst and hasattr(logger_inst, 'data'):
                     ts_str = logger_inst.data['metadata'].get('last_update')
@@ -93,7 +110,7 @@ class ListAgents(BaseTool):
                 lines.append(f"  - **Summary**: {summary}")
                 lines.append(f"  - **Log Path**: `{log_path}`")
                 lines.append("")
-        
+
         return "\n".join(lines)
 
 

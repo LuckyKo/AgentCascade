@@ -31,16 +31,16 @@ from agent_cascade.settings import (
 
 class AgentState(Enum):
     """Agent lifecycle states for the state machine.
-    
+
     States and valid transitions:
     - IDLE: Agent exists but is not currently executing (initial state after creation)
     - RUNNING: Agent is actively processing inside engine.run()
     - SLEEPING: Agent is waiting for async background tools to complete
     - COMPLETING: Agent has finished its work, cleaning up
     - TERMINATED: Agent has been terminated (final state)
-    
+
     Valid transitions are enforced by _transition() method.
-    
+
     The state machine fully replaces the old is_active boolean field:
     - IDLE replaces is_active=False (agent not executing)
     - RUNNING replaces is_active=True (agent executing)
@@ -54,7 +54,7 @@ class AgentState(Enum):
 
 class InvalidStateTransition(Exception):
     """Raised when an invalid state transition is attempted."""
-    
+
     def __init__(self, current_state: AgentState, new_state: AgentState):
         self.current_state = current_state
         self.new_state = new_state
@@ -66,7 +66,7 @@ class InvalidStateTransition(Exception):
 @dataclass(slots=True)
 class CacheEntry:
     """Single entry in the argument/output cache pool.
-    
+
     Stores a tool argument dict or output string along with metadata
     for display and resolution via {USE_CACHED_ENTRY_N} syntax.
     """
@@ -80,27 +80,27 @@ class CacheEntry:
 
 class ArgumentCachePool:
     """Thread-safe rolling cache pool for tool arguments and outputs.
-    
+
     Per-instance scope with a fixed-size deque that wraps around,
     overwriting oldest entries when the limit is reached.
-    
+
     Indices grow monotonically (never reset). An evicted entry's index
     becomes stale — lookups return None, which signals callers to leave
     placeholders as-is.
     """
     __slots__ = ('_entries', '_lock', '_next_index', 'max_size', 'enabled')
-    
+
     def __init__(self, max_size: int = 50):
         self._entries: deque[CacheEntry] = deque(maxlen=max_size)
         self._lock = threading.Lock()
         self._next_index = 1          # Monotonically increasing (never wraps/reset)
         self.max_size = max_size
         self.enabled = True           # Toggle on/off
-    
+
     def add(self, category: str, source_tool: str, value: Any,
             threshold: int = 0) -> int:
         """Add entry and return its index N. Returns -1 when disabled or below threshold.
-        
+
         Args:
             category: "arg" or "output"
             source_tool: Tool name (e.g. "read_file", "read_file.path")
@@ -141,7 +141,7 @@ class ArgumentCachePool:
             idx = self._next_index
             self._next_index += 1
             return idx
-    
+
     def get(self, index: int) -> Optional['CacheEntry']:
         """Look up entry by its N index. Returns None if evicted or not found."""
         with self._lock:
@@ -149,7 +149,7 @@ class ArgumentCachePool:
                 if entry.index == index:
                     return entry
             return None  # Entry was evicted (too old) — caller should leave placeholder as-is
-    
+
     def get_state_summary(self, max_display: int = 10) -> str:
         """Return truncated state string for system_info display.
 
@@ -160,10 +160,10 @@ class ArgumentCachePool:
         with self._lock:
             entries = list(self._entries)
             head = self._next_index  # Next index to be assigned (exclusive upper bound)
-        
+
         if not entries:
             return "  Cache Pool: empty\n"
-        
+
         lines = [f"  Cache Pool: {len(entries)}/{self.max_size} entries (enabled={self.enabled})\n"]
         # Show entries in [head - max_display : head) range, newest first
         cutoff = head - max_display
@@ -180,12 +180,12 @@ class ArgumentCachePool:
             tool_label = f"{e.source_tool:<24}"
             lines.append(f"    [N={e.index:>3}] [{marker}] {tool_label}"
                         f"({e.char_count} chars)  \"{p}\"")
-        
+
         older = [e for e in entries if e.index <= cutoff]
         if older:
             indices = ", ".join(str(e.index) for e in older[:5])
             lines.append(f"    ... and {len(older)} older entries (oldest: N={indices}...)")
-        
+
         return "\n".join(lines)
 
 
@@ -194,17 +194,17 @@ class AgentInstance:
     """
     The canonical representation of any agent — main or sub.
 
-    Required fields (no default): instance_name, agent_class, conversation, 
+    Required fields (no default): instance_name, agent_class, conversation,
         created_at, last_activity, latest_marker_index.
 
-    Optional fields (has defaults): state (default IDLE), and all remaining fields 
+    Optional fields (has defaults): state (default IDLE), and all remaining fields
         for compression, token tracking, nesting, etc.
 
     The instance_name uniquely identifies an agent in the pool.
 
     Design principle: AgentInstance is primarily DATA. All orchestration logic
     lives in ExecutionEngine, not here. This dataclass just holds state.
-    
+
     State machine replaces the old is_active boolean field. Use the state property
     or is_running() helper method to check execution status.
     """
@@ -226,7 +226,7 @@ class AgentInstance:
     # ── Execution State (with defaults) ─────────────────────────────────
     state: AgentState = field(default=AgentState.IDLE)  # Current lifecycle state (default: IDLE, not RUNNING)
     _state_lock: threading.RLock = field(default_factory=threading.RLock)  # Lock for state transitions
-    
+
     # SLEEPING state tracking fields (for async tools) - part of Execution State
     sleeping_since: Optional[float] = None  # time.monotonic() when entered SLEEPING state
     _last_wakeup_log: float = field(default=0.0)  # Last time wakeup message was logged
@@ -283,7 +283,7 @@ class AgentInstance:
     _last_endpoint_config: Optional[dict] = None  # Cached endpoint config (api_base, model, state_save_enabled) for state save/restore decisions
     _cached_llm_messages: List[Message] = field(default_factory=list)  # Sliced working set for LLM
     _last_config_version: int = field(default=-1)                      # Pool config version at last rebuild
-    
+
     # ── Loop Detection Cooldown (Fix /compress Bug) ───────────────────────────
     # After compression/rollback, the conversation state has concentrated patterns that can trigger
     # false-positive loop detection. This flag suppresses loop detection on the next turn only.
@@ -543,10 +543,10 @@ class AgentInstance:
 
     def _transition(self, new_state: AgentState) -> None:
         """Transition to a new state with validation.
-        
+
         Args:
             new_state: The target state to transition to.
-            
+
         Raises:
             InvalidStateTransition: If the transition is not valid.
         """
@@ -558,10 +558,10 @@ class AgentInstance:
             AgentState.TERMINATED: set(),  # Terminal state - no transitions out
             AgentState.IDLE: {AgentState.RUNNING, AgentState.TERMINATED},
         }
-        
+
         if new_state not in valid_transitions.get(self.state, set()):
             raise InvalidStateTransition(self.state, new_state)
-        
+
         self.state = new_state
 
     # ── Helper properties (replaces the old is_active boolean) ──────────
@@ -569,10 +569,10 @@ class AgentInstance:
     @property
     def is_running(self) -> bool:
         """Check if this agent is currently executing inside engine.run().
-        
+
         Replaces the old is_active boolean field. Returns True when state is RUNNING.
         Thread-safe: reads self.state under _state_lock protection.
-        
+
         Returns:
             bool: True if state == AgentState.RUNNING, False otherwise.
         """
@@ -581,14 +581,25 @@ class AgentInstance:
 
     def is_executing(self) -> bool:
         """Alias for is_running, provided for code clarity in some contexts.
-        
+
         Thread-safe: reads self.state under _state_lock protection.
-        
+
         Returns:
             bool: True if agent is actively processing (RUNNING state).
         """
         with self._state_lock:
             return self.state == AgentState.RUNNING
+
+    def get_state_name(self) -> str:
+        """Return the current agent state as a string (e.g., "RUNNING", "IDLE").
+
+        Thread-safe: reads self.state under _state_lock protection.
+
+        Returns:
+            str: The name of the current AgentState enum value.
+        """
+        with self._state_lock:
+            return self.state.name
 
 
 @dataclass
@@ -664,7 +675,7 @@ class PoolSettings:
     @classmethod
     def from_dict(cls, data: dict) -> 'PoolSettings':
         """Deserialize settings from a dictionary.
-        
+
         Gracefully handles missing keys (uses defaults) and unknown keys (ignores).
         Uses dataclass __init__ with filtered kwargs for type safety.
         """
@@ -675,5 +686,5 @@ class PoolSettings:
             return cls(**kwargs)
         except (TypeError, ValueError) as e:
             raise ValueError(f"Invalid pool_settings.json: {e}") from e
-    
-    
+
+

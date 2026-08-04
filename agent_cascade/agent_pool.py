@@ -1009,7 +1009,7 @@ class AgentPool:
     def get_agent_info(self, name: str) -> dict | None:
         """Return info dict for an agent template (name, tagline/description, tools).
 
-        Used by list_agents tool and the default prompt builder.
+        Used by the default prompt builder and internal lookups.
         Returns None if the template is not found.
         """
         template = self.get_template(name)
