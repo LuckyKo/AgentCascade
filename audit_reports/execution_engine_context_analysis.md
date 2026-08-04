@@ -290,7 +290,7 @@ clear_truncation_state()
 
 The engine exports these to api_integration (bidirectional dependency):
 - `ExecutionEngine` class (for type hints and subclassing)
-- `_build_resources_block(pool, template, instance)` — builds "CURRENT AVAILABLE RESOURCES" block for system prompts
+- `_build_resources_block(pool, template, instance)` — builds "## AVAILABLE AGENTS" block for system prompts
 - `_replace_resources_block(content, new_block)` — replaces existing resources block in system prompt
 - `_build_session_metadata(pool, instance)` — builds session metadata block
 - `_replace_section(content, section_header, new_content)` — generic section replacement

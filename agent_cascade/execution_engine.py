@@ -416,7 +416,7 @@ def _is_incomplete_state(turn_output: List[Message]) -> str | None:
 
 
 def _build_resources_block(pool, template, instance=None) -> str:
-    """Build the '--- CURRENT AVAILABLE RESOURCES' block reflecting current disabled_tools.
+    """Build the '## AVAILABLE AGENTS' block reflecting current disabled_tools.
 
     This is used both during initial injection and to refresh the block when
     disabled_tools changes at runtime (e.g., user toggles tools via UI).
@@ -476,7 +476,7 @@ def _build_resources_block(pool, template, instance=None) -> str:
     if not content_parts:
         return ""
 
-    return "\n\n--- CURRENT AVAILABLE RESOURCES (Auto-Injected) ---\n" + "".join(content_parts)
+    return "\n\n## AVAILABLE AGENTS\n" + "".join(content_parts)
 
 
 def _build_skills_block(loaded_skills: list) -> str:
@@ -541,7 +541,22 @@ def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=
         return False
 
     skills_block = _build_skills_block(skills_to_inject)
-    sys_msg.content += skills_block
+
+    # Ensure consistent order: AVAILABLE AGENTS → Active Skills.
+    # If AVAILABLE AGENTS block exists, insert skills after it; otherwise append at end.
+    if "## AVAILABLE AGENTS" in sys_msg.content:
+        # Find the end of the AVAILABLE AGENTS block (next ## heading or end).
+        # Pattern captures from the heading through content to next section boundary.
+        pattern = r'## AVAILABLE AGENTS\s*(.*?)(?=\n\n##|\Z)'
+        match = re.search(pattern, sys_msg.content, flags=re.DOTALL)
+        if match:
+            insert_pos = match.end()
+            sys_msg.content = sys_msg.content[:insert_pos] + skills_block + sys_msg.content[insert_pos:]
+        else:
+            # Fallback: append at end if regex fails
+            sys_msg.content += skills_block
+    else:
+        sys_msg.content += skills_block
 
     # Log with appropriate identifier
     if isinstance(instance_or_sysmsg, AgentInstance):
@@ -737,7 +752,7 @@ def _replace_section(m0_content: str, heading_prefix: str, new_section: str) -> 
 
 
 def _replace_resources_block(m0_content: str, new_block: str) -> str:
-    """Replace the existing '--- CURRENT AVAILABLE RESOURCES' block in m0 content.
+    """Replace the existing '## AVAILABLE AGENTS' block in m0 content.
 
     Uses a regex to find and replace the entire block (from the header line
     through to just before the next heading or --- rule or end of string).
@@ -750,7 +765,7 @@ def _replace_resources_block(m0_content: str, new_block: str) -> str:
     Returns:
         The updated m0_content with the resources block replaced.
     """
-    return _replace_section(m0_content, "--- CURRENT AVAILABLE RESOURCES", new_block)
+    return _replace_section(m0_content, "## AVAILABLE AGENTS", new_block)
 
 
 
@@ -1673,13 +1688,27 @@ class ExecutionEngine:
                     # re-lookup
                     new_block = _build_resources_block(self.pool, template, instance)
                     if new_block:
-                        if '--- CURRENT AVAILABLE RESOURCES' in m0_content:
+                        if '## AVAILABLE AGENTS' in m0_content:
                             # Replace the existing block with fresh data
                             # (handles dynamic tool changes)
                             m0_content = _replace_resources_block(m0_content, new_block)
                         else:
-                            # First injection — append to end
-                            m0_content += new_block
+                            # Legacy migration support only: strip the old "--- CURRENT AVAILABLE RESOURCES"
+                            # block from restored sessions that predate the "## AVAILABLE AGENTS" format.
+                            if '--- CURRENT AVAILABLE RESOURCES' in m0_content:
+                                escaped_old = re.escape("--- CURRENT AVAILABLE RESOURCES")
+                                old_pattern = escaped_old + r'.*?(?=\n\n(?:#{1,6}|---)|\Z)'
+                                m0_content = re.sub(old_pattern, "", m0_content, count=1, flags=re.DOTALL)
+
+                            # First injection — insert before ## Active Skills if present,
+                            # otherwise append at end. This ensures consistent order:
+                            # identity/metadata → available agents → active skills
+                            if '## Active Skills' in m0_content:
+                                # Insert before the Active Skills section
+                                m0_content = m0_content.replace('## Active Skills', new_block + '\n\n## Active Skills', 1)
+                            else:
+                                # No skills section — append at end as fallback
+                                m0_content += new_block
 
                     # Update the message ONLY if content actually changed
                     # (preserves LLM prefix caching)
