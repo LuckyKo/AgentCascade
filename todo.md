@@ -83,7 +83,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 [Agent 'phase1_reviewer_worker_child2' Failed]:
 Timed out after 30s waiting for endpoint slot on https://opencode.ai/zen/v1. Current active count: 1, max allowed: 1. Currently held by: phase1_reviewer_worker (generalist)
 ```
-- [ ] the `Self-Augmentation` skill does not always get inserted on new agent call
+- [x] the `Self-Augmentation` skill does not always get inserted on new agent call — fixed: now always injected when skills toggle is enabled, regardless of load_skill mode (AUTO or explicit list). Previously gated behind AUTO-only check.
 
 # Errors to investigate:
 

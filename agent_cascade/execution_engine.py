@@ -537,6 +537,9 @@ def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=
     else:
         sys_msg = instance_or_sysmsg
 
+    # Idempotency guard: skip injection if '## Active Skills' already exists.
+    # This is acceptable for self-augmentation because it's a static skill — once injected
+    # into a session's system message, its content doesn't change, so re-injection is redundant.
     if sys_msg.role != SYSTEM or "## Active Skills" in sys_msg.content:
         return False
 
@@ -568,13 +571,14 @@ def _inject_skills_to_system_message(pool, instance_or_sysmsg, skills_to_inject=
 
 
 def _inject_self_augmentation_skill(pool, instance) -> bool:
-    """Inject self-augmentation skill into instance's system message if AUTO mode.
+    """Inject self-augmentation skill into instance's system message when skills are enabled.
 
     Self-augmentation is the foundational root skill that teaches agents how to
     discover and load specialized skills at runtime. It must be injected into every
-    main agent instance so they can bootstrap their own capability expansion.
-    On session restore, only self-augmentation is injected (no AUTO matching against
-    stale history); new agents spawned with fresh tasks get full AUTO matching.
+    main agent instance so they can bootstrap their own capability expansion, regardless
+    of whether load_skill is AUTO or an explicit list. On session restore, only
+    self-augmentation is injected (no AUTO matching against stale history); new agents
+    spawned with fresh tasks get full AUTO matching.
 
     Args:
         pool: AgentPool instance providing skill_manager and settings.
@@ -584,7 +588,7 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
         True if self-augmentation skill was injected, False otherwise.
         Safe to call multiple times (checks for existing '## Active Skills' block).
     """
-    from agent_cascade.settings import DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE, LOAD_SKILL_AUTO
+    from agent_cascade.settings import DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE
 
     load_skill_value = getattr(pool.settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE)
     if isinstance(load_skill_value, str):
@@ -598,12 +602,11 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
         logger.debug("[SKILLS] _inject_self_augmentation_skill: no skill_manager on pool, skipping")
         return False
     if load_skill_value_upper == LOAD_SKILL_NONE:
-        logger.debug("[SKILLS] _inject_self_augmentation_skill: default_load_skill_mode is NONE, skipping")
+        logger.debug("[SKILLS] _inject_self_augmentation_skill: default_load_skill_mode is NONE (skills disabled), skipping")
         return False
-    if load_skill_value_upper != LOAD_SKILL_AUTO:
-        logger.debug("[SKILLS] _inject_self_augmentation_skill: mode '%s' not AUTO, skipping self-augmentation",
-                     load_skill_value_upper)
-        return False
+
+    # Self-augmentation is injected for any enabled mode (AUTO or explicit list).
+    # It's the meta-skill that enables runtime discovery, so it must always be present.
 
     skill_manager._ensure_discovered()
     self_augmentation_instructions = skill_manager.load_full_instructions("self-augmentation")
@@ -613,7 +616,7 @@ def _inject_self_augmentation_skill(pool, instance) -> bool:
 
     skills_to_inject.append(self_augmentation_instructions)
 
-    return _inject_skills_to_system_message(pool, instance, skills_to_inject if skills_to_inject else None)
+    return _inject_skills_to_system_message(pool, instance, skills_to_inject)
 
 
 def _get_supervisor_log_filename(pool: Any, supervisor_name: str) -> Optional[str]:
@@ -4411,11 +4414,12 @@ class ExecutionEngine:
                 logger.warning("[SKILLS] Failed to resolve skills for %s: %s", instance_name, e)
                 loaded_skills = []
 
-            # Always include self-augmentation skill when skills are enabled (AUTO mode)
-            if load_skill_value_upper == LOAD_SKILL_AUTO:
-                self_augmentation_instructions = skill_manager.load_full_instructions("self-augmentation")
-                if self_augmentation_instructions and self_augmentation_instructions not in loaded_skills:
-                    loaded_skills.append(self_augmentation_instructions)
+            # Always include self-augmentation skill when skills are enabled (not NONE).
+            # Self-augmentation is the meta-skill that enables runtime discovery; it must be present
+            # regardless of whether load_skill is AUTO or an explicit list.
+            self_augmentation_instructions = skill_manager.load_full_instructions("self-augmentation")
+            if self_augmentation_instructions and self_augmentation_instructions not in loaded_skills:
+                loaded_skills.append(self_augmentation_instructions)
 
         # Inject skills into system message using general-purpose helper
         _inject_skills_to_system_message(self.pool, sys_msg, loaded_skills if loaded_skills else None)
