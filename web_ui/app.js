@@ -1777,7 +1777,8 @@ function handleServerMessage(data) {
                 // but guard against malformed server data where Object.assign overwrites it.
                 existing.messages = existing.messages || sa.messages || [];
                 existing._lastHistoryCount = hCount;
-                delete existing.is_partial; // local state should be complete
+                // NOTE: Do NOT delete is_partial here — it indicates the last message is still streaming.
+                // It gets correctly set by Object.assign(existing, saCopy) above from the server's is_partial field.
               }
             } else {
               // Fallback: if we don't have existing state, we can't merge partials
