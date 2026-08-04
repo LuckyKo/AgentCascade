@@ -806,7 +806,6 @@ def build_state_from_pool(
             'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
             'loop_max_chars': getattr(ps, 'loop_max_chars', 40960),
             'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),
-            'loop_entropy_enabled': getattr(ps, 'loop_entropy_enabled', True),
             # Skills system
             'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
             'auto_skill_enabled': getattr(ps, 'auto_skill_enabled', True),
@@ -987,7 +986,6 @@ def build_stream_update_from_pool(
             'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
             'loop_max_chars': getattr(ps, 'loop_max_chars', 40960),
             'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),
-            'loop_entropy_enabled': getattr(ps, 'loop_entropy_enabled', True),
             # Skills system
             'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
             'auto_skill_enabled': getattr(ps, 'auto_skill_enabled', True),

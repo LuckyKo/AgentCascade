@@ -32,7 +32,7 @@ POOL_SETTINGS_KEYS = frozenset({
     'auto_rollback_on_loop',
     # Inner-loop detection
     'inner_loop_detect_enabled', 'loop_min_chars', 'loop_max_chars',
-    'loop_char_run_enabled', 'loop_entropy_enabled',
+    'loop_char_run_enabled',
     # Skills system
     'default_load_skill_mode', 'auto_skill_enabled',
     # Retry policy

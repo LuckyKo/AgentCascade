@@ -143,7 +143,6 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-loop-min-chars', prop: 'value', key: 'loop_min_chars', localKey: 'loop-min-chars' },
   { id: '#setting-loop-max-chars', prop: 'value', key: 'loop_max_chars', localKey: 'loop-max-chars' },
   { id: '#setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled', localKey: 'loop-char-run-enabled' },
-  { id: '#setting-loop-entropy', prop: 'checked', key: 'loop_entropy_enabled', localKey: 'loop-entropy-enabled' },
   // Skills system
   { id: '#setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode', localKey: 'enable-skills',
     transform: (v) => v === 'AUTO' },
@@ -960,8 +959,6 @@ function saveSettings(sendToServer) {
   if ($('#setting-loop-min-chars')) s['loop-min-chars'] = $('#setting-loop-min-chars').value;
   if ($('#setting-loop-max-chars')) s['loop-max-chars'] = $('#setting-loop-max-chars').value;
   if ($('#setting-loop-char-run')) s['loop-char-run-enabled'] = $('#setting-loop-char-run').checked;
-  if ($('#setting-loop-entropy')) s['loop-entropy-enabled'] = $('#setting-loop-entropy').checked;
-
   // Cache pool settings
   if ($('#setting-cache-pool-enabled')) s['cache-pool-enabled'] = $('#setting-cache-pool-enabled').checked;
   if ($('#setting-cache-pool-size')) s['cache-pool-size'] = $('#setting-cache-pool-size').value;
@@ -1086,9 +1083,8 @@ function loadSettings() {
     if (s['loop-min-chars'] !== undefined) $('#setting-loop-min-chars').value = s['loop-min-chars'];
     if (s['loop-max-chars'] !== undefined) $('#setting-loop-max-chars').value = s['loop-max-chars'];
     if (s['loop-char-run-enabled'] !== undefined) $('#setting-loop-char-run').checked = s['loop-char-run-enabled'];
-    if (s['loop-entropy-enabled'] !== undefined) $('#setting-loop-entropy').checked = s['loop-entropy-enabled'];
     if (s['tool-result-max-chars'] !== undefined) {
-      $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
+    $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
       $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
     }
     if (s['idle-timeout'] !== undefined) {
@@ -4593,7 +4589,6 @@ function getGenerateCfg() {
   if ($('#setting-loop-min-chars')) cfg.loop_min_chars = parseInt($('#setting-loop-min-chars').value) || 4000;
   if ($('#setting-loop-max-chars')) cfg.loop_max_chars = parseInt($('#setting-loop-max-chars').value) || 40960;
   if ($('#setting-loop-char-run')) cfg.loop_char_run_enabled = $('#setting-loop-char-run').checked;
-  if ($('#setting-loop-entropy')) cfg.loop_entropy_enabled = $('#setting-loop-entropy').checked;
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
   if ($('#setting-max-rollbacks')) cfg.max_auto_rollbacks = parseInt($('#setting-max-rollbacks').value);
   if ($('#setting-idle-timeout')) cfg.idle_timeout_seconds = parseFloat($('#setting-idle-timeout').value) || 900;

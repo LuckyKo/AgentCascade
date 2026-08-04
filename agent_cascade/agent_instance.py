@@ -642,7 +642,7 @@ class PoolSettings:
     loop_sentence_rep_enabled: bool = True    # DEPRECATED — sentence repetition detection removed in Phase 3
     loop_ngram_rep_enabled: bool = True       # DEPRECATED — n-gram repetition detection removed in Phase 3
     loop_block_rep_enabled: bool = True       # DEPRECATED — block repetition detection removed in Phase 3
-    loop_entropy_enabled: bool = True         # Entropy collapse detection
+    loop_entropy_enabled: bool = True         # DEPRECATED: entropy detection removed in Phase 3, kept for backward compat
 
     # Retry policy settings (Phase 6 — exposed via UI/Config with validation)
     retry_max_attempts: int = 3              # Total outer retry attempts [1, 6]
