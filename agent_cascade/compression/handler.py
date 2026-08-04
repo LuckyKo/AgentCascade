@@ -219,44 +219,6 @@ class CompressionHandler:
                 instance._pending_notifications = []
         return text
 
-    def _drain_notification_queue(
-        self,
-        instance: 'AgentInstance',
-        queue_attr: str,
-        header: str,
-        text: str,
-        prepend: bool = False,
-    ) -> str:
-        """Drain a notification queue into a text string.
-
-        Generic drain for _tool_warnings, _cache_notifications, etc.
-        Reads the list under lock, clears it, joins entries, and appends/prepends.
-
-        Args:
-            instance: Agent instance with the notification queue attribute.
-            queue_attr: Name of the list attribute (e.g., '_tool_warnings').
-            header: Section header text (e.g., '[TOOL WARNINGS]').
-            text: The raw content string (or any object convertible to str).
-            prepend: If True, prepend header+block before text.
-                     If False (default), append after text.
-        Returns:
-            text with notifications added (or unchanged if queue empty).
-        """
-        with instance._compression_lock:
-            queue = getattr(instance, queue_attr, [])
-            items = list(queue)
-            setattr(instance, queue_attr, [])
-
-        if items:
-            if not isinstance(text, str):
-                text = str(text)
-            block = "\n\n".join(str(i) for i in items)
-            if prepend:
-                text = f"{header}\n{block}\n\n{text}"
-            else:
-                text = f"{text}\n\n{header}\n{block}"
-        return text
-
     def _drain_tool_warnings(
         self,
         instance: 'AgentInstance',
@@ -264,7 +226,20 @@ class CompressionHandler:
         prepend: bool = False,
     ) -> str:
         """Drain generic tool warnings into a text string."""
-        return self._drain_notification_queue(instance, '_tool_warnings', '[TOOL WARNINGS]', text, prepend)
+        with instance._compression_lock:
+            queue = instance._tool_warnings
+            items = list(queue)
+            instance._tool_warnings = []
+
+        if items:
+            if not isinstance(text, str):
+                text = str(text)
+            block = "\n\n".join(str(i) for i in items)
+            if prepend:
+                text = f"[TOOL WARNINGS]\n{block}\n\n{text}"
+            else:
+                text = f"{text}\n\n[TOOL WARNINGS]\n{block}"
+        return text
 
     def _drain_cache_notifications(
         self,
@@ -273,7 +248,20 @@ class CompressionHandler:
         prepend: bool = False,
     ) -> str:
         """Drain cache pool notifications into a text string."""
-        return self._drain_notification_queue(instance, '_cache_notifications', '[CACHE INFO]', text, prepend)
+        with instance._compression_lock:
+            queue = instance._cache_notifications
+            items = list(queue)
+            instance._cache_notifications = []
+
+        if items:
+            if not isinstance(text, str):
+                text = str(text)
+            block = "\n\n".join(str(i) for i in items)
+            if prepend:
+                text = f"[CACHE INFO]\n{block}\n\n{text}"
+            else:
+                text = f"{text}\n\n[CACHE INFO]\n{block}"
+        return text
 
     # ── Unified Tool Result Assembly ───────────────────────────────────────────
 
@@ -464,7 +452,7 @@ class CompressionHandler:
     def check_cooldown(
         self,
         instance: AgentInstance,
-        llm_messages: Optional[List[Message]],
+        llm_messages: List[Message],
         usage_pct: float
     ) -> bool:
         """Check if compression cooldown is active.
@@ -473,7 +461,7 @@ class CompressionHandler:
         
         Args:
             instance: Agent instance
-            llm_messages: Working set for warning injection (may be None in proactive checks)
+            llm_messages: Working set for warning injection
             usage_pct: Current token usage percentage
             
         Returns:
@@ -491,12 +479,9 @@ class CompressionHandler:
                     f"Forced compression cooldown active for {inst_name}: "
                     f"{elapsed:.1f}s / {cooldown:.1f}s — skipping this cycle"
                 )
-                # Only inject warning if llm_messages is available (Phase 3 path).
-                # Proactive checks (Phase 1/2) may not have llm_messages readily available.
-                if llm_messages is not None:
-                    current_tokens = self.engine._count_history_tokens(instance.conversation, instance)
-                    max_tokens = self.engine._get_max_tokens(instance)
-                    self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens)
+                current_tokens = self.engine._count_history_tokens(instance.conversation, instance)
+                max_tokens = self.engine._get_max_tokens(instance)
+                self.engine._inject_compression_warning(llm_messages, usage_pct, current_tokens, max_tokens)
                 return True
             
             # Mark this compression attempt (under lock for thread safety)
@@ -509,7 +494,7 @@ class CompressionHandler:
     def check_overfeeding(
         self,
         instance: AgentInstance,
-        llm_messages: Optional[List[Message]],
+        llm_messages: List[Message],
         response: Optional[List[Message]] = None
     ) -> bool:
         """Check if overfeeding threshold exceeded.
@@ -549,7 +534,7 @@ class CompressionHandler:
         self,
         instance: AgentInstance,
         messages: List[Message],
-        llm_messages: Optional[List[Message]],
+        llm_messages: List[Message],
         usage_pct: float,
         response: Optional[List[Message]] = None
     ) -> bool:

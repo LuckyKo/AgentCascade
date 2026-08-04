@@ -26,7 +26,9 @@ from agent_cascade.settings import (
     AUTO_SKILL_ENABLED,
     AUTO_SKILL_EXTRA_TURNS,
     COMPRESSION_DEFAULT_FRACTION,
+    COMPRESSION_RECOUNT_THRESHOLD,
     DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE, LOAD_SKILL_AUTO,
+    DEFAULT_MAX_INPUT_TOKENS,
     DEFAULT_MAX_TURNS,
     DEFAULT_TOOL_RESULT_MAX_CHARS,
     MAX_AUTO_CONTINUE_ATTEMPTS,
@@ -995,15 +997,9 @@ class ExecutionEngine:
         except Exception as e:
             logger.debug(f"Logging failed for {inst_name} (non-critical): {e}")
 
-        # ── Phase 2 Proactive Async Drain Compression Check ──────────────
-        # Compression fix plan: after async child results are injected into parent context,
-        # check usage proactively. Large child outputs can push context past limits; this
-        # catches it before the next LLM call. Same pattern as Phase 1 post-tool check.
-        # Only runs when messages were actually injected (processed_messages is non-empty).
-        # Respects cooldown/max-attempts guards. Safe: wrapped in try/except, never escapes.
-        # ──────────────────────────────────────────────────────────────────
+        # Proactive compression check after async child results are injected
         if processed_messages:
-            self._proactive_compression_check(instance, messages, response, check_label="async-drain")
+            self._proactive_compression_check(instance, messages, llm_messages, response, check_label="async-drain")
 
         return True
 
@@ -1919,11 +1915,11 @@ class ExecutionEngine:
         user messages, async injections). Falls back to full recount on first
         turn. Injects warning at lower thresholds.
 
-        PHASE 3 HARDENING (compression fix plan):
+        Hardening behavior:
         - Always uses fresh max_tokens for threshold comparison (not stale cache)
-        - Forces full recount when delta unavailable AND near threshold (>85%)
-        - Overrides cooldown at >95% to prevent silent truncation
-        - Raises ContextWindowExceeded on max-attempts exceeded at >95%
+        - Forces full recount when delta unavailable AND near threshold
+        - Overrides cooldown at force threshold to prevent silent truncation
+        - Raises ContextWindowExceeded on max-attempts exceeded at force threshold
         - Acquires _compression_lock around token count to prevent race with async drains
 
         Args:
@@ -1935,18 +1931,17 @@ class ExecutionEngine:
             True if compression was triggered (skip LLM call), False otherwise.
 
         Raises:
-            ContextWindowExceeded: When max-attempts exceeded at >95% usage (overflow is loud, not silent)
+            ContextWindowExceeded: When max-attempts exceeded at force-threshold usage (overflow is loud, not silent)
         """
         force_threshold = self.pool.settings.compression_force_threshold
         reserve_tokens = self.pool.settings.compression_context_reserve_tokens
 
-        # PHASE 3 FIX: Always use fresh max_tokens for threshold comparison
-        # Do NOT trust stale _allocated_max_input_tokens cache near/at threshold
-        # Wrapped in try/except — if resolution fails, fall back to instance cache
+        # Always use fresh max_tokens — do not trust stale cache near/at threshold.
+        # If resolution fails, fall back to instance cache, then the configured default.
         try:
             max_tokens_fresh = self._get_max_tokens(instance)
         except Exception:
-            max_tokens_fresh = instance._allocated_max_input_tokens or 128000
+            max_tokens_fresh = instance._allocated_max_input_tokens or DEFAULT_MAX_INPUT_TOKENS
 
         actual_tokens = instance._last_actual_token_count
         allocated_max = instance._allocated_max_input_tokens
@@ -1964,43 +1959,40 @@ class ExecutionEngine:
                     _last_token_count_conversation_length=-1,
                     _cached_token_count=0
                 )
-                with instance._compression_lock:  # PHASE 3 FIX: lock around count only
+                with instance._compression_lock:
                     delta_tokens = self._count_history_tokens(messages[delta_start:], dummy)
-            elif delta_start < 0 and actual_tokens > allocated_max * 0.85:
-                # PHASE 3 FIX: Force full recount when cache invalidated AND near threshold
-                # Cache was invalidated by appends (compression, rollback), so delta is unavailable.
-                # If we're already near/at threshold based on cached data, don't trust estimates.
+            elif delta_start < 0 and actual_tokens > allocated_max * COMPRESSION_RECOUNT_THRESHOLD:
+                # Cache was invalidated by appends (compression, rollback), so delta is
+                # unavailable. If already near threshold, force a full recount instead
+                # of trusting potentially stale estimates.
                 logger.debug(
                     f"[{instance.instance_name}] Token cache invalidated near threshold "
                     f"(delta_start={delta_start}, actual={actual_tokens}/{allocated_max}), forcing recount"
                 )
-                with instance._compression_lock:  # PHASE 3 FIX: lock around count only
+                with instance._compression_lock:
                     actual_tokens = self._count_history_tokens(messages, instance)
                 delta_tokens = 0
 
             current_tokens = actual_tokens + delta_tokens
-            # Use fresh max_tokens for the check (PHASE 3 FIX)
             max_tokens_for_check = max_tokens_fresh
         else:
             # Fallback: first turn or no cached data yet
-            with instance._compression_lock:  # PHASE 3 FIX: lock around count only
+            with instance._compression_lock:
                 current_tokens = self._count_history_tokens(messages, instance)
             max_tokens_for_check = max_tokens_fresh
 
-        # PHASE 3 FIX: Use reserve tokens for effective limit (consistent with Phase 1/2)
+        # Reserve tokens for LLM call overhead (system prompt, function schemas, reasoning)
         effective_limit = max_tokens_for_check - reserve_tokens
         if effective_limit <= 0:
             effective_limit = max_tokens_for_check
 
         usage_pct = (current_tokens / effective_limit * 100) if effective_limit > 0 else 0
 
-        # PHASE 3 FIX: Forced compression at >95% with cooldown override and loud overflow
         if usage_pct > force_threshold:
             inst_name = instance.instance_name
             max_attempts = self.pool.settings.compression_max_attempts
 
-            # PHASE 3 FIX: Check max-attempts BEFORE calling _force_compression
-            # At >95%, if max-attempts exceeded, raise exception instead of silent truncation
+            # At >95%, if max-attempts exceeded, raise instead of silent truncation
             if instance._force_compress_count >= max_attempts:
                 raise ContextWindowExceeded(
                     f"Max compression attempts ({max_attempts}) exceeded at {usage_pct:.1f}% usage "
@@ -2008,8 +2000,8 @@ class ExecutionEngine:
                     f"compression can reduce it."
                 )
 
-            # PHASE 3 FIX (TOCTOU): Entire cooldown check + override decision + update
-            # in a single lock acquisition to prevent race between read and write.
+            # Cooldown check + override decision + counter update in a single lock
+            # acquisition to prevent a race between read and write (TOCTOU).
             with instance._compression_lock:
                 now = time.monotonic()
                 cooldown = self.pool.settings.compression_force_cooldown
@@ -2018,13 +2010,13 @@ class ExecutionEngine:
                 if elapsed < cooldown and usage_pct > force_threshold:
                     # Override cooldown at critical level — truncation risk > compression cost
                     logger.warning(
-                        f"[{inst_name}] PHASE 3: Overriding compression cooldown at {usage_pct:.1f}% usage "
+                        f"[{inst_name}] Overriding compression cooldown at {usage_pct:.1f}% usage "
                         f"(elapsed={elapsed:.1f}s/{cooldown:.1f}s). Critical threshold reached — must compress."
                     )
                     instance._last_force_compress_time = now
                     instance._force_compress_count += 1
 
-            # Lock released. Now call _force_compression OUTSIDE the lock to avoid deadlock.
+            # Call _force_compression outside the lock to avoid deadlock.
             return self._force_compression(instance, messages, llm_messages, usage_pct, response)
 
         # Warning injection at >90% (configurable via compression_warning_threshold)
@@ -2138,7 +2130,7 @@ class ExecutionEngine:
 
     def _force_compression(
         self, instance: AgentInstance, messages: List[Message],
-        llm_messages: Optional[List[Message]], usage_pct: float,
+        llm_messages: List[Message], usage_pct: float,
         response: Optional[List[Message]] = None
     ) -> bool:
         """Force compress when token usage exceeds critical threshold. Returns True (continue loop)."""
@@ -2158,22 +2150,22 @@ class ExecutionEngine:
         self,
         instance: AgentInstance,
         messages: List[Message],
+        llm_messages: List[Message],
         response: Optional[List[Message]] = None,
         check_label: str = "proactive"
     ) -> None:
-        """Proactive compression check for Phase 1 (post-tool) and Phase 2 (async drain).
+        """Check context usage after post-tool / async-drain appends and trigger compression if needed.
 
-        Extracted to eliminate duplicate code between _execute_detected_tools and
-        _drain_and_inject. Checks context usage against proactive threshold (default 88%)
-        and triggers compression if exceeded, before returning to the main loop.
-
-        This is a best-effort check — all exceptions are caught internally and never
-        escape to callers. If compression is skipped due to cooldown/max-attempts, logs
-        a warning; Phase 3 pre-LLM hard guard will catch overflow as final backstop.
+        Best-effort check — all exceptions are caught internally and never escape
+        to callers. If compression is skipped due to cooldown/max-attempts, logs a
+        warning; the pre-LLM hard guard (_check_and_trigger_compression) catches
+        overflow as final backstop.
 
         Args:
             instance: Agent instance to check
             messages: Current message list (used for token counting)
+            llm_messages: LLM working set (passed through to _force_compression for
+                warning injection and working-set rebuild after compression)
             response: Optional response list for streaming notifications
             check_label: Label for log messages ("post-tool", "async-drain", etc.)
         """
@@ -2182,32 +2174,28 @@ class ExecutionEngine:
             proactive_threshold = self.pool.settings.compression_proactive_threshold
             reserve_tokens = self.pool.settings.compression_context_reserve_tokens
 
-            # Fresh max_tokens — do NOT use stale _allocated_max_input_tokens cache
             max_tokens = self._get_max_tokens(instance)
 
-            # Compute usage with reserve headroom for LLM call overhead
+            # Reserve headroom for LLM call overhead (system prompt, function schemas)
             effective_limit = max_tokens - reserve_tokens
             if effective_limit <= 0:
                 effective_limit = max_tokens
 
-            # Acquire lock around token count to prevent race with async drains
             with instance._compression_lock:
                 current_tokens = self._count_history_tokens(messages, instance)
 
             usage_pct = (current_tokens / effective_limit * 100) if effective_limit > 0 else 0
 
             if usage_pct > proactive_threshold:
-                logger.debug(
+                logger.info(
                     f"[{inst_name}] {check_label} proactive check: context at {usage_pct:.1f}% "
                     f"(threshold {proactive_threshold}%), triggering compression"
                 )
-                # Pass llm_messages=None — proactive checks don't have it readily available.
-                # check_cooldown handles None gracefully (skips warning injection).
-                result = self._force_compression(instance, messages, None, usage_pct, response)
+                result = self._force_compression(instance, messages, llm_messages, usage_pct, response)
                 if not result:
                     logger.warning(
                         f"[{inst_name}] {check_label} compression skipped (cooldown/max-attempts) "
-                        f"at {usage_pct:.1f}% — Phase 3 pre-LLM guard will catch overflow"
+                        f"at {usage_pct:.1f}% — pre-LLM guard will catch overflow"
                     )
         except Exception as e:
             # Never let this fail the caller's path (tool execution or async drain)
@@ -3767,17 +3755,8 @@ class ExecutionEngine:
                 if tools_processed > 0:
                     logger.warning(f"Added {tools_processed} placeholder FUNCTION messages for unexecuted tools in {inst_name}")
 
-        # ── Phase 1 Proactive Post-Tool Compression Check ────────────────
-        # Compression fix plan: after all tool results are appended (including orphan handling),
-        # check context usage proactively. If above proactive threshold (default 88%), trigger
-        # compression before returning to the main loop. This catches multi-tool accumulation
-        # and large single tool results before they cause overflow at the next LLM call.
-        # Respects cooldown/max-attempts guards — if skipped due to cooldown at >88%, logs warning;
-        # Phase 3 pre-LLM hard guard will catch it. Acquires _compression_lock around token count
-        # to prevent race with async drains. Safe: wrapped in try/except, never escapes exceptions.
-        # ──────────────────────────────────────────────────────────────────
         if used_any_tool:
-            self._proactive_compression_check(instance, messages, response, check_label="post-tool")
+            self._proactive_compression_check(instance, messages, llm_messages, response, check_label="post-tool")
 
         return used_any_tool
 

@@ -59,6 +59,12 @@ DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD: float = float(os.getenv(
     'QWEN_AGENT_DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD', 88.0))  # Proactive compress at X% usage (post-tool, async drain checks)
 DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS: int = int(os.getenv(
     'QWEN_AGENT_COMPRESSION_CONTEXT_RESERVE_TOKENS', 3000))  # Tokens reserved for LLM call overhead (system prompt, function schemas, reasoning)
+COMPRESSION_OVERFLOW_TOLERANCE_PCT: float = float(os.getenv(
+    'QWEN_AGENT_COMPRESSION_OVERFLOW_TOLERANCE_PCT', 3.0))  # Tolerance margin for overflow detection before raising exception
+# Recount threshold: when delta token estimates are unavailable, force a full recount
+# if cached usage already exceeds this fraction of the allocated max (cache may be stale).
+COMPRESSION_RECOUNT_THRESHOLD: float = float(os.getenv(
+    'QWEN_AGENT_COMPRESSION_RECOUNT_THRESHOLD', 0.85))  # Force full recount at X fraction of allocated max when cache invalidated
 COMPRESSION_DEFAULT_FRACTION: float = float(os.getenv(
     'QWEN_AGENT_COMPRESSION_DEFAULT_FRACTION', 0.7))  # Default fraction of history to discard (70%)
 COMPRESSION_MIN_FRACTION: float = float(os.getenv(

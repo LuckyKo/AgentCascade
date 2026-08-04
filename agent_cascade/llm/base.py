@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 from agent_cascade.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION, SYSTEM, USER, Message
 from agent_cascade.log import logger
-from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS
+from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS, COMPRESSION_OVERFLOW_TOLERANCE_PCT
 from agent_cascade.exceptions import ContextWindowExceeded
 from agent_cascade.utils.tokenization_qwen import tokenizer
 from agent_cascade.utils.utils import (extract_text_from_message, format_as_multimodal_message, format_as_text_message,
@@ -331,13 +331,10 @@ class BaseChatModel(ABC):
         if max_input_tokens > 0:
             agent_name = generate_cfg.pop('agent_name', 'Unknown')
 
-            # ── Phase 4 Overflow Detection Guard ────────────────────────────────
-            # Compression fix plan: before silently truncating, check for severe overflow.
-            # Token estimates are imperfect, so we allow a small tolerance margin (+3%).
-            # Within tolerance: truncate as safety net (existing behavior).
-            # Beyond tolerance: raise ContextWindowExceeded instead of silently dropping messages.
-            # This makes overflow loud and prevents divergence between LLM payload and instance.conversation.
-            # ─────────────────────────────────────────────────────────────────────
+            # Overflow guard: token estimates are imperfect, so allow a small tolerance
+            # margin. Within tolerance: truncate as safety net. Beyond tolerance: raise
+            # ContextWindowExceeded instead of silently dropping messages (prevents
+            # divergence between LLM payload and instance.conversation).
             try:
                 estimated_tokens = sum(get_message_stats(m)['tokens'] for m in messages)
             except Exception:
@@ -345,14 +342,12 @@ class BaseChatModel(ABC):
 
             if estimated_tokens is not None and estimated_tokens > max_input_tokens:
                 overflow_pct = ((estimated_tokens - max_input_tokens) / max_input_tokens * 100) if max_input_tokens > 0 else 0
-                tolerance_margin_pct = 3.0  # Allow small margin for token estimate inaccuracy
 
-                if overflow_pct > tolerance_margin_pct:
+                if overflow_pct > COMPRESSION_OVERFLOW_TOLERANCE_PCT:
                     raise ContextWindowExceeded(
-                        f"Context window severely exceeded before LLM call [{agent_name}]: "
-                        f"estimated {estimated_tokens} tokens vs max {max_input_tokens} "
-                        f"(+{overflow_pct:.1f}% over limit, tolerance {tolerance_margin_pct:.1f}%). "
-                        f"Compression should have prevented this."
+                        f"Context window exceeded before LLM call [{agent_name}]: "
+                        f"~{estimated_tokens} tokens vs {max_input_tokens} limit "
+                        f"(+{overflow_pct:.1f}%). Compression should have prevented this."
                     )
 
             messages = _truncate_input_messages_roughly(
