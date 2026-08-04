@@ -2582,6 +2582,21 @@ class ExecutionEngine:
                             else:
                                 _reasoning = str(_reasoning)
                             _total_text = _reasoning + _content
+
+                            # Also feed function_call data so tool-call streaming
+                            # (where content is empty but payload is in name+arguments)
+                            # is detected by the inner-loop detector.
+                            _fc = msg_field(_last_msg, 'function_call')
+                            if _fc:
+                                if isinstance(_fc, dict):
+                                    _fc_name = _fc.get('name', '') or ''
+                                    _fc_args = _fc.get('arguments', '') or ''
+                                else:
+                                    _fc_name = getattr(_fc, 'name', '') or ''
+                                    _fc_args = getattr(_fc, 'arguments', '') or ''
+                                if _fc_name or _fc_args:
+                                    _total_text += f"\n{_fc_name}: {_fc_args}"
+
                             # Generator is append-only (delta_stream=False), so
                             # slicing by previous length gives the new delta
                             _delta_text = _total_text[_prev_text_len:]
