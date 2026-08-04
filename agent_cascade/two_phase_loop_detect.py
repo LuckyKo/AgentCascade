@@ -10,8 +10,7 @@ This detector is ADDITIVE to char_run and max_chars; it does not replace them.
 from __future__ import annotations
 
 import os
-import re
-from collections import Counter as GapCounter, Counter
+from collections import Counter
 from dataclasses import dataclass
 
 
@@ -25,14 +24,7 @@ class Suspicion:
 
 def tokenize_chunk(text: str) -> list[str]:
     """Split text into tokens on whitespace, strip leading/trailing punctuation, filter empty."""
-    tokens = text.split()
-    result: list[str] = []
-    for t in tokens:
-        # Strip common punctuation from edges
-        cleaned = t.strip(".,!?;:'\"()[]{}<>")
-        if cleaned:
-            result.append(cleaned.lower())  # Normalize case for matching
-    return result
+    return [t.strip(".,!?;:'\"()[]{}<>").lower() for t in text.split() if t.strip(".,!?;:'\"()[]{}<>")]
 
 
 class TwoPhaseLoopDetector:
@@ -80,9 +72,6 @@ class TwoPhaseLoopDetector:
         # Tail buffer for exact comparison — no truncation needed (detector is per-response, max_chars limits total)
         self.tail_buffer: str = ""
 
-        # Interval tracking
-        self.last_suspicion_interval: int | None = None
-
         # Feature flag — gated for safe rollout
         self.two_phase_enabled = os.environ.get("QWEN_AGENT_LOOP_TWO_PHASE_ENABLED", "0") == "1"
 
@@ -94,7 +83,6 @@ class TwoPhaseLoopDetector:
         self.cooldown_active = False
         self.cooldown_remaining_feeds = 0
         self.tail_buffer = ""
-        self.last_suspicion_interval = None
 
     def _prune_counters(self) -> None:
         """Keep only the most frequent n-grams to bound memory usage."""
@@ -143,7 +131,7 @@ class TwoPhaseLoopDetector:
 
         # Consistency gate: dominant gap must represent >=60% of all gaps
         # This distinguishes periodic loops from merely repetitive content
-        gap_counts = GapCounter(distances)
+        gap_counts = Counter(distances)
         most_common_gap, most_common_count = gap_counts.most_common(1)[0]
         dominant_ratio = most_common_count / len(distances)
 
@@ -213,57 +201,34 @@ class TwoPhaseLoopDetector:
 
         return None
 
-    def _confirm_loop(self, suspicion: Suspicion) -> bool:
-        """Exact match test: count how many times the suspected interval repeats in tail."""
+    def _confirm_loop(self, suspicion: Suspicion) -> int:
+        """Exact match test: count how many times the suspected interval repeats in tail.
 
+        Returns the number of confirmed repetitions (0 if not enough data or no loop).
+        Caller should compare against confirmed_matches_required to decide on abort.
+        """
         interval = suspicion.interval_length
-
-        # Validate interval is reasonable (max interval = 1/3 of available tail for confirmation)
         max_interval = len(self.tail_buffer) // self.confirmed_matches_required
         if interval < 1 or interval > max_interval:
-            return False  # Interval too small or too large to confirm with available buffer
+            return 0
 
-        # Need enough tail to check for multiple repetitions
         min_tail_needed = interval * self.confirmed_matches_required
         if len(self.tail_buffer) < min_tail_needed:
-            return False  # Not enough data yet, let suspicion accumulate more
+            return 0
 
-        # Extract the suspected repeating segment from the end of tail
         candidate_segment = self.tail_buffer[-interval:]
-
-        # Count exact repetitions moving backward through tail
-        confirmed_count = 1  # We have at least one (the tail itself)
+        confirmed_count = 1
         pos = len(self.tail_buffer) - interval
 
         while pos >= interval:
             prev_segment = self.tail_buffer[pos - interval : pos]
-
             if prev_segment == candidate_segment:
                 confirmed_count += 1
                 pos -= interval
             else:
-                break  # Exact match chain broken
-
-        return confirmed_count >= self.confirmed_matches_required
-
-    def _count_exact_repetitions(self, suspicion: Suspicion) -> int:
-        """Count exact repetitions of the suspected interval in tail buffer."""
-        interval = suspicion.interval_length
-        if interval < 1 or len(self.tail_buffer) < interval * self.confirmed_matches_required:
-            return 0
-
-        candidate_segment = self.tail_buffer[-interval:]
-        count = 1
-        pos = len(self.tail_buffer) - interval
-
-        while pos >= interval:
-            if self.tail_buffer[pos - interval : pos] == candidate_segment:
-                count += 1
-                pos -= interval
-            else:
                 break
 
-        return count
+        return confirmed_count
 
     def _apply_cooldown(self) -> None:
         """Suppress suspicion detection after failed confirmation to prevent repeated false triggers.
@@ -294,20 +259,15 @@ class TwoPhaseLoopDetector:
         suspicion = self._check_suspicion(new_text)
 
         if suspicion is not None:
-            self.last_suspicion_interval = suspicion.interval_length
+            confirmed_count = self._confirm_loop(suspicion)
 
-            # Phase 2: Attempt confirmation (exact match test)
-            confirmed = self._confirm_loop(suspicion)
-
-            if confirmed:
-                # CONFIRMED LOOP — trigger abort
+            if confirmed_count >= self.confirmed_matches_required:
                 return {
                     "loop": True,
                     "reason": f"semantic loop ({suspicion.interval_length} chars repeating)",
-                    "confirmed_repetitions": self._count_exact_repetitions(suspicion),
+                    "confirmed_repetitions": confirmed_count,
                 }
             else:
-                # Confirmation failed — heuristic misfired, apply cooldown
                 self._apply_cooldown()
 
         return None  # No loop detected

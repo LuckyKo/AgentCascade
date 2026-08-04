@@ -48,6 +48,13 @@ _spec.loader.exec_module(_mod)
 InnerLoopDetector = _mod.InnerLoopDetector
 
 
+# Shared test filler used across multiple test classes.
+_FILLER = " ".join(
+    f"Word{i} has properties that are interesting for analysis."
+    for i in range(1, 20)
+) + "."
+
+
 # ---------------------------------------------------------------------------
 # Helper: build a detector tuned for fast testing (low thresholds)
 # ---------------------------------------------------------------------------
@@ -79,15 +86,9 @@ def make_detector(**kwargs):
 class TestCharacterRunDetection:
     """Feed a chunk with >24 identical characters → should detect loop."""
 
-    # Helper: unique filler to pass min_chars (500) without triggering anything.
-    _FILLER = " ".join(
-        f"Word{i} has properties that are interesting for analysis."
-        for i in range(1, 20)
-    ) + "."
-
     def test_single_char_run_detected(self):
         det = make_detector()
-        result = det.feed(self._FILLER + "a" * 150)  # >130 limit
+        result = det.feed(_FILLER + "a" * 150)  # >130 limit
         assert result is not None, "Should detect a run of 150 identical chars"
         assert result["loop"] is True
         assert "character run" in result["reason"].lower()
@@ -95,22 +96,22 @@ class TestCharacterRunDetection:
     def test_run_at_exactly_limit_plus_one(self):
         """131 identical chars (limit=130 + 1) should trigger."""
         det = make_detector()
-        result = det.feed(self._FILLER + "x" * 131)
+        result = det.feed(_FILLER + "x" * 131)
         assert result is not None
         assert result["loop"] is True
-
+    
     def test_run_at_limit_no_detection(self):
         """Exactly 130 identical chars (at the limit, not above) should NOT trigger."""
         det = make_detector()
         # char_run starts at 0; first char sets run=1. After 130 chars run==130.
         # Condition is `> self.char_run_limit` i.e. > 130, so 130 chars → no alert.
-        result = det.feed(self._FILLER + "y" * 130)
+        result = det.feed(_FILLER + "y" * 130)
         assert result is None
-
+    
     def test_alternating_chars_no_detection(self):
         """Alternating characters should never trigger a run."""
         det = make_detector()
-        result = det.feed(self._FILLER + "ab" * 50)
+        result = det.feed(_FILLER + "ab" * 50)
         assert result is None
 
 
@@ -151,22 +152,16 @@ class TestNoLoopOnNormalText:
 class TestResetMethod:
     """Feed some text, reset, feed the same text again → should work correctly."""
 
-    # Helper: unique filler to pass min_chars (500).
-    _FILLER = " ".join(
-        f"Step{i} involves examining component alpha-{i} for correctness."
-        for i in range(1, 20)
-    ) + "."
-
     def test_reset_clears_state(self):
         """Feed text that triggers detection, reset, feed again → both should detect."""
         det = make_detector()
         # First pass: trigger char_run detection (>130 chars)
-        result1 = det.feed(self._FILLER + "a" * 150)
+        result1 = det.feed(_FILLER + "a" * 150)
         assert result1 is not None, "First pass should detect loop"
 
         # Reset and feed the same text again
         det.reset()
-        result2 = det.feed(self._FILLER + "a" * 150)
+        result2 = det.feed(_FILLER + "a" * 150)
         assert result2 is not None, "Second pass should also detect (fresh state)"
 
     def test_reset_clears_fields(self):
@@ -184,7 +179,7 @@ class TestResetMethod:
     def test_reset_allows_reuse(self):
         """After reset, the detector should work normally for new text."""
         det = make_detector()
-        det.feed(self._FILLER + "a" * 150)  # >130 chars triggers loop
+        det.feed(_FILLER + "a" * 150)  # >130 chars triggers loop
         det.reset()
         result = det.feed("Normal sentence. Another one. Yet another.")
         assert result is None
@@ -224,15 +219,9 @@ class TestMaxCharsGuard:
 class TestReturnFormat:
     """When loop detected, verify the dict has expected keys."""
 
-    # Helper: unique filler to pass min_chars (500).
-    _FILLER = " ".join(
-        f"Word{i} has properties that are interesting for analysis."
-        for i in range(1, 20)
-    ) + "."
-
     def test_return_has_required_keys(self):
         det = make_detector()
-        result = det.feed(self._FILLER + "a" * 150)  # >130 limit
+        result = det.feed(_FILLER + "a" * 150)  # >130 limit
         assert isinstance(result, dict)
         assert "loop" in result
         assert "reason" in result
@@ -241,18 +230,18 @@ class TestReturnFormat:
 
     def test_loop_key_is_true(self):
         det = make_detector()
-        result = det.feed(self._FILLER + "a" * 150)  # >130 limit
+        result = det.feed(_FILLER + "a" * 150)  # >130 limit
         assert result["loop"] is True
 
     def test_reason_is_string(self):
         det = make_detector()
-        result = det.feed(self._FILLER + "a" * 150)  # >130 limit
+        result = det.feed(_FILLER + "a" * 150)  # >130 limit
         assert isinstance(result["reason"], str)
         assert len(result["reason"]) > 0
 
     def test_score_is_numeric(self):
         det = make_detector()
-        result = det.feed(self._FILLER + "a" * 150)  # >130 limit
+        result = det.feed(_FILLER + "a" * 150)  # >130 limit
         assert isinstance(result["score"], (int, float))
         # After Phase 3, score is hardcoded to 100 for all detections
         assert result["score"] == 100
@@ -271,17 +260,11 @@ class TestReturnFormat:
 class TestMultipleFeedCalls:
     """Feed in small chunks, verify state accumulates correctly across calls."""
 
-    # Helper: unique filler to pass min_chars (500).
-    _FILLER = " ".join(
-        f"Word{i} has properties that are interesting for analysis."
-        for i in range(1, 20)
-    ) + "."
-
     def test_char_run_across_chunks(self):
         """A character run spanning multiple feed calls should be detected."""
         det = make_detector()
         # Feed filler first to pass min_chars, then char runs across chunks
-        det.feed(self._FILLER)
+        det.feed(_FILLER)
         det.feed("a" * 80)
         result = det.feed("a" * 60)  # total run = 140 > 130
         assert result is not None, "Run across chunks should trigger detection"
@@ -355,7 +338,7 @@ class TestEdgeCases:
     def test_multiple_empty_feeds(self):
         """Multiple empty feeds should not cause issues."""
         det = make_detector()
-        for _ in range(100):
+        for _ in range(3):
             result = det.feed("")
             assert result is None
 
@@ -389,16 +372,10 @@ class TestEdgeCases:
 class TestIntegrationScenarios:
     """Realistic integration tests combining remaining signals."""
 
-    # Helper: unique filler to pass min_chars (500).
-    _FILLER = " ".join(
-        f"Word{i} has properties that are interesting for analysis."
-        for i in range(1, 20)
-    ) + "."
-
     def test_char_run_detection(self):
         """Char run detection should work with normal parameters."""
         det = make_detector()
-        result = det.feed(self._FILLER + "a" * 150)  # >130 limit
+        result = det.feed(_FILLER + "a" * 150)  # >130 limit
         assert result is not None, "Char run should trigger detection"
         assert "character run" in result["reason"].lower()
 

@@ -77,10 +77,7 @@ class InnerLoopDetector:
             self.char_run = 0
             return None
 
-        ##################################################
         # Accumulate and check max chars guard
-        ##################################################
-
         self._chars_fed += len(chunk)
 
         # Max char guard: force-trigger if output exceeds limit.
@@ -91,10 +88,7 @@ class InnerLoopDetector:
                 "score": 100,
             }
 
-        ##################################################
         # Character repetition (per-char scan — always runs to maintain state)
-        ##################################################
-
         for ch in chunk:
             if ch == self.last_char:
                 self.char_run += 1
@@ -110,11 +104,7 @@ class InnerLoopDetector:
                     "score": 100,
                 }
 
-        ##################################################
         # Two-phase semantic loop detection (gated by feature flag)
-        # Runs after char_run; replaces all scoring-based modes.
-        ##################################################
-
         two_phase_result = self._two_phase_detector.feed(chunk)
         if two_phase_result is not None:
             return two_phase_result
@@ -122,7 +112,7 @@ class InnerLoopDetector:
         return None
 
 
-# ── Loop sample saving helper ────────────────────────────────────────────────
+# Loop sample saving helper
 
 # Default path for loop samples: under the workspace logs directory.
 _LOOP_SAMPLES_DIR = os.path.join(DEFAULT_WORKSPACE, "logs", "loop_samples")

@@ -284,7 +284,6 @@ class TestResetBehavior:
         assert d.cooldown_active is False, "cooldown_active not cleared by reset()"
         assert d.cooldown_remaining_feeds == 0, "cooldown_remaining_feeds not cleared by reset()"
         assert d.tail_buffer == "", "tail_buffer not cleared by reset()"
-        assert d.last_suspicion_interval is None, "last_suspicion_interval not cleared by reset()"
 
     def test_reset_allows_fresh_detection(self):
         """After reset(), detector can start fresh and detect new loops."""
@@ -322,8 +321,6 @@ class TestEdgeCases:
         for i in range(50):
             result = d.feed("x ")
             assert result is None, f"Very short repeat should not confirm as loop, got: {result}"
-        # Suspicion never fires because ngrams can't form from single tokens
-        assert d.last_suspicion_interval is None, "Suspicion should not fire on trivial repetition"
 
     def test_empty_feeds_no_errors(self):
         """Empty string feeds should not cause errors."""
@@ -481,32 +478,6 @@ class TestReturnFormat:
 
 class TestSuspicionIntervalEstimation:
     """Test the interval estimation logic."""
-
-    def test_last_suspicion_interval_set_on_confirmed_loop(self):
-        """When a loop is detected, last_suspicion_interval should be set to the interval.
-
-        We use a known repeating pattern that reliably triggers detection, then verify
-        the interval was recorded.
-        """
-        d = make_detector()
-
-        block = "Repeated block for testing interval estimation in the suspicion phase.\n"
-        detected = False
-        for i in range(20):
-            result = d.feed(block)
-            if result is not None and result.get("loop"):
-                detected = True
-                break
-
-        # If loop was detected, interval must have been set
-        if detected:
-            assert d.last_suspicion_interval is not None, \
-                "last_suspicion_interval should be set when loop is detected"
-            assert isinstance(d.last_suspicion_interval, int), \
-                "last_suspicion_interval should be an integer"
-            # The interval should be close to the block length
-            assert abs(d.last_suspicion_interval - len(block)) < len(block) * 0.5, \
-                f"Interval {d.last_suspicion_interval} should be close to block length {len(block)}"
 
 
 class TestTokenization:
