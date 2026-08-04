@@ -3262,10 +3262,9 @@ function renderSubAgents() {
     // Update tab content safely (preserves handlers on closeBtn)
     const iconSpan = tabBtn.querySelector('.tab-icon-container');
     if (iconSpan) {
-      // Get agent state for visibility logic
-      const agentState = agentData?.agent_state || 'idle';
-      // Show indicator for RUNNING or SLEEPING states (agent is actively doing something)
-      const shouldShowIndicator = isActive || agentState === 'SLEEPING';
+      // Show pulsing indicator only when actively streaming LLM output
+      const isStreaming = agentData?.is_partial ?? false;
+      const shouldShowIndicator = isStreaming;
       
       // Only update icon innerHTML when active state actually changed to avoid GPU churn
       const prevActive = tabBtn.dataset.isActive === 'true';
@@ -3759,25 +3758,45 @@ function updateControls() {
     if (isGenerating) {
       sendBtn.classList.add('inject-mode');
       sendBtn.title = 'Inject message into active agent (Enter)';
-      // Update the active generating agent's tab to show pulse indicator immediately.
+      // Update the active agent's tab icon to show pulse indicator only if actively streaming.
       // renderSubAgents() also handles icon updates but is throttled (~200ms); this provides instant visual feedback when generation starts/stops.
       const activeAgentName = getActiveAgentName();
       const activeTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getAgentTabId(activeAgentName)}"]`);
       if (activeTabEl) {
-        const icon = state.subAgents[activeAgentName]?.agent_class === 'orchestrator' ? '💬' : '🤖';
-        activeTabEl.innerHTML = '<span class="sub-tab-pulse"></span> ' + escapeHtml(activeAgentName || DEFAULT_SESSION_NAME);
+        const iconContainer = activeTabEl.querySelector('.tab-icon-container');
+        if (iconContainer) {
+          const icon = state.subAgents[activeAgentName]?.agent_class === 'orchestrator' ? '💬' : '🤖';
+          const isStreaming = state.subAgents[activeAgentName]?.is_partial ?? false;
+          const prevActive = activeTabEl.dataset.isActive === 'true';
+          if (prevActive !== isStreaming) {
+            iconContainer.innerHTML = isStreaming
+              ? '<span class="sub-tab-pulse"></span> <span class="main-tab-icon">' + icon + '</span>'
+              : '<span class="main-tab-icon">' + icon + '</span>';
+            activeTabEl.dataset.isActive = String(isStreaming);
+          }
+        }
       }
       resetBtn.disabled = true;
       document.body.classList.add('is-generating');
     } else {
       sendBtn.classList.remove('inject-mode');
       sendBtn.title = 'Send (Enter)';
-      // Restore active agent tab icon
+      // Restore active agent tab icon, showing pulse only if actively streaming.
       const activeAgentName = getActiveAgentName();
       const activeTabEl = mainTabBar.querySelector(`.main-tab[data-tab="${getAgentTabId(activeAgentName)}"]`);
       if (activeTabEl) {
-        const icon = state.subAgents[activeAgentName]?.agent_class === 'orchestrator' ? '💬' : '🤖';
-        activeTabEl.innerHTML = '<span class="main-tab-icon">' + icon + '</span> ' + escapeHtml(activeAgentName || DEFAULT_SESSION_NAME);
+        const iconContainer = activeTabEl.querySelector('.tab-icon-container');
+        if (iconContainer) {
+          const icon = state.subAgents[activeAgentName]?.agent_class === 'orchestrator' ? '💬' : '🤖';
+          const isStreaming = state.subAgents[activeAgentName]?.is_partial ?? false;
+          const prevActive = activeTabEl.dataset.isActive === 'true';
+          if (prevActive !== isStreaming) {
+            iconContainer.innerHTML = isStreaming
+              ? '<span class="sub-tab-pulse"></span> <span class="main-tab-icon">' + icon + '</span>'
+              : '<span class="main-tab-icon">' + icon + '</span>';
+            activeTabEl.dataset.isActive = String(isStreaming);
+          }
+        }
       }
       resetBtn.disabled = false;
       document.body.classList.remove('is-generating');

@@ -79,7 +79,7 @@ Timed out after 30s waiting for endpoint slot on https://opencode.ai/zen/v1. Cur
 - [x] the `Self-Augmentation` skill does not always get inserted on new agent call — fixed: now always injected when skills toggle is enabled, regardless of load_skill mode (AUTO or explicit list). Previously gated behind AUTO-only check.
 - [x] add launched agent's log file name to the async call agent reply. Fixed: in _run_child_async() (tool_dispatcher.py), call pool.get_logger() before returning the confirmation message, include os.path.basename(log_path) in the message format.
 - [x] remove the tools info from `list_agents`, make sure we catch all agent states (it's missing some). Fixed: removed tools/capabilities display from template listing in manager_ops.py; replaced binary ACTIVE/IDLE with full state mapping (IDLE/RUNNING/SLEEPING/COMPLETING/TERMINATED) plus HALTED overlay via _format_agent_status helper; added thread-safe get_state_name() accessor to AgentInstance.
-- [ ] UI refine: make the blinking motion of the activity bubble in the agent tabs (the dot in front of the name) only blink for the ones actively streaming
+- [x] UI refine: make the blinking motion of the activity bubble in the agent tabs (the dot in front of the name) only blink for the ones actively streaming. Fixed: changed pulse visibility logic in web_ui/app.js renderSubAgents() and updateControls() to use per-agent is_partial flag (true streaming state from backend) instead of execution state (active/SLEEPING). Pulse now only appears when agent is actively streaming LLM output.
 - [ ] telemetry: add `Malformed` info to session-stats telemetry (how many times we hit the Auto-continue logic); in `loops detected` count the inner loops too
 
 # Errors to investigate:
