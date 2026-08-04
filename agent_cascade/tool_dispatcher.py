@@ -552,10 +552,13 @@ class ToolDispatcher:
         logger.debug("ASYNC - %s launched by %s", instance_name, caller_name)
         
         # Get the logger to include filename in the response
-        child_logger = self.pool.get_logger(instance_name, agent_class)
-        log_filename = os.path.basename(child_logger.log_path)
-        
-        return f"Agent '{instance_name}' ({log_filename}) launched asynchronously. You can continue working or stop, you will be woken up when the result is available."
+        try:
+            child_logger = self.pool.get_logger(instance_name, agent_class)
+            log_filename = os.path.basename(child_logger.log_path)
+            return f"Agent '{instance_name}' ({log_filename}) launched asynchronously. You can continue working or stop, you will be woken up when the result is available."
+        except Exception as e:
+            logger.error(f"Failed to get logger for async agent {instance_name}: {e}")
+            return f"Agent '{instance_name}' launched asynchronously. You can continue working or stop, you will be woken up when the result is available."
 
     def _reacquire_caller_slot(
         self,
