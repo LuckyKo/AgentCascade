@@ -184,8 +184,8 @@ class InnerLoopSettings:
     default_min_chars: int = 4000          # Min chars to accumulate before full detection (kept for compatibility)
     default_max_chars: int = 40960         # Hard character limit — force-trigger detection if exceeded (~8K tokens)
 
-    # Max chars guard toggle
-    max_chars_enabled: bool = True         # Enable max chars hard limit guard
+    # Max chars guard toggle — controls the hard character limit detection guard.
+    loop_max_chars_enabled: bool = True    # Enable max chars hard limit guard
 
     # Two-phase semantic loop detection settings
     loop_two_phase_enabled: bool = False   # Enable two-phase semantic loop detection

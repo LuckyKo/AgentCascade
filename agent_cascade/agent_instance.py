@@ -645,7 +645,7 @@ class PoolSettings:
     loop_block_rep_enabled: bool = True       # DEPRECATED — block repetition detection removed in Phase 3
     loop_entropy_enabled: bool = True         # DEPRECATED: entropy detection removed in Phase 3, kept for backward compat
 
-    # Max chars guard toggle
+    # Max chars guard toggle — controls the hard character limit detection guard.
     loop_max_chars_enabled: bool = True               # Enable max chars hard limit guard
 
     # Two-phase semantic loop detection toggles (replaces scoring-based modes)

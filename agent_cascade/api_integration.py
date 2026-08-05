@@ -489,6 +489,21 @@ def run_agent_in_pool_with_recovery(
 
 # ── Helper functions for build_state_from_pool / build_stream_update_from_pool ──
 
+def _serialize_loop_settings(ps):
+    """Serialize loop detection settings from PoolSettings instance."""
+    return {
+        'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
+        'loop_max_chars': getattr(ps, 'loop_max_chars', 40960),
+        'loop_char_run_limit': getattr(ps, 'loop_char_run_limit', 129),
+        'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),
+        'loop_max_chars_enabled': getattr(ps, 'loop_max_chars_enabled', True),
+        'loop_two_phase_enabled': getattr(ps, 'loop_two_phase_enabled', False),
+        'loop_suspicion_threshold': getattr(ps, 'loop_suspicion_threshold', 7),
+        'loop_confirm_required': getattr(ps, 'loop_confirm_required', 3),
+        'loop_cooldown_feeds': getattr(ps, 'loop_cooldown_feeds', 50),
+    }
+
+
 def _get_instance_messages(pool: AgentPool, instance_name: str,
                            responses: Optional[List[Message]] = None) -> List[Message]:
     """Get messages list from pool instance, extending with optional responses."""
@@ -802,16 +817,8 @@ def build_state_from_pool(
             'max_auto_rollbacks': getattr(ps, 'max_auto_rollbacks', 3),
             'auto_rollback_on_loop': getattr(ps, 'auto_rollback_on_loop', True),
             # Inner-loop detection
-            'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False),
-            'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
-            'loop_max_chars': getattr(ps, 'loop_max_chars', 40960),
-            'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),
-            'loop_char_run_limit': getattr(ps, 'loop_char_run_limit', 129),
-            'loop_max_chars_enabled': getattr(ps, 'loop_max_chars_enabled', True),
-            'loop_two_phase_enabled': getattr(ps, 'loop_two_phase_enabled', False),
-            'loop_suspicion_threshold': getattr(ps, 'loop_suspicion_threshold', 7),
-            'loop_confirm_required': getattr(ps, 'loop_confirm_required', 3),
-            'loop_cooldown_feeds': getattr(ps, 'loop_cooldown_feeds', 50),
+            **{'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False)},
+            **_serialize_loop_settings(ps),
             # Skills system
             'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
             'auto_skill_enabled': getattr(ps, 'auto_skill_enabled', True),
@@ -988,16 +995,8 @@ def build_stream_update_from_pool(
             'max_auto_rollbacks': getattr(ps, 'max_auto_rollbacks', 3),
             'auto_rollback_on_loop': getattr(ps, 'auto_rollback_on_loop', True),
             # Inner-loop detection
-            'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False),
-            'loop_min_chars': getattr(ps, 'loop_min_chars', 4000),
-            'loop_max_chars': getattr(ps, 'loop_max_chars', 40960),
-            'loop_char_run_enabled': getattr(ps, 'loop_char_run_enabled', True),
-            'loop_char_run_limit': getattr(ps, 'loop_char_run_limit', 129),
-            'loop_max_chars_enabled': getattr(ps, 'loop_max_chars_enabled', True),
-            'loop_two_phase_enabled': getattr(ps, 'loop_two_phase_enabled', False),
-            'loop_suspicion_threshold': getattr(ps, 'loop_suspicion_threshold', 7),
-            'loop_confirm_required': getattr(ps, 'loop_confirm_required', 3),
-            'loop_cooldown_feeds': getattr(ps, 'loop_cooldown_feeds', 50),
+            **{'inner_loop_detect_enabled': getattr(ps, 'inner_loop_detect_enabled', False)},
+            **_serialize_loop_settings(ps),
             # Skills system
             'default_load_skill_mode': getattr(ps, 'default_load_skill_mode', 'AUTO'),
             'auto_skill_enabled': getattr(ps, 'auto_skill_enabled', True),

@@ -86,7 +86,7 @@ class InnerLoopDetector:
         self._chars_fed += len(chunk)
 
         # Max char guard: force-trigger if output exceeds limit (gated by toggle).
-        if self._settings.max_chars_enabled and self._chars_fed >= self.max_chars:
+        if self._settings.loop_max_chars_enabled and self._chars_fed >= self.max_chars:
             return {
                 "loop": True,
                 "reason": f"max chars exceeded ({self._chars_fed}/{self.max_chars})",
