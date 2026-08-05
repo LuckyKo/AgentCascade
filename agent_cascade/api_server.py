@@ -1029,8 +1029,13 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
             init = {'type': 'state', **build_state()}
             await websocket.send_text(json.dumps(init, ensure_ascii=False, default=str))
         except Exception as e:
-            logger.warning(f"WebSocket initial state send failed: {e}")
+            logger.error(f"WebSocket initial state send failed: {e}", exc_info=True)
             ws_connections.discard(websocket)
+            # Close with error code so client knows something went wrong
+            try:
+                await websocket.close(code=1011, reason="Server error building initial state")
+            except Exception:
+                pass
             return
 
         try:
