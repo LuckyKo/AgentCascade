@@ -624,6 +624,7 @@ class PoolSettings:
     auto_continue: bool = True  # Auto-continue on message truncation (respects user toggle)
 
     # SLEEPING state settings (for async tools)
+    # DEPRECATED: sleeping_timeout is no longer used; agents stay SLEEPING until woken by messages or completed.
     sleeping_timeout: float = AGENT_SLEEPING_TIMEOUT  # Max seconds to wait for background tools before timeout
     sleeping_wakeup_interval: float = AGENT_SLEEPING_WAKEUP_INTERVAL  # Wakeup log interval while SLEEPING
 

@@ -89,7 +89,7 @@ AGENT_MAX_WORKERS: int = int(os.getenv(
 # DEPRECATED (2026-08): AGENT_SLEEPING_TIMEOUT is no longer used.
 # Timeout-to-IDLE transition removed; agents stay SLEEPING until woken by messages or completed.
 AGENT_SLEEPING_TIMEOUT: float = float(os.getenv(
-    'QWEN_AGENT_SLEEPING_TIMEOUT', 300.0))  # Max seconds for background tools (DEPRECATED)
+    'QWEN_AGENT_SLEEPING_TIMEOUT', 300.0))  # DEPRECATED (2026-08): Formerly max seconds before SLEEPING→IDLE transition; now unused.
 AGENT_SLEEPING_WAKEUP_INTERVAL: float = float(os.getenv(
     'QWEN_AGENT_SLEEPING_WAKEUP_INTERVAL', 5.0))  # Wakeup log interval while SLEEPING
 # Conservative estimate used for compression template overhead estimation.

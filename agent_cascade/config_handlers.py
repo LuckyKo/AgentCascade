@@ -60,7 +60,7 @@ POOL_SETTINGS_KEYS = frozenset({
     # Security
     'security_check_timeout',
     # Nesting/sleeping limits
-    'max_nesting_depth', 'sleeping_timeout', 'sleeping_wakeup_interval',
+    'max_nesting_depth', 'sleeping_wakeup_interval',
     # Sync checks
     'tail_sync_check_enabled',
 })
@@ -635,6 +635,7 @@ def _handle_security_check_timeout(ui_cfg: dict, agent_pool: Optional[Any], agen
 
 @register_config_handler('sleeping_timeout')
 def _handle_sleeping_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    # DEPRECATED (2026-08): Kept for backward compatibility only; sleeping_timeout is no longer used.
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = max(1, int(ui_cfg['sleeping_timeout']))
         agent_pool.settings.sleeping_timeout = val

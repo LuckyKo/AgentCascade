@@ -1029,7 +1029,7 @@ class AsyncShellTracker:
     # ────────────────────────────────────────────────────────────────
     def _enqueue(self, agent_name: str, text: str):
         """Inject a message into the agent's queue via the pool."""
-        if self._pool and hasattr(self._pool, 'enqueue_message'):
+        if self._pool:
             try:
                 self._pool.enqueue_message(agent_name, text)
             except Exception as e:

@@ -2268,7 +2268,7 @@ class AgentPool:
 
     def enqueue_message(self, instance_name: str, text: str):
         """Push a message into a specific agent's queue (no sender tracking)."""
-        with self._message_condition:
+        with self._queue_lock:
             self.message_queues.setdefault(instance_name, []).append(text)
             self._message_condition.notify_all()  # Wake any __wait callers
         self._mark_activity(instance_name)

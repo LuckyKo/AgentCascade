@@ -79,8 +79,9 @@ from .settings import InnerLoopSettings as _InnerLoopSettings
 from .operation_manager import set_current_instance_name, clear_current_instance_name
 
 # ── Constants ────────────────────────────────────────────────────────────────
-MAX_TEXT_LENGTH_FOR_REGEX = 1_000_000  # Threshold to skip expensive regex ops
-MIN_OUTPUT_LENGTH = 200               # Minimum output length for broken-json detection
+MAX_TEXT_LENGTH_FOR_REGEX = 1_000_000    # Threshold to skip expensive regex ops
+MIN_OUTPUT_LENGTH = 200                  # Minimum output length for broken-json detection
+SLEEPING_LOOP_BACKOFF = 0.1              # Seconds to sleep when re-entering loop from SLEEPING state
 
 # Sampling & limit parameters to strip when custom sampling is disabled for an
 # endpoint.
@@ -1234,10 +1235,8 @@ class ExecutionEngine:
                 final_turn_tools_disabled = False
 
                 # ── SLEEPING STATE GUARD ────────────────────────────────────
-                # Agents wake ONLY for async tool results, NOT user messages
-                # alone.
-                # User messages accumulate in queue and are drained alongside
-                # async results.
+                # Agents wake on ANY queued message (user messages or async tool results).
+                # Both types now use the same message_queue; unified wakeup simplifies flow.
                 if instance.state == AgentState.SLEEPING:
                     action, yield_value = self._handle_sleeping_state(
                         instance, messages, llm_messages, response, skip_slot_acquire
@@ -1245,7 +1244,7 @@ class ExecutionEngine:
                     if yield_value is not None:
                         yield yield_value
                         if action == SleepAction.CONTINUE_LOOP:
-                            time.sleep(0.1)  # Prevent tight loop when no results available yet
+                            time.sleep(SLEEPING_LOOP_BACKOFF)  # Prevent tight loop when no results available yet
                             continue
                     if action == SleepAction.BREAK_LOOP:
                         break
