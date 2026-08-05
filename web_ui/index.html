@@ -547,6 +547,26 @@
                       <span title="Detect consecutive identical characters">Char Run</span>
                       <input type="checkbox" id="setting-loop-char-run" checked />
                       </label>
+                      <label class="setting-field toggle-field">
+                      <span title="Hard character limit guard — force-trigger detection if exceeded">Max Chars Guard</span>
+                      <input type="checkbox" id="setting-loop-max-chars-enabled" checked />
+                      </label>
+                      <label class="setting-field toggle-field">
+                      <span title="Two-phase semantic loop detection (ngram suspicion + exact confirmation)">Semantic Loop Detection</span>
+                      <input type="checkbox" id="setting-loop-two-phase" />
+                      </label>
+                      <label class="setting-field">
+                      <span title="N-gram occurrence count to trigger suspicion [5-15]">Suspicion Threshold</span>
+                      <input type="number" id="setting-loop-suspicion-threshold" min="5" max="15" step="1" value="7" />
+                      </label>
+                      <label class="setting-field">
+                      <span title="Exact matches required for confirmation [2-6]">Confirm Required</span>
+                      <input type="number" id="setting-loop-confirm-required" min="2" max="6" step="1" value="3" />
+                      </label>
+                      <label class="setting-field">
+                      <span title="Feeds to suppress after failed confirmation [10-200]">Cooldown Feeds</span>
+                      <input type="number" id="setting-loop-cooldown-feeds" min="10" max="200" step="10" value="50" />
+                      </label>
                     </div>
                     <!-- End Loop Tuning -->
                     <!-- Retry Policy Settings (Phase 6) -->

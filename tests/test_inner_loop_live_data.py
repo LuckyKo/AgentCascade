@@ -41,6 +41,7 @@ _settings_spec = _util.spec_from_file_location(
 _settings_mod = _util.module_from_spec(_settings_spec)
 sys.modules["agent_cascade.settings"] = _settings_mod
 _settings_spec.loader.exec_module(_settings_mod)
+InnerLoopSettings = _settings_mod.InnerLoopSettings
 
 _spec = _util.spec_from_file_location(
     "inner_loop_detect",
@@ -128,7 +129,9 @@ def feed_chunks(text: str, chunk_size: int = 256):
     Default chunk_size=256 ensures most sentences aren't split across
     boundaries, avoiding false positives from repeated fragments.
     """
-    det = InnerLoopDetector(min_chars=0)
+    settings = InnerLoopSettings()
+    settings.loop_two_phase_enabled = True
+    det = InnerLoopDetector(min_chars=0, settings=settings)
     for i in range(0, len(text), chunk_size):
         result = det.feed(text[i : i + chunk_size])
         if result:
@@ -146,7 +149,9 @@ def feed_repeated_block(block: str, repetitions: int = 20):
 
     Returns the detection result dict or None.
     """
-    det = InnerLoopDetector(min_chars=0)
+    settings = InnerLoopSettings()
+    settings.loop_two_phase_enabled = True
+    det = InnerLoopDetector(min_chars=0, settings=settings)
     for _ in range(repetitions):
         result = det.feed(block)
         if result:

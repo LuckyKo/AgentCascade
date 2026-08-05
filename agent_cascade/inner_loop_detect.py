@@ -47,7 +47,12 @@ class InnerLoopDetector:
         self._chars_fed = 0
 
         # Two-phase semantic loop detector — replaces all scoring-based modes.
-        self._two_phase_detector = TwoPhaseLoopDetector()
+        self._two_phase_detector = TwoPhaseLoopDetector(
+            suspicion_threshold=settings.loop_suspicion_threshold,
+            confirmed_matches_required=settings.loop_confirm_required,
+            cooldown_duration=settings.loop_cooldown_feeds,
+            enabled=settings.loop_two_phase_enabled,
+        )
 
     # ── State management ────────────────────────────────────────────────
 
@@ -80,8 +85,8 @@ class InnerLoopDetector:
         # Accumulate and check max chars guard
         self._chars_fed += len(chunk)
 
-        # Max char guard: force-trigger if output exceeds limit.
-        if self._chars_fed >= self.max_chars:
+        # Max char guard: force-trigger if output exceeds limit (gated by toggle).
+        if self._settings.max_chars_enabled and self._chars_fed >= self.max_chars:
             return {
                 "loop": True,
                 "reason": f"max chars exceeded ({self._chars_fed}/{self.max_chars})",

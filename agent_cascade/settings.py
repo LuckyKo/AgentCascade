@@ -184,6 +184,15 @@ class InnerLoopSettings:
     default_min_chars: int = 4000          # Min chars to accumulate before full detection (kept for compatibility)
     default_max_chars: int = 40960         # Hard character limit — force-trigger detection if exceeded (~8K tokens)
 
+    # Max chars guard toggle
+    max_chars_enabled: bool = True         # Enable max chars hard limit guard
+
+    # Two-phase semantic loop detection settings
+    loop_two_phase_enabled: bool = False   # Enable two-phase semantic loop detection
+    loop_suspicion_threshold: int = 7      # N-gram occurrence count to trigger suspicion [5-15]
+    loop_confirm_required: int = 3         # Exact matches required for confirmation [2-6]
+    loop_cooldown_feeds: int = 50          # Feeds to suppress after failed confirmation [10-200]
+
     # ── Deprecated settings (scoring-based modes removed in Phase 3) ────
     # These fields are no longer used by InnerLoopDetector but kept for backward
     # compatibility with code that passes explicit values when constructing settings.

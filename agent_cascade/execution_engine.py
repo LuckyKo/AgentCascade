@@ -2625,6 +2625,12 @@ class ExecutionEngine:
                     default_min_chars=getattr(_ps, 'loop_min_chars', 4000),
                     default_max_chars=getattr(_ps, 'loop_max_chars', 40960),
                     char_run_enabled=getattr(_ps, 'loop_char_run_enabled', True),
+                    char_run_limit=getattr(_ps, 'loop_char_run_limit', 129),
+                    max_chars_enabled=getattr(_ps, 'loop_max_chars_enabled', True),
+                    loop_two_phase_enabled=getattr(_ps, 'loop_two_phase_enabled', False),
+                    loop_suspicion_threshold=getattr(_ps, 'loop_suspicion_threshold', 7),
+                    loop_confirm_required=getattr(_ps, 'loop_confirm_required', 3),
+                    loop_cooldown_feeds=getattr(_ps, 'loop_cooldown_feeds', 50),
                 )
                 _inner_detector = InnerLoopDetector(settings=_inner_settings)
                 _prev_text_len = 0  # Tracks accumulated text length for delta extraction (delta_stream=False)

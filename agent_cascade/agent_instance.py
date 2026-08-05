@@ -639,10 +639,20 @@ class PoolSettings:
 
     # Per-mode toggles for inner-loop detector (individual detection modes)
     loop_char_run_enabled: bool = True        # Character run detection
+    loop_char_run_limit: int = 129            # Character run limit (consecutive identical chars)
     loop_sentence_rep_enabled: bool = True    # DEPRECATED — sentence repetition detection removed in Phase 3
     loop_ngram_rep_enabled: bool = True       # DEPRECATED — n-gram repetition detection removed in Phase 3
     loop_block_rep_enabled: bool = True       # DEPRECATED — block repetition detection removed in Phase 3
     loop_entropy_enabled: bool = True         # DEPRECATED: entropy detection removed in Phase 3, kept for backward compat
+
+    # Max chars guard toggle
+    loop_max_chars_enabled: bool = True               # Enable max chars hard limit guard
+
+    # Two-phase semantic loop detection toggles (replaces scoring-based modes)
+    loop_two_phase_enabled: bool = False              # Enable two-phase semantic loop detection
+    loop_suspicion_threshold: int = 7                 # N-gram occurrence count to trigger suspicion [5-15]
+    loop_confirm_required: int = 3                    # Exact matches required for confirmation [2-6]
+    loop_cooldown_feeds: int = 50                     # Feeds to suppress after failed confirmation [10-200]
 
     # Retry policy settings (Phase 6 — exposed via UI/Config with validation)
     retry_max_attempts: int = 3              # Total outer retry attempts [1, 6]

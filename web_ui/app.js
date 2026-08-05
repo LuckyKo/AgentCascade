@@ -143,6 +143,11 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-loop-min-chars', prop: 'value', key: 'loop_min_chars', localKey: 'loop-min-chars' },
   { id: '#setting-loop-max-chars', prop: 'value', key: 'loop_max_chars', localKey: 'loop-max-chars' },
   { id: '#setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled', localKey: 'loop-char-run-enabled' },
+  { id: '#setting-loop-max-chars-enabled', prop: 'checked', key: 'loop_max_chars_enabled', localKey: 'loop-max-chars-enabled' },
+  { id: '#setting-loop-two-phase', prop: 'checked', key: 'loop_two_phase_enabled', localKey: 'loop-two-phase-enabled' },
+  { id: '#setting-loop-suspicion-threshold', prop: 'value', key: 'loop_suspicion_threshold', localKey: 'loop-suspicion-threshold' },
+  { id: '#setting-loop-confirm-required', prop: 'value', key: 'loop_confirm_required', localKey: 'loop-confirm-required' },
+  { id: '#setting-loop-cooldown-feeds', prop: 'value', key: 'loop_cooldown_feeds', localKey: 'loop-cooldown-feeds' },
   // Skills system
   { id: '#setting-enable-skills', prop: 'checked', key: 'default_load_skill_mode', localKey: 'enable-skills',
     transform: (v) => v === 'AUTO' },
@@ -959,6 +964,11 @@ function saveSettings(sendToServer) {
   if ($('#setting-loop-min-chars')) s['loop-min-chars'] = $('#setting-loop-min-chars').value;
   if ($('#setting-loop-max-chars')) s['loop-max-chars'] = $('#setting-loop-max-chars').value;
   if ($('#setting-loop-char-run')) s['loop-char-run-enabled'] = $('#setting-loop-char-run').checked;
+  if ($('#setting-loop-max-chars-enabled')) s['loop-max-chars-enabled'] = $('#setting-loop-max-chars-enabled').checked;
+  if ($('#setting-loop-two-phase')) s['loop-two-phase-enabled'] = $('#setting-loop-two-phase').checked;
+  if ($('#setting-loop-suspicion-threshold')) s['loop-suspicion-threshold'] = $('#setting-loop-suspicion-threshold').value;
+  if ($('#setting-loop-confirm-required')) s['loop-confirm-required'] = $('#setting-loop-confirm-required').value;
+  if ($('#setting-loop-cooldown-feeds')) s['loop-cooldown-feeds'] = $('#setting-loop-cooldown-feeds').value;
   // Cache pool settings
   if ($('#setting-cache-pool-enabled')) s['cache-pool-enabled'] = $('#setting-cache-pool-enabled').checked;
   if ($('#setting-cache-pool-size')) s['cache-pool-size'] = $('#setting-cache-pool-size').value;
@@ -1083,6 +1093,15 @@ function loadSettings() {
     if (s['loop-min-chars'] !== undefined) $('#setting-loop-min-chars').value = s['loop-min-chars'];
     if (s['loop-max-chars'] !== undefined) $('#setting-loop-max-chars').value = s['loop-max-chars'];
     if (s['loop-char-run-enabled'] !== undefined) $('#setting-loop-char-run').checked = s['loop-char-run-enabled'];
+    if (s['loop-max-chars-enabled'] !== undefined) $('#setting-loop-max-chars-enabled').checked = s['loop-max-chars-enabled'];
+    if (s['loop-two-phase-enabled'] !== undefined) $('#setting-loop-two-phase').checked = s['loop-two-phase-enabled'];
+    if (s['loop-suspicion-threshold'] !== undefined) $('#setting-loop-suspicion-threshold').value = s['loop-suspicion-threshold'];
+    if (s['loop-confirm-required'] !== undefined) $('#setting-loop-confirm-required').value = s['loop-confirm-required'];
+    if (s['loop-cooldown-feeds'] !== undefined) $('#setting-loop-cooldown-feeds').value = s['loop-cooldown-feeds'];
+
+    // Update two-phase input enabled state based on toggle
+    updateTwoPhaseInputsEnabled();
+
     if (s['tool-result-max-chars'] !== undefined) {
     $('#setting-tool-result-max-chars').value = s['tool-result-max-chars'];
       $('#setting-tool-result-max-chars').dispatchEvent(new Event('input'));
@@ -1348,6 +1367,27 @@ if (autoSecurityToggle) {
     }
     renderApprovals();
   });
+}
+
+// Two-phase loop detection UI: disable dependent inputs when feature is off
+function updateTwoPhaseInputsEnabled() {
+    const enabled = document.getElementById('setting-loop-two-phase');
+    const suspicion = document.getElementById('setting-loop-suspicion-threshold');
+    const confirm = document.getElementById('setting-loop-confirm-required');
+    const cooldown = document.getElementById('setting-loop-cooldown-feeds');
+    if (enabled) {
+        const isOn = enabled.checked;
+        [suspicion, confirm, cooldown].forEach(el => {
+            if (el) el.disabled = !isOn;
+        });
+    }
+}
+
+if (document.getElementById('setting-loop-two-phase')) {
+    document.getElementById('setting-loop-two-phase').addEventListener('change', () => {
+        updateTwoPhaseInputsEnabled();
+        saveSettings();
+    });
 }
 
 loadSettings();
@@ -4589,6 +4629,11 @@ function getGenerateCfg() {
   if ($('#setting-loop-min-chars')) cfg.loop_min_chars = parseInt($('#setting-loop-min-chars').value) || 4000;
   if ($('#setting-loop-max-chars')) cfg.loop_max_chars = parseInt($('#setting-loop-max-chars').value) || 40960;
   if ($('#setting-loop-char-run')) cfg.loop_char_run_enabled = $('#setting-loop-char-run').checked;
+  if ($('#setting-loop-max-chars-enabled')) cfg.loop_max_chars_enabled = $('#setting-loop-max-chars-enabled').checked;
+  if ($('#setting-loop-two-phase')) cfg.loop_two_phase_enabled = $('#setting-loop-two-phase').checked;
+  if ($('#setting-loop-suspicion-threshold')) cfg.loop_suspicion_threshold = parseInt($('#setting-loop-suspicion-threshold').value) || 7;
+  if ($('#setting-loop-confirm-required')) cfg.loop_confirm_required = parseInt($('#setting-loop-confirm-required').value) || 3;
+  if ($('#setting-loop-cooldown-feeds')) cfg.loop_cooldown_feeds = parseInt($('#setting-loop-cooldown-feeds').value) || 50;
   if ($('#setting-log-api-post')) cfg.log_api_post = $('#setting-log-api-post').checked;
   if ($('#setting-max-rollbacks')) cfg.max_auto_rollbacks = parseInt($('#setting-max-rollbacks').value);
   if ($('#setting-idle-timeout')) cfg.idle_timeout_seconds = parseFloat($('#setting-idle-timeout').value) || 900;

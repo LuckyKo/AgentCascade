@@ -32,7 +32,9 @@ POOL_SETTINGS_KEYS = frozenset({
     'auto_rollback_on_loop',
     # Inner-loop detection
     'inner_loop_detect_enabled', 'loop_min_chars', 'loop_max_chars',
-    'loop_char_run_enabled',
+    'loop_char_run_enabled', 'loop_char_run_limit', 'loop_max_chars_enabled',
+    'loop_two_phase_enabled', 'loop_suspicion_threshold',
+    'loop_confirm_required', 'loop_cooldown_feeds',
     # Skills system
     'default_load_skill_mode', 'auto_skill_enabled',
     # Retry policy
@@ -256,6 +258,44 @@ def _handle_inner_loop_detect(ui_cfg: dict, agent_pool: Optional[Any], agents: l
         agent_pool.settings.inner_loop_detect_enabled = bool(ui_cfg['inner_loop_detect_enabled'])
 
 
+@register_config_handler('loop_max_chars_enabled')
+def _handle_loop_max_chars_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle max chars hard limit guard."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_max_chars_enabled = bool(ui_cfg['loop_max_chars_enabled'])
+
+
+@register_config_handler('loop_two_phase_enabled')
+def _handle_loop_two_phase_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle two-phase semantic loop detection."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_two_phase_enabled = bool(ui_cfg['loop_two_phase_enabled'])
+
+
+@register_config_handler('loop_suspicion_threshold')
+def _handle_loop_suspicion_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update suspicion threshold for two-phase loop detection [5-15]."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = int(ui_cfg['loop_suspicion_threshold'])
+        agent_pool.settings.loop_suspicion_threshold = max(5, min(15, val))
+
+
+@register_config_handler('loop_confirm_required')
+def _handle_loop_confirm_required(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update confirm required for two-phase loop detection [2-6]."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = int(ui_cfg['loop_confirm_required'])
+        agent_pool.settings.loop_confirm_required = max(2, min(6, val))
+
+
+@register_config_handler('loop_cooldown_feeds')
+def _handle_loop_cooldown_feeds(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update cooldown feeds for two-phase loop detection [10-200]."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = int(ui_cfg['loop_cooldown_feeds'])
+        agent_pool.settings.loop_cooldown_feeds = max(10, min(200, val))
+
+
 @register_config_handler('default_load_skill_mode')
 def _handle_default_load_skill_mode(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update default load_skill mode (AUTO or NONE)."""
@@ -291,6 +331,21 @@ def _handle_loop_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list
     """Update maximum character limit for inner loop detection."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         agent_pool.settings.loop_max_chars = max(1000, int(ui_cfg.get('loop_max_chars', 40960)))
+
+
+@register_config_handler('loop_char_run_enabled')
+def _handle_loop_char_run_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle character run detection."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        agent_pool.settings.loop_char_run_enabled = bool(ui_cfg.get('loop_char_run_enabled', True))
+
+
+@register_config_handler('loop_char_run_limit')
+def _handle_loop_char_run_limit(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update character run limit (consecutive identical chars). Range [10, 500]."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = int(ui_cfg.get('loop_char_run_limit', 129))
+        agent_pool.settings.loop_char_run_limit = max(10, min(500, val))
 
 
 # Retry policy settings handlers (Phase 1 of retry refactoring)
