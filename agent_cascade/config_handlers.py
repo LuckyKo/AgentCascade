@@ -323,14 +323,16 @@ def _handle_auto_skill_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: 
 def _handle_loop_min_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update minimum characters before activating heavy loop detection."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.loop_min_chars = max(500, int(ui_cfg.get('loop_min_chars', 4000)))
+        val = int(ui_cfg.get('loop_min_chars', 4000))
+        agent_pool.settings.loop_min_chars = max(500, min(20000, val))
 
 
 @register_config_handler('loop_max_chars')
 def _handle_loop_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Update maximum character limit for inner loop detection."""
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.loop_max_chars = max(1000, int(ui_cfg.get('loop_max_chars', 40960)))
+        val = int(ui_cfg.get('loop_max_chars', 40960))
+        agent_pool.settings.loop_max_chars = max(1000, min(100000, val))
 
 
 @register_config_handler('loop_char_run_enabled')

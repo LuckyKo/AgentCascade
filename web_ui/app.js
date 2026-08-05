@@ -143,6 +143,7 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-loop-min-chars', prop: 'value', key: 'loop_min_chars', localKey: 'loop-min-chars' },
   { id: '#setting-loop-max-chars', prop: 'value', key: 'loop_max_chars', localKey: 'loop-max-chars' },
   { id: '#setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled', localKey: 'loop-char-run-enabled' },
+  { id: '#setting-loop-char-run-limit', prop: 'value', key: 'loop_char_run_limit', localKey: 'loop-char-run-limit' },
   { id: '#setting-loop-max-chars-enabled', prop: 'checked', key: 'loop_max_chars_enabled', localKey: 'loop-max-chars-enabled' },
   { id: '#setting-loop-two-phase', prop: 'checked', key: 'loop_two_phase_enabled', localKey: 'loop-two-phase-enabled' },
   { id: '#setting-loop-suspicion-threshold', prop: 'value', key: 'loop_suspicion_threshold', localKey: 'loop-suspicion-threshold' },
@@ -221,6 +222,10 @@ function syncPoolSettings(ps) {
   if (logApiPostEl && saved['log-api-post'] !== undefined) {
     logApiPostEl.checked = saved['log-api-post'];
   }
+
+  // Update two-phase input enabled state after server settings sync
+  updateTwoPhaseInputsEnabled();
+
   // Persist synced settings to localStorage only if something changed (skip server broadcast to avoid feedback loop).
   if (changed) saveSettings(false);
 }

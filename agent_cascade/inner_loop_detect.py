@@ -109,6 +109,10 @@ class InnerLoopDetector:
                     "score": 100,
                 }
 
+        # Skip two-phase detection until minimum chars threshold reached
+        if self._chars_fed < self.min_chars:
+            return None
+
         # Two-phase semantic loop detection (gated by feature flag)
         two_phase_result = self._two_phase_detector.feed(chunk)
         if two_phase_result is not None:
