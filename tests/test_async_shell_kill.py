@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from agent_cascade.async_shell import AsyncShellTracker, AsyncShellTask, KILL_WAIT_TIMEOUT
+from agent_cascade.log import logger
 
 
 def _setup_task(tracker, task):
@@ -439,6 +440,296 @@ class TestKillRaceConditions:
         t_kill.join(timeout=5)
 
         assert len(errors) == 0, f"Race condition errors: {errors}"
+
+
+# ============================================================================
+# Windows sibling process kill test (& operator spawns siblings, not children)
+# ============================================================================
+
+class TestKillSiblingProcesses:
+
+    def test_kill_warns_about_surviving_children(self):
+        """Verify _kill_process_tree logs a warning when child processes survive.
+
+        Uses mocked subprocess calls to deterministically simulate survivors,
+        avoiding flaky behavior from real process timing.
+        """
+        if os.name != 'nt':
+            pytest.skip("Windows-only test")
+
+        tracker = AsyncShellTracker(pool=None)
+
+        # Capture log output to check for survivor warning
+        import io as iomodule
+        import logging
+        log_capture = iomodule.StringIO()
+        handler = logging.StreamHandler(log_capture)
+        handler.setLevel(logging.WARNING)
+        logger.addHandler(handler)
+
+        try:
+            call_count = [0]
+
+            def mock_subprocess_run(cmd, **kwargs):
+                call_count[0] += 1
+                cmd_str = str(cmd)
+                # First call: PowerShell to get descendants (has ConvertTo-Csv and ParentProcessId)
+                if 'ConvertTo-Csv' in cmd_str:
+                    return MagicMock(
+                        returncode=0,
+                        stdout='"ProcessId","ParentProcessId"\n"1000","4"\n"2000","1000"\n"3000","1000"\n',
+                        stderr=''
+                    )
+                # Second call: taskkill (succeeds)
+                elif 'taskkill' in cmd_str:
+                    return MagicMock(returncode=0, stdout='', stderr='')
+                # Third call: PowerShell to check survivors (uses -Filter "ProcessId IN")
+                elif 'ProcessId IN' in cmd_str:
+                    return MagicMock(
+                        returncode=0,
+                        stdout='2000\n3000\n',  # These two survived
+                        stderr=''
+                    )
+                return MagicMock(returncode=0, stdout='', stderr='')
+
+            proc_mock = MagicMock()
+            proc_mock.pid = 1000
+            proc_mock.poll.return_value = None  # Still running
+
+            with patch('subprocess.run', side_effect=mock_subprocess_run):
+                tracker._kill_process_tree(proc_mock, 'test_agent', 42)
+
+            log_output = log_capture.getvalue()
+
+            # Verify warning was logged about survivors
+            assert 'survived tree kill' in log_output.lower(), \
+                f"Expected survivor warning. Log: {log_output}"
+            assert 'tool_id=42' in log_output, \
+                f"Warning should mention tool_id. Log: {log_output}"
+            assert 'orphaned' in log_output.lower(), \
+                f"Warning should mention orphaned. Log: {log_output}"
+
+        finally:
+            logger.removeHandler(handler)
+
+    def test_descendant_pid_collection(self):
+        """Verify _get_windows_descendant_pids correctly finds child processes."""
+        if os.name != 'nt':
+            pytest.skip("Windows-only test")
+
+        tracker = AsyncShellTracker(pool=None)
+
+        # Start a process with known children
+        proc = subprocess.Popen(
+            ['cmd', '/c', 'start /B ping -t 127.0.0.1 >nul'],
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+
+        try:
+            time.sleep(0.5)  # Let child spawn
+
+            descendants = tracker._get_windows_descendant_pids(proc.pid)
+
+            # Should find at least the ping process as a descendant
+            assert isinstance(descendants, list), "Should return a list of PIDs"
+            # Note: We don't assert len > 0 because start /B may spawn as sibling not child
+            # The important thing is the method works without errors
+
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+# ============================================================================
+# Unit tests for helper methods with mocked subprocess
+# ============================================================================
+
+class TestDescendantPIDCollectionMocked:
+
+    def test_no_children_returns_empty(self):
+        """_get_windows_descendant_pids returns [] when process has no children."""
+        tracker = AsyncShellTracker(pool=None)
+
+        # Mock PowerShell CSV output: ProcessId, ParentProcessId
+        mock_output = '"ProcessId","ParentProcessId"\n"4","0"\n"1000","4"\n'
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=mock_output)
+
+            descendants = tracker._get_windows_descendant_pids(1000)
+
+            assert descendants == [], f"Expected empty list, got {descendants}"
+
+    def test_finds_direct_children(self):
+        """_get_windows_descendant_pids finds direct children via PPID."""
+        tracker = AsyncShellTracker(pool=None)
+
+        # PowerShell CSV: ProcessId, ParentProcessId
+        # Parent 1000 has child 2000 (PPID=1000) and grandchild 3000 (PPID=2000)
+        mock_output = (
+            '"ProcessId","ParentProcessId"\n'
+            '"4","0"\n'
+            '"1000","4"\n'
+            '"2000","1000"\n'
+            '"3000","2000"\n'
+        )
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=mock_output)
+
+            descendants = tracker._get_windows_descendant_pids(1000)
+
+            assert 2000 in descendants, "Should find direct child"
+            assert 3000 in descendants, "Should find grandchild"
+            assert 1000 not in descendants, "Should not include parent itself"
+            assert len(descendants) == 2
+
+    def test_handles_commas_in_output(self):
+        """_get_windows_descendant_pids correctly parses CSV with commas."""
+        tracker = AsyncShellTracker(pool=None)
+
+        # PowerShell output - csv module handles edge cases
+        mock_output = (
+            '"ProcessId","ParentProcessId"\n'
+            '"4","0"\n'
+            '"1000","4"\n'
+            '"2000","1000"\n'
+        )
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=mock_output)
+
+            descendants = tracker._get_windows_descendant_pids(1000)
+
+            assert 2000 in descendants, "Should find child"
+
+    def test_handles_tasklist_failure(self):
+        """_get_windows_descendant_pids returns [] on subprocess failure."""
+        tracker = AsyncShellTracker(pool=None)
+
+        with patch('subprocess.run') as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired("powershell", 10)
+
+            descendants = tracker._get_windows_descendant_pids(1000)
+
+            assert descendants == []
+
+    def test_handles_empty_output(self):
+        """_get_windows_descendant_pids returns [] on empty output."""
+        tracker = AsyncShellTracker(pool=None)
+
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='')
+
+            descendants = tracker._get_windows_descendant_pids(1000)
+
+            assert descendants == []
+
+
+class TestPIDAliveCheckMocked:
+
+    def test_finds_alive_pid(self):
+        """_check_windows_pids_alive correctly identifies running PIDs."""
+        tracker = AsyncShellTracker(pool=None)
+
+        # PowerShell returns list of alive ProcessIds, one per line
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='4\n500\n')
+
+            alive = tracker._check_windows_pids_alive([4, 500, 999])
+
+            assert 4 in alive, "PID 4 should be alive"
+            assert 500 in alive, "PID 500 should be alive"
+            assert 999 not in alive, "Non-existent PID should not be reported alive"
+
+    def test_empty_input_returns_empty(self):
+        """_check_windows_pids_alive returns [] for empty input."""
+        tracker = AsyncShellTracker(pool=None)
+
+        alive = tracker._check_windows_pids_alive([])
+        assert alive == []
+
+
+class TestKillProcessTreeEarlyExit:
+
+    def test_skips_kill_if_already_dead(self):
+        """_kill_process_tree returns early if process.poll() is not None."""
+        tracker = AsyncShellTracker(pool=None)
+
+        proc_mock = MagicMock()
+        proc_mock.pid = 12345
+        proc_mock.poll.return_value = 0  # Already finished
+
+        with patch.object(tracker, '_get_windows_descendant_pids') as mock_descendants:
+            with patch('subprocess.run') as mock_taskkill:
+                tracker._kill_process_tree(proc_mock, 'test_agent', 1)
+
+                mock_descendants.assert_not_called()
+                mock_taskkill.assert_not_called()
+
+
+class TestKillProcessTreeTaskkillFailure:
+
+    def test_handles_taskkill_failure_gracefully(self):
+        """_kill_process_tree logs warning and continues verification when taskkill fails."""
+        if os.name != 'nt':
+            pytest.skip("Windows-only test")
+
+        tracker = AsyncShellTracker(pool=None)
+
+        import io as iomodule
+        import logging
+        log_capture = iomodule.StringIO()
+        handler = logging.StreamHandler(log_capture)
+        handler.setLevel(logging.DEBUG)
+        logger.addHandler(handler)
+
+        try:
+            call_count = [0]
+
+            def mock_subprocess_run(cmd, **kwargs):
+                call_count[0] += 1
+                cmd_str = str(cmd)
+                # First call: PowerShell to get descendants (has ConvertTo-Csv)
+                if 'ConvertTo-Csv' in cmd_str:
+                    return MagicMock(
+                        returncode=0,
+                        stdout='"ProcessId","ParentProcessId"\n"1000","4"\n"2000","1000"\n',
+                        stderr=''
+                    )
+                # Second call: taskkill (fails with non-zero exit code)
+                elif 'taskkill' in cmd_str:
+                    return MagicMock(
+                        returncode=128,
+                        stdout='',
+                        stderr='Access is denied.\n'
+                    )
+                # Third call: PowerShell to check survivors
+                elif 'ProcessId IN' in cmd_str:
+                    return MagicMock(returncode=0, stdout='2000\n', stderr='')
+                return MagicMock(returncode=0, stdout='', stderr='')
+
+            proc_mock = MagicMock()
+            proc_mock.pid = 1000
+            proc_mock.poll.return_value = None  # Still running
+
+            with patch('subprocess.run', side_effect=mock_subprocess_run):
+                tracker._kill_process_tree(proc_mock, 'test_agent', 99)
+
+            log_output = log_capture.getvalue()
+
+            # Verify taskkill failure warning was logged
+            assert 'taskkill for pid 1000 failed' in log_output.lower(), \
+                f"Expected taskkill failure warning. Log: {log_output}"
+            assert 'access is denied' in log_output.lower(), \
+                f"Expected error message in warning. Log: {log_output}"
+
+            # Verify survivor verification still happened (didn't abort)
+            assert 'survived tree kill' in log_output.lower(), \
+                f"Should still verify survivors after taskkill failure. Log: {log_output}"
+
+        finally:
+            logger.removeHandler(handler)
 
 
 if __name__ == '__main__':

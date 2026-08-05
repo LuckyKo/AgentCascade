@@ -19,6 +19,8 @@ import signal
 import subprocess
 import threading
 import time
+import csv
+import io
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -835,10 +837,118 @@ class AsyncShellTracker:
                 logger.debug(f"[AsyncShell] Failed to kill viewer PID {viewer.pid}: {e}")
 
     # ────────────────────────────────────────────────────────────────
+    def _get_windows_descendant_pids(self, parent_pid: int) -> List[int]:
+        """Get all descendant PIDs of a process on Windows using WMI via PowerShell.
+
+        Uses Get-CimInstance Win32_Process to get PID/PPID mapping for all processes,
+        then recursively collects descendants. This is more reliable than tasklist which
+        doesn't expose PPID in its CSV output.
+
+        Args:
+            parent_pid: The root PID whose descendants to find.
+
+        Returns:
+            List of descendant PIDs (children, grandchildren, etc.), excluding parent itself.
+        """
+        try:
+            # Query all processes with their PPIDs using PowerShell/CIM
+            ps_cmd = (
+                'Get-CimInstance Win32_Process | '
+                'Select-Object ProcessId, ParentProcessId | '
+                'ConvertTo-Csv -NoTypeInformation'
+            )
+            result = subprocess.run(
+                ['powershell', '-NoProfile', '-Command', ps_cmd],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                logger.debug(f"[AsyncShell] PowerShell CIM query failed (rc={result.returncode}): {result.stderr.strip()}")
+                return []
+            if not result.stdout.strip():
+                return []
+
+            # Build PPID -> [child_pids] mapping from output
+            ppid_to_children: Dict[int, List[int]] = {}
+            reader = csv.reader(io.StringIO(result.stdout))
+            next(reader, None)  # Skip header row
+            for row in reader:
+                if len(row) < 2:
+                    continue
+                try:
+                    pid = int(row[0])
+                    ppid = int(row[1])
+                    ppid_to_children.setdefault(ppid, []).append(pid)
+                except (ValueError, IndexError):
+                    continue
+
+            # Recursively collect descendants starting from parent_pid
+            # Use visited set to prevent infinite loops from process tree cycles
+            descendants: List[int] = []
+            visited: set = set()
+            to_visit = [parent_pid]
+            while to_visit:
+                current = to_visit.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                for child in ppid_to_children.get(current, []):
+                    if child != parent_pid and child not in visited:  # Exclude root + prevent duplicates
+                        descendants.append(child)
+                        to_visit.append(child)
+
+            return descendants
+        except Exception as e:
+            logger.debug(f"[AsyncShell] Failed to get descendant PIDs for {parent_pid}: {e}")
+            return []
+
+    # ────────────────────────────────────────────────────────────────
+    def _check_windows_pids_alive(self, pids: List[int]) -> List[int]:
+        """Check which of the given PIDs are still alive on Windows.
+
+        Uses a single PowerShell call to query all PIDs at once via Get-CimInstance
+        with a Where-Object filter, avoiding one subprocess per PID.
+
+        Args:
+            pids: List of PIDs to check.
+
+        Returns:
+            Subset of pids that are still running.
+        """
+        if not pids:
+            return []
+
+        alive = []
+        try:
+            # Build comma-separated list for PowerShell filter
+            pid_list = ','.join(str(p) for p in pids)
+            ps_cmd = (
+                f'Get-CimInstance Win32_Process -Filter "ProcessId IN ({pid_list})" | '
+                'Select-Object -ExpandProperty ProcessId'
+            )
+            result = subprocess.run(
+                ['powershell', '-NoProfile', '-Command', ps_cmd],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                target_set = set(pids)
+                for line in result.stdout.strip().splitlines():
+                    line = line.strip()
+                    if line.isdigit():
+                        pid = int(line)
+                        if pid in target_set:
+                            alive.append(pid)
+        except Exception as e:
+            logger.debug(f"[AsyncShell] Failed to check PIDs {pids}: {e}")
+
+        return alive
+
+    # ────────────────────────────────────────────────────────────────
     def _kill_process_tree(self, proc: subprocess.Popen, agent_name: str, tool_id: int):
         """Kill the main process tree and its associated viewer process (if any).
 
         Terminates the primary shell subprocess plus all descendants via taskkill/killpg.
+        On Windows, captures descendant PIDs before killing, verifies after, and warns
+        about any survivors (e.g., sibling processes spawned via cmd & operator).
         Also cleans up the secondary "viewer" console window spawned on Windows when
         console_window=True. Uses _kill_viewer_process to avoid race conditions around
         viewer_process access.
@@ -851,7 +961,18 @@ class AsyncShellTracker:
         pid = proc.pid
         logger.debug(f"[AsyncShell] Killing process tree for {agent_name} tool_id={tool_id}, PID={pid}")
 
+        # Skip if already dead
+        if proc.poll() is not None:
+            logger.debug(f"[AsyncShell] Process {pid} already finished, skipping kill")
+            return
+
         if ON_WINDOWS:
+            # Capture descendant PIDs before killing to verify later
+            descendant_pids = self._get_windows_descendant_pids(pid)
+            all_target_pids = [pid] + descendant_pids
+            if descendant_pids:
+                logger.debug(f"[AsyncShell] Captured {len(descendant_pids)} descendant PID(s) for tool_id={tool_id}: {descendant_pids}")
+
             try:
                 # First pass: taskkill with tree flag (main process)
                 result = subprocess.run(
@@ -865,6 +986,17 @@ class AsyncShellTracker:
                     logger.warning(f"[AsyncShell] taskkill for PID {pid} failed with rc={result.returncode}: {result.stderr.strip()}")
             except Exception as e:
                 logger.warning(f"[AsyncShell] taskkill for PID {pid}: {e}")
+
+            # Verify all captured PIDs are dead; warn about survivors
+            if descendant_pids:
+                time.sleep(0.3)  # Allow process table to update after kill
+                survivors = self._check_windows_pids_alive(all_target_pids)
+                if survivors:
+                    logger.warning(
+                        f"[AsyncShell] __kill: {len(survivors)} process(es) survived tree kill "
+                        f"for tool_id={tool_id}: {survivors}. They will be orphaned."
+                    )
+
         else:
             try:
                 import signal
