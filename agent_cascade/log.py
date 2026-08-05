@@ -46,17 +46,14 @@ class _WindowsSafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
                 os.remove(dest)
             shutil.move(source, dest)
         except OSError as e:
-            # Log warning but don't crash - current file keeps writing until rotation succeeds
-            # Use module-level logger directly (already defined at import time)
+            # Don't use logger here - we're inside emit() already, calling logger.warning()
+            # would cause recursion/nested emit on the same handler -> "Logging error" messages.
+            # Write directly to stderr for observability without recursion risk.
             try:
-                logger.warning(f"Log rotation failed ({source} -> {dest}): {e}")
+                sys.__stderr__.write(f"[LOG ROTATION FAILED] {source} -> {dest}: {e}\n")
+                sys.__stderr__.flush()
             except Exception:
-                # Fallback during shutdown or recursion
-                try:
-                    sys.__stderr__.write(f"[LOG ROTATION FAILED] {source} -> {dest}: {e}\n")
-                    sys.__stderr__.flush()
-                except Exception:
-                    pass
+                pass  # Silently ignore - rotation will retry next time file size threshold is hit
 
 
 class _CapturingStream:
