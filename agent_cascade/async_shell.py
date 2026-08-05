@@ -467,6 +467,20 @@ class AsyncShellTracker:
             command, creationflags = configure_windows_utf8(command, create_new_console=task.console_window)
             env = _WIN_ENV
 
+            # Add -NoProfile to PowerShell commands to suppress profile.ps1 loading errors.
+            if original_command.strip().lower().startswith('powershell'):
+                # Insert -NoProfile after powershell executable name (handles paths like C:\...\powershell.exe)
+                import re
+                command = re.sub(
+                    r'^(powershell(?:\.exe)?\s+)(?!.*-NoProfile)',
+                    r'\1-NoProfile ',
+                    original_command,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                # Re-apply UTF-8 config since we modified the command
+                command, creationflags = configure_windows_utf8(command, create_new_console=task.console_window)
+
         proc = subprocess.Popen(
             command,
             cwd=str(cwd) if cwd else None,
@@ -687,11 +701,11 @@ class AsyncShellTracker:
                 killed_externally = task.killed
             if killed_externally:
                 # External kill requested. Only kill main process if still alive;
-                # always ensure viewer is cleaned up (even if main already finished).
+                # _kill_process_tree handles viewer cleanup automatically.
                 if proc.poll() is None:
                     self._kill_process_tree(proc, agent_name, tool_id)
                     time.sleep(PROCESS_KILL_SETTLE_DELAY)
-                else:
+                elif task.viewer_process is not None:
                     # Main process already finished but kill was requested — just kill viewer.
                     self._kill_viewer_process(task)
             elif timed_out:
@@ -831,24 +845,31 @@ class AsyncShellTracker:
             tool_id: Task identifier (for task lookup and logging).
         """
         pid = proc.pid
+        logger.debug(f"[AsyncShell] Killing process tree for {agent_name} tool_id={tool_id}, PID={pid}")
 
         if ON_WINDOWS:
             try:
                 # First pass: taskkill with tree flag (main process)
-                subprocess.run(
+                result = subprocess.run(
                     ['taskkill', '/F', '/T', '/PID', str(pid)],
                     capture_output=True, timeout=10, text=True,
                 )
                 time.sleep(PROCESS_KILL_SETTLE_DELAY)
+                if result.returncode == 0:
+                    logger.debug(f"[AsyncShell] Successfully killed PID {pid} (taskkill succeeded)")
+                else:
+                    logger.warning(f"[AsyncShell] taskkill for PID {pid} failed with rc={result.returncode}: {result.stderr.strip()}")
             except Exception as e:
                 logger.warning(f"[AsyncShell] taskkill for PID {pid}: {e}")
         else:
             try:
                 import signal
                 os.killpg(os.getpgid(pid), signal.SIGKILL)
+                logger.debug(f"[AsyncShell] Sent SIGKILL to process group {pid}")
             except OSError:
                 try:
                     proc.kill()
+                    logger.debug(f"[AsyncShell] Fallback kill for PID {pid}")
                 except Exception as e:
                     logger.warning(f"[AsyncShell] kill fallback for PID {pid}: {e}")
 
@@ -1069,11 +1090,11 @@ class AsyncShellTracker:
 
     # ────────────────────────────────────────────────────────────────
     def kill_task(self, agent_name: str, tool_id: int) -> Optional[str]:
-        """Request termination of a running async shell task and wait briefly for confirmation.
+        """Request termination of a running async shell task and wait for confirmation.
 
-        Sets the killed flag so the tracking thread can detect it and perform actual
-        process cleanup via _kill_process_tree. Then waits up to ~5 seconds to verify
-        the process actually terminated; if not, force-kills directly.
+        Sets the killed flag so the tracking thread detects it and exits poll_loop.
+        Then force-kills the process tree directly (no race with tracking thread).
+        Waits until proc.poll() confirms the process is actually dead before returning.
 
         Args:
             agent_name: Owner agent name
@@ -1091,22 +1112,24 @@ class AsyncShellTracker:
                 proc = task.process
                 pid = task.pid
             if proc and proc.poll() is None:
-                # Set killed flag — tracking thread will detect this, exit poll loop,
-                # and handle the actual process termination via _kill_process_tree.
+                # Set killed flag so tracking thread exits poll_loop and skips heartbeats.
                 with task._lock:
                     task.killed = True
 
-                # Wait briefly for the tracking thread to actually terminate the process.
-                # If it hasn't terminated within KILL_WAIT_TIMEOUT, force-kill directly.
+                # Force-kill the process tree directly for immediate termination.
+                # This avoids race conditions with the tracking thread also trying to kill.
+                self._kill_process_tree(proc, agent_name, tool_id)
+
+                # Wait until the process is confirmed dead before returning.
                 deadline = time.time() + KILL_WAIT_TIMEOUT
                 while proc.poll() is None and time.time() < deadline:
                     time.sleep(0.1)
 
-                if proc.poll() is None:
-                    logger.warning(f"[AsyncShell] kill_task timeout for {agent_name} tool_id={tool_id}; force-killing PID {pid}")
-                    self._kill_process_tree(proc, agent_name, tool_id)
-
-                return f"Shell killed [Tool ID: {tool_id}, PID: {pid}]."
+                if proc.poll() is not None:
+                    return f"Shell killed [Tool ID: {tool_id}, PID: {pid}]."
+                else:
+                    logger.warning(f"[AsyncShell] kill_task timed out waiting for PID {pid} to die")
+                    return f"Shell kill requested but process PID {pid} did not terminate within {KILL_WAIT_TIMEOUT}s."
             else:
                 with task._lock:
                     rc = task.return_code

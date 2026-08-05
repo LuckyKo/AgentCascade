@@ -1,5 +1,6 @@
 # DNA Model for Agent Prompts and Instructions
 # Centralizing all strings for easy A-B testing and consistency.
+# -*- coding: utf-8 -*-
 
 from typing import Dict, List, Set
 
@@ -297,7 +298,8 @@ TOOL_METADATA = {
             '**Async Mode**: Set async_mode=true to run commands in the background — returns immediately with a tool_id and PID. '
             'The command runs while you continue working, sending periodic heartbeat updates (if heartbeat_interval > 0) and a final result message when done. '
             'Use the tool_id parameter to manage running shells: send input, check status (__status), kill (__kill), update heartbeat (__heartbeat=N seconds), or send Ctrl+C (__ctrl_c). '
-            'Max 5 concurrent async shells per agent.'
+            'Max 5 concurrent async shells per agent.\n\n'
+            '**stdin Limitations**: Windows CMD variable expansion with stdin (e.g., `set /p VAR=input & echo %VAR%`) may not work reliably in one-liners due to how cmd /c processes variables — the input arrives but `%VAR%` won\'t expand because it was parsed before input was received. This applies to both sync and async modes.'
         ),
         'parameters': {
             'command': 'The exact shell command to execute. In async mode with an existing tool_id, use special commands: __kill (terminate), __status (check status + recent output), __heartbeat=N (set heartbeat interval in seconds), __ctrl_c (send interrupt signal). Any other text is sent as stdin input to the running process — this is NOT a shell command and should not be validated as one.',
