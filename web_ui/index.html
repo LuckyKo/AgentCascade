@@ -424,6 +424,29 @@
                 </div>
               </div>
 
+              <!-- Context Window -->
+              <div class="settings-section">
+                <h3 class="settings-section-title">Context Window</h3>
+                <div class="settings-section-body">
+                  <label class="setting-field">
+                    <span>Compression Warning Threshold (%) — warn agent when context usage exceeds this %</span>
+                    <input type="number" id="setting-compression-warning-threshold" min="50" max="99" step="1" value="90" />
+                  </label>
+                  <label class="setting-field">
+                    <span>Compression Force Threshold (%) — force compress when context usage exceeds this %</span>
+                    <input type="number" id="setting-compression-force-threshold" min="51" max="99" step="1" value="95" />
+                  </label>
+                  <label class="setting-field">
+                    <span>Proactive Compression Threshold (%) — trigger proactive compression after tool calls at this %</span>
+                    <input type="number" id="setting-compression-proactive-threshold" min="50" max="94" step="1" value="88" />
+                  </label>
+                  <label class="setting-field">
+                    <span>Context Reserve Tokens — tokens reserved for LLM overhead</span>
+                    <input type="number" id="setting-compression-context-reserve-tokens" min="500" max="10000" step="500" value="3000" />
+                  </label>
+                </div>
+              </div>
+
               <!-- Cache Pool -->
               <div class="settings-section">
                 <h3 class="settings-section-title">Cache Pool</h3>

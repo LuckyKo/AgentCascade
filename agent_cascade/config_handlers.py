@@ -69,6 +69,8 @@ POOL_SETTINGS_KEYS = frozenset({
 EXTRA_PERSIST_KEYS = frozenset({
     'disabled_tools',  # Per-agent-class tool assignments from UI settings panel
     'auto_security',   # Auto-Ask security mode toggle state
+    'compression_proactive_threshold',   # Proactive compression threshold (PoolSettings field, persisted here for restart survival)
+    'compression_context_reserve_tokens',  # Context reserve tokens (PoolSettings field, persisted here for restart survival)
 })
 
 # ── Registry of config key → handler function ────────────────────────────
@@ -568,6 +570,20 @@ def _handle_compression_max_attempts(ui_cfg: dict, agent_pool: Optional[Any], ag
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = max(1, int(ui_cfg['compression_max_attempts']))
         agent_pool.settings.compression_max_attempts = val
+
+
+@register_config_handler('compression_proactive_threshold')
+def _handle_compression_proactive_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = float(ui_cfg['compression_proactive_threshold'])
+        agent_pool.settings.compression_proactive_threshold = val
+
+
+@register_config_handler('compression_context_reserve_tokens')
+def _handle_compression_context_reserve_tokens(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(100, int(ui_cfg['compression_context_reserve_tokens']))
+        agent_pool.settings.compression_context_reserve_tokens = val
 
 
 @register_config_handler('enable_agent_budgeting')

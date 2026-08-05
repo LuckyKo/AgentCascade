@@ -988,6 +988,12 @@ function saveSettings(sendToServer) {
   if ($('#setting-retry-base-delay')) s['retry-base-delay'] = Math.max(0.1, parseFloat($('#setting-retry-base-delay').value) || 1.0);
   if ($('#setting-retry-max-delay')) s['retry-max-delay'] = Math.max(1.0, parseFloat($('#setting-retry-max-delay').value) || 8.0);
 
+  // Compression threshold settings
+  if ($('#setting-compression-warning-threshold')) s['compression-warning-threshold'] = $('#setting-compression-warning-threshold').value;
+  if ($('#setting-compression-force-threshold')) s['compression-force-threshold'] = $('#setting-compression-force-threshold').value;
+  if ($('#setting-compression-proactive-threshold')) s['compression-proactive-threshold'] = $('#setting-compression-proactive-threshold').value;
+  if ($('#setting-compression-context-reserve-tokens')) s['compression-context-reserve-tokens'] = $('#setting-compression-context-reserve-tokens').value;
+
   // Log API POST Dump toggle (frontend-only, not in backend pool_settings)
   if ($('#setting-log-api-post')) s['log-api-post'] = $('#setting-log-api-post').checked;
 
@@ -1189,6 +1195,20 @@ function loadSettings() {
     }
     if ($('#setting-retry-max-delay') && s['retry-max-delay'] !== undefined) {
       $('#setting-retry-max-delay').value = s['retry-max-delay'];
+    }
+
+    // Compression threshold settings
+    if ($('#setting-compression-warning-threshold') && s['compression-warning-threshold'] !== undefined) {
+      $('#setting-compression-warning-threshold').value = s['compression-warning-threshold'];
+    }
+    if ($('#setting-compression-force-threshold') && s['compression-force-threshold'] !== undefined) {
+      $('#setting-compression-force-threshold').value = s['compression-force-threshold'];
+    }
+    if ($('#setting-compression-proactive-threshold') && s['compression-proactive-threshold'] !== undefined) {
+      $('#setting-compression-proactive-threshold').value = s['compression-proactive-threshold'];
+    }
+    if ($('#setting-compression-context-reserve-tokens') && s['compression-context-reserve-tokens'] !== undefined) {
+      $('#setting-compression-context-reserve-tokens').value = s['compression-context-reserve-tokens'];
     }
 
     // MCP settings restore (workAccessFoldersRW block follows below)
@@ -4647,6 +4667,13 @@ function getGenerateCfg() {
   if ($('#setting-idle-timeout')) cfg.idle_timeout_seconds = parseFloat($('#setting-idle-timeout').value) || 900;
   if ($('#setting-system-idle-timeout')) cfg.system_agent_idle_timeout_seconds = parseFloat($('#setting-system-idle-timeout').value) || 900;
   if ($('#setting-tool-result-max-chars')) cfg.tool_result_max_chars = parseInt($('#setting-tool-result-max-chars').value) || 10000;
+
+  // Compression threshold settings (PoolSettings fields)
+  if ($('#setting-compression-warning-threshold')) cfg.compression_warning_threshold = parseFloat($('#setting-compression-warning-threshold').value) || 90;
+  if ($('#setting-compression-force-threshold')) cfg.compression_force_threshold = parseFloat($('#setting-compression-force-threshold').value) || 95;
+  if ($('#setting-compression-proactive-threshold')) cfg.compression_proactive_threshold = parseFloat($('#setting-compression-proactive-threshold').value) || 88;
+  if ($('#setting-compression-context-reserve-tokens')) cfg.compression_context_reserve_tokens = parseInt($('#setting-compression-context-reserve-tokens').value) || 3000;
+
   if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value) || -1;
   if ($('#setting-grep-spillover')) cfg.grep_spillover = $('#setting-grep-spillover').checked;
   if ($('#setting-shell-char-limit')) cfg.shell_char_limit = parseInt($('#setting-shell-char-limit').value) || -1;
