@@ -200,12 +200,41 @@ Clear conversation and reset session.
 ```
 
 #### refresh_souls
-Reload agent configurations from disk.
+Reload agent templates from disk and broadcast updated state to all connected clients. Does not return a specific response to the caller — use `refresh_agents` if you need the list of discovered agents back programmatically.
 ```json
 {
     "type": "refresh_souls"
 }
 ```
+
+#### refresh_agents
+Reload agent templates from disk and return the list of discovered agents. Unlike `refresh_souls` which only broadcasts state changes, this command returns the agent names via WebSocket so callers (including agents invoking via tool calls) can programmatically determine what's loaded after refresh.
+
+Request:
+```json
+{
+    "type": "refresh_agents"
+}
+```
+
+Response (sent via send_queue to caller):
+```json
+{
+    "type": "refresh_agents_result",
+    "agents": ["orchestrator", "coder", "reviewer", ...]
+}
+```
+
+On error, the response includes an `error` field instead of agents:
+```json
+{
+    "type": "refresh_agents_result",
+    "agents": [],
+    "error": "<error message>"
+}
+```
+
+Both `refresh_souls` and `refresh_agents` also broadcast a full state update to all connected clients after completing.
 
 #### restart_server
 Trigger a server restart via os.execl.
@@ -358,6 +387,27 @@ Clear the pending message queue for an instance.
     "message_index": "<required: integer index to remove, or -1 to clear all>"
 }
 ```
+
+#### Agent Tool Restrictions for Dynamically Loaded Agents
+
+When a new agent soul file (`*_soul.md`) is discovered during refresh, it starts with default tool restrictions unless explicit `disabled_tools` configuration is provided. This prevents dynamically loaded agents from having unrestricted access to sensitive operations.
+
+**Tools disabled by default:**
+- `shell_cmd` — Execute shell commands on host system
+- `code_interpreter` — Run Python code in sandbox
+- `write_file`, `edit_file`, `delete_file`, `copy_file`, `re_indent` — File mutations
+- `web_search`, `web_extractor` — Network access
+- `propose_skill` — Create new reusable skills
+- All MCP tools (via `__all_mcp_tools__` sentinel)
+
+**Tools enabled by default:**
+- `call_agent`, `dismiss_agent`, `list_agents` — Sub-agent coordination
+- `read_file`, `view_image`, `list_dir`, `grep` — Read-only file operations
+- `compress_context`, `forget_last` — Context management
+- `system_info`, `read_logs`, `code_map`, `calculate`, `syntax_check` — Information utilities
+- `scan_skills`, `load_skill` — Skill access (read-only)
+
+To grant a new agent additional capabilities, set `disabled_tools` explicitly in its soul file's `generate_cfg` or via the UI tool assignment panel. Core system agents (`orchestrator`, `security`, `compressor`) are excluded from default restrictions.
 
 ### Server → Client Messages
 
