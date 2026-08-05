@@ -113,6 +113,7 @@ def test_llm_dashscope(local_llm_cfg, functions, stream, delta_stream):
             f"Expected function call with functions provided. Response: {response[-1]}"
 
 
+@pytest.mark.live_api
 @pytest.mark.parametrize('stream', [True, False])
 @pytest.mark.parametrize('delta_stream', [True, False])
 def test_llm_retry_failure(stream, delta_stream):
@@ -129,6 +130,7 @@ def test_llm_retry_failure(stream, delta_stream):
         list(response)
 
 
+@pytest.mark.live_api
 @pytest.mark.parametrize('delta_stream', [True, False])
 def test_llm_retry_failure_delta(delta_stream):
     # Test non-streaming path: explicitly set use_raw_api to False for qwen-turbo
