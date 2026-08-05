@@ -1492,11 +1492,10 @@ class ExecutionEngine:
                     self.pool._async_registry.clear_pending(instance.instance_name)
                 except Exception:
                     pass  # Non-critical cleanup
-            # Also drain the async results buffer to prevent memory leak from
-            # stale results
-            if hasattr(self.pool, '_async_results'):
+            # Also drain the message queue to prevent memory leak from stale messages
+            if hasattr(self.pool, 'drain_queue'):
                 try:
-                    self.pool._async_results.drain(instance.instance_name)
+                    self.pool.drain_queue(instance.instance_name)
                 except Exception:
                     pass  # Non-critical cleanup
 
@@ -1884,23 +1883,13 @@ class ExecutionEngine:
         """
         inst_name = instance.instance_name
 
-        # Drain user messages from queue
+        # Drain user messages from queue (includes async results — single queue now)
         if self._drain_and_inject(
             instance, inst_name, messages, llm_messages, response,
             drain_fn=self.pool.drain_queue,
             factory=self._make_user_message,
         ):
             # Invalidate LLM preprocessing cache after queue injection for fresh processing
-            self._clear_llm_preprocess_cache(instance, inst_name)
-            return True
-
-        # Drain async results (heartbeats, completions) that arrived during LLM call
-        if self._drain_and_inject(
-            instance, inst_name, messages, llm_messages, response,
-            drain_fn=self.pool.drain_async_results,
-            factory=self._make_async_result_message,
-        ):
-            # Invalidate LLM preprocessing cache after async result injection
             self._clear_llm_preprocess_cache(instance, inst_name)
             return True
 
@@ -4008,14 +3997,13 @@ class ExecutionEngine:
             logger.info(f"Queued messages for {inst_name} after turn completion. Looping back.")
             return True  # Loop back to process injected messages
 
-        # Safety drain: catch any results from fast-completing children that
-        # completed
-        # between register_async_call() and the has_pending() check above
+        # Safety drain: catch any messages from fast-completing children that
+        # completed between register_async_call() and the has_pending() check above
         try:
             if self._drain_and_inject(
                 instance, inst_name, messages, llm_messages, response,
-                drain_fn=self.pool.drain_async_results,
-                factory=self._make_async_result_message,
+                drain_fn=self.pool.drain_queue,
+                factory=self._make_user_message,
             ):
                 return True  # Continue loop to process drained results
         except Exception as e:
@@ -4197,60 +4185,36 @@ class ExecutionEngine:
         if self._is_stopped(inst_name):
             return SleepAction.BREAK_LOOP, None
 
-        # Drain async tool results ONLY — user messages do NOT wake sleeping
-        # agents
-        async_results = self.pool.drain_async_results(inst_name)
+        # Drain message queue — all wakeups now come through here (async results + user messages)
+        messages_list = self.pool.drain_queue(inst_name)
 
-        if async_results:
-            # Async results arrived — wake up and inject
+        if messages_list:
+            # Wake up on ANY message
             with instance._state_lock:
-                # CHECK TERMINATED BEFORE TRANSITION — prevents resuming
-                # terminated agent
                 if instance.state == AgentState.TERMINATED:
-                    logger.debug("TERMINATED while SLEEPING for %s - breaking", inst_name)
                     return SleepAction.BREAK_LOOP, None
                 instance._transition(AgentState.RUNNING)
                 instance.sleeping_since = None
                 instance._last_wakeup_log = time.monotonic()
-                logger.debug("RESUMED from SLEEPING - %s async results, user msgs=%s",
-                             len(async_results), self.pool.has_messages(inst_name))
+                logger.debug("RESUMED from SLEEPING - %s (%d messages)", inst_name, len(messages_list))
 
-            # Inject async results FIRST (items mode — already drained)
+            # Inject all drained messages as user-type messages (async results are already formatted strings)
             self._drain_and_inject(
                 instance, inst_name, messages, llm_messages, response,
-                items=async_results,
-                factory=self._make_async_result_message,
-            )
-
-            # THEN drain any queued user messages (they were waiting while
-            # agent was sleeping)
-            self._drain_and_inject(
-                instance, inst_name, messages, llm_messages, response,
-                drain_fn=self.pool.drain_queue,
+                items=messages_list,  # Pass pre-drained items directly
                 factory=self._make_user_message,
             )
 
             # Re-acquire concurrency slot after waking from SLEEPING
             if not skip_slot_acquire:
-                self._acquire_slot_with_logging(instance, "after_async_wakeup")
-
-                # Exit if stopped after re-acquiring slot in sleep loop
+                self._acquire_slot_with_logging(instance, "after_message_wakeup")
                 if self._is_stopped(inst_name):
-                    logger.debug(
-                        f"[SLOT_STOP_CHECK] Stale slot detected after async wakeup for {inst_name}, exiting"
-                    )
-                    return SleepAction.BREAK_LOOP, None  # Stop detected — slot released in finally
+                    return SleepAction.BREAK_LOOP, None
 
-            # Continue to normal LLM processing below (in RUNNING state now)
             return SleepAction.CONTINUE_LOOP, None
 
         elif self.pool.has_pending(inst_name):
-            # Still waiting for background tools — NO user wakeup (preserves
-            # tool_call → tool_response flow)
-            # User messages stay in queue until async results arrive
-            if instance.state == AgentState.TERMINATED:
-                return SleepAction.BREAK_LOOP, None
-
+            # Still waiting for background tools — user messages now wake sleeping agents too.
             current_time = time.monotonic()
             sleeping_duration = 0.0
             if instance.sleeping_since is not None:
@@ -4258,24 +4222,6 @@ class ExecutionEngine:
 
             # Get settings with defaults
             wakeup_interval = getattr(self.pool.settings, 'sleeping_wakeup_interval', 5.0)
-            sleeping_timeout = getattr(self.pool.settings, 'sleeping_timeout', 300.0)
-
-            # Check for timeout first
-            if sleeping_duration >= sleeping_timeout:
-                logger.warning("SLEEPING TIMEOUT - %s waited %.1fs (timeout=%ss)",
-                                inst_name, sleeping_duration, sleeping_timeout)
-                # Final drain before giving up — prevents data loss of
-                # late-arriving results
-                final_results = self.pool.drain_async_results(inst_name)
-                self._drain_and_inject(
-                    instance, inst_name, messages, llm_messages, response,
-                    items=final_results,
-                    factory=self._make_async_result_message,
-                )
-                with instance._state_lock:
-                    instance._transition(AgentState.COMPLETING)
-                    instance.sleeping_since = None
-                return SleepAction.BREAK_LOOP, None
 
             # Log wakeup message periodically
             if (current_time - instance._last_wakeup_log) >= wakeup_interval:
@@ -4296,26 +4242,25 @@ class ExecutionEngine:
             return SleepAction.CONTINUE_LOOP, []
 
         else:
-            # No pending tools and no immediate results
-            # Stable-state drain — keep draining until no more results arrive
+            # No pending tools and no messages — check for any late-arriving messages
+            # via stable-state drain before transitioning to COMPLETING
             results_found = False
             while self._drain_and_inject(
                 instance, inst_name, messages, llm_messages, response,
-                drain_fn=self.pool.drain_async_results,
-                factory=self._make_async_result_message,
+                drain_fn=self.pool.drain_queue,
+                factory=self._make_user_message,
             ):
                 results_found = True
 
             # Final safety drain — catches race conditions
             if self._drain_and_inject(
                 instance, inst_name, messages, llm_messages, response,
-                drain_fn=self.pool.drain_async_results,
-                factory=self._make_async_result_message,
+                drain_fn=self.pool.drain_queue,
+                factory=self._make_user_message,
             ):
                 results_found = True
 
-            # If any results were found, transition to RUNNING so LLM processes
-            # them
+            # If any results were found, transition to RUNNING so LLM processes them
             if results_found:
                 with instance._state_lock:
                     if instance.state == AgentState.TERMINATED:
@@ -4335,8 +4280,7 @@ class ExecutionEngine:
                         )
                         return SleepAction.BREAK_LOOP, None  # Stop detected — slot released in finally
 
-                # Loop back; now in RUNNING state → LLM processes injected
-                # results
+                # Loop back; now in RUNNING state → LLM processes injected results
                 return SleepAction.CONTINUE_LOOP, []  # Bridge signal for UI update before LLM processing
 
             # No results found — safe to transition to COMPLETING

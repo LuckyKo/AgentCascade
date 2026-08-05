@@ -748,12 +748,11 @@ class AsyncShellTracker:
                 self._send_remaining_output(agent_name, tool_id, timed_out)
 
                 # Send final result BEFORE marking completed
-                # Order matters: send_completion_message puts into _async_results.
+                # Order matters: send_completion_message enqueues to message_queue via _enqueue().
                 # If we mark completed first, has_pending() returns False and a
-                # sleeping agent might transition to COMPLETING before seeing the
-                # completion message. By sending first, the agent either sees the
-                # message in _async_results (wakes up) or has_pending() still
-                # returns True (keeps sleeping, will see message next iteration).
+                # sleeping agent might miss the completion message. By sending first,
+                # the agent either sees the message in its queue (wakes up) or
+                # has_pending() still returns True (keeps sleeping).
                 self._send_completion_message(agent_name, tool_id, original_command, timed_out)
 
         except Exception as e:
@@ -903,11 +902,7 @@ class AsyncShellTracker:
             logger.debug("[async_shell] heartbeat(no output) agent=%s tool_id=%s beat=%s",
                          agent_name, tool_id, beat)
             msg = f"⟨shell_cmd heartbeat⟩ Beat {beat}, Tool ID: {tool_id} | No new output (still running)"
-            pool = self._pool
-            if pool and hasattr(pool, '_async_results'):
-                pool._async_results.put(agent_name, msg, function_id=f"heartbeat_{tool_id}")
-            else:
-                self._enqueue(agent_name, msg)
+            self._enqueue(agent_name, msg)
             return
 
         logger.debug("[async_shell] heartbeat with output agent=%s tool_id=%s lines=%d",
@@ -940,13 +935,8 @@ class AsyncShellTracker:
             f"{line_count} line{'s' if line_count != 1 else ''} since last tick\n"
             f"{output_text}"
         )
-        # Put heartbeat into async result buffer so it wakes sleeping agents
-        pool = self._pool
-        if pool and hasattr(pool, '_async_results'):
-            pool._async_results.put(agent_name, msg, function_id=f"heartbeat_{tool_id}")
-        else:
-            # Fallback to normal enqueue if pool not available
-            self._enqueue(agent_name, msg)
+        # Send heartbeat via message queue (wakes sleeping agents)
+        self._enqueue(agent_name, msg)
 
     # ────────────────────────────────────────────────────────────────
     def _send_remaining_output(self, agent_name: str, tool_id: int, timed_out: bool):
@@ -996,13 +986,8 @@ class AsyncShellTracker:
                 f"{output_text}"
             )
 
-        # Put remaining output into async result buffer so it wakes sleeping agents
-        pool = self._pool
-        if pool and hasattr(pool, '_async_results'):
-            pool._async_results.put(agent_name, msg, function_id=f"shell_remaining_{tool_id}")
-        else:
-            # Fallback to normal enqueue if pool not available
-            self._enqueue(agent_name, msg)
+        # Send remaining output via message queue (wakes sleeping agents)
+        self._enqueue(agent_name, msg)
 
     # ────────────────────────────────────────────────────────────────
     def _send_completion_message(
@@ -1038,13 +1023,8 @@ class AsyncShellTracker:
                 f"Completed in {elapsed:.1f} s ({status}).\n"
             )
 
-        # Put completion into async result buffer so it wakes sleeping agents
-        pool = self._pool
-        if pool and hasattr(pool, '_async_results'):
-            pool._async_results.put(agent_name, msg, function_id=f"shell_complete_{tool_id}")
-        else:
-            # Fallback to normal enqueue if pool not available
-            self._enqueue(agent_name, msg)
+        # Send completion via message queue (wakes sleeping agents)
+        self._enqueue(agent_name, msg)
 
     # ────────────────────────────────────────────────────────────────
     def _enqueue(self, agent_name: str, text: str):

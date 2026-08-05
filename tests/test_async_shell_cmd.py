@@ -93,9 +93,8 @@ def shell_cmd_tool():
 
 class TestHeartbeatUsesAsyncResultBuffer:
 
-    def test_heartbeat_goes_to_async_results_not_enqueue(self, mock_task_running):
+    def test_heartbeat_goes_to_enqueue_message(self, mock_task_running):
         pool = MagicMock()
-        pool._async_results = MagicMock()
         pool.enqueue_message = MagicMock()
 
         tracker = AsyncShellTracker(pool=pool)
@@ -107,16 +106,15 @@ class TestHeartbeatUsesAsyncResultBuffer:
 
         tracker._send_heartbeat('test_agent', 1)
 
-        pool._async_results.put.assert_called_once()
-        pool.enqueue_message.assert_not_called()
+        pool.enqueue_message.assert_called_once()
 
-        msg = pool._async_results.put.call_args[0][1]
+        msg = pool.enqueue_message.call_args[0][1]
         assert '⟨shell_cmd heartbeat⟩' in msg
         assert 'Tool ID: 1' in msg
 
     def test_heartbeat_does_not_double_wrap(self, mock_task_running):
         pool = MagicMock()
-        pool._async_results = MagicMock()
+        pool.enqueue_message = MagicMock()
         tracker = AsyncShellTracker(pool=pool)
         _setup_task(tracker, mock_task_running)
 
@@ -125,7 +123,7 @@ class TestHeartbeatUsesAsyncResultBuffer:
             mock_task_running.last_heartbeat_sent_pos = 0
 
         tracker._send_heartbeat('test_agent', 1)
-        msg = pool._async_results.put.call_args[0][1]
+        msg = pool.enqueue_message.call_args[0][1]
 
         assert msg.startswith('⟨shell_cmd heartbeat⟩')
         assert '"function_id":' not in msg
@@ -149,9 +147,14 @@ class TestHeartbeatUsesAsyncResultBuffer:
         msg = pool.enqueue_message.call_args[0][1]
         assert '⟨shell_cmd heartbeat⟩' in msg
 
-    def test_heartbeat_function_id_includes_tool_id(self, mock_task_running):
+    def test_heartbeat_no_longer_uses_async_results_buffer(self, mock_task_running):
+        """Verify heartbeats now go directly to enqueue_message (single-queue migration)."""
         pool = MagicMock()
-        pool._async_results = MagicMock()
+        pool.enqueue_message = MagicMock()
+        # Ensure _async_results is NOT used
+        if hasattr(pool, '_async_results'):
+            delattr(pool, '_async_results')
+
         tracker = AsyncShellTracker(pool=pool)
         _setup_task(tracker, mock_task_running)
 
@@ -160,9 +163,9 @@ class TestHeartbeatUsesAsyncResultBuffer:
             mock_task_running.last_heartbeat_sent_pos = 0
 
         tracker._send_heartbeat('test_agent', 1)
-        call_kwargs = pool._async_results.put.call_args.kwargs if hasattr(pool._async_results.put.call_args, 'kwargs') else pool._async_results.put.call_args[1]
-        func_id = call_kwargs.get('function_id', '')
-        assert 'heartbeat_1' in str(func_id)
+        pool.enqueue_message.assert_called_once()
+        msg = pool.enqueue_message.call_args[0][1]
+        assert '⟨shell_cmd heartbeat⟩' in msg
 
 
 # ============================================================================

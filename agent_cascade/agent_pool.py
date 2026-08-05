@@ -25,7 +25,7 @@ from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
 from .agent_instance import AgentInstance, PoolSettings, AgentState
-from .async_tools import AsyncResultBuffer, AsyncToolRegistry
+from .async_tools import AsyncToolRegistry
 
 
 # Active states for agent lifecycle management (not IDLE — it means "not executing")
@@ -306,12 +306,11 @@ class AgentPool:
         self.instance_state: Dict[str, dict] = {}
         self.message_queues: Dict[str, List[str]] = {}     # per-agent message queues
         self._queue_lock = threading.Lock()                # Protects message_queues mutations
+        self._message_condition = threading.Condition(self._queue_lock)  # For __wait blocking support
 
         # ── Async Tools Infrastructure (SLEEPING state support) ─────────────
         # These attributes support the SLEEPING state guard for async background tools.
-        # _async_results: buffer storing completed async tool results by instance name
         # _async_registry: tracks pending async tool calls by instance name
-        self._async_results: AsyncResultBuffer = AsyncResultBuffer()
         self._async_registry: AsyncToolRegistry = AsyncToolRegistry(pool=self)
 
         # ── Async Shell Infrastructure (background shell_cmd support) ────────
@@ -955,13 +954,6 @@ class AgentPool:
             except Exception as e:
                 logger.debug(f"Cancelling async tools for {instance_name} failed (non-critical): {e}")
 
-        # Drain async results buffer to prevent memory leaks and stale messages
-        if hasattr(self, '_async_results'):
-            try:
-                self._async_results.drain(instance_name)
-            except Exception as e:
-                logger.debug(f"Draining async results for {instance_name} failed (non-critical): {e}")
-
         # Kill all background shell processes for this agent
         if hasattr(self, '_async_shell_tracker'):
             try:
@@ -1176,8 +1168,6 @@ class AgentPool:
             logger.warning(f"Async registry shutdown failed during reset (threads may leak): {e}")
         # Recreate for new session
         self._async_registry = AsyncToolRegistry(pool=self)
-        # Clear async results buffer
-        self._async_results = AsyncResultBuffer()
 
         # Restart idle checker — it may have been stopped by the caller's
         # pool.stopped = True. IdleManager.start() is idempotent.
@@ -1479,13 +1469,6 @@ class AgentPool:
                             queue_cleared += 1
                         except Exception as e:
                             logger.debug(f"Queue clear failed for {inst_name}: {e}")
-                # Drain async results buffer
-                if hasattr(self, '_async_results'):
-                    try:
-                        self._async_results.drain(inst_name)
-                        async_cleared += 1
-                    except Exception:
-                        pass
         except Exception as e:
             logger.debug(f"Cache clear during stop_session (non-critical): {e}")
 
@@ -2285,8 +2268,9 @@ class AgentPool:
 
     def enqueue_message(self, instance_name: str, text: str):
         """Push a message into a specific agent's queue (no sender tracking)."""
-        with self._queue_lock:
+        with self._message_condition:
             self.message_queues.setdefault(instance_name, []).append(text)
+            self._message_condition.notify_all()  # Wake any __wait callers
         self._mark_activity(instance_name)
 
     def drain_queue(self, instance_name: str) -> List[str]:
@@ -2355,40 +2339,40 @@ class AgentPool:
 
         return False
 
-    # ── Async Results Buffer (SLEEPING state support) ───────────────────────
+    def wait_for_message(self, instance_name: str, timeout: float = 30.0) -> Optional[str]:
+        """Block until a message is available for this instance, or timeout.
 
-    def add_async_result(self, instance_name: str, result: str, function_id: Optional[str] = None):
-        """Add a completed async tool result to the buffer for an instance.
-
-        Delegate method for backward compatibility — delegates to AsyncResultBuffer.
-
-        Args:
-            instance_name: The agent instance that dispatched this async tool.
-            result: The string result from the completed async tool.
-            function_id: The LLM's tool_call_id for this async call (optional).
-        """
-        self._async_results.put(instance_name, result, function_id=function_id)
-
-    def drain_async_results(self, instance_name: str) -> List[Tuple[str, Optional[str]]]:
-        """Drain all completed async results for an instance atomically.
-
-        Batched drain operation for efficiency.
-
-        Delegate method for backward compatibility — delegates to AsyncResultBuffer.
-        This operation pops the entire results list at once under lock, minimizing
-        lock contention and ensuring thread-safe access to async results.
+        Used by __wait tool to pause execution until the next async message
+        (e.g., heartbeat or completion) arrives. When a message becomes available,
+        it is removed from the queue and returned so it is not duplicated by normal draining.
 
         Args:
-            instance_name: The agent instance to drain results for.
+            instance_name: The agent instance to wait for messages.
+            timeout: Maximum seconds to wait. If None, wait indefinitely.
 
         Returns:
-            List of (result_string, function_id) tuples (may be empty). Original buffer is cleared.
-            Each tuple element is Tuple[str, Optional[str]] where the second element may be None.
+            A single message string if one becomes available, or None if the
+            timeout elapses with no new message for this instance.
         """
-        return self._async_results.drain(instance_name)
+        with self._message_condition:
+            deadline = None if timeout is None else time.time() + timeout
 
-    # Alias for compatibility with execution_engine.py usage
-    _async_results_drain = drain_async_results
+            while True:
+                msgs = self.message_queues.get(instance_name)
+                if msgs and len(msgs) > 0:
+                    # Take the first available message for this instance
+                    return msgs.pop(0)
+
+                if deadline is not None:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        # Clean up empty list if we created one
+                        if instance_name in self.message_queues and not self.message_queues[instance_name]:
+                            del self.message_queues[instance_name]
+                        return None
+                    self._message_condition.wait(timeout=min(remaining, 1.0))
+                else:
+                    self._message_condition.wait()
 
     def has_pending(self, instance_name: str) -> bool:
         """Check if there are pending async tool calls for an instance.

@@ -360,36 +360,32 @@ class ShellCmd(BaseTool):
         elif command == '__ctrl_c':
             return tracker.send_ctrl_c(agent_name, tool_id) or "No action taken."
         elif command == '__wait':
-            buffer = getattr(self.agent_pool, '_async_results', None)
-            if buffer is None:
-                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Async result buffer not available."
+            pool = self.agent_pool
+            if pool is None or not hasattr(pool, 'wait_for_message'):
+                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Agent pool not available."
 
             # If there's no known task and nothing currently queued for this agent,
             # do a short wait to see if a late completion message arrives. Otherwise, fail fast.
             task = tracker._get_task(agent_name, tool_id)
-            has_queued = False
-            with buffer._condition:
-                has_queued = bool(buffer._results.get(agent_name))
+            has_queued = pool.has_messages(agent_name) if hasattr(pool, 'has_messages') else False
 
             if task is None and not has_queued:
                 # Brief grace period in case completion message is about to be queued
-                result_tuple = buffer.wait_for_next(agent_name, timeout=2.0)
-                if result_tuple is None:
+                result_str = pool.wait_for_message(agent_name, timeout=2.0)
+                if result_str is None:
                     return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No running shell found."
-                result_str, _ = result_tuple
                 truncated = ShellCmd._truncate_shell_message(result_str, agent_name, self.agent_pool)
                 return f"⟨shell_cmd wait⟩ Tool ID: {tool_id}\n{truncated}"
 
             # Block until the next async message (heartbeat/completion/etc.) is queued
             # for this agent, then return it. This aligns __wait with "wait until the
-            # async message queue is not empty".
+            # message queue is not empty".
             timeout = 30.0
-            result_tuple = buffer.wait_for_next(agent_name, timeout=timeout)
+            result_str = pool.wait_for_message(agent_name, timeout=timeout)
 
-            if result_tuple is None:
+            if result_str is None:
                 return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No async message within {timeout:.0f}s."
 
-            result_str, _ = result_tuple
             # Apply the same truncation as heartbeats so __wait replies are consistent.
             truncated = ShellCmd._truncate_shell_message(result_str, agent_name, self.agent_pool)
             return f"⟨shell_cmd wait⟩ Tool ID: {tool_id}\n{truncated}"
