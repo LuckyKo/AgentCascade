@@ -377,9 +377,9 @@ class ShellCmd(BaseTool):
                 truncated = ShellCmd._truncate_shell_message(result_str, agent_name, self.agent_pool)
                 return f"⟨shell_cmd wait⟩ Tool ID: {tool_id}\n{truncated}"
 
-            # Block until the next async message (heartbeat/completion/etc.) is queued
-            # for this agent, then return it. This aligns __wait with "wait until the
-            # message queue is not empty".
+            # Block until any message arrives for this agent (shell heartbeat/completion,
+            # async child result, or user message), then return it. With unified wakeup
+            # queue, __wait serves as a general "pause until something happens" mechanism.
             timeout = 30.0
             result_str = pool.wait_for_message(agent_name, timeout=timeout)
 
