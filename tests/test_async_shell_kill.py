@@ -85,45 +85,43 @@ class TestKillTaskWithMockedProcess:
             mock_kill.assert_called_once()
             assert mock_kill.call_args[0][0] is proc_mock
 
-    def test_kill_returns_after_process_confirmed_dead(self):
-        """kill_task waits until proc.poll() != None before returning success."""
+    @pytest.mark.parametrize("poll_behavior,expected_in_result", [
+        ("waits_then_dead", "Shell killed"),
+        ("never_dies", "did not terminate"),
+    ])
+    def test_kill_returns_after_process_confirmed_dead(self, poll_behavior, expected_in_result):
+        """kill_task waits until proc.poll() != None before returning success (or errors on timeout)."""
         tracker = AsyncShellTracker(pool=None)
         proc_mock = MagicMock()
         proc_mock.pid = 99999
 
-        # First poll returns None (still running), then after a delay returns exit code
-        call_count = [0]
-        def poll_side_effect():
-            call_count[0] += 1
-            if call_count[0] <= 2:
-                return None  # Still alive initially
-            return -1       # Killed
+        if poll_behavior == "waits_then_dead":
+            # First polls return None, then process dies
+            call_count = [0]
+            def poll_side_effect():
+                call_count[0] += 1
+                return None if call_count[0] <= 2 else -1
+            proc_mock.poll.side_effect = poll_side_effect
 
-        proc_mock.poll.side_effect = poll_side_effect
+            task = _make_running_task(pid=99999, process=proc_mock)
+            _setup_task(tracker, task)
 
-        task = _make_running_task(pid=99999, process=proc_mock)
-        _setup_task(tracker, task)
-
-        result = tracker.kill_task('test_agent', 1)
-
-        assert 'Shell killed' in result
-        # Verify we waited (poll was called multiple times)
-        assert call_count[0] > 2
-
-    def test_kill_returns_error_if_process_doesnt_die(self):
-        """kill_task returns error message if process doesn't terminate within timeout."""
-        tracker = AsyncShellTracker(pool=None)
-        proc_mock = MagicMock()
-        proc_mock.poll.return_value = None  # Never dies
-        proc_mock.pid = 99999
-
-        task = _make_running_task(pid=99999, process=proc_mock)
-        _setup_task(tracker, task)
-
-        with patch('agent_cascade.async_shell.KILL_WAIT_TIMEOUT', 0.3):
             result = tracker.kill_task('test_agent', 1)
 
-        assert 'did not terminate' in result or 'timed out' in result.lower()
+            assert expected_in_result in result
+            # Verify we waited (poll called multiple times)
+            assert call_count[0] > 2
+
+        elif poll_behavior == "never_dies":
+            proc_mock.poll.return_value = None  # Never dies
+
+            task = _make_running_task(pid=99999, process=proc_mock)
+            _setup_task(tracker, task)
+
+            with patch('agent_cascade.async_shell.KILL_WAIT_TIMEOUT', 0.3):
+                result = tracker.kill_task('test_agent', 1)
+
+            assert expected_in_result in result or 'timed out' in result.lower()
 
     def test_kill_already_finished(self):
         """kill_task returns info message if process already finished."""
@@ -153,8 +151,8 @@ class TestKillTaskWithMockedProcess:
 
 class TestKillTaskWithRealProcess:
 
-    def test_kill_terminates_long_running_process_cross_platform(self):
-        """kill_task terminates a real long-running process (cross-platform)."""
+    def test_kill_terminates_long_running_process(self):
+        """kill_task terminates a real long-running process and stops heartbeats (cross-platform)."""
         pool = MagicMock()
         messages_received = []
         pool.enqueue_message = lambda agent, msg: messages_received.append((agent, msg))
@@ -167,7 +165,7 @@ class TestKillTaskWithRealProcess:
         else:
             cmd = 'sleep 60'
 
-        tool_id, _, _, completed_early, _ = tracker.launch(
+        tool_id, pid, _, completed_early, _ = tracker.launch(
             agent_name='test_agent',
             command=cmd,
             heartbeat_interval=0.5,
@@ -176,8 +174,14 @@ class TestKillTaskWithRealProcess:
 
         assert not completed_early, "Command should not complete instantly"
 
-        # Wait for process to start
+        # Wait for process to start and possibly send a heartbeat
         time.sleep(1.0)
+
+        # On Windows, verify the real PID is alive before kill
+        if os.name == 'nt':
+            task = tracker._get_task('test_agent', tool_id)
+            real_pid = task.pid if task else None
+            assert real_pid is not None and real_pid > 0, f"PID not set: {real_pid}"
 
         # Kill the task
         result = tracker.kill_task('test_agent', tool_id)
@@ -191,49 +195,24 @@ class TestKillTaskWithRealProcess:
         assert hb_after_kill == hb_before_kill, \
             f"Expected no more heartbeats after kill, but got {hb_after_kill - hb_before_kill}"
 
-    @pytest.mark.skipif(os.name != 'nt', reason="Windows-only test")
-    def test_kill_actually_terminates_long_running_process(self):
-        """kill_task terminates a real long-running process and no heartbeats follow."""
-        pool = MagicMock()
-        messages_received = []
-        pool.enqueue_message = lambda agent, msg: messages_received.append((agent, msg))
+        # Windows-specific: verify process is actually dead via tasklist
+        if os.name == 'nt' and real_pid:
+            time.sleep(0.3)
+            try:
+                proc_info = subprocess.run(
+                    ['tasklist', '/FI', f'PID eq {real_pid}', '/NH'],
+                    capture_output=True, text=True, timeout=5
+                )
+                assert str(real_pid) not in proc_info.stdout.strip(), \
+                    f"Process {real_pid} still running after kill. Output: {proc_info.stdout[:200]}"
+            except subprocess.TimeoutExpired:
+                pytest.skip("tasklist timed out")
 
-        tracker = AsyncShellTracker(pool=pool)
-
-        # Launch a long-running ping command (will run forever essentially)
-        tool_id, pid, early_output, completed_early, rc = tracker.launch(
-            agent_name='test_agent',
-            command='ping -t 127.0.0.1 >nul 2>&1',
-            heartbeat_interval=0.5,  # Fast heartbeats to verify they stop
-            timeout=3600,
-        )
-
-        assert not completed_early, "Ping should not complete instantly"
-
-        # Wait briefly for process to start and maybe send one heartbeat
-        time.sleep(1.0)
-
-        # Kill the task
-        result = tracker.kill_task('test_agent', tool_id)
-        assert 'Shell killed' in result, f"Kill failed: {result}"
-
-        # Allow tracking thread time to send completion message
-        time.sleep(0.5)
-
-        # Filter: after kill+completion, only heartbeats should NOT appear (completion is OK)
-        messages_after_kill = [m for m in messages_received[len(messages_received):] if 'heartbeat' in m[1].lower()]
-
-        # Verify no more HEARTBEATS arrive after kill (wait for 2x heartbeat interval)
-        hb_before_kill = sum(1 for m in messages_received if 'heartbeat' in m[1].lower())
-        time.sleep(1.5)  # Long enough for at least 3 heartbeats if still running
-        hb_after_kill = sum(1 for m in messages_received if 'heartbeat' in m[1].lower())
-
-        assert hb_after_kill == hb_before_kill, \
-            f"Expected no more heartbeats after kill, but got {hb_after_kill - hb_before_kill}"
-
-    @pytest.mark.skipif(os.name != 'nt', reason="Windows-only test")
     def test_kill_returns_only_after_process_dead(self):
-        """kill_task blocks until the process is confirmed terminated."""
+        """kill_task blocks until the process is confirmed terminated (Windows)."""
+        if os.name != 'nt':
+            pytest.skip("Windows-only test")
+
         pool = MagicMock()
         pool.enqueue_message = lambda agent, msg: None
 

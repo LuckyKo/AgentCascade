@@ -162,6 +162,9 @@ class AsyncShellTask:
     # Flag set under _lock when task is killed externally; prevents further heartbeats.
     killed: bool = False
 
+    # Set by kill_task before calling _kill_process_tree to prevent double-kill with tracking thread.
+    kill_in_progress: bool = False
+
     # Secondary "viewer" process for visible console window on Windows (fire-and-forget)
     viewer_process: Optional[subprocess.Popen] = None
 
@@ -699,10 +702,11 @@ class AsyncShellTracker:
             # so the console window stays visible until the command is actually done.
             with task._lock:
                 killed_externally = task.killed
-            if killed_externally:
-                # External kill requested. Only kill main process if still alive;
-                # _kill_process_tree handles viewer cleanup automatically.
-                if proc.poll() is None:
+                kill_in_progress = task.kill_in_progress
+            if killed_externally and not kill_in_progress:
+                # External kill requested but kill_task hasn't started yet (e.g., race).
+                # Only kill main process if still alive; _kill_process_tree handles viewer cleanup.
+                if proc is not None and proc.poll() is None:
                     self._kill_process_tree(proc, agent_name, tool_id)
                     time.sleep(PROCESS_KILL_SETTLE_DELAY)
                 elif task.viewer_process is not None:
@@ -1111,19 +1115,24 @@ class AsyncShellTracker:
             with task._lock:
                 proc = task.process
                 pid = task.pid
-            if proc and proc.poll() is None:
-                # Set killed flag so tracking thread exits poll_loop and skips heartbeats.
-                with task._lock:
+                if proc and proc.poll() is None:
+                    # Set killed flag under same lock as poll check to prevent TOCTOU.
                     task.killed = True
+                    task.kill_in_progress = True
+                else:
+                    proc = None  # Signal that process already finished
 
+            if proc is not None:
                 # Force-kill the process tree directly for immediate termination.
-                # This avoids race conditions with the tracking thread also trying to kill.
                 self._kill_process_tree(proc, agent_name, tool_id)
 
                 # Wait until the process is confirmed dead before returning.
                 deadline = time.time() + KILL_WAIT_TIMEOUT
                 while proc.poll() is None and time.time() < deadline:
                     time.sleep(0.1)
+
+                with task._lock:
+                    task.kill_in_progress = False
 
                 if proc.poll() is not None:
                     return f"Shell killed [Tool ID: {tool_id}, PID: {pid}]."
