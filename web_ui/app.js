@@ -138,14 +138,17 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-max-rollbacks', prop: 'value', key: 'max_auto_rollbacks', localKey: 'max-rollbacks' },
   { id: '#setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop', localKey: 'auto_rollback_on_loop' },
   { id: '#setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting', localKey: 'enable_agent_budgeting' },
-  // Inner-loop detection
+  // Inner-loop detection (master toggle)
   { id: '#setting-inner-loop-detect', prop: 'checked', key: 'inner_loop_detect_enabled', localKey: 'inner-loop-detect' },
+  // Inner-loop thresholds
   { id: '#setting-loop-min-chars', prop: 'value', key: 'loop_min_chars', localKey: 'loop-min-chars' },
   { id: '#setting-loop-max-chars', prop: 'value', key: 'loop_max_chars', localKey: 'loop-max-chars' },
+  { id: '#setting-loop-max-chars-enabled', prop: 'checked', key: 'loop_max_chars_enabled', localKey: 'loop-max-chars-enabled' },
+  // Inner-loop detection modes
   { id: '#setting-loop-char-run', prop: 'checked', key: 'loop_char_run_enabled', localKey: 'loop-char-run-enabled' },
   { id: '#setting-loop-char-run-limit', prop: 'value', key: 'loop_char_run_limit', localKey: 'loop-char-run-limit' },
-  { id: '#setting-loop-max-chars-enabled', prop: 'checked', key: 'loop_max_chars_enabled', localKey: 'loop-max-chars-enabled' },
   { id: '#setting-loop-two-phase', prop: 'checked', key: 'loop_two_phase_enabled', localKey: 'loop-two-phase-enabled' },
+  // Inner-loop semantic parameters
   { id: '#setting-loop-suspicion-threshold', prop: 'value', key: 'loop_suspicion_threshold', localKey: 'loop-suspicion-threshold' },
   { id: '#setting-loop-confirm-required', prop: 'value', key: 'loop_confirm_required', localKey: 'loop-confirm-required' },
   { id: '#setting-loop-cooldown-feeds', prop: 'value', key: 'loop_cooldown_feeds', localKey: 'loop-cooldown-feeds' },

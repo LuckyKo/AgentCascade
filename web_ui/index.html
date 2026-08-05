@@ -531,6 +531,9 @@
                     <!-- Inner Loop Tuning Controls -->
                     <div class="settings-section-body" style="margin: 4px 0 8px 12px; padding: 8px; border-left: 2px solid #555; background: rgba(255,255,255,0.03);">
                       <div class="setting-field" style="font-size:11px; color:#aaa; margin-bottom:6px;">Loop Detection Tuning</div>
+
+                      <!-- Thresholds -->
+                      <div class="setting-field" style="font-size:11px; color:#aaa; margin-bottom:4px;">Thresholds</div>
                       <label class="setting-field">
                         <span title="Minimum characters before heavy checks activate">Min Chars</span>
                         <input type="number" id="setting-loop-min-chars" min="500" max="20000" step="500" value="4000" />
@@ -540,32 +543,38 @@
                         <input type="number" id="setting-loop-max-chars" min="1000" max="100000" step="1000" value="40960" />
                       </label>
                       <label class="setting-field toggle-field">
-                      <span title="Detect consecutive identical characters">Char Run</span>
-                      <input type="checkbox" id="setting-loop-char-run" checked />
+                        <span title="Hard character limit guard — force-trigger detection if exceeded">Max Chars Guard</span>
+                        <input type="checkbox" id="setting-loop-max-chars-enabled" checked />
+                      </label>
+
+                      <!-- Detection Modes -->
+                      <div class="setting-field" style="font-size:11px; color:#aaa; margin:8px 0 4px;">Detection Modes</div>
+                      <label class="setting-field toggle-field">
+                        <span title="Detect consecutive identical characters">Char Run</span>
+                        <input type="checkbox" id="setting-loop-char-run" checked />
                       </label>
                       <label class="setting-field">
-                      <span title="Number of consecutive identical characters to trigger detection">Char Run Limit</span>
-                      <input type="number" id="setting-loop-char-run-limit" min="10" max="500" step="1" value="129" />
+                        <span title="Number of consecutive identical characters to trigger detection">Char Run Limit</span>
+                        <input type="number" id="setting-loop-char-run-limit" min="10" max="500" step="1" value="129" />
                       </label>
                       <label class="setting-field toggle-field">
-                      <span title="Hard character limit guard — force-trigger detection if exceeded">Max Chars Guard</span>
-                      <input type="checkbox" id="setting-loop-max-chars-enabled" checked />
+                        <span title="Two-phase semantic loop detection (ngram suspicion + exact confirmation)">Semantic Loop Detection</span>
+                        <input type="checkbox" id="setting-loop-two-phase" />
                       </label>
-                      <label class="setting-field toggle-field">
-                      <span title="Two-phase semantic loop detection (ngram suspicion + exact confirmation)">Semantic Loop Detection</span>
-                      <input type="checkbox" id="setting-loop-two-phase" />
+
+                      <!-- Semantic Parameters -->
+                      <div class="setting-field" style="font-size:11px; color:#aaa; margin:8px 0 4px;">Semantic Parameters</div>
+                      <label class="setting-field">
+                        <span title="N-gram occurrence count to trigger suspicion [5-15]">Suspicion Threshold</span>
+                        <input type="number" id="setting-loop-suspicion-threshold" min="5" max="15" step="1" value="7" />
                       </label>
                       <label class="setting-field">
-                      <span title="N-gram occurrence count to trigger suspicion [5-15]">Suspicion Threshold</span>
-                      <input type="number" id="setting-loop-suspicion-threshold" min="5" max="15" step="1" value="7" />
+                        <span title="Exact matches required for confirmation [2-6]">Confirm Required</span>
+                        <input type="number" id="setting-loop-confirm-required" min="2" max="6" step="1" value="3" />
                       </label>
                       <label class="setting-field">
-                      <span title="Exact matches required for confirmation [2-6]">Confirm Required</span>
-                      <input type="number" id="setting-loop-confirm-required" min="2" max="6" step="1" value="3" />
-                      </label>
-                      <label class="setting-field">
-                      <span title="Feeds to suppress after failed confirmation [10-200]">Cooldown Feeds</span>
-                      <input type="number" id="setting-loop-cooldown-feeds" min="10" max="200" step="10" value="50" />
+                        <span title="Feeds to suppress after failed confirmation [10-200]">Cooldown Feeds</span>
+                        <input type="number" id="setting-loop-cooldown-feeds" min="10" max="200" step="10" value="50" />
                       </label>
                     </div>
                     <!-- End Loop Tuning -->
