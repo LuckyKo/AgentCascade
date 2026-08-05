@@ -30,11 +30,17 @@ from agent_cascade.tools.base import BaseTool
 
 class MCPManager:
     _instance = None  # Private class variable to store the unique instance
+    _registered_tool_names: set[str] = set()  # Track all dynamically registered MCP tool names
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             cls._instance = super(MCPManager, cls).__new__(cls, *args, **kwargs)
         return cls._instance
+
+    @classmethod
+    def is_mcp_tool(cls, tool_name: str) -> bool:
+        """Check if a given tool name is a dynamically registered MCP tool."""
+        return tool_name in cls._registered_tool_names
 
     def __init__(self):
         if not hasattr(self, 'clients'):  # The singleton should only be inited once
@@ -265,6 +271,9 @@ class MCPManager:
         return tools
 
     def create_tool_class(self, register_name, register_client_id, tool_name, tool_desc, tool_parameters):
+
+        # Track this MCP tool name globally for security filtering
+        self._registered_tool_names.add(register_name)
 
         class ToolClass(BaseTool):
             name = register_name

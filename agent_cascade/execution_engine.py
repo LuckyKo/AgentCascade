@@ -169,6 +169,13 @@ def _get_active_functions_from_template(template, instance=None, pool=None) -> l
         return []
 
     # Sort by name to ensure deterministic output across retries (KV cache prefix)
+    # Handle MCP tools sentinel: if __all_mcp_tools__ is in disabled, block all registered MCP tools
+    disable_all_mcp = '__all_mcp_tools__' in disabled
+    if disable_all_mcp:
+        from agent_cascade.tools.mcp_manager import MCPManager
+        registered_names = MCPManager._registered_tool_names.copy()
+        disabled |= {name for name in func_map.keys() if name in registered_names}
+
     return [func.function for name, func in sorted(func_map.items()) if name not in disabled]
 
 

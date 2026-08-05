@@ -73,6 +73,9 @@ DEFAULT_NEW_AGENT_DISABLED_TOOLS: frozenset[str] = frozenset({
     
     # System modification
     'propose_skill',  # Create new reusable skills
+    
+    # MCP tools sentinel — disables all dynamically registered MCP tools by default
+    '__all_mcp_tools__',  # Sentinel: block ALL MCP tools (e.g., memory-get, filesystem-read)
 })
 
 # Tools kept ENABLED by default for dynamically loaded agents:
@@ -89,6 +92,7 @@ RUNTIME_REGISTERED_TOOLS: frozenset[str] = frozenset({
     'call_agent',
     'dismiss_agent',
     'list_agents',
+    '__all_mcp_tools__',  # Sentinel value for MCP tool blocking (not a real tool)
 })
 
 
