@@ -293,14 +293,6 @@ def _handle_loop_max_chars(ui_cfg: dict, agent_pool: Optional[Any], agents: list
         agent_pool.settings.loop_max_chars = max(1000, int(ui_cfg.get('loop_max_chars', 40960)))
 
 
-@register_config_handler('loop_entropy_enabled')
-def _handle_loop_entropy(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Toggle entropy collapse detection mode."""
-    if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        agent_pool.settings.loop_entropy_enabled = bool(
-            ui_cfg.get('loop_entropy_enabled', True))
-
-
 # Retry policy settings handlers (Phase 1 of retry refactoring)
 
 @register_config_handler('retry_max_attempts')

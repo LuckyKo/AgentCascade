@@ -671,9 +671,18 @@ class PoolSettings:
     enable_agent_budgeting: bool = True                     # Enable max_turns propagation/budgeting for agent calls
 
     def to_dict(self) -> dict:
-        """Serialize settings to a JSON-safe dictionary."""
+        """Serialize settings to a JSON-safe dictionary.
+        
+        Excludes deprecated loop detection fields that were removed in Phase 3.
+        """
         from dataclasses import asdict
-        return asdict(self)
+        result = asdict(self)
+        # Remove deprecated fields no longer used by InnerLoopDetector (Phase 3 cleanup)
+        for field in ('loop_score_threshold', 'loop_sentence_rep_enabled', 
+                      'loop_ngram_rep_enabled', 'loop_block_rep_enabled', 
+                      'loop_entropy_enabled'):
+            result.pop(field, None)
+        return result
 
     @classmethod
     def from_dict(cls, data: dict) -> 'PoolSettings':
