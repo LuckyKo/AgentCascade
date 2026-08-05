@@ -50,6 +50,39 @@ DEFAULT_COMPRESSOR_DISABLED_TOOLS: frozenset[str] = (
 )
 
 
+# Default disabled tools for dynamically discovered agents without explicit config.
+# Security baseline: newly loaded agents start READ-ONLY until user grants more access.
+# Applied ONLY when agent has zero disabled_tools configuration from Layers 1-2 AND is not
+# orchestrator/security/compressor (core system agents excluded). See Layer 4 in
+# agent_cascade.utils.disabled_tools.resolve_disabled_tools_for_agent().
+DEFAULT_NEW_AGENT_DISABLED_TOOLS: frozenset[str] = frozenset({
+    # Host/system access
+    'shell_cmd',          # Execute shell commands on host system
+    'code_interpreter',   # Run Python code in sandbox
+    
+    # File mutations (agents start read-only)
+    'write_file',         # Create/overwrite files
+    'edit_file',          # Modify existing files
+    'delete_file',        # Delete files
+    'copy_file',          # Copy files/directories
+    're_indent',          # Re-indent file blocks (mutates files on disk)
+    
+    # Network access
+    'web_search',         # External search queries
+    'web_extractor',      # Fetch web page content
+    
+    # System modification
+    'propose_skill',      # Create new reusable skills
+})
+
+# Tools kept ENABLED by default for dynamically loaded agents:
+# - call_agent, dismiss_agent, list_agents — essential for agent coordination
+# - read_file, view_image, list_dir, grep — safe read-only file operations
+# - compress_context, forget_last — context management (not security risks)
+# - system_info, read_logs, code_map, calculate, syntax_check — info utilities
+# - scan_skills, load_skill — skill access (read-only)
+
+
 # Tools that are registered at runtime via agent_factory.py (not in TOOL_REGISTRY)
 # but should be accepted by disabled_tools validation
 RUNTIME_REGISTERED_TOOLS: frozenset[str] = frozenset({

@@ -86,6 +86,7 @@ class WsMessageHandler:
             'retry': self.handle_retry,
             'reset': self.handle_reset,
             'refresh_souls': self.handle_refresh_souls,
+            'refresh_agents': self.handle_refresh_agents,
             'restart_server': self.handle_restart_server,
             'update_config': self.handle_update_config,
             'set_work_folders': self.handle_set_work_folders,
@@ -618,22 +619,77 @@ class WsMessageHandler:
             self.agent_pool.reset()
         await self._broadcast('done')
 
-    async def handle_refresh_souls(self, data: dict) -> None:
-        """Handle 'refresh_souls' — refresh agent templates."""
-        if self.agent_pool:
-            self.agent_pool.refresh_agents()
-
-            # Update the global agents list used by build_state
-            new_agents = [self.agent_pool.get_agent(name) for name in self.agent_pool.list_agents()]
-            # Ensure orchestrator is at index 0 if possible
-            if 'orchestrator' in self.agent_pool.agents:
-                orch = self.agent_pool.agents['orchestrator']
-                new_agents = [orch] + [a for a in new_agents if a != orch]
-
-            # Mutate the agents list in-place so the handler's reference stays valid
+    def _do_refresh_agents(self) -> list:
+        """Perform agent template refresh. Returns list of agent names after refresh.
+        
+        Shared by handle_refresh_souls and handle_refresh_agents to avoid duplication.
+        Updates self.agents in-place (clear/extend required because closures in
+        create_app() hold references to this exact list object).
+        """
+        if not self.agent_pool:
+            return []
+        
+        # Reload templates from disk
+        self.agent_pool.refresh_agents()
+        
+        # Get new agent list
+        agent_names = self.agent_pool.list_agents()
+        new_agents = [self.agent_pool.get_agent(name) for name in agent_names]
+        
+        # Ensure orchestrator is at index 0 if present
+        if 'orchestrator' in self.agent_pool.agents:
+            orch = self.agent_pool.agents['orchestrator']
+            new_agents = [orch] + [a for a in new_agents if a != orch]
+        
+        # Mutate agents list in-place under lock. clear()/extend() is REQUIRED here
+        # because closures in api_server.py create_app() reference this exact list
+        # object (used by /api/agents, build_state model lookups, etc.). Direct
+        # assignment would break those references.
+        with self._session_lock:
             self.agents.clear()
             self.agents.extend(new_agents)
+        
+        return agent_names
 
+    async def handle_refresh_souls(self, data: dict) -> None:
+        """Handle 'refresh_souls' — refresh agent templates and broadcast state."""
+        try:
+            await asyncio.to_thread(self._do_refresh_agents)
+        except Exception as e:
+            from agent_cascade.log import logger
+            logger.error(f"Agent refresh failed: {e}")
+            await self.broadcast_fn({'type': 'error', 'message': f'Agent refresh failed: {e}'})
+            return
+        
+        await self._broadcast()
+
+    async def handle_refresh_agents(self, data: dict) -> None:
+        """Handle 'refresh_agents' — reload templates and return agent list.
+        
+        Unlike refresh_souls (broadcast-only), this returns the discovered agent
+        names via send_queue so callers (including agents invoking via tool calls)
+        can programmatically determine what's loaded after refresh.
+        """
+        try:
+            agent_names = await asyncio.to_thread(self._do_refresh_agents)
+        except Exception as e:
+            from agent_cascade.log import logger
+            logger.error(f"Agent refresh failed: {e}")
+            await self.send_queue.put({
+                'type': 'refresh_agents_result',
+                'agents': [],
+                'error': str(e),
+            })
+            await self.broadcast_fn({'type': 'error', 'message': f'Agent refresh failed: {e}'})
+            return
+        
+        # Return result to caller for programmatic use
+        await self.send_queue.put({
+            'type': 'refresh_agents_result',
+            'agents': agent_names,
+        })
+        
+        # Also broadcast full state update (consistent with handle_refresh_souls)
         await self._broadcast()
 
     async def handle_restart_server(self, data: dict) -> None:

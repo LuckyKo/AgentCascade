@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 from agent_cascade.constants import (
     DEFAULT_SECURITY_DISABLED_TOOLS,
     DEFAULT_COMPRESSOR_DISABLED_TOOLS,
+    DEFAULT_NEW_AGENT_DISABLED_TOOLS,
 )
 
 
@@ -80,6 +81,8 @@ def resolve_disabled_tools_for_agent(
          Always merged with Layer 1 (union of both sources).
       3. Agent-class defaults — Security / Compressor defense-in-depth
          **Always applied** regardless of Layers 1–2.
+      4. Default safe baseline — Applied ONLY when no explicit config exists
+         from Layers 1-2 AND agent is not orchestrator/security/compressor.
 
     For dict-format disabled_tools the function looks up by:
       - ``agent_name`` (exact match, e.g. ``"Coder"``)
@@ -96,6 +99,7 @@ def resolve_disabled_tools_for_agent(
         A set of tool names that should be disabled for this agent.
     """
     disabled: Set[str] = set()
+    has_explicit_config = False  # Tracks whether Layers 1-2 provided any config
 
     # ── Helper to extract per-agent tools from a dict or flat list ──────────
     def _extract(dt, name: str, atype: str) -> Set[str]:
@@ -113,10 +117,12 @@ def resolve_disabled_tools_for_agent(
 
     # ── Layer 1: Instance override (highest precedence) ─────────────────────
     if instance_override and 'disabled_tools' in instance_override:
+        has_explicit_config = True
         disabled |= _extract(instance_override['disabled_tools'], agent_name, agent_type)
 
     # ── Layer 2: Template config (always merged with instance override) ─────
     if template_cfg and 'disabled_tools' in template_cfg:
+        has_explicit_config = True
         disabled |= _extract(template_cfg['disabled_tools'], agent_name, agent_type)
 
     # ── Layer 3: Agent-class defaults (defense-in-depth, ALWAYS applied) ────
@@ -125,6 +131,16 @@ def resolve_disabled_tools_for_agent(
         disabled |= DEFAULT_SECURITY_DISABLED_TOOLS
     elif atype_lower == 'compressor':
         disabled |= DEFAULT_COMPRESSOR_DISABLED_TOOLS
+
+    # ── Layer 4: Default safe baseline for agents with no explicit config ────
+    # Security rationale: dynamically discovered agents loaded from soul files
+    # should start READ-ONLY until the user explicitly grants more capabilities.
+    # Applied ONLY when:
+    #   - No explicit disabled_tools was set by Layers 1-2 (has_explicit_config is False)
+    #   - Agent is not orchestrator/security/compressor (core system agents excluded;
+    #     orchestrator needs full coordination, security/compressor have Layer 3 defaults)
+    if not has_explicit_config and atype_lower not in ('orchestrator', 'security', 'compressor'):
+        disabled |= DEFAULT_NEW_AGENT_DISABLED_TOOLS
 
     return disabled
 
