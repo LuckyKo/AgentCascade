@@ -49,7 +49,6 @@ import base64
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_WORKSPACE
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.utils.utils import extract_text_from_message, get_message_stats, get_history_stats, IMAGE_REGEX, msg_field, msg_set
@@ -195,6 +194,8 @@ def _set_generating_true(session: dict) -> None:
 
 
 def create_app(agents, agent_pool, config=None, auto_security=False):
+    from agent_cascade.log import logger
+
     """
     Create the FastAPI application.
 
@@ -1147,6 +1148,9 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
 
 
 if __name__ == "__main__":
+    from agent_cascade.log import init_logging, logger
+    init_logging()
+
     import uvicorn
     from agent_cascade.agent_pool import AgentPool
 
