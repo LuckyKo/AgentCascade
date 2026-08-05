@@ -2477,11 +2477,15 @@ class AgentPool:
                     if child_inst:
                         save_instance_state(child_inst)
                 except Exception as e:
-                    logger.debug("Failed to save async child state for %s: %s", child_instance_name, e)
+                    logger.debug(f"Failed to save async child state for {child_instance_name}: {e}")
 
                 return result
             except Exception as e:
-                # Catch generic exceptions to preserve the structured agent-specific prefix
+                # Cleanup zombie instance on failure (e.g., slot timeout after instance creation)
+                try:
+                    self.dismiss_instance(child_instance_name)
+                except Exception as cleanup_err:
+                    logger.warning(f"Failed to dismiss zombie instance {child_instance_name} during error cleanup: {cleanup_err}")
                 return f"[Agent '{child_instance_name}' Failed]:\n{str(e)}"
 
         self._async_registry.register(instance_name, run_child_agent, function_id=function_id)
