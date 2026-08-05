@@ -429,28 +429,28 @@
                 <h3 class="settings-section-title">Context Window</h3>
                 <div class="settings-section-body">
                   <label class="setting-field">
-                    <span>Compression Warning Threshold (%) — warn agent when context usage exceeds this %</span>
+                  <span title="Warn agent when context usage exceeds this percentage">Compression Warning Threshold (%)</span>
                     <input type="number" id="setting-compression-warning-threshold" min="50" max="99" step="1" value="90" />
                   </label>
                   <label class="setting-field">
-                    <span>Compression Force Threshold (%) — force compress when context usage exceeds this %</span>
+                  <span title="Force compress when context usage exceeds this percentage">Compression Force Threshold (%)</span>
                     <input type="number" id="setting-compression-force-threshold" min="51" max="99" step="1" value="95" />
                   </label>
                   <label class="setting-field">
-                    <span>Proactive Compression Threshold (%) — trigger proactive compression after tool calls at this %</span>
+                  <span title="Trigger proactive compression after tool calls when context exceeds this percentage">Proactive Compression Threshold (%)</span>
                     <input type="number" id="setting-compression-proactive-threshold" min="50" max="96" step="1" value="88" />
                   </label>
                   <label class="setting-field">
-                    <span>Context Reserve Tokens — tokens reserved for LLM overhead</span>
+                  <span title="Tokens reserved for LLM overhead (system prompt, function schemas)">Context Reserve Tokens</span>
                     <input type="number" id="setting-compression-context-reserve-tokens" min="500" max="10000" step="500" value="3000" />
                     </label>
                     <label class="setting-field">
-                    <span>Compression Percentage (%) — % of history to discard when compressing</span>
+                    <span title="% of conversation history to discard when compressing">Compression Percentage (%)</span>
                     <input type="number" id="setting-compression-fraction" min="10" max="90" step="1" value="70" />
                   </label>
                 </div>
               </div>
-                  
+              
               <!-- Cache Pool -->
               <div class="settings-section">
                 <h3 class="settings-section-title">Cache Pool</h3>
