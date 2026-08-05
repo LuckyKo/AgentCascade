@@ -472,8 +472,8 @@ class AgentPool:
             if compression_fraction_raw is not None:
                 try:
                     import agent_cascade.settings as settings_mod
-                    val = float(compression_fraction_raw) / 100.0
-                    val = min(0.9, max(0.1, val))
+                    val = float(compression_fraction_raw) / 100.0  # Convert percentage to fraction
+                    val = min(settings_mod.COMPRESSION_MAX_FRACTION, max(settings_mod.COMPRESSION_MIN_FRACTION, val))
                     settings_mod.COMPRESSION_DEFAULT_FRACTION = val
                     logger.info(f"[PoolSettings] Loaded compression_fraction={compression_fraction_raw}%")
                 except (ValueError, TypeError):

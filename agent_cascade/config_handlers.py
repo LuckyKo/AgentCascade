@@ -592,9 +592,16 @@ def _handle_compression_context_reserve_tokens(ui_cfg: dict, agent_pool: Optiona
 
 @register_config_handler('compression_fraction')
 def _handle_compression_fraction(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Handle compression_fraction setting.
+
+    UI sends a percentage (e.g. 70), we convert to fraction (0.7) and update the module-level
+    COMPRESSION_DEFAULT_FRACTION which is used by both forced and proactive compression.
+    Thread safety: module-level attribute assignment is atomic in CPython; reads are also atomic,
+    so no lock needed for simple float updates.
+    """
     import agent_cascade.settings as settings_mod
-    val = float(ui_cfg['compression_fraction']) / 100.0  # Convert from percentage to fraction
-    val = min(0.9, max(0.1, val))  # Clamp between MIN and MAX fraction bounds
+    val = float(ui_cfg['compression_fraction']) / 100.0  # Convert UI percentage to fraction
+    val = min(settings_mod.COMPRESSION_MAX_FRACTION, max(settings_mod.COMPRESSION_MIN_FRACTION, val))
     settings_mod.COMPRESSION_DEFAULT_FRACTION = val
 
 

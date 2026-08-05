@@ -175,6 +175,12 @@ const POOL_SETTINGS_MAP = [
   // Approval timeout settings
   { id: '#settingApprovalTimeoutEnabled', prop: 'checked', key: 'enable_approval_timeout', localKey: 'approval-timeout-enabled' },
   { id: '#settingApprovalTimeoutSeconds', prop: 'value', key: 'approval_timeout_seconds', localKey: 'approval-timeout-seconds' },
+  // Compression settings
+  { id: '#setting-compression-warning-threshold', prop: 'value', key: 'compression_warning_threshold', localKey: 'compression-warning-threshold' },
+  { id: '#setting-compression-force-threshold', prop: 'value', key: 'compression_force_threshold', localKey: 'compression-force-threshold' },
+  { id: '#setting-compression-proactive-threshold', prop: 'value', key: 'compression_proactive_threshold', localKey: 'compression-proactive-threshold' },
+  { id: '#setting-compression-context-reserve-tokens', prop: 'value', key: 'compression_context_reserve_tokens', localKey: 'compression-context-reserve-tokens' },
+  { id: '#setting-compression-fraction', prop: 'value', key: 'compression_fraction', localKey: 'compression-fraction' },
 ];
 
 /** Sync pool settings from server state to UI elements.
