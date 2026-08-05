@@ -578,7 +578,7 @@ def _handle_compression_max_attempts(ui_cfg: dict, agent_pool: Optional[Any], ag
 def _handle_compression_proactive_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = float(ui_cfg['compression_proactive_threshold'])
-        val = min(94.0, max(50.0, val))  # Keep within valid range
+        val = min(96.0, max(50.0, val))  # Keep within valid range (must be below forced threshold)
         agent_pool.settings.compression_proactive_threshold = val
 
 

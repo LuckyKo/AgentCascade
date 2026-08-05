@@ -991,7 +991,7 @@ function saveSettings(sendToServer) {
   // Compression threshold settings — store as validated numbers, not raw strings
   if ($('#setting-compression-warning-threshold')) s['compression-warning-threshold'] = Math.min(99, Math.max(50, parseInt($('#setting-compression-warning-threshold').value) || 90));
   if ($('#setting-compression-force-threshold')) s['compression-force-threshold'] = Math.min(99, Math.max(51, parseInt($('#setting-compression-force-threshold').value) || 95));
-  if ($('#setting-compression-proactive-threshold')) s['compression-proactive-threshold'] = Math.min(94, Math.max(50, parseInt($('#setting-compression-proactive-threshold').value) || 88));
+  if ($('#setting-compression-proactive-threshold')) s['compression-proactive-threshold'] = Math.min(96, Math.max(50, parseInt($('#setting-compression-proactive-threshold').value) || 88));
   if ($('#setting-compression-context-reserve-tokens')) s['compression-context-reserve-tokens'] = Math.min(10000, Math.max(500, parseInt($('#setting-compression-context-reserve-tokens').value) || 3000));
 
   // Log API POST Dump toggle (frontend-only, not in backend pool_settings)
@@ -4671,7 +4671,7 @@ function getGenerateCfg() {
   // Compression threshold settings (PoolSettings fields) — clamped to match saveSettings() validation
   if ($('#setting-compression-warning-threshold')) cfg.compression_warning_threshold = Math.min(99, Math.max(50, parseFloat($('#setting-compression-warning-threshold').value) || 90));
   if ($('#setting-compression-force-threshold')) cfg.compression_force_threshold = Math.min(99, Math.max(51, parseFloat($('#setting-compression-force-threshold').value) || 95));
-  if ($('#setting-compression-proactive-threshold')) cfg.compression_proactive_threshold = Math.min(94, Math.max(50, parseFloat($('#setting-compression-proactive-threshold').value) || 88));
+  if ($('#setting-compression-proactive-threshold')) cfg.compression_proactive_threshold = Math.min(96, Math.max(50, parseFloat($('#setting-compression-proactive-threshold').value) || 88));
   if ($('#setting-compression-context-reserve-tokens')) cfg.compression_context_reserve_tokens = Math.min(10000, Math.max(500, parseInt($('#setting-compression-context-reserve-tokens').value) || 3000));
 
   if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value) || -1;
