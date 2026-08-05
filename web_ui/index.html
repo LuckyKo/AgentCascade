@@ -443,10 +443,14 @@
                   <label class="setting-field">
                     <span>Context Reserve Tokens — tokens reserved for LLM overhead</span>
                     <input type="number" id="setting-compression-context-reserve-tokens" min="500" max="10000" step="500" value="3000" />
+                    </label>
+                    <label class="setting-field">
+                    <span>Compression Ratio (%) — fraction of history to discard when compressing (forced/proactive)</span>
+                    <input type="number" id="setting-compression-fraction" min="10" max="90" step="5" value="70" />
                   </label>
                 </div>
               </div>
-
+                  
               <!-- Cache Pool -->
               <div class="settings-section">
                 <h3 class="settings-section-title">Cache Pool</h3>

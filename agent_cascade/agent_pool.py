@@ -397,6 +397,10 @@ class AgentPool:
                     if hasattr(om, 'approval_timeout_seconds'):
                         data['approval_timeout_seconds'] = om.approval_timeout_seconds
 
+                # Add compression_fraction as percentage (runtime-modifiable module-level setting)
+                from agent_cascade.settings import COMPRESSION_DEFAULT_FRACTION
+                data['compression_fraction'] = round(COMPRESSION_DEFAULT_FRACTION * 100, 1)
+
                 with open(self._pool_settings_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
@@ -462,6 +466,18 @@ class AgentPool:
                     self._pending_approval_timeout_seconds = int(approval_timeout_seconds_raw)
                 except (ValueError, TypeError):
                     logger.warning(f"[PoolSettings] Invalid approval_timeout_seconds value, ignoring.")
+
+            # Apply compression_fraction from disk if present (overrides module default)
+            compression_fraction_raw = data.pop('compression_fraction', None)
+            if compression_fraction_raw is not None:
+                try:
+                    import agent_cascade.settings as settings_mod
+                    val = float(compression_fraction_raw) / 100.0
+                    val = min(0.9, max(0.1, val))
+                    settings_mod.COMPRESSION_DEFAULT_FRACTION = val
+                    logger.info(f"[PoolSettings] Loaded compression_fraction={compression_fraction_raw}%")
+                except (ValueError, TypeError):
+                    logger.warning(f"[PoolSettings] Invalid compression_fraction value, ignoring.")
 
         except Exception as e:
             logger.error(f"[PoolSettings] Failed to load settings from {self._pool_settings_path}: {e}. Using defaults.")

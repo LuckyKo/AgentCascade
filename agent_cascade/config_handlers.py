@@ -71,6 +71,7 @@ EXTRA_PERSIST_KEYS = frozenset({
     'auto_security',   # Auto-Ask security mode toggle state
     'compression_proactive_threshold',   # Proactive compression threshold (PoolSettings field, persisted here for restart survival)
     'compression_context_reserve_tokens',  # Context reserve tokens (PoolSettings field, persisted here for restart survival)
+    'compression_fraction',  # Compression ratio as percentage (maps to COMPRESSION_DEFAULT_FRACTION)
 })
 
 # ── Registry of config key → handler function ────────────────────────────
@@ -587,6 +588,14 @@ def _handle_compression_context_reserve_tokens(ui_cfg: dict, agent_pool: Optiona
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = max(500, int(ui_cfg['compression_context_reserve_tokens']))
         agent_pool.settings.compression_context_reserve_tokens = val
+
+
+@register_config_handler('compression_fraction')
+def _handle_compression_fraction(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    import agent_cascade.settings as settings_mod
+    val = float(ui_cfg['compression_fraction']) / 100.0  # Convert from percentage to fraction
+    val = min(0.9, max(0.1, val))  # Clamp between MIN and MAX fraction bounds
+    settings_mod.COMPRESSION_DEFAULT_FRACTION = val
 
 
 @register_config_handler('enable_agent_budgeting')

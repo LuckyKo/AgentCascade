@@ -993,6 +993,7 @@ function saveSettings(sendToServer) {
   if ($('#setting-compression-force-threshold')) s['compression-force-threshold'] = Math.min(99, Math.max(51, parseInt($('#setting-compression-force-threshold').value) || 95));
   if ($('#setting-compression-proactive-threshold')) s['compression-proactive-threshold'] = Math.min(96, Math.max(50, parseInt($('#setting-compression-proactive-threshold').value) || 88));
   if ($('#setting-compression-context-reserve-tokens')) s['compression-context-reserve-tokens'] = Math.min(10000, Math.max(500, parseInt($('#setting-compression-context-reserve-tokens').value) || 3000));
+  if ($('#setting-compression-fraction')) s['compression-fraction'] = Math.min(90, Math.max(10, parseInt($('#setting-compression-fraction').value) || 70));
 
   // Log API POST Dump toggle (frontend-only, not in backend pool_settings)
   if ($('#setting-log-api-post')) s['log-api-post'] = $('#setting-log-api-post').checked;
@@ -1209,6 +1210,9 @@ function loadSettings() {
     }
     if ($('#setting-compression-context-reserve-tokens') && s['compression-context-reserve-tokens'] !== undefined) {
       $('#setting-compression-context-reserve-tokens').value = s['compression-context-reserve-tokens'];
+    }
+    if ($('#setting-compression-fraction') && s['compression-fraction'] !== undefined) {
+      $('#setting-compression-fraction').value = s['compression-fraction'];
     }
 
     // MCP settings restore (workAccessFoldersRW block follows below)
@@ -4673,6 +4677,7 @@ function getGenerateCfg() {
   if ($('#setting-compression-force-threshold')) cfg.compression_force_threshold = Math.min(99, Math.max(51, parseFloat($('#setting-compression-force-threshold').value) || 95));
   if ($('#setting-compression-proactive-threshold')) cfg.compression_proactive_threshold = Math.min(96, Math.max(50, parseFloat($('#setting-compression-proactive-threshold').value) || 88));
   if ($('#setting-compression-context-reserve-tokens')) cfg.compression_context_reserve_tokens = Math.min(10000, Math.max(500, parseInt($('#setting-compression-context-reserve-tokens').value) || 3000));
+  if ($('#setting-compression-fraction')) cfg.compression_fraction = Math.min(90, Math.max(10, parseInt($('#setting-compression-fraction').value) || 70));
 
   if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value) || -1;
   if ($('#setting-grep-spillover')) cfg.grep_spillover = $('#setting-grep-spillover').checked;
