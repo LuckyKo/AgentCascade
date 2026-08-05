@@ -948,7 +948,16 @@ class AsyncShellTracker:
 
         Terminates the primary shell subprocess plus all descendants via taskkill/killpg.
         On Windows, captures descendant PIDs before killing, verifies after, and warns
-        about any survivors (e.g., sibling processes spawned via cmd & operator).
+        about any survivors.
+
+        Known survivor scenarios (processes NOT in the kill tree):
+        - cmd.exe & operator: spawns sibling processes under same parent, not children of cmd
+        - start command: creates detached processes adopted by explorer/System
+        - PowerShell Start-Process with separate window: similar detachment behavior
+
+        For these cases, taskkill /T cannot reach them as they are not descendants.
+        A warning is logged listing surviving PIDs so users can investigate.
+
         Also cleans up the secondary "viewer" console window spawned on Windows when
         console_window=True. Uses _kill_viewer_process to avoid race conditions around
         viewer_process access.
