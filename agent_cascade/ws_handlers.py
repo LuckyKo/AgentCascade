@@ -634,7 +634,13 @@ class WsMessageHandler:
         
         # Get new agent list
         agent_names = self.agent_pool.list_agents()
-        new_agents = [self.agent_pool.get_agent(name) for name in agent_names]
+        if not agent_names:
+            from agent_cascade.log import logger
+            logger.warning("No agents found after refresh")
+            return []
+        
+        # Filter out None values in case get_agent fails for some template
+        new_agents = [a for a in (self.agent_pool.get_agent(name) for name in agent_names) if a is not None]
         
         # Ensure orchestrator is at index 0 if present
         if 'orchestrator' in self.agent_pool.agents:
