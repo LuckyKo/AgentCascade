@@ -541,6 +541,7 @@ def _handle_disabled_tools(ui_cfg: dict, agent_pool: Optional[Any], agents: list
 def _handle_compression_force_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = float(ui_cfg['compression_force_threshold'])
+        val = min(99.0, max(51.0, val))  # Keep within valid range (must be > warning threshold)
         agent_pool.settings.compression_force_threshold = val
 
 
@@ -548,6 +549,7 @@ def _handle_compression_force_threshold(ui_cfg: dict, agent_pool: Optional[Any],
 def _handle_compression_warning_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = float(ui_cfg['compression_warning_threshold'])
+        val = min(99.0, max(50.0, val))  # Keep within valid range
         agent_pool.settings.compression_warning_threshold = val
 
 
@@ -576,13 +578,14 @@ def _handle_compression_max_attempts(ui_cfg: dict, agent_pool: Optional[Any], ag
 def _handle_compression_proactive_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = float(ui_cfg['compression_proactive_threshold'])
+        val = min(94.0, max(50.0, val))  # Keep within valid range
         agent_pool.settings.compression_proactive_threshold = val
 
 
 @register_config_handler('compression_context_reserve_tokens')
 def _handle_compression_context_reserve_tokens(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
-        val = max(100, int(ui_cfg['compression_context_reserve_tokens']))
+        val = max(500, int(ui_cfg['compression_context_reserve_tokens']))
         agent_pool.settings.compression_context_reserve_tokens = val
 
 

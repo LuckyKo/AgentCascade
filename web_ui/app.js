@@ -988,11 +988,11 @@ function saveSettings(sendToServer) {
   if ($('#setting-retry-base-delay')) s['retry-base-delay'] = Math.max(0.1, parseFloat($('#setting-retry-base-delay').value) || 1.0);
   if ($('#setting-retry-max-delay')) s['retry-max-delay'] = Math.max(1.0, parseFloat($('#setting-retry-max-delay').value) || 8.0);
 
-  // Compression threshold settings
-  if ($('#setting-compression-warning-threshold')) s['compression-warning-threshold'] = $('#setting-compression-warning-threshold').value;
-  if ($('#setting-compression-force-threshold')) s['compression-force-threshold'] = $('#setting-compression-force-threshold').value;
-  if ($('#setting-compression-proactive-threshold')) s['compression-proactive-threshold'] = $('#setting-compression-proactive-threshold').value;
-  if ($('#setting-compression-context-reserve-tokens')) s['compression-context-reserve-tokens'] = $('#setting-compression-context-reserve-tokens').value;
+  // Compression threshold settings — store as validated numbers, not raw strings
+  if ($('#setting-compression-warning-threshold')) s['compression-warning-threshold'] = Math.min(99, Math.max(50, parseInt($('#setting-compression-warning-threshold').value) || 90));
+  if ($('#setting-compression-force-threshold')) s['compression-force-threshold'] = Math.min(99, Math.max(51, parseInt($('#setting-compression-force-threshold').value) || 95));
+  if ($('#setting-compression-proactive-threshold')) s['compression-proactive-threshold'] = Math.min(94, Math.max(50, parseInt($('#setting-compression-proactive-threshold').value) || 88));
+  if ($('#setting-compression-context-reserve-tokens')) s['compression-context-reserve-tokens'] = Math.min(10000, Math.max(500, parseInt($('#setting-compression-context-reserve-tokens').value) || 3000));
 
   // Log API POST Dump toggle (frontend-only, not in backend pool_settings)
   if ($('#setting-log-api-post')) s['log-api-post'] = $('#setting-log-api-post').checked;
@@ -4668,11 +4668,11 @@ function getGenerateCfg() {
   if ($('#setting-system-idle-timeout')) cfg.system_agent_idle_timeout_seconds = parseFloat($('#setting-system-idle-timeout').value) || 900;
   if ($('#setting-tool-result-max-chars')) cfg.tool_result_max_chars = parseInt($('#setting-tool-result-max-chars').value) || 10000;
 
-  // Compression threshold settings (PoolSettings fields)
-  if ($('#setting-compression-warning-threshold')) cfg.compression_warning_threshold = parseFloat($('#setting-compression-warning-threshold').value) || 90;
-  if ($('#setting-compression-force-threshold')) cfg.compression_force_threshold = parseFloat($('#setting-compression-force-threshold').value) || 95;
-  if ($('#setting-compression-proactive-threshold')) cfg.compression_proactive_threshold = parseFloat($('#setting-compression-proactive-threshold').value) || 88;
-  if ($('#setting-compression-context-reserve-tokens')) cfg.compression_context_reserve_tokens = parseInt($('#setting-compression-context-reserve-tokens').value) || 3000;
+  // Compression threshold settings (PoolSettings fields) — clamped to match saveSettings() validation
+  if ($('#setting-compression-warning-threshold')) cfg.compression_warning_threshold = Math.min(99, Math.max(50, parseFloat($('#setting-compression-warning-threshold').value) || 90));
+  if ($('#setting-compression-force-threshold')) cfg.compression_force_threshold = Math.min(99, Math.max(51, parseFloat($('#setting-compression-force-threshold').value) || 95));
+  if ($('#setting-compression-proactive-threshold')) cfg.compression_proactive_threshold = Math.min(94, Math.max(50, parseFloat($('#setting-compression-proactive-threshold').value) || 88));
+  if ($('#setting-compression-context-reserve-tokens')) cfg.compression_context_reserve_tokens = Math.min(10000, Math.max(500, parseInt($('#setting-compression-context-reserve-tokens').value) || 3000));
 
   if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value) || -1;
   if ($('#setting-grep-spillover')) cfg.grep_spillover = $('#setting-grep-spillover').checked;
