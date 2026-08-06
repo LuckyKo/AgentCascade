@@ -1623,7 +1623,7 @@ function handleServerMessage(data) {
       if (data.session_name && state.sessionName !== data.session_name) { state.sessionName = data.session_name; localStorage.setItem('agent-cascade-session-name', state.sessionName); }
       if (data.agent_index !== undefined) state.agentIndex = data.agent_index;
       // FIX: Use Array.isArray check to update approvals (including empty array to clear all)
-      if (Array.isArray(data.approvals)) {
+      if ('approvals' in data && Array.isArray(data.approvals)) {
         state.approvals = data.approvals;
       }
       renderApprovals(); // Always call to keep bar in sync, even when approvals field is missing
@@ -1923,7 +1923,7 @@ function handleServerMessage(data) {
       
       // Approvals require immediate rendering (user must see these promptly)
       // FIX: Use Array.isArray check to update approvals (including empty array to clear all)
-      if (Array.isArray(data.approvals)) {
+      if ('approvals' in data && Array.isArray(data.approvals)) {
         state.approvals = data.approvals;
       }
       renderApprovals(); // Always call to ensure bar stays in sync with current state
@@ -2016,7 +2016,7 @@ function handleServerMessage(data) {
 
     case 'approvals':
     // FIX: Use Array.isArray check to update approvals (including empty array to clear all)
-    if (Array.isArray(data.approvals)) {
+    if ('approvals' in data && Array.isArray(data.approvals)) {
         state.approvals = data.approvals;
       }
       renderApprovals();
@@ -3207,6 +3207,8 @@ function renderApprovals() {
 // Global functions for inline onclick handlers
 window.approveRequest = function (requestId) {
   send({ type: 'approve', request_id: requestId });
+  // Immediately remove from approvals for instant feedback before backend responds
+  state.approvals = state.approvals.filter(a => a.request_id !== requestId);
   delete state.securityResponses[requestId];
   state.activeSecurityChecks.delete(requestId);
 };
@@ -3239,6 +3241,8 @@ window.rejectRequest = function (requestId) {
   const input = document.getElementById(`reject-${requestId}`);
   const reason = input ? input.value.trim() : 'Rejected by user';
   send({ type: 'reject', request_id: requestId, reason: reason || 'Rejected by user' });
+  // Immediately remove from approvals for instant feedback before backend responds
+  state.approvals = state.approvals.filter(a => a.request_id !== requestId);
   delete state.securityResponses[requestId];
   state.activeSecurityChecks.delete(requestId);
 };

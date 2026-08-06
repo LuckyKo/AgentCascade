@@ -670,12 +670,16 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
     async def _approval_loop():
         """Poll for pending approvals and push to clients."""
         known_ids: Set[str] = set()
+        seen_ids: Set[str] = set()  # Cumulative set of all IDs we've ever seen
         while True:
             try:
                 await asyncio.sleep(0.3)
                 pending = get_approvals()
                 current_ids = {a['request_id'] for a in pending}
-                if current_ids != known_ids:
+                new_seen = current_ids - seen_ids
+                resolved_ids = known_ids - current_ids  # IDs that were known but now gone
+                if new_seen or resolved_ids:
+                    seen_ids.update(current_ids)
                     known_ids = current_ids.copy()
                     await broadcast({'type': 'approvals', 'approvals': pending})
             except asyncio.CancelledError:
