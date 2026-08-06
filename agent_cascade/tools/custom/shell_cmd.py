@@ -296,13 +296,14 @@ class ShellCmd(BaseTool):
             return result
 
         # Case 2 & 3: Still running — return launched message, with early output appended if available
+        console_line = "A console window has been opened for inspection (Windows).\n" if console_window else ""
         launched_msg = (
             f"⟨shell_cmd launched⟩ Tool ID: {tool_id}\n"
             f"Command running in background.\n"
             f"Command: `{command[:200]}`\n"
             f"Heartbeat interval: {heartbeat_interval}s\n"
             f"Timeout: {effective_timeout}s\n"
-            f"A console window has been opened for inspection (Windows).\n\n"
+            f"{console_line}"
             f"You can manage this shell by calling shell_cmd with tool_id={tool_id}:\n"
             f"  - __status → check current status and recent output\n"
             f"  - __kill → terminate the process\n"
