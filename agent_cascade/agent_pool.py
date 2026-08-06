@@ -316,6 +316,7 @@ class AgentPool:
         # ── Async Shell Infrastructure (background shell_cmd support) ────────
         from agent_cascade.async_shell import AsyncShellTracker
         self._async_shell_tracker = AsyncShellTracker(pool=self)
+        self._enable_async_shell_console_window = True  # Default ON (current behavior)
 
         # ── Global state ─────────────────────────────────────────────────────
         self._stopped_event = threading.Event()         # M3 fix: stopped flag for emergency shutdown
@@ -396,6 +397,10 @@ class AgentPool:
                     if hasattr(om, 'approval_timeout_seconds'):
                         data['approval_timeout_seconds'] = om.approval_timeout_seconds
 
+                # Add async shell console window toggle
+                if hasattr(self, '_enable_async_shell_console_window'):
+                    data['enable_async_shell_console_window'] = bool(self._enable_async_shell_console_window)
+
                 # Add compression_fraction as percentage (runtime-modifiable module-level setting)
                 from agent_cascade.settings import COMPRESSION_DEFAULT_FRACTION
                 data['compression_fraction'] = round(COMPRESSION_DEFAULT_FRACTION * 100, 1)
@@ -433,6 +438,7 @@ class AgentPool:
             auto_security_raw = data.pop('auto_security', None)
             enable_approval_timeout_raw = data.pop('enable_approval_timeout', None)
             approval_timeout_seconds_raw = data.pop('approval_timeout_seconds', None)
+            enable_async_shell_console_window_raw = data.pop('enable_async_shell_console_window', None)
 
             # Replace settings with loaded values (defaults fill gaps for new fields)
             self.settings = PoolSettings.from_dict(data)
@@ -465,6 +471,10 @@ class AgentPool:
                     self._pending_approval_timeout_seconds = int(approval_timeout_seconds_raw)
                 except (ValueError, TypeError):
                     logger.warning(f"[PoolSettings] Invalid approval_timeout_seconds value, ignoring.")
+
+            # Apply async shell console window toggle from disk if present
+            if enable_async_shell_console_window_raw is not None:
+                self._enable_async_shell_console_window = bool(enable_async_shell_console_window_raw)
 
             # Apply compression_fraction from disk if present (overrides module default)
             compression_fraction_raw = data.pop('compression_fraction', None)

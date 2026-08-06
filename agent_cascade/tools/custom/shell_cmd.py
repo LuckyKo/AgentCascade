@@ -249,6 +249,11 @@ class ShellCmd(BaseTool):
         # Default timeout for async mode is much longer (1 hour)
         effective_timeout = timeout if timeout else 3600
 
+        # Respect user toggle for console window popup
+        console_window = True
+        if self.agent_pool and hasattr(self.agent_pool, '_enable_async_shell_console_window'):
+            console_window = bool(self.agent_pool._enable_async_shell_console_window)
+
         start_time = time.time()
         try:
             tool_id, pid, early_output, completed_early, return_code = tracker.launch(
@@ -257,6 +262,7 @@ class ShellCmd(BaseTool):
                 heartbeat_interval=heartbeat_interval,
                 timeout=effective_timeout,
                 cwd=resolved_cwd,
+                console_window=console_window,  # Respect user toggle
             )
         except ValueError as e:
             return f"[shell_cmd] {e}"

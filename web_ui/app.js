@@ -175,6 +175,8 @@ const POOL_SETTINGS_MAP = [
   // Approval timeout settings
   { id: '#settingApprovalTimeoutEnabled', prop: 'checked', key: 'enable_approval_timeout', localKey: 'approval-timeout-enabled' },
   { id: '#settingApprovalTimeoutSeconds', prop: 'value', key: 'approval_timeout_seconds', localKey: 'approval-timeout-seconds' },
+  // Async shell console window toggle
+  { id: '#settingAsyncShellConsoleWindow', prop: 'checked', key: 'enable_async_shell_console_window', localKey: 'async-shell-console-window' },
   // Compression settings
   { id: '#setting-compression-warning-threshold', prop: 'value', key: 'compression_warning_threshold', localKey: 'compression-warning-threshold' },
   { id: '#setting-compression-force-threshold', prop: 'value', key: 'compression_force_threshold', localKey: 'compression-force-threshold' },
@@ -637,6 +639,9 @@ const settingAfkMessage = $('#setting-afk-message');
 const approvalTimeoutEnabled = $('#settingApprovalTimeoutEnabled');
 const approvalTimeoutSeconds = $('#settingApprovalTimeoutSeconds');
 
+// Async shell console window toggle
+const settingAsyncShellConsoleWindow = $('#settingAsyncShellConsoleWindow');
+
 
 // Range outputs
 const ranges = [
@@ -973,6 +978,9 @@ function saveSettings(sendToServer) {
   // Approval timeout settings
   if (approvalTimeoutEnabled) s['approval-timeout-enabled'] = approvalTimeoutEnabled.checked;
   if (approvalTimeoutSeconds) s['approval-timeout-seconds'] = approvalTimeoutSeconds.value;
+
+  // Async shell console window toggle
+  if (settingAsyncShellConsoleWindow) s['async-shell-console-window'] = settingAsyncShellConsoleWindow.checked;
 
   // Loop detection tuning settings
   if ($('#setting-loop-min-chars')) s['loop-min-chars'] = $('#setting-loop-min-chars').value;
@@ -4698,6 +4706,9 @@ function getGenerateCfg() {
   // Approval timeout settings
   if (approvalTimeoutSeconds && approvalTimeoutSeconds.value) cfg.approval_timeout_seconds = parseInt(approvalTimeoutSeconds.value) || 300;
   if (approvalTimeoutEnabled) cfg.enable_approval_timeout = approvalTimeoutEnabled.checked;
+
+  // Async shell console window toggle
+  if (settingAsyncShellConsoleWindow) cfg.enable_async_shell_console_window = settingAsyncShellConsoleWindow.checked;
 
   // Cache pool settings
   if ($('#setting-cache-pool-enabled')) cfg.cache_pool_enabled = $('#setting-cache-pool-enabled').checked;

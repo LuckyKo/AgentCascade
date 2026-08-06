@@ -82,6 +82,10 @@ Timed out after 30s waiting for endpoint slot on https://opencode.ai/zen/v1. Cur
 - [x] UI refine: make the blinking motion of the activity bubble in the agent tabs (the dot in front of the name) only blink for the ones actively streaming. Fixed: changed pulse visibility logic in web_ui/app.js renderSubAgents() and updateControls() to use per-agent is_partial flag (true streaming state from backend) instead of execution state (active/SLEEPING). Pulse now only appears when agent is actively streaming LLM output.
 - [ ] telemetry: add `Malformed` info to session-stats telemetry (how many times we hit the Auto-continue logic); in `loops detected` count the inner loops too
 - [x] UI issue: approval window pops back up after being approved/rejected by user. Fixed: 3-part fix — (1) backend now always emits 'approvals' key even when empty in api_integration.py builders, (2) _approval_loop tracks cumulative seen_ids to catch transient approvals, (3) frontend immediately removes resolved request_id from state.approvals on approve/reject for instant feedback.
+- [x] need an UI toggle for shell_cmd window popup, also they should not steal focus if they do show up. Fixed: added "Show Async Shell Console Window" checkbox in settings (default ON), full-stack toggle following approval-timeout pattern — HTML index.html + app.js wiring → config_handlers.py registration → agent_pool.py default/save/load → api_integration.py broadcast → shell_cmd.py reads setting and passes console_window flag to tracker.launch(). async_shell.py already supported the flag end-to-end. Focus-steal limitation documented: Windows CREATE_NEW_CONSOLE inherently brings window to front; toggle lets users disable popup entirely if focus-steal is unacceptable.
+- [ ] check if we have a timeout for slow streaming endpoints
+- [ ] the UI setting `Max Auto-Rollbacks (-1=∞)` is supposed to give us the max allowed message loops before the agent gets kicked back to caller. doesnt seem to work... also probably needs a better name
+- [ ] add model state save/reload before security agent launch if endpoints support it and theres a slot handover during the process
 
 # Errors to investigate:
 

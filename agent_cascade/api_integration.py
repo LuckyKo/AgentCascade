@@ -850,6 +850,9 @@ def build_state_from_pool(
         pool_settings['approval_timeout_seconds'] = getattr(om, 'approval_timeout_seconds', 300)
         pool_settings['enable_approval_timeout'] = getattr(om, 'enable_timeout', True)
 
+    # Add async shell console window toggle from pool if available
+    pool_settings['enable_async_shell_console_window'] = getattr(pool, '_enable_async_shell_console_window', True)
+
     # Add disabled_tools from live cache if available
     if hasattr(pool, '_ui_disabled_tools') and pool._ui_disabled_tools:
         try:
@@ -1027,6 +1030,9 @@ def build_stream_update_from_pool(
         om = pool.operation_manager
         pool_settings['approval_timeout_seconds'] = getattr(om, 'approval_timeout_seconds', 300)
         pool_settings['enable_approval_timeout'] = getattr(om, 'enable_timeout', True)
+
+    # Add async shell console window toggle from pool if available
+    pool_settings['enable_async_shell_console_window'] = getattr(pool, '_enable_async_shell_console_window', True)
 
     # Add disabled_tools from live cache if available
     if hasattr(pool, '_ui_disabled_tools') and pool._ui_disabled_tools:

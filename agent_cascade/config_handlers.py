@@ -48,6 +48,8 @@ POOL_SETTINGS_KEYS = frozenset({
     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
     # Approval timeout settings
     'approval_timeout_seconds', 'enable_approval_timeout',
+    # Async shell console window toggle
+    'enable_async_shell_console_window',
     # Work folders (persisted alongside PoolSettings fields)
     'work_access_folders_ro', 'work_access_folders_rw',
     # Default workspace
@@ -232,6 +234,17 @@ def _handle_enable_approval_timeout(ui_cfg: dict, agent_pool: Optional[Any], age
             )
         except Exception as e:
             _logger.warning(f"Failed to set approval timeout toggle: {e}")
+
+
+@register_config_handler('enable_async_shell_console_window')
+def _handle_enable_async_shell_console_window(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle async shell_cmd console window popup."""
+    from agent_cascade.log import logger as _logger
+    if agent_pool is not None:
+        try:
+            agent_pool._enable_async_shell_console_window = bool(ui_cfg['enable_async_shell_console_window'])
+        except Exception as e:
+            _logger.warning(f"Failed to set async shell console window toggle: {e}")
 
 
 @register_config_handler('max_parallel_agents')
