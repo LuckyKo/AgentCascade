@@ -175,6 +175,9 @@ class TestSubAgentStateMainSession:
                 self.instances = created_instances
                 self.instance_state = {}
             
+            def _resolve_instance_name(self, instance_name, exclude=None):
+                return instance_name
+            
             def create_instance(self, instance_name, agent_class, parent_instance, max_turns, conversation):
                 from agent_cascade.agent_instance import AgentInstance
                 inst = AgentInstance(

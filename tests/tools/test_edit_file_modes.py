@@ -310,8 +310,8 @@ def test_delete_and_insert_mode():
         )
         assert "OK:" in res, f"Test 7 failed: {res}"
         content = file_path.read_text(encoding='utf-8')
-        # -3=line 8, -1=line 10 → delete lines 8-9 (exclusive of 10), insert at line 8
-        assert content == "l1\nl2\nl3\nl4\nl5\nl6\nl7\nreplaced\nl10\n", f"Test 7 assertion: got [{content}]"
+        # -3=line 8, -1=line 10 → delete lines 8-10 inclusive (per docstring: "-1 = last line"), insert at line 8
+        assert content == "l1\nl2\nl3\nl4\nl5\nl6\nl7\nreplaced\n", f"Test 7 assertion: got [{content}]"
 
         # ── Test 8: Delete entire file content ─────────────────────────
         lines = [f"line{i}\n" for i in range(1, 11)]

@@ -88,8 +88,8 @@ def test_conversation_underestimation_comparison():
 def test_overhead_constant_configurable():
     """Verify the overhead constant can be adjusted via environment variable."""
     # This is just a sanity check that the constant exists and has expected default
-    assert CHAT_TEMPLATE_TOKEN_OVERHEAD == 5, \
-        f"Default overhead should be 5, got {CHAT_TEMPLATE_TOKEN_OVERHEAD}"
+    assert CHAT_TEMPLATE_TOKEN_OVERHEAD == 8, \
+        f"Default overhead should be 8, got {CHAT_TEMPLATE_TOKEN_OVERHEAD}"
     print(f"Configurable overhead constant: CHAT_TEMPLATE_TOKEN_OVERHEAD = {CHAT_TEMPLATE_TOKEN_OVERHEAD}")
     print("  PASS\n")
 

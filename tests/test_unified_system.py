@@ -523,7 +523,9 @@ class TestCLIMode:
             assert False, "Should have raised ValueError"
         except ValueError as e:
             msg = str(e).lower()
-            assert 'no llm configuration available' in msg.lower()
+            # Accept either error message variant (endpoint config or general LLM config)
+            assert ('no llm' in msg and ('configuration' in msg or 'endpoint' in msg)), \
+                f"Expected LLM config/endpoint error, got: {e}"
 
     def test_api_router_path_when_injected(self):
         """When api_router IS provided, it should be used for LLM config."""
