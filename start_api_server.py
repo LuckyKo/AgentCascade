@@ -50,7 +50,6 @@ except ValueError as e:
 
 # ── NOW safe to import agent_cascade modules ────────────────────────────────
 from pathlib import Path
-from agent_cascade.log import logger
 
 # ── Workspace Detection (shared) ─────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.absolute()
@@ -98,6 +97,9 @@ def initialize_agents():
 
 
 if __name__ == '__main__':
+    from agent_cascade.log import init_logging, logger
+    init_logging()
+
     import sys
 
     # ── Parse remaining args for --auto_security (instance-id already parsed above) ────

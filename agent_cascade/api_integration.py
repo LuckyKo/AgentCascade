@@ -1159,8 +1159,10 @@ def _resolve_max_tokens(pool, instance=None):
     except ImportError:
         DEFAULT_MAX_INPUT_TOKENS = 58000
 
-    # ── Step 1: Per-instance override (from execution engine propagation) ──
-    # Absolute priority — supervisor-set overrides should never be second-guessed
+    # ── Step 1: Per-instance override (from UI config via _apply_ui_config) ──
+    # Absolute priority — supervisor-set overrides should never be second-guessed.
+    # Note: lifecycle_manager._propagate_settings() does NOT set max_input_tokens here;
+    # it is resolved dynamically at call time via the API Router (Step 2 below).
     if instance and hasattr(instance, '_generate_cfg_override') and instance._generate_cfg_override:
         inst_override = instance._generate_cfg_override.get('max_input_tokens')
         if inst_override:
