@@ -22,9 +22,51 @@ class Suspicion:
     dominant_ngram: tuple[str, ...]  # The n-gram tuple that triggered suspicion
 
 
-def tokenize_chunk(text: str) -> list[str]:
-    """Split text into tokens on whitespace, strip leading/trailing punctuation, filter empty."""
-    return [t.strip(".,!?;:'\"()[]{}<>").lower() for t in text.split() if t.strip(".,!?;:'\"()[]{}<>")]
+def _is_token_boundary(ch: str) -> bool:
+    """Check if a character is whitespace or punctuation that terminates a token."""
+    return ch.isspace() or ch in ".,!?;:'\"()[]{}<>"
+
+
+class StreamingTokenizer:
+    """Incremental tokenizer that buffers partial words across chunk boundaries.
+
+    Guarantees identical tokenization regardless of where chunk boundaries fall,
+    by only emitting tokens when a word is fully received (terminated by whitespace/punctuation).
+    """
+
+    def __init__(self) -> None:
+        self.pending: str = ""  # Partial word waiting for completion
+
+    def tokenize_chunk(self, text: str) -> list[str]:
+        """Tokenize a chunk of text, buffering any incomplete trailing word.
+
+        Returns list of completed tokens. Any partial word at the end is held
+        in pending and will be completed when the next chunk arrives.
+        """
+        tokens: list[str] = []
+        buffer = self.pending + text
+        self.pending = ""
+
+        current_start = 0
+        i = 0
+        while i < len(buffer):
+            if _is_token_boundary(buffer[i]):
+                # End of a word — emit token if non-empty
+                word = buffer[current_start:i].strip(".,!?;:'\"()[]{}<>").lower()
+                if word:
+                    tokens.append(word)
+                current_start = i + 1
+            i += 1
+
+        # Any remaining characters form an incomplete word — buffer them
+        if current_start < len(buffer):
+            self.pending = buffer[current_start:]
+
+        return tokens
+
+    def reset(self) -> None:
+        """Clear pending state."""
+        self.pending = ""
 
 
 class TwoPhaseLoopDetector:
@@ -49,9 +91,16 @@ class TwoPhaseLoopDetector:
         )
         self.max_counter_entries = 200  # Prune threshold for counter
 
+        # Streaming tokenizer — buffers partial words across chunks for consistent tokenization
+        self.tokenizer = StreamingTokenizer()
+
         # Persistent token buffer — accumulates across feeds, bounded
         self.token_buffer: list[str] = []
         self.max_token_buffer = 5000
+
+        # Parallel array: char_end_offset[i] = character position in tail_buffer where token i ends.
+        # Used for accurate interval estimation (token-based suspicion → char-based confirmation).
+        self.token_char_offsets: list[int] = []
 
         # Ngram tracking
         self.ngram_counter: Counter[tuple[str, ...]] = Counter()
@@ -81,11 +130,13 @@ class TwoPhaseLoopDetector:
     def reset(self) -> None:
         """Clear all state so the detector can be reused for a new LLM call attempt."""
         self.token_buffer.clear()
+        self.token_char_offsets.clear()
         self.ngram_counter.clear()
         self.ngram_positions.clear()
         self.cooldown_active = False
         self.cooldown_remaining_feeds = 0
         self.tail_buffer = ""
+        self.tokenizer.reset()
 
     def _prune_counters(self) -> None:
         """Keep only the most frequent n-grams to bound memory usage."""
@@ -103,9 +154,9 @@ class TwoPhaseLoopDetector:
     def _estimate_interval(self, ngram_window: tuple[str, ...]) -> int:
         """Estimate loop interval from positions where this n-gram appears.
 
-        Algorithm: compute distances between consecutive occurrences, return median distance IF consistent.
-        Median is robust against outliers (e.g., one occurrence far apart due to preamble text).
-        Consistency gate ensures gaps are periodic (actual loop) not just repetitive content.
+        Uses minimum gap as the interval estimate when gaps show a harmonic pattern
+        (some are multiples of others due to skipped positions from chunk boundaries).
+        Falls back to median if gaps are consistent without harmonics.
         """
         positions = self.ngram_positions.get(ngram_window, [])
 
@@ -123,27 +174,30 @@ class TwoPhaseLoopDetector:
         if len(distances) < 4:
             return -1  # Not enough gaps
 
-        # Return median distance — robust estimate of interval length
-        distances.sort()
-        mid = len(distances) // 2
+        # Use the minimum positive gap as the interval estimate.
+        # Rationale: when chunk boundaries cause some positions to be skipped, we get
+        # harmonic gaps (e.g., [48, 96, 48, 53]) where larger gaps are multiples of the true interval.
+        min_gap = min(distances)
 
-        if len(distances) % 2 == 0:
-            median = (distances[mid - 1] + distances[mid]) // 2
-        else:
-            median = distances[mid]
+        # Consistency gate: check if most gaps are close to min_gap or small integer multiples of it.
+        tolerance = max(4, min_gap // 6)
+        consistent_count = 0
+        for d in distances:
+            # Gap is consistent if it's close to min_gap or a multiple of it (1x-4x)
+            for mult in range(1, 5):
+                target = mult * min_gap
+                if abs(d - target) <= tolerance:
+                    consistent_count += 1
+                    break
 
-        # Consistency gate: dominant gap must represent >=60% of all gaps
-        # This distinguishes periodic loops from merely repetitive content
-        gap_counts = Counter(distances)
-        most_common_gap, most_common_count = gap_counts.most_common(1)[0]
-        dominant_ratio = most_common_count / len(distances)
+        consistent_ratio = consistent_count / len(distances)
 
-        if dominant_ratio < 0.6:
+        if consistent_ratio < 0.6:
             return -1  # Gaps too inconsistent — repetitive but not periodic
 
         # Clamp to reasonable bounds (max interval = tail/confirmed_matches_required, ensuring confirmation can verify)
         max_interval = len(self.tail_buffer) // self.confirmed_matches_required if self.tail_buffer else 10000
-        return max(1, min(median, max_interval))
+        return max(1, min(min_gap, max_interval))
 
     def _check_suspicion(self, new_text: str) -> Suspicion | None:
         """Lightweight heuristic: track n-gram frequencies over persistent token buffer, flag when pattern repeats."""
@@ -156,21 +210,39 @@ class TwoPhaseLoopDetector:
             return None
 
         # Update tail buffer — no truncation needed (see class docstring)
+        chars_before_new = len(self.tail_buffer)
         self.tail_buffer += new_text
 
-        # Tokenize new chunk and append to persistent token buffer
-        new_tokens = tokenize_chunk(new_text)
+        # Tokenize using streaming tokenizer (buffers partial words across chunks)
+        new_tokens = self.tokenizer.tokenize_chunk(new_text)
+        first_new_token_idx = len(self.token_buffer)
+
+        # Record exact char offsets for each new token.
+        # Since tokens are emitted in order from the input, we can compute cumulative positions.
+        pos_in_chunk = 0
+        for token in new_tokens:
+            # Find where this token appears in new_text starting from current position
+            idx = new_text.find(token, pos_in_chunk)
+            if idx < 0:
+                # Token might be lowercased/stripped version — find original form
+                idx = self._find_token_in_text(new_text, token, pos_in_chunk)
+            char_end_offset = chars_before_new + idx + len(token)
+            self.token_char_offsets.append(char_end_offset)
+            pos_in_chunk = idx + len(token)
+
         self.token_buffer.extend(new_tokens)
 
         # Trim token buffer if too large (keep tail portion where loops would appear)
         if len(self.token_buffer) > self.max_token_buffer:
-            self.token_buffer = self.token_buffer[-self.max_token_buffer:]
+            trim_count = len(self.token_buffer) - self.max_token_buffer
+            self.token_buffer = self.token_buffer[trim_count:]
+            self.token_char_offsets = self.token_char_offsets[trim_count:]
 
         # Slide ngram window over the END of token_buffer (where new tokens are)
         # Only scan recently added region to avoid re-scanning everything each feed
-        start_scan = max(0, len(self.token_buffer) - len(new_tokens) - self.ngram_window_size)
+        start_scan = max(0, first_new_token_idx - self.ngram_window_size)
 
-        for i in range(start_scan, max(start_scan + 1, len(self.token_buffer) - self.ngram_window_size + 1)):
+        for i in range(start_scan, len(self.token_buffer) - self.ngram_window_size + 1):
             window = tuple(self.token_buffer[i : i + self.ngram_window_size])
             if len(window) < self.ngram_window_size:
                 continue
@@ -178,15 +250,22 @@ class TwoPhaseLoopDetector:
             # Use tuple directly as key — deterministic, no hash randomization issues
             self.ngram_counter[window] += 1
 
-            # Track position in tail_buffer where this n-gram ends (for interval estimation)
-            # Bounded: keep only last ~8 positions per entry to limit memory
+            # Track position using EXACT char offset from token_char_offsets.
+            # The position is where this n-gram window ENDS in tail_buffer.
+            # Only record if far enough from last position (avoids overlapping-window noise).
+            exact_char_pos = self.token_char_offsets[i + self.ngram_window_size - 1]
+
             if window not in self.ngram_positions:
                 self.ngram_positions[window] = []
 
             pos_list = self.ngram_positions[window]
-            pos_list.append(len(self.tail_buffer))
-            if len(pos_list) > 8:
-                pos_list[:] = pos_list[-8:]  # Trim to last 8 positions
+            last_pos = pos_list[-1] if pos_list else None
+            min_gap = max(8, self.ngram_window_size // 4)  # Minimum char gap between recorded positions
+
+            if last_pos is None or (exact_char_pos - last_pos) >= min_gap:
+                pos_list.append(exact_char_pos)
+                if len(pos_list) > 8:
+                    pos_list[:] = pos_list[-8:]  # Trim to last 8 positions
 
         # Prune counters if too large (keep top entries by count)
         if len(self.ngram_counter) > self.max_counter_entries:
@@ -204,34 +283,68 @@ class TwoPhaseLoopDetector:
 
         return None
 
+    def _find_token_in_text(self, text: str, token: str, start: int) -> int:
+        """Find the original (case/punctuation preserved) form of a token in text."""
+        # Search for any substring that matches when lowercased and stripped
+        remaining = text[start:]
+        min_len = len(token)
+        max_len = min(len(remaining), min_len + 10)  # Allow up to 10 extra chars for punctuation
+
+        for length in range(min_len, max_len + 1):
+            if start + length > len(text):
+                break
+            candidate = text[start:start + length]
+            if candidate.lower().strip(".,!?;:'\"()[]{}<>") == token:
+                return start
+
+        # Fallback: search from start position for the lowercased token
+        idx = remaining.lower().find(token)
+        return start + idx if idx >= 0 else start
+
     def _confirm_loop(self, suspicion: Suspicion) -> int:
         """Exact match test: count how many times the suspected interval repeats in tail.
 
         Returns the number of confirmed repetitions (0 if not enough data or no loop).
         Caller should compare against confirmed_matches_required to decide on abort.
+
+        Searches around the estimated interval to tolerate small position estimation errors
+        from token-to-char mapping (typically ±1-2 tokens worth of characters).
         """
-        interval = suspicion.interval_length
+        estimated_interval = suspicion.interval_length
         max_interval = len(self.tail_buffer) // self.confirmed_matches_required
-        if interval < 1 or interval > max_interval:
+        if estimated_interval < 1 or estimated_interval > max_interval:
             return 0
 
-        min_tail_needed = interval * self.confirmed_matches_required
-        if len(self.tail_buffer) < min_tail_needed:
-            return 0
+        # Search radius: allow ±15% tolerance for interval estimation error from token mapping
+        search_radius = max(8, estimated_interval // 6)
+        best_count = 0
+        best_interval = estimated_interval
 
-        candidate_segment = self.tail_buffer[-interval:]
-        confirmed_count = 1
-        pos = len(self.tail_buffer) - interval
+        for interval in range(
+            max(1, estimated_interval - search_radius),
+            min(max_interval, estimated_interval + search_radius) + 1
+        ):
+            min_tail_needed = interval * self.confirmed_matches_required
+            if len(self.tail_buffer) < min_tail_needed:
+                continue
 
-        while pos >= interval:
-            prev_segment = self.tail_buffer[pos - interval : pos]
-            if prev_segment == candidate_segment:
-                confirmed_count += 1
-                pos -= interval
-            else:
-                break
+            candidate_segment = self.tail_buffer[-interval:]
+            confirmed_count = 1
+            pos = len(self.tail_buffer) - interval
 
-        return confirmed_count
+            while pos >= interval:
+                prev_segment = self.tail_buffer[pos - interval : pos]
+                if prev_segment == candidate_segment:
+                    confirmed_count += 1
+                    pos -= interval
+                else:
+                    break
+
+            if confirmed_count > best_count:
+                best_count = confirmed_count
+                best_interval = interval
+
+        return best_count
 
     def _apply_cooldown(self) -> None:
         """Suppress suspicion detection after failed confirmation to prevent repeated false triggers.

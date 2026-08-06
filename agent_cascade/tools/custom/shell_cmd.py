@@ -360,35 +360,72 @@ class ShellCmd(BaseTool):
         elif command == '__ctrl_c':
             return tracker.send_ctrl_c(agent_name, tool_id) or "No action taken."
         elif command == '__wait':
-            pool = self.agent_pool
-            if pool is None or not hasattr(pool, 'wait_for_message'):
-                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Agent pool not available."
-
-            # If there's no known task and nothing currently queued for this agent,
-            # do a short wait to see if a late completion message arrives. Otherwise, fail fast.
+            # If there's no known task, fail fast.
             task = tracker._get_task(agent_name, tool_id)
-            has_queued = pool.has_messages(agent_name) if hasattr(pool, 'has_messages') else False
 
-            if task is None and not has_queued:
-                # Brief grace period in case completion message is about to be queued
-                result_str = pool.wait_for_message(agent_name, timeout=2.0)
-                if result_str is None:
-                    return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No running shell found."
-                truncated = ShellCmd._truncate_shell_message(result_str, agent_name, self.agent_pool)
-                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id}\n{truncated}"
+            if task is None:
+                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No running shell found."
 
-            # Block until any message arrives for this agent (shell heartbeat/completion,
-            # async child result, or user message), then return it. With unified wakeup
-            # queue, __wait serves as a general "pause until something happens" mechanism.
-            timeout = 30.0
-            result_str = pool.wait_for_message(agent_name, timeout=timeout)
+            # If task is already completed, report that instead of waiting.
+            if task.completed:
+                return (
+                    f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process already completed "
+                    f"(exit code {task.return_code})."
+                )
 
-            if result_str is None:
-                return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No async message within {timeout:.0f}s."
+            # Determine wait timeout based on the task's heartbeat_interval.
+            # When heartbeats are configured, wait up to that interval (capped at 60s).
+            # When no heartbeats (-1), use a default 30s so __wait still pauses meaningfully.
+            if task.heartbeat_interval > 0:
+                timeout = min(task.heartbeat_interval, 60.0)
+            else:
+                timeout = 30.0
 
-            # Apply the same truncation as heartbeats so __wait replies are consistent.
-            truncated = ShellCmd._truncate_shell_message(result_str, agent_name, self.agent_pool)
-            return f"⟨shell_cmd wait⟩ Tool ID: {tool_id}\n{truncated}"
+            # Poll the task for new output or completion status changes.
+            # This directly checks task state rather than relying on message queue,
+            # so it works even when no heartbeats are configured.
+            import time as _time
+            start_time = _time.time()
+            poll_interval = 0.5
+
+            with task._lock:
+                last_stdout_len = len(task.stdout_lines)
+                last_stderr_len = len(task.stderr_lines)
+
+            while True:
+                # Check for timeout
+                elapsed = _time.time() - start_time
+                remaining = timeout - elapsed
+                if remaining <= 0:
+                    return (
+                        f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No new output "
+                        f"(timeout after {timeout:.0f}s)."
+                    )
+
+                # Sleep briefly before next poll (use smaller interval near timeout)
+                sleep_time = min(poll_interval, remaining)
+                _time.sleep(sleep_time)
+
+                # Check task state
+                with task._lock:
+                    if task.completed:
+                        return (
+                            f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process completed "
+                            f"(exit code {task.return_code})."
+                        )
+
+                    # Collect new output since last check
+                    new_stdout = list(task.stdout_lines[last_stdout_len:])
+                    new_stderr = list(task.stderr_lines[last_stderr_len:])
+                    last_stdout_len = len(task.stdout_lines)
+                    last_stderr_len = len(task.stderr_lines)
+
+                if new_stdout or new_stderr:
+                    # Format output similar to heartbeat style
+                    lines = new_stdout + new_stderr
+                    output_text = '\n'.join(line.rstrip('\r\n') for line in lines)
+                    truncated = ShellCmd._truncate_shell_message(output_text, agent_name, self.agent_pool)
+                    return f"⟨shell_cmd wait⟩ Tool ID: {tool_id}\n{truncated}"
         else:
             # Send as stdin input to the running process
             return tracker.send_input(agent_name, tool_id, command) or f"Input sent [Tool ID: {tool_id}]."

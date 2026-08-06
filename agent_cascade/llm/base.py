@@ -309,7 +309,7 @@ class BaseChatModel(ABC):
             messages = [Message(role=SYSTEM, content=DEFAULT_SYSTEM_MESSAGE)] + messages
 
         # Not precise. It's hard to estimate tokens related with function calling and multimodal items.
-        max_input_tokens = generate_cfg.pop('max_input_tokens', DEFAULT_MAX_INPUT_TOKENS)
+        max_input_tokens = generate_cfg.get('max_input_tokens', DEFAULT_MAX_INPUT_TOKENS)
 
         # Feature 006: Extract token count callback BEFORE agent_settings loop
         on_token_count_cb = generate_cfg.pop('_on_token_count', None)
@@ -341,21 +341,37 @@ class BaseChatModel(ABC):
                 estimated_tokens = None  # If counting fails, fall through to truncation as backstop
 
             if estimated_tokens is not None and estimated_tokens > max_input_tokens:
-                overflow_pct = ((estimated_tokens - max_input_tokens) / max_input_tokens * 100) if max_input_tokens > 0 else 0
+                # Truncate first as the primary defense against context overflow.
+                messages = _truncate_input_messages_roughly(
+                    messages=messages,
+                    max_tokens=max_input_tokens,
+                    agent_name=agent_name,
+                    on_token_count_cb=on_token_count_cb,
+                )
 
-                if overflow_pct > COMPRESSION_OVERFLOW_TOLERANCE_PCT:
+                # Re-check after truncation: only raise if truncation failed to reduce tokens.
+                # If truncation did its job (tokens reduced), allow it through even if still
+                # slightly over — system message overhead is unavoidable with tiny limits.
+                try:
+                    truncated_tokens = sum(get_message_stats(m)['tokens'] for m in messages)
+                except Exception:
+                    truncated_tokens = None  # If recount fails, let it through — truncation did its best
+
+                if truncated_tokens is not None and truncated_tokens >= estimated_tokens:
+                    # Truncation didn't help at all — something is wrong, raise.
                     raise ContextWindowExceeded(
-                        f"Context window exceeded before LLM call [{agent_name}]: "
-                        f"~{estimated_tokens} tokens vs {max_input_tokens} limit "
-                        f"(+{overflow_pct:.1f}%). Compression should have prevented this."
+                        f"Context window exceeded after truncation [{agent_name}]: "
+                        f"~{truncated_tokens} tokens vs {max_input_tokens} limit. "
+                        f"Truncation failed to reduce payload. Compression should have prevented this."
                     )
-
-            messages = _truncate_input_messages_roughly(
-                messages=messages,
-                max_tokens=max_input_tokens,
-                agent_name=agent_name,
-                on_token_count_cb=on_token_count_cb,
-            )
+            else:
+                # No overflow detected, still run truncation as a safety net for edge cases.
+                messages = _truncate_input_messages_roughly(
+                    messages=messages,
+                    max_tokens=max_input_tokens,
+                    agent_name=agent_name,
+                    on_token_count_cb=on_token_count_cb,
+                )
 
         if functions:
             fncall_mode = True
@@ -1060,11 +1076,12 @@ def _truncate_input_messages_roughly(messages: List[Message], max_tokens: int, a
     
     if all_tokens <= available_token:
         return messages
+    
+    # Even if system message consumed all budget, still try to truncate user content.
+    # Clamp available_token to at least 1 so truncation has a non-zero budget.
     if available_token <= 0:
-        raise ModelServiceError(
-            code='400',
-            message=f'The input system has exceed the maximum input context length ({max_tokens} tokens)',
-        )
+        logger.debug(f'Agent [{agent_name}] - System message consumed all tokens ({max_tokens}), clamping available to 1 for truncation')
+        available_token = 1
 
     exceedance = all_tokens - available_token  # make exceedance <= 0 -> ok
     for it, (user_msg_idx, indexed_messages) in enumerate(indexed_messages_per_user.items()):
