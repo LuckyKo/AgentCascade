@@ -642,7 +642,6 @@ const approvalTimeoutSeconds = $('#settingApprovalTimeoutSeconds');
 // Async shell console window toggle
 const settingAsyncShellConsoleWindow = $('#settingAsyncShellConsoleWindow');
 
-
 // Range outputs
 const ranges = [
   { input: $('#setting-temperature'), output: $('#val-temperature') },

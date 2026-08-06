@@ -238,7 +238,7 @@ def _handle_enable_approval_timeout(ui_cfg: dict, agent_pool: Optional[Any], age
 
 @register_config_handler('enable_async_shell_console_window')
 def _handle_enable_async_shell_console_window(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Toggle async shell_cmd console window popup."""
+    """Update async shell console window toggle state. Set via UI config update."""
     from agent_cascade.log import logger as _logger
     if agent_pool is not None:
         try:

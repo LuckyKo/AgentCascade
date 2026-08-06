@@ -732,6 +732,22 @@ def _serialize_instances_incremental(
     
     return all_instances
 
+
+def _add_pool_runtime_settings(pool: Any, pool_settings: dict) -> None:
+    """Add runtime pool settings (approval timeout, async shell console window) to pool_settings dict.
+
+    Shared by build_state_from_pool and build_stream_update_from_pool to avoid duplication.
+    """
+    # Approval timeout settings from operation_manager if available
+    if hasattr(pool, 'operation_manager') and pool.operation_manager:
+        om = pool.operation_manager
+        pool_settings['approval_timeout_seconds'] = getattr(om, 'approval_timeout_seconds', 300)
+        pool_settings['enable_approval_timeout'] = getattr(om, 'enable_timeout', True)
+
+    # Async shell console window toggle from pool if available
+    pool_settings['enable_async_shell_console_window'] = getattr(pool, '_enable_async_shell_console_window', True)
+
+
 def build_state_from_pool(
     pool: AgentPool,
     instance_name: str,
@@ -844,14 +860,9 @@ def build_state_from_pool(
             if key in pool.llm_cfg:
                 pool_settings[key] = pool.llm_cfg[key]
 
-    # Add approval timeout settings from operation_manager if available
-    if hasattr(pool, 'operation_manager') and pool.operation_manager:
-        om = pool.operation_manager
-        pool_settings['approval_timeout_seconds'] = getattr(om, 'approval_timeout_seconds', 300)
-        pool_settings['enable_approval_timeout'] = getattr(om, 'enable_timeout', True)
 
-    # Add async shell console window toggle from pool if available
-    pool_settings['enable_async_shell_console_window'] = getattr(pool, '_enable_async_shell_console_window', True)
+    # Add runtime pool settings (approval timeout, async shell console window)
+    _add_pool_runtime_settings(pool, pool_settings)
 
     # Add disabled_tools from live cache if available
     if hasattr(pool, '_ui_disabled_tools') and pool._ui_disabled_tools:
@@ -1025,14 +1036,9 @@ def build_stream_update_from_pool(
             if key in pool.llm_cfg:
                 pool_settings[key] = pool.llm_cfg[key]
 
-    # Add approval timeout settings from operation_manager if available
-    if hasattr(pool, 'operation_manager') and pool.operation_manager:
-        om = pool.operation_manager
-        pool_settings['approval_timeout_seconds'] = getattr(om, 'approval_timeout_seconds', 300)
-        pool_settings['enable_approval_timeout'] = getattr(om, 'enable_timeout', True)
 
-    # Add async shell console window toggle from pool if available
-    pool_settings['enable_async_shell_console_window'] = getattr(pool, '_enable_async_shell_console_window', True)
+    # Add runtime pool settings (approval timeout, async shell console window)
+    _add_pool_runtime_settings(pool, pool_settings)
 
     # Add disabled_tools from live cache if available
     if hasattr(pool, '_ui_disabled_tools') and pool._ui_disabled_tools:

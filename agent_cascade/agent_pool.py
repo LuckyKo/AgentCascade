@@ -398,8 +398,7 @@ class AgentPool:
                         data['approval_timeout_seconds'] = om.approval_timeout_seconds
 
                 # Add async shell console window toggle
-                if hasattr(self, '_enable_async_shell_console_window'):
-                    data['enable_async_shell_console_window'] = bool(self._enable_async_shell_console_window)
+                data['enable_async_shell_console_window'] = bool(self._enable_async_shell_console_window)
 
                 # Add compression_fraction as percentage (runtime-modifiable module-level setting)
                 from agent_cascade.settings import COMPRESSION_DEFAULT_FRACTION
