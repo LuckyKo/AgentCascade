@@ -77,7 +77,33 @@ def _make_mock_pool(
     def get_effective_concurrency(agent_class):
         return agent_concurrency.get(agent_class, -1) if agent_concurrency else -1
 
+    def get_agent_slot_info(agent_class):
+        """Return slot info dict matching real api_router.get_agent_slot_info()."""
+        concurrency = get_effective_concurrency(agent_class)
+        if concurrency == -1:
+            return {
+                'slot_key': None,
+                'is_sequential': False,
+                'concurrency_limit': -1,
+                'api_base': None,
+                'needs_slot': False,
+            }
+        is_sequential = (concurrency == 0)
+        slot_key = '_shared_sequential_slot_' if is_sequential else f"http://localhost:8080/v1"
+        return {
+            'slot_key': slot_key,
+            'is_sequential': is_sequential,
+            'concurrency_limit': concurrency,
+            'api_base': "http://localhost:8080/v1",
+            'needs_slot': True,
+        }
+
+    def get_llm_config(agent_class):
+        return {'api_base': 'http://localhost:8080/v1'}
+
     api_router.get_effective_concurrency = get_effective_concurrency
+    api_router.get_agent_slot_info = get_agent_slot_info
+    api_router.get_llm_config = get_llm_config
     pool.api_router = api_router
 
     # Set up settings for nesting depth check

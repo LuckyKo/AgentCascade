@@ -51,6 +51,8 @@ def _make_tool_with_tracker(shell_cmd_tool, tracker):
     """Wire a ShellCmd tool to use a tracker."""
     mock_pool = MagicMock()
     mock_pool._async_shell_tracker = tracker
+    mock_pool.llm_cfg = {}  # Must be dict so .get('shell_char_limit', default) returns default
+    mock_pool.operation_manager.request_user_approval.return_value = (True, '')  # Auto-approve for tests
     shell_cmd_tool.agent_pool = mock_pool
     shell_cmd_tool.agent_name = 'test_agent'
 
@@ -96,6 +98,7 @@ class TestHeartbeatUsesAsyncResultBuffer:
     def test_heartbeat_goes_to_enqueue_message(self, mock_task_running):
         pool = MagicMock()
         pool.enqueue_message = MagicMock()
+        pool.llm_cfg = {}
 
         tracker = AsyncShellTracker(pool=pool)
         _setup_task(tracker, mock_task_running)
@@ -115,6 +118,7 @@ class TestHeartbeatUsesAsyncResultBuffer:
     def test_heartbeat_does_not_double_wrap(self, mock_task_running):
         pool = MagicMock()
         pool.enqueue_message = MagicMock()
+        pool.llm_cfg = {}
         tracker = AsyncShellTracker(pool=pool)
         _setup_task(tracker, mock_task_running)
 
@@ -133,6 +137,7 @@ class TestHeartbeatUsesAsyncResultBuffer:
         pool = MagicMock()
         del pool._async_results
         pool.enqueue_message = MagicMock()
+        pool.llm_cfg = {}
 
         tracker = AsyncShellTracker(pool=pool)
         _setup_task(tracker, mock_task_running)
@@ -151,6 +156,7 @@ class TestHeartbeatUsesAsyncResultBuffer:
         """Verify heartbeats now go directly to enqueue_message (single-queue migration)."""
         pool = MagicMock()
         pool.enqueue_message = MagicMock()
+        pool.llm_cfg = {}
         # Ensure _async_results is NOT used
         if hasattr(pool, '_async_results'):
             delattr(pool, '_async_results')
@@ -340,12 +346,30 @@ class TestOptionalJustification:
             shell_cmd_tool.call('{"command": "ls -la"}')
         assert 'justification' in str(exc_info.value).lower()
 
-    def test_tool_id_with_non_control_command_requires_justification(self, shell_cmd_tool):
-        """Having tool_id alone doesn't exempt a regular command from needing justification."""
-        _make_tool_with_tracker(shell_cmd_tool, MagicMock())
-        with pytest.raises(ValueError) as exc_info:
-            shell_cmd_tool.call('{"command": "echo test", "tool_id": 1}')
-        assert 'justification' in str(exc_info.value).lower()
+    def test_tool_id_with_non_control_command_sends_as_stdin(self, shell_cmd_tool):
+        """Non-control commands with tool_id are sent as stdin input (no justification needed).
+
+        This is intentional: tool_id means interacting with an already-approved running shell.
+        See _handle_control_command else branch: 'Send as stdin input to the running process'.
+        """
+        tracker = AsyncShellTracker(pool=None)
+        task = _make_running_task(tool_id=1, command='cat')
+        _setup_task(tracker, task)
+
+        # Mock send_input to verify it's called with correct args
+        tracker.send_input = MagicMock(return_value=None)
+
+        mock_pool = MagicMock()
+        mock_pool._async_shell_tracker = tracker
+        mock_pool.llm_cfg = {}
+        shell_cmd_tool.agent_pool = mock_pool
+        shell_cmd_tool.agent_name = 'test_agent'
+
+        # Non-control command with tool_id should NOT raise — it attempts stdin input
+        result = shell_cmd_tool.call('{"command": "echo test", "tool_id": 1}')
+
+        # Verify tracker.send_input was actually called with correct args (agent_name, tool_id, command)
+        tracker.send_input.assert_called_once_with('test_agent', 1, 'echo test')
 
     def test_control_command_with_non_numeric_tool_id_raises(self, shell_cmd_tool):
         """Control commands with non-numeric tool_id should raise a clear error."""
@@ -353,6 +377,13 @@ class TestOptionalJustification:
         with pytest.raises(ValueError) as exc_info:
             shell_cmd_tool.call('{"command": "__status", "tool_id": "abc"}')
         assert 'tool_id' in str(exc_info.value).lower() and 'numeric' in str(exc_info.value).lower()
+
+    def test_control_command_without_tool_id_raises(self, shell_cmd_tool):
+        """Control commands without tool_id should raise a clear error."""
+        _make_tool_with_tracker(shell_cmd_tool, MagicMock())
+        with pytest.raises(ValueError) as exc_info:
+            shell_cmd_tool.call('{"command": "__status"}')
+        assert 'tool_id' in str(exc_info.value).lower()
 
     def test_regular_command_with_justification_works(self, shell_cmd_tool):
         with patch.object(shell_cmd_tool, '_execute_sync', return_value='file1\nfile2\n') as mock_exec:
@@ -373,6 +404,8 @@ class TestOptionalJustification:
 
         mock_pool = MagicMock()
         mock_pool._async_shell_tracker = tracker
+        mock_pool.llm_cfg = {}
+        mock_pool.operation_manager.request_user_approval.return_value = (True, '')
         shell_cmd_tool.agent_pool = mock_pool
         shell_cmd_tool.agent_name = 'test_agent'
 
@@ -389,6 +422,8 @@ class TestOptionalJustification:
 
         mock_pool = MagicMock()
         mock_pool._async_shell_tracker = tracker
+        mock_pool.llm_cfg = {}
+        mock_pool.operation_manager.request_user_approval.return_value = (True, '')
         shell_cmd_tool.agent_pool = mock_pool
         shell_cmd_tool.agent_name = 'test_agent'
 
@@ -407,6 +442,8 @@ class TestOptionalJustification:
 
         mock_pool = MagicMock()
         mock_pool._async_shell_tracker = tracker
+        mock_pool.llm_cfg = {}
+        mock_pool.operation_manager.request_user_approval.return_value = (True, '')
         shell_cmd_tool.agent_pool = mock_pool
         shell_cmd_tool.agent_name = 'test_agent'
 
@@ -454,6 +491,8 @@ class TestAutoAsyncMode:
         tracker.launch = MagicMock(return_value=(1, 12345, None, False, None))
         mock_pool = MagicMock()
         mock_pool._async_shell_tracker = tracker
+        mock_pool.llm_cfg = {}  # Must be dict so .get('shell_char_limit', default) returns default
+        mock_pool.operation_manager.request_user_approval.return_value = (True, '')  # Auto-approve for tests
         shell_cmd_tool.agent_pool = mock_pool
         shell_cmd_tool.agent_name = 'test_agent'
         return tracker

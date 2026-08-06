@@ -485,37 +485,42 @@ class TestTokenization:
 
     def test_tokenize_basic(self):
         """Basic tokenization splits on whitespace and strips punctuation."""
-        from agent_cascade.two_phase_loop_detect import tokenize_chunk
+        from agent_cascade.two_phase_loop_detect import StreamingTokenizer
 
-        tokens = tokenize_chunk("Hello, world! This is a test.")
+        tokenizer = StreamingTokenizer()
+        tokens = tokenizer.tokenize_chunk("Hello, world! This is a test.")
         assert tokens == ["hello", "world", "this", "is", "a", "test"]
 
     def test_tokenize_empty(self):
         """Empty string returns empty list."""
-        from agent_cascade.two_phase_loop_detect import tokenize_chunk
+        from agent_cascade.two_phase_loop_detect import StreamingTokenizer
 
-        tokens = tokenize_chunk("")
+        tokenizer = StreamingTokenizer()
+        tokens = tokenizer.tokenize_chunk("")
         assert tokens == []
 
     def test_tokenize_whitespace_only(self):
         """Whitespace-only string returns empty list."""
-        from agent_cascade.two_phase_loop_detect import tokenize_chunk
+        from agent_cascade.two_phase_loop_detect import StreamingTokenizer
 
-        tokens = tokenize_chunk("   \n\t  ")
+        tokenizer = StreamingTokenizer()
+        tokens = tokenizer.tokenize_chunk("   \n\t  ")
         assert tokens == []
 
     def test_tokenize_case_normalized(self):
         """Tokens are lowercased."""
-        from agent_cascade.two_phase_loop_detect import tokenize_chunk
+        from agent_cascade.two_phase_loop_detect import StreamingTokenizer
 
-        tokens = tokenize_chunk("Hello WORLD Test")
+        tokenizer = StreamingTokenizer()
+        tokens = tokenizer.tokenize_chunk("Hello WORLD Test ")
         assert tokens == ["hello", "world", "test"]
 
     def test_tokenize_strips_punctuation(self):
         """Leading/trailing punctuation is stripped from tokens."""
-        from agent_cascade.two_phase_loop_detect import tokenize_chunk
+        from agent_cascade.two_phase_loop_detect import StreamingTokenizer
 
-        tokens = tokenize_chunk('"quoted" (parenthesized) [bracketed]')
+        tokenizer = StreamingTokenizer()
+        tokens = tokenizer.tokenize_chunk('"quoted" (parenthesized) [bracketed]')
         assert tokens == ["quoted", "parenthesized", "bracketed"]
 
 

@@ -434,3 +434,31 @@ def isolated_config_dir(tmp_path_factory):
     yield test_config
     # Cleanup not strictly necessary (tmp_path handles it), but explicit is clear
     os.environ.pop("AGENT_CASCADE_TEST_CONFIG_DIR", None)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures: token_cache tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def short_ttl_cache():
+    """AgentTokenCache with a 1-second TTL for fast expiration tests."""
+    from agent_cascade.utils.token_cache import AgentTokenCache
+    return AgentTokenCache(ttl=1)
+
+
+@pytest.fixture
+def normal_ttl_cache():
+    """AgentTokenCache with the default 300-second TTL (used by thread-safety tests)."""
+    from agent_cascade.utils.token_cache import AgentTokenCache
+    return AgentTokenCache()
+
+
+# ---------------------------------------------------------------------------
+# Fixtures: tool_utils and streaming_tool_resolution tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def agent_pool():
+    """Minimal fake AgentPool with instance_conversations for cache-pool tests."""
+    return _FakeAgentPool()
