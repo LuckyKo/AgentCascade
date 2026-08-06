@@ -366,20 +366,23 @@ class ShellCmd(BaseTool):
             if task is None:
                 return f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - No running shell found."
 
-            # If task is already completed, report that instead of waiting.
-            if task.completed:
-                return (
-                    f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process already completed "
-                    f"(exit code {task.return_code})."
-                )
+            # Read initial state under lock to avoid race with tracking thread.
+            # All AsyncShellTask shared state must be accessed under task._lock
+            # (see async_shell.py line 245 for locking discipline documentation).
+            with task._lock:
+                if task.completed:
+                    return (
+                        f"⟨shell_cmd wait⟩ Tool ID: {tool_id} - Process already completed "
+                        f"(exit code {task.return_code})."
+                    )
 
-            # Determine wait timeout based on the task's heartbeat_interval.
-            # When heartbeats are configured, wait up to that interval (capped at 60s).
-            # When no heartbeats (-1), use a default 30s so __wait still pauses meaningfully.
-            if task.heartbeat_interval > 0:
-                timeout = min(task.heartbeat_interval, 60.0)
-            else:
-                timeout = 30.0
+                # Determine wait timeout based on the task's heartbeat_interval.
+                # When heartbeats are configured, wait up to that interval (capped at 60s).
+                # When no heartbeats (-1), use a default 30s so __wait still pauses meaningfully.
+                if task.heartbeat_interval > 0:
+                    timeout = min(task.heartbeat_interval, 60.0)
+                else:
+                    timeout = 30.0
 
             # Poll the task for new output or completion status changes.
             # This directly checks task state rather than relying on message queue,
