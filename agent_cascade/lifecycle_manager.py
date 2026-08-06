@@ -538,21 +538,26 @@ class AgentLifecycleManager:
         call_agent_args: dict = None,
     ) -> None:
         """Propagate settings from caller to child instance.
-
-        Propagates max_turns, max_input_tokens, and disabled_tools from the caller
-        agent's configuration to the child instance. Uses single lock scope to prevent
-        race conditions where another thread reads partial state.
-
+        
+        Propagates max_turns and disabled_tools from the caller agent's configuration
+        to the child instance. Uses single lock scope to prevent race conditions where
+        another thread reads partial state.
+        
+        Note: max_input_tokens is NOT propagated here. It is resolved dynamically
+        at call time via _resolve_max_tokens(), which consults the API Router for
+        live endpoint values (enabling failover). Baking it into the override would
+        freeze the value at spawn time and block router updates.
+        
         Args:
             instance: Child instance to configure
             caller: Parent instance name
             agent_class: Child's agent class
             call_agent_args: Optional args dict from the call_agent tool invocation.
                            If it contains 'max_turns', that value is used (capped by caller's limit).
-
+        
         Note:
             If target template has no LLM config, max_turns is still set but
-            max_input_tokens and disabled_tools propagation is skipped.
+            disabled_tools propagation is skipped.
         """
         # FIX
         if not hasattr(self.pool, 'api_router') or not self.pool.api_router:
@@ -605,42 +610,29 @@ class AgentLifecycleManager:
                 # continue execution
                 logger.warning(
                     f"Target agent instance ({agent_class}) template has no LLM config — "
-                    f"skipping settings propagation (max_input_tokens and disabled_tools)"
+                    f"skipping settings propagation (disabled_tools only)"
                 )
                 return
 
-            # Query router BEFORE acquiring _state_lock to reduce lock
-            # contention
-            propagated_max = llm_cfg.get('max_input_tokens')
-            # Fallback: if caller's config doesn't have max_input_tokens (e.g.,
-            # because
-            # initial_llm_cfg was missing it), query the API router for the
-            # target agent type's
-            # effective limit. This ensures sub-agents get proper limits even
-            # when the
-            # caller has no specific endpoint configured.
-            if not propagated_max and self.pool.api_router:
-                try:
-                    propagated_max = self.pool.api_router.get_effective_max_tokens(
-                        agent_class.lower()
-                    )
-                except Exception:
-                    pass
-
-            # FIX
+            # FIX: Do NOT bake max_input_tokens into _generate_cfg_override here.
+            # Doing so freezes the value at spawn time and short-circuits
+            # _resolve_max_tokens() from consulting the API Router for live
+            # endpoint values on failover. Per-instance overrides should only
+            # contain max_input_tokens when explicitly set via UI (_apply_ui_config),
+            # which is already handled correctly there.
             with self.pool._state_lock:
-                # Propagate max_input_tokens from caller's config (context
-                # window limit) — store on instance, NOT template
-                if propagated_max is not None or llm_cfg:
+                # Propagate non-LLM config settings from caller to child instance.
+                if llm_cfg:
                     cfg = (target_template.llm.generate_cfg or {}).copy()
 
-                    if propagated_max is not None:
-                        cfg['max_input_tokens'] = propagated_max
+                    # Ensure max_input_tokens is NOT baked into the override,
+                    # so _resolve_max_tokens() can consult the API Router dynamically.
+                    cfg.pop('max_input_tokens', None)
 
                     # Merge UI-level settings from caller's config that should
                     # propagate to children.
                     # Keys in NON_LLM_KEYS are excluded so each agent uses its
-                    # own model config.
+                    # own model config (includes max_input_tokens, max_turns, etc.).
                     if llm_cfg:
                         for k, v in llm_cfg.items():
                             if k not in NON_LLM_KEYS and v is not None:
