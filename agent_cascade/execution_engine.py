@@ -82,6 +82,7 @@ from .operation_manager import set_current_instance_name, clear_current_instance
 MAX_TEXT_LENGTH_FOR_REGEX = 1_000_000    # Threshold to skip expensive regex ops
 MIN_OUTPUT_LENGTH = 200                  # Minimum output length for broken-json detection
 SLEEPING_LOOP_BACKOFF = 0.1              # Seconds to sleep when re-entering loop from SLEEPING state
+_COMPRESSION_WAIT_TIMEOUT = 1.0          # Seconds to wait per iteration when suspended by compression
 
 # Sampling & limit parameters to strip when custom sampling is disabled for an
 # endpoint.
@@ -1386,19 +1387,13 @@ class ExecutionEngine:
                         yield response
                         break
                     elif self._is_suspended_by_compression(instance.instance_name):
-                        # Compression is running — wait cooperatively, then continue the loop
+                        # Compression-halt is a suspension, not termination — wait cooperatively.
                         logger.debug("suspended by compression, waiting - %s", instance.instance_name)
-                        while self._is_suspended_by_compression(instance.instance_name):
-                            if self._is_terminal_stop(instance.instance_name):
-                                yield response
-                                break
-                            self.pool.wait_if_paused(timeout=1.0)
-                        else:
-                            # Resumed (compression done), continue the main loop with this turn's output
+                        if not self._wait_for_compression_to_clear(instance.instance_name):
                             yield response
-                            continue
-                        # Fell through via break from terminal stop inside while
-                        break
+                            break  # Terminal stop during wait
+                        yield response
+                        continue  # Resumed (compression done), continue the main loop with this turn's output
 
                 # Clean up last-turn tool disabling only if we set it this
                 # iteration
@@ -1833,6 +1828,22 @@ class ExecutionEngine:
         automatically when resume_all_instances() clears the flag.
         """
         return inst_name in self.pool._compression_halted
+
+    def _wait_for_compression_to_clear(self, inst_name: str) -> bool:
+        """Wait cooperatively while suspended by compression-halt.
+
+        Compression-halt is a suspension, not termination — agents resume
+        automatically once forced compression completes and clears the flag.
+
+        Returns:
+            True if compression cleared (agent should continue normally).
+            False if a terminal stop occurred during wait (agent must exit).
+        """
+        while self._is_suspended_by_compression(inst_name):
+            if self._is_terminal_stop(inst_name):
+                return False  # Terminal stop — cannot resume
+            self.pool.wait_if_paused(timeout=_COMPRESSION_WAIT_TIMEOUT)
+        return True  # Compression cleared — safe to continue
 
     def _check_stop_conditions(self, instance: AgentInstance) -> bool:
         """Check if we should skip the LLM call due to stop conditions.
@@ -3456,15 +3467,11 @@ class ExecutionEngine:
             if self._is_terminal_stop(inst_name):
                 break
             elif self._is_suspended_by_compression(inst_name):
-                # Compression halted us before tool execution — wait, then retry this tool
+                # Compression-halt is a suspension, not termination — wait, then retry this tool.
                 logger.debug("tool exec suspended by compression - %s", inst_name)
-                while self._is_suspended_by_compression(inst_name):
-                    if self._is_terminal_stop(inst_name):
-                        break
-                    self.pool.wait_if_paused(timeout=1.0)
-                else:
-                    continue  # Resumed, re-enter tool dispatch loop with current tool
-                break  # Terminal stop during wait
+                if not self._wait_for_compression_to_clear(inst_name):
+                    break  # Terminal stop during wait
+                continue  # Resumed, re-enter tool dispatch loop with current tool
 
             # ── Disabled/Inexistent Tool Auto-Deny
             # ────────────────────────────
@@ -4094,12 +4101,10 @@ class ExecutionEngine:
         if self._is_terminal_stop(inst_name):
             return False  # Terminal stop — break from main loop
         elif self._is_suspended_by_compression(inst_name):
-            # Compression halted during post-turn processing — wait, then re-process
+            # Compression-halt is a suspension, not termination — wait, then re-process.
             logger.debug("post-turn processing suspended by compression - %s", inst_name)
-            while self._is_suspended_by_compression(inst_name):
-                if self._is_terminal_stop(inst_name):
-                    return False
-                self.pool.wait_if_paused(timeout=1.0)
+            if not self._wait_for_compression_to_clear(inst_name):
+                return False  # Terminal stop during wait
             # Resumed — fall through to process the response normally
 
         # 1. Check for unexecuted tool calls
