@@ -1824,7 +1824,7 @@ def _apply_ui_config(
 
                 for _key in (
                     'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
-                    'shell_char_limit', 'code_char_limit'
+                    'shell_char_limit', 'code_char_limit', 'list_dir_char_limit'
                 ):
                     if _key in sanitized:
                         pool.llm_cfg[_key] = sanitized[_key]

@@ -985,6 +985,7 @@ function saveSettings(sendToServer) {
   if ($('#setting-loop-min-chars')) s['loop-min-chars'] = $('#setting-loop-min-chars').value;
   if ($('#setting-loop-max-chars')) s['loop-max-chars'] = $('#setting-loop-max-chars').value;
   if ($('#setting-loop-char-run')) s['loop-char-run-enabled'] = $('#setting-loop-char-run').checked;
+  if ($('#setting-loop-char-run-limit')) s['loop-char-run-limit'] = $('#setting-loop-char-run-limit').value;
   if ($('#setting-loop-max-chars-enabled')) s['loop-max-chars-enabled'] = $('#setting-loop-max-chars-enabled').checked;
   if ($('#setting-loop-two-phase')) s['loop-two-phase-enabled'] = $('#setting-loop-two-phase').checked;
   if ($('#setting-loop-suspicion-threshold')) s['loop-suspicion-threshold'] = $('#setting-loop-suspicion-threshold').value;
@@ -1121,6 +1122,7 @@ function loadSettings() {
     if (s['loop-min-chars'] !== undefined) $('#setting-loop-min-chars').value = s['loop-min-chars'];
     if (s['loop-max-chars'] !== undefined) $('#setting-loop-max-chars').value = s['loop-max-chars'];
     if (s['loop-char-run-enabled'] !== undefined) $('#setting-loop-char-run').checked = s['loop-char-run-enabled'];
+    if (s['loop-char-run-limit'] !== undefined) $('#setting-loop-char-run-limit').value = s['loop-char-run-limit'];
     if (s['loop-max-chars-enabled'] !== undefined) $('#setting-loop-max-chars-enabled').checked = s['loop-max-chars-enabled'];
     if (s['loop-two-phase-enabled'] !== undefined) $('#setting-loop-two-phase').checked = s['loop-two-phase-enabled'];
     if (s['loop-suspicion-threshold'] !== undefined) $('#setting-loop-suspicion-threshold').value = s['loop-suspicion-threshold'];
@@ -4683,6 +4685,7 @@ function getGenerateCfg() {
   if ($('#setting-loop-min-chars')) cfg.loop_min_chars = parseInt($('#setting-loop-min-chars').value) || 4000;
   if ($('#setting-loop-max-chars')) cfg.loop_max_chars = parseInt($('#setting-loop-max-chars').value) || 40960;
   if ($('#setting-loop-char-run')) cfg.loop_char_run_enabled = $('#setting-loop-char-run').checked;
+  if ($('#setting-loop-char-run-limit')) cfg.loop_char_run_limit = parseInt($('#setting-loop-char-run-limit').value) || 129;
   if ($('#setting-loop-max-chars-enabled')) cfg.loop_max_chars_enabled = $('#setting-loop-max-chars-enabled').checked;
   if ($('#setting-loop-two-phase')) cfg.loop_two_phase_enabled = $('#setting-loop-two-phase').checked;
   if ($('#setting-loop-suspicion-threshold')) cfg.loop_suspicion_threshold = parseInt($('#setting-loop-suspicion-threshold').value) || 7;

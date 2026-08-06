@@ -404,6 +404,13 @@ class AgentPool:
                 from agent_cascade.settings import COMPRESSION_DEFAULT_FRACTION
                 data['compression_fraction'] = round(COMPRESSION_DEFAULT_FRACTION * 100, 1)
 
+                # Persist llm_cfg tool char limits and grep_spillover to pool_settings.json
+                if hasattr(self, 'llm_cfg') and isinstance(self.llm_cfg, dict):
+                    for key in ('tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
+                                'shell_char_limit', 'code_char_limit', 'list_dir_char_limit'):
+                        if key in self.llm_cfg:
+                            data[key] = self.llm_cfg[key]
+
                 with open(self._pool_settings_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
@@ -486,6 +493,43 @@ class AgentPool:
                     logger.info(f"[PoolSettings] Loaded compression_fraction={compression_fraction_raw}%")
                 except (ValueError, TypeError):
                     logger.warning(f"[PoolSettings] Invalid compression_fraction value, ignoring.")
+
+            # Restore llm_cfg tool char limits and grep_spillover from disk
+            if hasattr(self, 'llm_cfg') and isinstance(self.llm_cfg, dict):
+                # tool_result_max_chars
+                val = data.pop('tool_result_max_chars', None)
+                if val is not None:
+                    try: self.llm_cfg['tool_result_max_chars'] = int(val)
+                    except (ValueError, TypeError): pass
+
+                # grep_char_limit
+                val = data.pop('grep_char_limit', None)
+                if val is not None:
+                    try: self.llm_cfg['grep_char_limit'] = int(val)
+                    except (ValueError, TypeError): pass
+
+                # grep_spillover
+                val = data.pop('grep_spillover', None)
+                if val is not None:
+                    self.llm_cfg['grep_spillover'] = bool(val)
+
+                # shell_char_limit
+                val = data.pop('shell_char_limit', None)
+                if val is not None:
+                    try: self.llm_cfg['shell_char_limit'] = int(val)
+                    except (ValueError, TypeError): pass
+
+                # code_char_limit
+                val = data.pop('code_char_limit', None)
+                if val is not None:
+                    try: self.llm_cfg['code_char_limit'] = int(val)
+                    except (ValueError, TypeError): pass
+
+                # list_dir_char_limit
+                val = data.pop('list_dir_char_limit', None)
+                if val is not None:
+                    try: self.llm_cfg['list_dir_char_limit'] = int(val)
+                    except (ValueError, TypeError): pass
 
         except Exception as e:
             logger.error(f"[PoolSettings] Failed to load settings from {self._pool_settings_path}: {e}. Using defaults.")
