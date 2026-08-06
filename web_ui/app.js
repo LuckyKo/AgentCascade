@@ -1276,6 +1276,11 @@ function loadSettings() {
       state.autoSecurity = s['auto-security'];
     }
 
+    // Async shell console window toggle
+    if (settingAsyncShellConsoleWindow && s['async-shell-console-window'] !== undefined) {
+      settingAsyncShellConsoleWindow.checked = s['async-shell-console-window'];
+    }
+
     if (afkToggle && afkToggle.checked && !state.generating) {
       checkAfkAutoReply();
     }
