@@ -33,12 +33,19 @@ def _check_status(pool, instance_name: str) -> tuple[bool, bool]:
     """Check if an agent was stopped/halted or terminated.
 
     Returns:
-        (was_stopped_or_halted, was_terminated) tuple.
+        (was_stopped_by_user, was_terminated) tuple.
+
+    Note: Compression-halt is NOT treated as user stop — it's a transient
+    suspension that clears automatically via resume_all_instances(). Only
+    pool.stopped (global user stop) and manual halt count as 'stopped'.
     """
     stop_flag = pool.stopped
-    halted_flag = pool.is_instance_halted(instance_name)
+    # Only count MANUAL halt (in _halted_instances but NOT in _compression_halted)
+    # as "stopped". Compression-halt is transient.
+    was_manual_halt = (instance_name in pool._halted_instances and
+                       instance_name not in pool._compression_halted)
     was_terminated = instance_name in pool.terminated_instances
-    return (stop_flag or halted_flag), was_terminated
+    return (stop_flag or was_manual_halt), was_terminated
 
 
 def _determine_force_fresh(agent_class: str) -> bool:
@@ -98,7 +105,7 @@ def run_child_core(
     was_stopped, was_terminated = _check_status(pool, instance_name)
 
     # Extract and format result
-    result = extract_instance_output(conv, instance_name, was_terminated=was_terminated)
+    result = extract_instance_output(conv, instance_name, was_terminated=was_terminated, pool=pool)
     return _format_result(
         instance_name=instance_name,
         result=result,

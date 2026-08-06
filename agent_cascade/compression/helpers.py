@@ -311,7 +311,12 @@ def rebuild_working_set(
         pass
 
 
-def extract_instance_output(messages: list[Any], instance_name: str, was_terminated: bool = False) -> str:
+def extract_instance_output(
+    messages: list[Any],
+    instance_name: str,
+    was_terminated: bool = False,
+    pool=None  # Optional: AgentPool to resolve actual log path
+) -> str:
     """
     Extract text output from a sub-agent's conversation messages.
 
@@ -322,14 +327,28 @@ def extract_instance_output(messages: list[Any], instance_name: str, was_termina
         messages: List of Message objects or dicts (mixed types).
         instance_name: The agent instance name (used in fallback warnings).
         was_terminated: If True, the agent was terminated by user — return a termination message instead of generic warning.
+        pool: Optional AgentPool for resolving actual log file paths.
 
     Returns:
         The extracted text, or a warning message if no output was found.
     """
 
+    # Helper to get the best available log path hint
+    def _get_log_path_hint():
+        if pool is not None:
+            try:
+                logger_obj = pool.get_logger(instance_name)
+                if hasattr(logger_obj, 'log_path') and logger_obj.log_path:
+                    return str(logger_obj.log_path)
+            except Exception:
+                pass
+        # Fallback: give a useful hint about where to look
+        return f"logs/ (search for '{instance_name}' in AgentWorkspace/logs/)"
+
     if not messages:
         if was_terminated:
-            return f"Sub-agent {instance_name} was terminated by user."
+            log_hint = _get_log_path_hint()
+            return f"Sub-agent {instance_name} was terminated by user. Check log for details: {log_hint}"
         return f"Sub-agent {instance_name} finished but provided no text output."
 
     # Get the last message in the conversation
@@ -343,16 +362,17 @@ def extract_instance_output(messages: list[Any], instance_name: str, was_termina
     # Guard: if the last message is a tool result (function role), the agent
     # likely terminated incorrectly without producing a final text response.
     if msg_role == FUNCTION:
+        log_hint = _get_log_path_hint()
         return (f"WARNING: Sub-agent {instance_name} terminated with a tool result "
-                f"(no final text output). Check log for details: "
-                f"{instance_name}.log")
+                f"(no final text output). Check log for details: {log_hint}")
 
     result_str = extract_text_from_message(last_msg, add_upload_info=False).strip()
 
     if not result_str:
         if was_terminated:
+            log_hint = _get_log_path_hint()
             return (f"Sub-agent {instance_name} was terminated by user. "
-                    f"Check log for details: {instance_name}.log")
+                    f"Check log for details: {log_hint}")
         return f"WARNING: Sub-agent {instance_name} produced no text output in its final message (role={msg_role})."
 
     return result_str

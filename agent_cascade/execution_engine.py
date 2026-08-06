@@ -1123,16 +1123,18 @@ class ExecutionEngine:
         if not skip_slot_acquire:
             # Check stopped flag before acquiring slot to prevent starting new
             # work
-            if self._is_stopped(instance.instance_name):
-                return  # Exit early if stopped
+            if self._is_terminal_stop(instance.instance_name):
+                return  # Terminal stop — don't start work
+            # Compression-halt at startup: just proceed (compression is transient)
             instance._slot_release = None  # Initialize for proper cleanup in finally block
             self._acquire_slot_with_logging(instance, "initial")
 
             # Exit if stopped after slot acquire — prevents stale slot reuse
             # post-stop
-            if self._is_stopped(instance.instance_name):
+            if self._is_terminal_stop(instance.instance_name):
                 self._release_slot(instance, instance.instance_name)
-                return  # Exit generator immediately instead of continuing with stale state
+                return  # Terminal stop — release slot and exit
+            # Compression-halt after slot acquire: keep the slot, proceed to run loop
         else:
             # SKIP SLOT ACQUIRE — nested agent (Security/Compressor) inherits
             # parent's slot.
@@ -1378,10 +1380,25 @@ class ExecutionEngine:
 
                 # Check generation change (old run superseded by newer one)
                 # alongside stop
-                if not terminated_during_stream and self._is_stopped(instance.instance_name):
-                    logger.debug("halted/stopped/superseded - %s", instance.instance_name)
-                    yield response
-                    break  # ── Fix TODO #41: Break immediately instead of continuing loop ──
+                if not terminated_during_stream:
+                    if self._is_terminal_stop(instance.instance_name):
+                        logger.debug("terminal stop - %s", instance.instance_name)
+                        yield response
+                        break
+                    elif self._is_suspended_by_compression(instance.instance_name):
+                        # Compression is running — wait cooperatively, then continue the loop
+                        logger.debug("suspended by compression, waiting - %s", instance.instance_name)
+                        while self._is_suspended_by_compression(instance.instance_name):
+                            if self._is_terminal_stop(instance.instance_name):
+                                yield response
+                                break
+                            self.pool.wait_if_paused(timeout=1.0)
+                        else:
+                            # Resumed (compression done), continue the main loop with this turn's output
+                            yield response
+                            continue
+                        # Fell through via break from terminal stop inside while
+                        break
 
                 # Clean up last-turn tool disabling only if we set it this
                 # iteration
@@ -1748,7 +1765,7 @@ class ExecutionEngine:
                             m0['content'] = m0_content
                         else:
                             m0.content = m0_content
-                        logger.info(f"[CACHE_REBUILD] System prompt content CHANGED for {inst_name} ({', '.join(diff_summary)})")
+                        logger.debug(f"[CACHE_REBUILD] System prompt content CHANGED for {inst_name} ({', '.join(diff_summary)})")
 
                         # Persist updated system message to file so it survives
                         # restarts.
@@ -1794,8 +1811,34 @@ class ExecutionEngine:
         # llm_messages]}")
         return conv, llm_messages, response
 
+    def _is_terminal_stop(self, inst_name: str) -> bool:
+        """Check if this instance has a TERMINAL stop condition (cannot resume).
+
+        Returns True only for conditions that mean execution must end permanently:
+        - Global pool stop (user clicked Stop)
+        - Generation mismatch (superseded by newer run)
+        - Instance terminated
+
+        Does NOT return True for compression-halt or manual halt — those are suspendable.
+        """
+        return (self.pool.stopped or
+                self._my_generation != self.pool._run_generation or
+                self.pool.is_instance_terminated(inst_name))
+
+    def _is_suspended_by_compression(self, inst_name: str) -> bool:
+        """Check if this instance is suspended because of forced compression.
+
+        Returns True only when the instance was halted by forced compression's
+        halt_all_instances(). These agents should wait cooperatively and resume
+        automatically when resume_all_instances() clears the flag.
+        """
+        return inst_name in self.pool._compression_halted
+
     def _check_stop_conditions(self, instance: AgentInstance) -> bool:
-        """Check for pool stopped, instance halted, or terminated states.
+        """Check if we should skip the LLM call due to stop conditions.
+
+        Only returns True for terminal stops — compression-halt agents should
+        wait and retry rather than skipping the LLM call permanently.
 
         Extracted from _pre_llm_checks() - Phase 3.8
 
@@ -1806,14 +1849,17 @@ class ExecutionEngine:
             True if any stop condition met (skip LLM call), False otherwise.
         """
         inst_name = instance.instance_name
-        return self._is_stopped(inst_name)
+        return self._is_terminal_stop(inst_name)
 
     def _is_stopped(self, inst_name: str) -> bool:
-        """Check if pool is stopped, run superseded, or instance terminated.
+        """Check if execution should stop for this instance.
 
-        Centralized stop condition check used throughout execution_engine.py to avoid
-        duplicated 4-condition checks across 8+ locations. Returns True immediately
-        on any stop signal for fast-path efficiency.
+        Legacy name kept for backward compatibility at call sites that only need
+        a boolean 'should I stop now'. Returns True for terminal stops OR any halt.
+
+        IMPORTANT: Callers that break/return on this check must distinguish between
+        terminal stops (break permanently) and compression-halt (wait then resume).
+        Use _is_terminal_stop() and _is_suspended_by_compression() directly at those sites.
 
         Note: Does NOT include pause — pause is handled separately via cooperative
         wait loops (e.g. `while self.pool.is_paused(): time.sleep(0.1)`).
@@ -1825,10 +1871,8 @@ class ExecutionEngine:
         Returns:
             True if any stop condition met, False otherwise.
         """
-        return (self.pool.stopped or
-                self._my_generation != self.pool._run_generation or
-                inst_name in self.pool._halted_instances or
-                self.pool.is_instance_terminated(inst_name))
+        return (self._is_terminal_stop(inst_name) or
+                inst_name in self.pool._halted_instances)
 
     def _check_stream_termination(
         self, stream_tick: int, inst_name: str, response: List[Message],
@@ -1852,7 +1896,7 @@ class ExecutionEngine:
             Returns (response + turn_output + partial_msgs, False) if stop detected.
             Returns None if no stop detected (caller should continue normally).
         """
-        if stream_tick % 20 == 0 and self._is_stopped(inst_name):
+        if stream_tick % 20 == 0 and self._is_terminal_stop(inst_name):
             logger.debug(
                 "[TERMINATE] Stopped mid-stream after %d ticks - %s",
                 stream_tick, inst_name
@@ -2789,7 +2833,7 @@ class ExecutionEngine:
                     # before the LLM call, but stop
                     # can also be triggered DURING the streaming call itself
                     # (while chunks are arriving).
-                    if self._is_stopped(inst_name):
+                    if self._is_terminal_stop(inst_name):
                         # Telemetry: record LLM call end for mid-stream stop (non-blocking)
                         self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                         with instance._compression_lock:
@@ -2806,6 +2850,7 @@ class ExecutionEngine:
                             pass  # Already closed/exhausted
                         yield None  # Signal UI that stop was detected mid-stream
                         break
+                    # Compression-halt during streaming: let the stream complete, handle at Site 3
 
                     # Update _streaming_responses every ~100ms with deep copy
                     # of partial content
@@ -2817,7 +2862,7 @@ class ExecutionEngine:
 
                     # Re-check stop/halt after UI update (defense in depth —
                     # catches stop during slow streaming)
-                    if self._is_stopped(inst_name):
+                    if self._is_terminal_stop(inst_name):
                         # Telemetry: record LLM call end for mid-stream stop (non-blocking)
                         self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)
                         with instance._compression_lock:
@@ -3316,7 +3361,7 @@ class ExecutionEngine:
             False otherwise.
         """
         is_incomplete = _is_incomplete_state(turn_output)
-        if (is_truncated or is_incomplete) and not self._is_stopped(inst_name) and self.pool.settings.auto_continue:
+        if (is_truncated or is_incomplete) and not self._is_terminal_stop(inst_name) and self.pool.settings.auto_continue:
             instance._auto_continue_count = getattr(instance, '_auto_continue_count', 0) + 1
             if instance._auto_continue_count >= MAX_AUTO_CONTINUE_ATTEMPTS:
                 instance._auto_continue_count = 0
@@ -3402,14 +3447,24 @@ class ExecutionEngine:
 
             # Cooperatively wait if paused — don't skip tool execution, just wait
             while self.pool.is_paused():
-                if self._is_stopped(inst_name):
-                    break
+                if self._is_terminal_stop(inst_name):
+                    break  # Terminal stop — exit pause-wait, will break at next _is_stopped check
                 self.pool.wait_if_paused(timeout=1.0)
 
             # Stop/halt check BEFORE tool execution (check before setting
             # used_any_tool)
-            if self._is_stopped(inst_name):
+            if self._is_terminal_stop(inst_name):
                 break
+            elif self._is_suspended_by_compression(inst_name):
+                # Compression halted us before tool execution — wait, then retry this tool
+                logger.debug("tool exec suspended by compression - %s", inst_name)
+                while self._is_suspended_by_compression(inst_name):
+                    if self._is_terminal_stop(inst_name):
+                        break
+                    self.pool.wait_if_paused(timeout=1.0)
+                else:
+                    continue  # Resumed, re-enter tool dispatch loop with current tool
+                break  # Terminal stop during wait
 
             # ── Disabled/Inexistent Tool Auto-Deny
             # ────────────────────────────
@@ -4036,8 +4091,16 @@ class ExecutionEngine:
 
         # Check stop immediately after LLM response — prevents unnecessary
         # post-turn processing
-        if self._is_stopped(inst_name):
-            return False  # Stop detected — break from loop
+        if self._is_terminal_stop(inst_name):
+            return False  # Terminal stop — break from main loop
+        elif self._is_suspended_by_compression(inst_name):
+            # Compression halted during post-turn processing — wait, then re-process
+            logger.debug("post-turn processing suspended by compression - %s", inst_name)
+            while self._is_suspended_by_compression(inst_name):
+                if self._is_terminal_stop(inst_name):
+                    return False
+                self.pool.wait_if_paused(timeout=1.0)
+            # Resumed — fall through to process the response normally
 
         # 1. Check for unexecuted tool calls
         if self._check_for_tool_calls_in_output(instance, response):
@@ -4181,8 +4244,9 @@ class ExecutionEngine:
 
         # Check stop immediately — a SLEEPING agent should not wait up to 300s
         # for wakeup
-        if self._is_stopped(inst_name):
+        if self._is_terminal_stop(inst_name):
             return SleepAction.BREAK_LOOP, None
+        # Compression-halt while sleeping: the sleep loop already polls; just continue waiting
 
         # Drain message queue — all wakeups now come through here (async results + user messages)
         messages_list = self.pool.drain_queue(inst_name)
@@ -4207,8 +4271,9 @@ class ExecutionEngine:
             # Re-acquire concurrency slot after waking from SLEEPING
             if not skip_slot_acquire:
                 self._acquire_slot_with_logging(instance, "after_message_wakeup")
-                if self._is_stopped(inst_name):
+                if self._is_terminal_stop(inst_name):
                     return SleepAction.BREAK_LOOP, None
+                # Compression-halt after wakeup: proceed to main loop (Site 3 will wait if needed)
 
             return SleepAction.CONTINUE_LOOP, None
 
@@ -4273,11 +4338,12 @@ class ExecutionEngine:
                     self._acquire_slot_with_logging(instance, "after_stable_drain")
 
                     # Exit if stopped after re-acquiring slot in sleep loop
-                    if self._is_stopped(inst_name):
+                    if self._is_terminal_stop(inst_name):
                         logger.debug(
-                            f"[SLOT_STOP_CHECK] Stale slot detected after stable drain for {inst_name}, exiting"
+                            f"[SLOT_STOP_CHECK] Terminal stop after stable drain for {inst_name}, exiting"
                         )
                         return SleepAction.BREAK_LOOP, None  # Stop detected — slot released in finally
+                    # Compression-halt: proceed to main loop (Site 3 will wait if needed)
 
                 # Loop back; now in RUNNING state → LLM processes injected results
                 return SleepAction.CONTINUE_LOOP, []  # Bridge signal for UI update before LLM processing
@@ -4572,7 +4638,9 @@ class ExecutionEngine:
             total_tool_calls = 0
 
             for resp in self.run(inst):
-                if self._is_stopped(instance_name):
+                # Inner run() loop handles compression-halt via cooperative wait at Site 3.
+                # Only break here on terminal stops (which cause run() to yield final state and end).
+                if self._is_terminal_stop(instance_name):
                     break
 
                 # FIX BOOL_LEAK: Unpack (messages, is_streaming) tuple from
@@ -4632,7 +4700,7 @@ class ExecutionEngine:
                 total_tool_calls=total_tool_calls,
                 append_fn=lambda msg: self._append_and_log(inst, self._make_user_message(msg)),
                 rollback_fn=lambda pop_count: self.pool._rollback_instance(instance_name, pop_count=pop_count),
-                is_stopped=lambda: self._is_stopped(instance_name),
+                is_stopped=lambda: self._is_terminal_stop(instance_name),
                 engine_run_generator=lambda: self.run(inst),
             )
 
