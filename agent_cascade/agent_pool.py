@@ -252,6 +252,8 @@ class AgentPool:
                 default_llm_cfg=llm_cfg,
                 config_dir=config_dir
             )
+            # Back-reference so api_router can check terminated_instances during retries
+            self.api_router._pool = self
         self.telemetry = telemetry
         self.operation_manager = operation_manager
 
