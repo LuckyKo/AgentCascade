@@ -92,6 +92,33 @@ class ToolDispatcher:
             current = parent_inst
         return current.instance_name
 
+    # ── Slot Key Computation ─────────────────────────────────────────────────
+
+    def _compute_slot_key(self, agent_class: str) -> str:
+        """Compute the slot key for an agent class.
+        
+        Extracted from inline computations in handle_call_agent and 
+        _find_ancestor_with_slot to avoid duplication. Same logic as 
+        EndpointScheduler.acquire().
+        
+        Args:
+            agent_class: The agent class name
+            
+        Returns:
+            Slot key string: '_shared_sequential_slot_' for sequential agents,
+            otherwise the api_base/model_server value.
+        """
+        router = self.pool.api_router
+        if not router:
+            return 'unknown'
+        
+        concurrency = router.get_effective_concurrency(agent_class)
+        llm_cfg = router.get_llm_config(agent_class)
+        api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
+        
+        is_sequential = (concurrency == 0)
+        return '_shared_sequential_slot_' if is_sequential else api_base
+
     # ── Main Tool Execution Entry Point ──────────────────────────────────────
     
     def execute_tool(
@@ -294,14 +321,7 @@ class ToolDispatcher:
                 
                 # Case 4/5: Caller holds a slot. Check for collision.
                 if caller_holds_slot and child_slot_info and child_slot_info['needs_slot']:
-                    # Get caller's slot key (computed inline—see Change 3)
-                    caller_concurrency = router.get_effective_concurrency(caller_slot_holder.agent_class)
-                    caller_llm_cfg = router.get_llm_config(caller_slot_holder.agent_class)
-                    caller_api_base = caller_llm_cfg.get('api_base') or caller_llm_cfg.get('model_server', 'unknown')
-                    
-                    # Compute caller's slot key using same logic as EndpointScheduler.acquire()
-                    caller_is_sequential = (caller_concurrency == 0)
-                    caller_slot_key = '_shared_sequential_slot_' if caller_is_sequential else caller_api_base
+                    caller_slot_key = self._compute_slot_key(caller_slot_holder.agent_class)
                     
                     child_slot_key = child_slot_info['slot_key']
                     
@@ -339,6 +359,8 @@ class ToolDispatcher:
         Extracted from ExecutionEngine._handle_dismiss_agent() - Phase 4.3
         
         Removes another agent from the pool. Prevents dismissing self or supervisor.
+        You can only dismiss your own children, or if you are a root orchestrator (no parent), 
+        you can dismiss any agent.
         Supports both single-instance dismissal and bulk dismissal of all idle agents.
         
         Args:
@@ -478,21 +500,14 @@ class ToolDispatcher:
                 try:
                     with parent._state_lock:
                         if parent._slot_release is not None:
-                            # Compute ancestor's slot key (same logic as inline computation in _handle_call_agent)
-                            router = self.pool.api_router
-                            if router:
-                                anc_concurrency = router.get_effective_concurrency(parent.agent_class)
-                                anc_llm_cfg = router.get_llm_config(parent.agent_class)
-                                anc_api_base = anc_llm_cfg.get('api_base') or anc_llm_cfg.get('model_server', 'unknown')
-                                anc_is_sequential = (anc_concurrency == 0)
-                                anc_slot_key = '_shared_sequential_slot_' if anc_is_sequential else anc_api_base
+                            anc_slot_key = self._compute_slot_key(parent.agent_class)
 
-                                if anc_slot_key == target_slot_key:
-                                    logger.debug(
-                                        f"[DEADLOCK_PREVENTION] Ancestor '{parent_name}' holds slot pool "
-                                        f"'{anc_slot_key}' conflicting with child's need"
-                                    )
-                                    return parent_name
+                            if anc_slot_key == target_slot_key:
+                                logger.debug(
+                                    f"[DEADLOCK_PREVENTION] Ancestor '{parent_name}' holds slot pool "
+                                    f"'{anc_slot_key}' conflicting with child's need"
+                                )
+                                return parent_name
                 except Exception as e:
                     logger.debug(f"Ancestor slot check failed for {parent_name} (non-critical): {e}")
 
