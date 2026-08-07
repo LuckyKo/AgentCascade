@@ -2,6 +2,9 @@
 
 Talks to autoloader state endpoints for KV cache slot state management.
 All operations are best-effort — failures are logged but never block execution.
+
+Per-instance state limits are obsolete: we use stable labels (instance_name) and rely on
+autoloader's per-model max-5 LRU eviction to manage disk usage.
 """
 
 import httpx
@@ -10,8 +13,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Per-instance state limits are obsolete: we use stable labels (instance_name) and rely on
-# autoloader's per-model max-5 LRU eviction to manage disk usage.
+# Track which instances have confirmed no legacy files — skip their cleanup checks.
+_legacy_cleanup_done_instances: set[str] = set()
 
 
 def _normalize_api_base(api_base: str) -> str:
@@ -135,7 +138,7 @@ def save_state(api_base: str, model: str, instance_name: str) -> Optional[str]:
         # Defensive check: reject obviously dangerous instance_names (belt-and-suspenders).
         # Autoloader also sanitizes labels via _sanitize_label().
         if "../" in instance_name or "..\\" in instance_name:
-            logger.warning("Rejected state save for instance with unsafe name: %s", instance_name)
+            logger.debug("Rejected state save for instance with unsafe name: %s", instance_name)
             return None
 
         base = _normalize_api_base(api_base)
@@ -179,7 +182,18 @@ def is_autoloader_endpoint(api_base: str) -> bool:
 
 
 def _cleanup_old_states(api_base_no_v1: str, model: str, instance_name: str):
-    """Clean up legacy timestamped state files for this instance (pre-fix artifacts)."""
+    """Clean up legacy timestamped state files for this instance (pre-fix artifacts).
+
+    Per-instance tracking: once no legacy files are found for an instance, it's added to a
+    set and all future cleanup checks for that instance return immediately — avoids one HTTP
+    GET per save forever. If files were deleted, we keep checking in case more appear from
+    other models on subsequent saves.
+    """
+    global _legacy_cleanup_done_instances
+
+    if instance_name in _legacy_cleanup_done_instances:
+        return
+
     try:
         url = f"{api_base_no_v1}/v1/models/{model}/state"
         resp = httpx.get(url, timeout=10)
@@ -197,16 +211,21 @@ def _cleanup_old_states(api_base_no_v1: str, model: str, instance_name: str):
         for label in legacy_states:
             _delete_state(api_base_no_v1, model, label)
 
+        # No legacy files found for this instance — mark it done to avoid perpetual HTTP calls.
+        if not legacy_states:
+            _legacy_cleanup_done_instances.add(instance_name)
+
     except Exception as e:
         logger.debug("Legacy state cleanup failed for %s: %s", instance_name, e)
 
 
 def _delete_state(api_base_no_v1: str, model: str, label: str):
-    """Delete a saved state by label. Uses DELETE endpoint if available."""
+    """Delete a saved state by label via autoloader DELETE endpoint.
+
+    Silently handles missing files and transient errors — cleanup is best-effort.
+    """
     try:
         url = f"{api_base_no_v1}/v1/models/{model}/state/{label}"
-        resp = httpx.delete(url, timeout=10)
-        # If no DELETE endpoint exists yet (500/405), fall through silently.
-        # Future: add DELETE /v1/models/{model_id}/state/{label} to autoloader.
+        httpx.delete(url, timeout=10)
     except Exception as e:
         logger.debug("State delete failed for label %s: %s", label, e)
