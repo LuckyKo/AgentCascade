@@ -137,6 +137,13 @@ class SecurityAdvisorHandler:
         ap = ap_list[0]  # Check the first matching approval
         rid = ap['request_id']
 
+        # Resolve the true caller from the approval (the agent that requested the tool).
+        # Fall back to session name if missing or not in pool. This fixes deadlock where
+        # Security always inherited slot 0 instead of the caller's endpoint.
+        caller_agent = ap.get('agent_name') or instance_name
+        if self.agent_pool and self.agent_pool.get_instance(caller_agent) is None:
+            caller_agent = instance_name
+
         # Duplicate check guard — prevent overlapping checks for the same request
         active_checks, checks_lock = _get_active_checks_state(self.app_state)
         with checks_lock:
@@ -160,7 +167,7 @@ class SecurityAdvisorHandler:
         # Spawn background thread to run the full check lifecycle
         threading.Thread(
             target=self._run_check_worker,
-            args=(ap, sec_inst, rid, auto_apply, instance_name,
+            args=(ap, sec_inst, rid, auto_apply, instance_name, caller_agent,
                   SECURITY_ADVISOR_PROMPT,
                   timeout_seconds,
                   warning_seconds),
@@ -170,7 +177,7 @@ class SecurityAdvisorHandler:
     # ── Worker function (runs in the spawned thread) ───────────────────────
     def _run_check_worker(
         self, ap: dict, sec_inst, rid: str, auto_apply: bool,
-        instance_name: str, prompt_template: str,
+        instance_name: str, caller_agent: str, prompt_template: str,
         timeout_seconds: float, warning_seconds: float,
     ) -> None:
         """Background thread worker — executes the full security check lifecycle."""
@@ -180,7 +187,7 @@ class SecurityAdvisorHandler:
 
         try:
             self._execute_check(
-                ap, sec_inst, rid, auto_apply, instance_name,
+                ap, sec_inst, rid, auto_apply, instance_name, caller_agent,
                 prompt_template, timeout_seconds, warning_seconds,
             )
         except Exception as e:
@@ -206,6 +213,7 @@ class SecurityAdvisorHandler:
         rid: str,
         auto_apply: bool,
         instance_name: str,
+        caller_agent: str,
         prompt_template: str,
         timeout_seconds: float,
         warning_seconds: float,
@@ -261,7 +269,7 @@ class SecurityAdvisorHandler:
                     agent_class='Security',
                     instance_name=sec_state_key,
                     task=prompt,
-                    caller=self.session.get('session_name', 'Orchestrator'),
+                    caller=caller_agent,
                 )
 
                 # Configure with UI settings (defense-in-depth tool filtering)
@@ -308,7 +316,7 @@ class SecurityAdvisorHandler:
                 sec_warning_timer.start()
 
             # ── Slot bypass for Security advisor ───────────────────────────
-            caller_name_sec = self.session.get('session_name', 'Orchestrator')
+            caller_name_sec = caller_agent
             caller_inst_sec = self.agent_pool.get_instance(caller_name_sec) if caller_name_sec else None
 
             sec_instance._skip_slot_acquire = True
