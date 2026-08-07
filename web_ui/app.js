@@ -1142,7 +1142,7 @@ function loadSettings() {
       $('#setting-grep-char-limit').value = s['grep_char_limit'] ?? s['grep-char-limit'];
     }
     if (s['grep_spillover'] !== undefined || s['grep-spillover'] !== undefined) {
-      $('#setting-grep-spillover').checked = !!s['grep_spillover'] ?? !!s['grep-spillover'];
+      $('#setting-grep-spillover').checked = s['grep_spillover'] ?? s['grep-spillover'];
     }
 
     // Shell, code, and list_dir char limits: prefer underscore keys from generate_cfg, fall back to legacy hyphenated keys
