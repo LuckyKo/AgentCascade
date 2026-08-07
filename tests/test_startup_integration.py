@@ -10,9 +10,7 @@ This test:
 Uses a real HTTP server (not TestClient) to avoid WebSocket deadlock issues in test_api_endpoints.py.
 """
 
-import base64
 import json
-import os
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -20,8 +18,9 @@ from typing import Any
 
 import pytest
 import requests
-from cryptography.hazmat.primitives.asymmetric import x25519
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+# Shared E2E encryption helpers (extracted to avoid duplication)
+from tests.conftest_e2e import derive_shared_secret, encrypt_payload, generate_client_keypair
 
 # ── Mock LLM endpoint ────────────────────────────────────────────────────────
 
@@ -84,14 +83,29 @@ def mock_llm_server():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
+    # Verify mock server is actually accepting connections
+    for _ in range(10):
+        try:
+            import urllib.request
+            with urllib.request.urlopen(f"{base_url}/models", timeout=1):
+                break
+        except (urllib.error.URLError, OSError):
+            time.sleep(0.1)
+    else:
+        server.shutdown()
+        pytest.fail("Mock LLM server failed to start")
+
     yield base_url
 
     server.shutdown()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def ac_server(mock_llm_server):
-    """Boot the full AgentCascade app via uvicorn on a real port. Yields base URL."""
+    """Boot the full AgentCascade app via uvicorn on a real port. Yields base URL.
+
+    Uses function scope for test isolation — each test gets its own server instance.
+    """
     import sys
     from pathlib import Path
 
@@ -139,44 +153,31 @@ def ac_server(mock_llm_server):
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
 
-    # Wait for server to be ready
+    # Wait for server to be ready (up to 15 seconds with increasing patience)
     base_url = f"http://127.0.0.1:{ac_port}"
-    for _ in range(30):
+    last_error = None
+    for attempt in range(75):
         try:
             resp = requests.get(f"{base_url}/api/keys", timeout=1)
             if resp.status_code == 200:
                 break
-        except (requests.ConnectionError, requests.Timeout):
-            pass
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_error = str(e)
         time.sleep(0.2)
     else:
-        pytest.fail("AC server did not start within timeout")
+        server.should_exit = True
+        thread.join(timeout=3)
+        pytest.fail(
+            f"AC server did not start within timeout. "
+            f"Last error: {last_error}. Port: {ac_port}"
+        )
 
-    yield base_url
-
-    server.should_exit = True
-
-
-def _generate_client_keypair():
-    private_key = x25519.X25519PrivateKey.generate()
-    public_key_b64 = base64.b64encode(
-        private_key.public_key().public_bytes_raw()
-    ).decode("utf-8")
-    return private_key, public_key_b64
-
-
-def _derive_shared_secret(client_private_key: x25519.X25519PrivateKey, server_public_b64: str) -> bytes:
-    server_public_bytes = base64.b64decode(server_public_b64)
-    server_public_key = x25519.X25519PublicKey.from_public_bytes(server_public_bytes)
-    return client_private_key.exchange(server_public_key)
-
-
-def _encrypt_payload(shared_secret: bytes, payload: dict) -> tuple[str, str]:
-    aesgcm = AESGCM(shared_secret)
-    nonce = os.urandom(12)  # 96-bit nonce for AES-GCM
-    plaintext = json.dumps(payload).encode("utf-8")
-    ciphertext = aesgcm.encrypt(nonce, plaintext, None)
-    return base64.b64encode(ciphertext).decode("utf-8"), base64.b64encode(nonce).decode("utf-8")
+    try:
+        yield base_url
+    finally:
+        # Ensure clean shutdown regardless of test outcome
+        server.should_exit = True
+        thread.join(timeout=5)
 
 
 class TestStartupIntegration:
@@ -202,8 +203,8 @@ class TestStartupIntegration:
         server_public_b64 = resp.json()["public_key"]
 
         # Step 2: Handshake to get session token
-        client_private, client_public_b64 = _generate_client_keypair()
-        shared_secret = _derive_shared_secret(client_private, server_public_b64)
+        client_private, client_public_b64 = generate_client_keypair()
+        shared_secret = derive_shared_secret(client_private, server_public_b64)
 
         resp = requests.post(
             f"{base_url}/api/handshake",
@@ -215,7 +216,7 @@ class TestStartupIntegration:
 
         # Step 3: Send an encrypted message
         payload = {"target": "Maine", "text": "Test startup message"}
-        encrypted_b64, nonce_b64 = _encrypt_payload(shared_secret, payload)
+        encrypted_b64, nonce_b64 = encrypt_payload(shared_secret, payload)
 
         resp = requests.post(
             f"{base_url}/api/message",
