@@ -270,8 +270,9 @@ class ToolDispatcher:
         caller_slot_holder = self.pool.get_instance(caller_name)
         router = self.pool.api_router
 
-        # Get child's slot info
-        child_slot_info = router.get_agent_slot_info(agent_class) if router else None
+        # Get child's slot info with caller context for endpoint inheritance
+        caller_type = caller_slot_holder.agent_class if caller_slot_holder else None
+        child_slot_info = router.get_agent_slot_info(agent_class, caller_agent_type=caller_type) if router else None
 
         # Case 1: Child needs no slot (conc=-1) → always ASYNC, caller_holds_slot forced False
         if not child_slot_info or not child_slot_info.get('needs_slot'):

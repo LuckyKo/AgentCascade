@@ -2457,17 +2457,28 @@ class AgentPool:
             return None
 
         router = self.api_router
+        
+        # Resolve caller context from instance's parent for endpoint inheritance
+        # Mirrors execution_engine.py pattern (line 3206-3214): check is_terminated
+        instance = self.get_instance(instance_name)
+        caller_agent_type = None
+        if instance and getattr(instance, 'parent_instance', None):
+            parent = self.get_instance(instance.parent_instance)
+            if parent and hasattr(parent, 'agent_class') and not getattr(parent, 'is_terminated', False):
+                caller_agent_type = parent.agent_class
+        
         try:
             # Get the effective concurrency for this agent class (includes default fallback)
-            concurrency_limit = router.get_effective_concurrency(agent_class)
+            concurrency_limit = router.get_effective_concurrency(agent_class, caller_agent_type=caller_agent_type)
 
             # Resolve the actual api_base that will be used
-            llm_cfg = router.get_llm_config(agent_class)
+            llm_cfg = router.get_llm_config(agent_class, caller_agent_type=caller_agent_type)
             api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
 
             logger.debug(
                 f"[CALL_AGENT_DEBUG] _acquire_slot — agent_class={agent_class}, "
                 f"instance_name={instance_name}, api_base={api_base}, concurrency_limit={concurrency_limit}"
+                + (f", inherited_from={caller_agent_type}" if caller_agent_type else "")
             )
 
             # Acquire a slot on the endpoint scheduler (blocks if at capacity)

@@ -770,7 +770,7 @@ class APIRouter:
             normalized = self._normalize_agent_type(agent_type)
             return list(self.agent_priorities.get(normalized, []))
 
-    def get_effective_concurrency(self, agent_type: str) -> int:
+    def get_effective_concurrency(self, agent_type: str, caller_agent_type: Optional[str] = None) -> int:
         """
         Returns the concurrency limit of the actual endpoint that will be used 
         for the given agent type, including the default fallback.
@@ -783,17 +783,41 @@ class APIRouter:
         resolves the real endpoint — agents with no custom endpoints (like
         Security Advisor) inherit the caller's default and must respect its
         concurrency, not blindly return -1.
+        
+        Args:
+            agent_type: The agent type to resolve concurrency for
+            caller_agent_type: Optional caller agent type for Tier 2 inheritance when
+                the agent has no enabled endpoints (mirrors get_endpoint_chain behavior)
         """
         defaults = self.default_llm_cfg or {}
         with self._lock:
             # Normalize agent_type for case-insensitive lookup (Fix Finding 1)
             normalized_agent_type = self._normalize_agent_type(agent_type)
-            # First check agent-specific priorities
+            
+            # Tier 1: Agent-specific priorities — check for enabled endpoints
+            has_enabled_endpoints = False
             for eid in self.agent_priorities.get(normalized_agent_type, []):
                 ep = self.endpoints.get(eid)
                 if ep and ep.enabled:
+                    has_enabled_endpoints = True
                     return ep.concurrency_limit
-            # Fall back to default endpoint — find it by api_base
+            
+            # Tier 2: Caller inheritance — when agent has no enabled endpoints, use caller's
+            # Mirrors get_endpoint_chain logic: checks for enabled endpoints, not just priorities existence
+            if not has_enabled_endpoints and caller_agent_type:
+                normalized_caller = self._normalize_agent_type(caller_agent_type)
+                for eid in self.agent_priorities.get(normalized_caller, []):
+                    ep = self.endpoints.get(eid)
+                    if ep and ep.enabled:
+                        logger.debug(
+                            f"[ENDPOINT_INHERITANCE] get_effective_concurrency — "
+                            f"agent_type={agent_type} has no enabled endpoints, "
+                            f"inheriting from caller_agent_type={caller_agent_type}, "
+                            f"endpoint_id={eid}, concurrency_limit={ep.concurrency_limit}"
+                        )
+                        return ep.concurrency_limit
+            
+            # Tier 3+: Fall back to default endpoint by api_base
             default_base = defaults.get('api_base') or defaults.get('model_server', '')
             for ep in self.endpoints.values():
                 if ep.api_base == default_base:
@@ -806,17 +830,19 @@ class APIRouter:
         # Truly no config at all — unlimited
         return -1
     
-    def get_agent_slot_info(self, agent_class: str) -> dict:
+    def get_agent_slot_info(self, agent_class: str, caller_agent_type: Optional[str] = None) -> dict:
         """Get the slot type that an agent_class would use.
         
         Args:
             agent_class: The class name of the agent
+            caller_agent_type: Optional caller agent type for endpoint inheritance when
+                the agent has no enabled endpoints (mirrors get_endpoint_chain behavior)
             
         Returns:
             Dict with keys: slot_key, is_sequential, concurrency_limit, api_base, needs_slot.
             When concurrency_limit is -1 (unlimited), slot_key and api_base will be None.
         """
-        concurrency = self.get_effective_concurrency(agent_class)
+        concurrency = self.get_effective_concurrency(agent_class, caller_agent_type=caller_agent_type)
         if concurrency == -1:
             return {
                 'slot_key': None,
@@ -826,7 +852,7 @@ class APIRouter:
                 'needs_slot': False,
             }
         
-        llm_cfg = self.get_llm_config(agent_class)
+        llm_cfg = self.get_llm_config(agent_class, caller_agent_type=caller_agent_type)
         api_base = llm_cfg.get('api_base') or llm_cfg.get('model_server', 'unknown')
         
         slot_info = self.scheduler.get_slot_info(api_base, concurrency)
@@ -837,13 +863,18 @@ class APIRouter:
 
     # ── LLM Config Resolution ────────────────────────────────────────────
 
-    def get_llm_config(self, agent_type: str) -> dict:
+    def get_llm_config(self, agent_type: str, caller_agent_type: Optional[str] = None) -> dict:
         """
         Returns the highest-priority *enabled* endpoint config for the given
         agent type. Falls back to ``default_llm_cfg`` if no custom endpoints
         are configured or all are disabled.
+        
+        Args:
+            agent_type: The agent type to resolve config for
+            caller_agent_type: Optional caller agent type for Tier 2 inheritance when
+                the agent has no enabled endpoints (passed to get_endpoint_chain)
         """
-        chain = self.get_endpoint_chain(agent_type)
+        chain = self.get_endpoint_chain(agent_type, caller_agent_type=caller_agent_type)
         if chain:
             return chain[0]
         return copy.deepcopy(self.default_llm_cfg)
