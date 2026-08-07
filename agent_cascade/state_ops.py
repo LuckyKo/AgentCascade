@@ -6,13 +6,12 @@ All operations are best-effort — failures are logged but never block execution
 
 import httpx
 import logging
-import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Module constant — could be made configurable later via settings or endpoint config.
-MAX_STATES_PER_INSTANCE = 3   # Keep last 3 states per agent instance
+# Per-instance state limits are obsolete: we use stable labels (instance_name) and rely on
+# autoloader's per-model max-5 LRU eviction to manage disk usage.
 
 
 def _normalize_api_base(api_base: str) -> str:
@@ -133,9 +132,18 @@ def restore_instance_state(instance: 'AgentInstance') -> bool:
 def save_state(api_base: str, model: str, instance_name: str) -> Optional[str]:
     """Save KV cache state. Returns label if successful, None on failure."""
     try:
+        # Defensive check: reject obviously dangerous instance_names (belt-and-suspenders).
+        # Autoloader also sanitizes labels via _sanitize_label().
+        if "../" in instance_name or "..\\" in instance_name:
+            logger.warning("Rejected state save for instance with unsafe name: %s", instance_name)
+            return None
+
         base = _normalize_api_base(api_base)
 
-        label = f"{instance_name}_{int(time.time())}"
+        # Use instance_name as stable label — autoloader overwrites the same file on each save.
+        # Previous timestamped labels caused per-model eviction of live agent state.
+        # Autoloader's _sanitize_label() strips \, /, .. to prevent path traversal.
+        label = instance_name
         url = f"{base}/v1/models/{model}/state/save"
         resp = httpx.post(url, json={"label": label}, timeout=30)
 
@@ -171,9 +179,8 @@ def is_autoloader_endpoint(api_base: str) -> bool:
 
 
 def _cleanup_old_states(api_base_no_v1: str, model: str, instance_name: str):
-    """Delete oldest states for this instance if count > MAX_STATES_PER_INSTANCE."""
+    """Clean up legacy timestamped state files for this instance (pre-fix artifacts)."""
     try:
-        # List all saved states for this model
         url = f"{api_base_no_v1}/v1/models/{model}/state"
         resp = httpx.get(url, timeout=10)
         if resp.status_code != 200:
@@ -182,25 +189,16 @@ def _cleanup_old_states(api_base_no_v1: str, model: str, instance_name: str):
         data = resp.json()
         labels = data.get("labels", [])
 
-        # Filter to states belonging to this instance (label starts with instance_name_)
-        my_states = [l for l in labels if l.startswith(instance_name + "_")]
+        # Only match legacy timestamped format: instance_name_TIMESTAMP
+        legacy_pattern = instance_name + "_"
+        legacy_states = [l for l in labels if l.startswith(legacy_pattern)]
 
-        # Sort by timestamp portion (label format: instance_name_TIMESTAMP)
-        def extract_ts(label: str):
-            try:
-                return int(label.rsplit("_", 1)[1])
-            except (ValueError, IndexError):
-                return 0
-
-        my_states.sort(key=extract_ts)
-
-        # Delete oldest if we exceed the limit
-        while len(my_states) > MAX_STATES_PER_INSTANCE:
-            oldest = my_states.pop(0)
-            _delete_state(api_base_no_v1, model, oldest)
+        # Delete all legacy timestamped states — the current stable label file is kept.
+        for label in legacy_states:
+            _delete_state(api_base_no_v1, model, label)
 
     except Exception as e:
-        logger.debug("State cleanup failed for %s: %s", instance_name, e)
+        logger.debug("Legacy state cleanup failed for %s: %s", instance_name, e)
 
 
 def _delete_state(api_base_no_v1: str, model: str, label: str):
