@@ -36,6 +36,8 @@ from agent_cascade.settings import (
     LLM_RETRY_BASE_DELAY,
     LLM_RETRY_MAX_BACKOFF,
     TOKEN_ESTIMATE_CHAR_DIVISOR,
+    STREAM_MAX_SILENCE_SECONDS,
+    STREAM_MAX_TOTAL_SECONDS,
 )
 from agent_cascade.retry_policy import classify_error, calculate_backoff, RetryPolicy
 
@@ -2737,7 +2739,41 @@ class ExecutionEngine:
                     loop_retry_count += 1
                     yield None  # Signal UI
 
+                # Engine-level streaming watchdog: detect mid-stream stalls at the
+                # execution engine layer (last defense if backend didn't raise).
+                # Read configured values from pool settings, falling back to module defaults.
+                _engine_max_silence = getattr(
+                    self.pool.settings, 'stream_max_silence_seconds', STREAM_MAX_SILENCE_SECONDS)
+                _engine_max_total = getattr(
+                    self.pool.settings, 'stream_max_total_seconds', STREAM_MAX_TOTAL_SECONDS)
+                _engine_stream_start = time.monotonic()
+                _engine_first_output = True
+                _engine_last_output_time = None
+
                 for output in gen:
+                    # Watchdog check on each consumed output
+                    _now = time.monotonic()
+                    # Silence check only after first output; slow reasoning models may take >120s to produce first token
+                    if not _engine_first_output and _engine_last_output_time is not None:
+                        if (_now - _engine_last_output_time) > _engine_max_silence:
+                            logger.info(
+                                f"[STREAM_WATCHDOG] {inst_name}: silence exceeded "
+                                f"{_engine_max_silence:.0f}s (actual={_now - _engine_last_output_time:.1f}s)"
+                            )
+                            _abort_stream("Engine watchdog: stream_stalled")
+                            break  # Exit loop after aborting; will retry in outer while
+                    # Total timeout applies from stream start regardless of first output timing
+                    if (_now - _engine_stream_start) > _engine_max_total:
+                        logger.info(
+                            f"[STREAM_WATCHDOG] {inst_name}: total duration exceeded "
+                            f"{_engine_max_total:.0f}s (actual={_now - _engine_stream_start:.1f}s)"
+                        )
+                        _abort_stream("Engine watchdog: stream_stalled")
+                        break  # Exit loop after aborting; will retry in outer while
+                    if _engine_first_output:
+                        _engine_first_output = False
+                    _engine_last_output_time = _now
+
                     last_output = output
 
                     # Feed delta text to inner-loop detector (extracts new

@@ -65,6 +65,8 @@ POOL_SETTINGS_KEYS = frozenset({
     'max_nesting_depth', 'sleeping_wakeup_interval',
     # Sync checks
     'tail_sync_check_enabled',
+    # Streaming timeout settings
+    'stream_max_silence_seconds', 'stream_max_total_seconds',
 })
 
 # ── Non-PoolSettings keys that still trigger persistence (stored at top level of pool_settings.json) ────
@@ -428,6 +430,22 @@ def _handle_ci_stale_container_ttl(ui_cfg: dict, agent_pool: Optional[Any], agen
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         agent_pool.settings.ci_stale_container_ttl = max(
             CI_MIN_STALE_CONTAINER_TTL, int(ui_cfg['ci_stale_container_ttl']))
+
+
+@register_config_handler('stream_max_silence_seconds')
+def _handle_stream_max_silence_seconds(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update streaming max silence timeout (seconds between chunks before considering stream stalled)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = float(ui_cfg.get('stream_max_silence_seconds', 120.0))
+        agent_pool.settings.stream_max_silence_seconds = max(5.0, val)
+
+
+@register_config_handler('stream_max_total_seconds')
+def _handle_stream_max_total_seconds(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update streaming max total duration timeout (seconds for entire streaming response)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = float(ui_cfg.get('stream_max_total_seconds', 900.0))
+        agent_pool.settings.stream_max_total_seconds = max(60.0, val)
 
 
 @register_config_handler('max_turns')

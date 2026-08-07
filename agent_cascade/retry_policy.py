@@ -94,6 +94,7 @@ def classify_error(error: Exception) -> str:
         '503', '502', '504', '429',  # Server errors + rate limiting
         'network unreachable', 'dns', 'resolution failed',  # Network/DNS issues
         'temporary', 'overloaded', 'service unavailable',  # Transient server states
+        'stream_stalled',  # Stuck streaming API (mid-stream silence or total timeout)
     )
 
     is_fatal = any(pattern in error_str for pattern in fatal_patterns)

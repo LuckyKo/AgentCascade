@@ -14,6 +14,7 @@
 
 import json
 import os
+import time
 from http import HTTPStatus
 from pprint import pformat
 from typing import Dict, Iterator, List, Optional
@@ -103,8 +104,32 @@ class QwenChatAtDS(BaseFnCallModel):
     @staticmethod
     def _delta_stream_output(response) -> Iterator[List[Message]]:
         last_usage = {}  # Track usage across chunks; last chunk typically has final count
+        # Streaming watchdogs: track silence and total duration to detect stuck streams
+        from agent_cascade.settings import STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS
+        _stream_start = time.monotonic()
+        _first_chunk = True
+        _last_chunk_time = None
         for chunk in response:
             if chunk.status_code == HTTPStatus.OK:
+                # Watchdog: check for silence and total timeout on each received chunk
+                _now = time.monotonic()
+                # Silence check only after first chunk; slow reasoning models may take >120s to produce first token
+                if not _first_chunk and _last_chunk_time is not None:
+                    if (_now - _last_chunk_time) > STREAM_MAX_SILENCE_SECONDS:
+                        raise ModelServiceError(
+                            f"stream_stalled: no data for {STREAM_MAX_SILENCE_SECONDS:.0f}s "
+                            f"(silence={_now - _last_chunk_time:.1f}s, total={_now - _stream_start:.1f}s)"
+                        )
+                # Total timeout applies from stream start regardless of first chunk timing
+                if (_now - _stream_start) > STREAM_MAX_TOTAL_SECONDS:
+                    raise ModelServiceError(
+                        f"stream_stalled: exceeded total limit of {STREAM_MAX_TOTAL_SECONDS:.0f}s "
+                        f"(total={_now - _stream_start:.1f}s)"
+                    )
+                if _first_chunk:
+                    _first_chunk = False
+                _last_chunk_time = _now
+
                 # Extract usage from each chunk (last chunk has the complete count)
                 extracted = _extract_usage(getattr(chunk, 'usage', None))
                 if extracted:
@@ -131,8 +156,32 @@ class QwenChatAtDS(BaseFnCallModel):
         full_tool_calls = []
         # Extract usage info from DashScope streaming response (last chunk has it)
         last_usage = {}
+        # Streaming watchdogs: track silence and total duration to detect stuck streams
+        from agent_cascade.settings import STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS
+        _stream_start = time.monotonic()
+        _first_chunk = True
+        _last_chunk_time = None
         for chunk in response:
             if chunk.status_code == HTTPStatus.OK:
+                # Watchdog: check for silence and total timeout on each received chunk
+                _now = time.monotonic()
+                # Silence check only after first chunk; slow reasoning models may take >120s to produce first token
+                if not _first_chunk and _last_chunk_time is not None:
+                    if (_now - _last_chunk_time) > STREAM_MAX_SILENCE_SECONDS:
+                        raise ModelServiceError(
+                            f"stream_stalled: no data for {STREAM_MAX_SILENCE_SECONDS:.0f}s "
+                            f"(silence={_now - _last_chunk_time:.1f}s, total={_now - _stream_start:.1f}s)"
+                        )
+                # Total timeout applies from stream start regardless of first chunk timing
+                if (_now - _stream_start) > STREAM_MAX_TOTAL_SECONDS:
+                    raise ModelServiceError(
+                        f"stream_stalled: exceeded total limit of {STREAM_MAX_TOTAL_SECONDS:.0f}s "
+                        f"(total={_now - _stream_start:.1f}s)"
+                    )
+                if _first_chunk:
+                    _first_chunk = False
+                _last_chunk_time = _now
+
                 # Capture usage from each chunk; last chunk typically has the final count
                 extracted = _extract_usage(getattr(chunk, 'usage', None))
                 if extracted:

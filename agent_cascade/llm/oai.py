@@ -17,6 +17,7 @@ import httpx
 import logging
 import os
 import threading
+import time
 import openai
 import requests
 from pprint import pformat
@@ -72,13 +73,27 @@ def _get_cached_client(base_url: str, api_key: str) -> openai.OpenAI:
         # keepalive_expiry defaults to 3.0s (below LM Studio's 5s server timeout)
         # so idle connections are proactively discarded before becoming stale.
         # Override via env var QWEN_AGENT_LM_STUDIO_KEEPALIVE if needed per environment.
-        from agent_cascade.settings import LM_STUDIO_KEEPALIVE_SECONDS
+        from agent_cascade.settings import (
+            LM_STUDIO_KEEPALIVE_SECONDS,
+            HTTP_READ_TIMEOUT,
+            HTTP_CONNECT_TIMEOUT,
+            HTTP_WRITE_TIMEOUT,
+            HTTP_POOL_TIMEOUT,
+        )
         keepalive = float(os.environ.get('QWEN_AGENT_LM_STUDIO_KEEPALIVE', str(LM_STUDIO_KEEPALIVE_SECONDS)))
         logger.debug(f"[CACHE] MISS creating new client key={key}")
         _CLIENT_CACHE[key] = openai.OpenAI(
             base_url=base_url,
             api_key=api_key,
-            http_client=httpx.Client(limits=httpx.Limits(keepalive_expiry=keepalive)),
+            http_client=httpx.Client(
+                limits=httpx.Limits(keepalive_expiry=keepalive),
+                timeout=httpx.Timeout(
+                    read=HTTP_READ_TIMEOUT,
+                    connect=HTTP_CONNECT_TIMEOUT,
+                    write=HTTP_WRITE_TIMEOUT,
+                    pool=HTTP_POOL_TIMEOUT,
+                ),
+            ),
         )
         return _CLIENT_CACHE[key]
 
@@ -427,16 +442,38 @@ class TextChatAtOAI(BaseFnCallModel):
             response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
             #logger.debug(f"[TOOL_RECOVERY] _chat_stream _chat_complete_create END (got response iterator)")
 
+            # Streaming watchdogs: track silence and total duration to detect stuck streams
+            from agent_cascade.settings import STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS
+            _stream_start = time.monotonic()
+            _first_chunk = True
+            _last_chunk_time = None
+
             if delta_stream:
                 # Use _iter_events() to fully drain SSE stream so connection is returned to pool
-                _first_chunk = True
                 for sse in response._iter_events():
                     if sse.data == "[DONE]":
                         continue
                     chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
+
+                    # Watchdog: check for silence and total timeout on each received chunk
+                    _now = time.monotonic()
+                    # Silence check only after first chunk; slow reasoning models may take >120s to produce first token
+                    if not _first_chunk and _last_chunk_time is not None:
+                        if (_now - _last_chunk_time) > STREAM_MAX_SILENCE_SECONDS:
+                            raise ModelServiceError(
+                                f"stream_stalled: no data for {STREAM_MAX_SILENCE_SECONDS:.0f}s "
+                                f"(silence={_now - _last_chunk_time:.1f}s, total={_now - _stream_start:.1f}s)"
+                            )
+                    # Total timeout applies from stream start regardless of first chunk timing
+                    if (_now - _stream_start) > STREAM_MAX_TOTAL_SECONDS:
+                        raise ModelServiceError(
+                            f"stream_stalled: exceeded total limit of {STREAM_MAX_TOTAL_SECONDS:.0f}s "
+                            f"(total={_now - _stream_start:.1f}s)"
+                        )
                     if _first_chunk:
                         logger.debug(f"[TOOL_RECOVERY] _chat_stream FIRST CHUNK RECEIVED model={request_model}")
                         _first_chunk = False
+                    _last_chunk_time = _now
                     # Update local model info if returned by the server (e.g. LM Studio)
                     if hasattr(chunk, 'model') and chunk.model:
                         if chunk.model != self.model:
@@ -454,6 +491,7 @@ class TextChatAtOAI(BaseFnCallModel):
                 full_reasoning_content = ''
                 full_tool_calls = []
                 _first_chunk = True
+                _last_chunk_time = None
                 last_usage = None  # Track most recent usage; may arrive in a chunk without choices
                 _usage_emitted = False
                 # Use _iter_events() to fully drain SSE stream so connection is returned to pool
@@ -461,9 +499,26 @@ class TextChatAtOAI(BaseFnCallModel):
                     if sse.data == "[DONE]":
                         continue
                     chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
+
+                    # Watchdog: check for silence and total timeout on each received chunk
+                    _now = time.monotonic()
+                    # Silence check only after first chunk; slow reasoning models may take >120s to produce first token
+                    if not _first_chunk and _last_chunk_time is not None:
+                        if (_now - _last_chunk_time) > STREAM_MAX_SILENCE_SECONDS:
+                            raise ModelServiceError(
+                                f"stream_stalled: no data for {STREAM_MAX_SILENCE_SECONDS:.0f}s "
+                                f"(silence={_now - _last_chunk_time:.1f}s, total={_now - _stream_start:.1f}s)"
+                            )
+                    # Total timeout applies from stream start regardless of first chunk timing
+                    if (_now - _stream_start) > STREAM_MAX_TOTAL_SECONDS:
+                        raise ModelServiceError(
+                            f"stream_stalled: exceeded total limit of {STREAM_MAX_TOTAL_SECONDS:.0f}s "
+                            f"(total={_now - _stream_start:.1f}s)"
+                        )
                     if _first_chunk:
                         # logger.debug(f"[TOOL_RECOVERY] _chat_stream FIRST CHUNK RECEIVED model={request_model}")
                         _first_chunk = False
+                    _last_chunk_time = _now
                     # Update local model info if returned by the server
                     if hasattr(chunk, 'model') and chunk.model:
                         if chunk.model != self.model:

@@ -851,6 +851,9 @@ def build_state_from_pool(
             'cache_pool_enabled': getattr(ps, 'cache_pool_enabled', True),
             'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
             'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
+            # Streaming timeout settings
+            'stream_max_silence_seconds': getattr(ps, 'stream_max_silence_seconds', 120.0),
+            'stream_max_total_seconds': getattr(ps, 'stream_max_total_seconds', 900.0),
         })
 
     # Add tool char limits from pool.llm_cfg if available
@@ -1027,6 +1030,9 @@ def build_stream_update_from_pool(
             'cache_pool_enabled': getattr(ps, 'cache_pool_enabled', True),
             'cache_pool_size': getattr(ps, 'cache_pool_size', 64),
             'cache_threshold_chars': getattr(ps, 'cache_threshold_chars', 1000),
+            # Streaming timeout settings
+            'stream_max_silence_seconds': getattr(ps, 'stream_max_silence_seconds', 120.0),
+            'stream_max_total_seconds': getattr(ps, 'stream_max_total_seconds', 900.0),
         })
 
     # Add tool char limits from pool.llm_cfg if available

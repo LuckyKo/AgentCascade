@@ -145,6 +145,22 @@ LLM_RETRY_BASE_DELAY: float = float(os.getenv(
 LLM_RETRY_MAX_BACKOFF: float = float(os.getenv(
     'QWEN_AGENT_LLM_RETRY_MAX_BACKOFF', 5.0))  # Maximum backoff cap in seconds
 
+# Settings for streaming timeouts (Layer 1-3 defense against stuck streams)
+STREAM_MAX_SILENCE_SECONDS: float = float(os.getenv(
+    'QWEN_AGENT_STREAM_MAX_SILENCE_SECONDS', 120.0))  # Max seconds between chunks before considering stream stalled
+STREAM_MAX_TOTAL_SECONDS: float = float(os.getenv(
+    'QWEN_AGENT_STREAM_MAX_TOTAL_SECONDS', 900.0))  # Max total duration of a streaming response
+
+# HTTP client timeouts (passed to httpx)
+HTTP_READ_TIMEOUT: float = float(os.getenv(
+    'QWEN_AGENT_HTTP_READ_TIMEOUT', 300.0))  # Timeout for reading a single chunk from server
+HTTP_CONNECT_TIMEOUT: float = float(os.getenv(
+    'QWEN_AGENT_HTTP_CONNECT_TIMEOUT', 10.0))  # Timeout for establishing TCP connection
+HTTP_WRITE_TIMEOUT: float = float(os.getenv(
+    'QWEN_AGENT_HTTP_WRITE_TIMEOUT', 60.0))  # Timeout for sending request body
+HTTP_POOL_TIMEOUT: float = float(os.getenv(
+    'QWEN_AGENT_HTTP_POOL_TIMEOUT', 30.0))  # Timeout waiting for connection from pool
+
 # Settings for telemetry
 SYSTEM_PROMPT_HASH_MAX_CHARS: int = int(os.getenv(
     'QWEN_AGENT_SYSTEM_PROMPT_HASH_MAX_CHARS', 2000))  # Max chars for system prompt before hashing
