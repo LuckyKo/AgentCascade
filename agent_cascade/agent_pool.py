@@ -263,6 +263,9 @@ class AgentPool:
         self.llm_cfg = llm_cfg                          # LLM config (used as fallback when no api_router)
         self.settings = PoolSettings()                  # Configurable thresholds and timeouts
 
+        # ── Defaults for attributes that can be overridden by persisted settings ──
+        self._enable_async_shell_console_window = True  # Default ON (overridden by _load_pool_settings if persisted)
+
         # ── PoolSettings persistence ────────────────────────────────────────
         instance_id = get_instance_id()
         if instance_id:
@@ -316,7 +319,6 @@ class AgentPool:
         # ── Async Shell Infrastructure (background shell_cmd support) ────────
         from agent_cascade.async_shell import AsyncShellTracker
         self._async_shell_tracker = AsyncShellTracker(pool=self)
-        self._enable_async_shell_console_window = True  # Default ON (current behavior)
 
         # ── Global state ─────────────────────────────────────────────────────
         self._stopped_event = threading.Event()         # M3 fix: stopped flag for emergency shutdown
