@@ -2908,6 +2908,21 @@ class ExecutionEngine:
                 with instance._compression_lock:
                     instance._streaming_responses = []
 
+                # Check if this is a termination-abort error from api_router — exit cleanly without retrying.
+                _is_termination_abort = (
+                    isinstance(e, RuntimeError) and 
+                    len(e.args) >= 1 and 
+                    e.args[0] and 
+                    "has been terminated" in str(e.args[0])
+                )
+                
+                if _is_termination_abort:
+                    # Instance was terminated — abort LLM call cleanly without retry or error message.
+                    logger.debug(f"[TERMINATION] Aborting LLM call for {inst_name} due to instance termination")
+                    with instance._compression_lock:
+                        instance._streaming_responses = []
+                    break
+
                 if retry_count > _max_attempts:
                     # Telemetry: record LLM call end for exhausted retries (non-blocking)
                     self._record_telemetry_event(inst_name, 'end', output_tokens_est=0)

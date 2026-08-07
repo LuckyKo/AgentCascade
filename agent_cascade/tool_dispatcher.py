@@ -312,6 +312,18 @@ class ToolDispatcher:
                         # Case 4: Different slot pools → no collision → ASYNC is safe
                         caller_holds_slot = False
 
+                # Deadlock prevention (A→B→C scenario): If caller doesn't hold a slot but child needs one,
+                # check if any ancestor holds a conflicting slot pool. An async child (B) might not hold
+                # its own slot, but its parent (A) could be holding the same pool that grandchild (C) needs.
+                if not caller_holds_slot and child_slot_info and child_slot_info['needs_slot']:
+                    conflict_ancestor = self._find_ancestor_with_slot(caller_name, child_slot_info['slot_key'])
+                    if conflict_ancestor:
+                        logger.debug(
+                            f"[DEADLOCK_PREVENTION] Ancestor '{conflict_ancestor}' holds slot pool "
+                            f"conflicting with child's need — forcing sync for '{instance_name}'"
+                        )
+                        caller_holds_slot = True  # Force sync — ancestor holds this slot pool
+
         if caller_holds_slot:
             return self._run_child_sync(agent_class, instance_name, args, caller_slot_holder, caller_name, child_depth)
         else:
@@ -407,6 +419,16 @@ class ToolDispatcher:
         if instance.parent_instance and target_name == instance.parent_instance:
             return f"[status=error] Cannot dismiss your supervisor ({target_name})."
 
+        # Ownership check: only allow dismissing your own children, or root orchestrator can dismiss anyone
+        target_inst = self.pool.get_instance(target_name)
+        if target_inst:
+            is_own_child = (target_inst.parent_instance == instance.instance_name)
+            is_root_dismissing = (instance.parent_instance is None)
+
+            if not is_own_child and not is_root_dismissing:
+                return f"[status=error] Cannot dismiss '{target_name}' — you can only dismiss your own children. " \
+                       f"(Target's parent is '{target_inst.parent_instance or 'root'}')"
+
         # Check existence before dismissing
         if target_name not in self.pool.instance_conversations:
             return f"[status=not_found] Instance '{target_name}' not found — no agent by that name is currently active."
@@ -423,7 +445,61 @@ class ToolDispatcher:
         return "\n".join(lines)
 
     # ── call_agent Sub-Methods (extracted from ExecutionEngine._handle_call_agent) ───────────
-    
+
+    def _find_ancestor_with_slot(self, start_instance_name: str, target_slot_key: str) -> Optional[str]:
+        """Walk up parent chain to find an active ancestor holding a conflicting slot pool.
+
+        Used for deadlock prevention in A→B(async)→C(sync needing A's slot) scenarios.
+        B doesn't hold its own slot (it's async), but A might be holding the same pool
+        that C needs. If found, caller should force sync execution.
+
+        Args:
+            start_instance_name: The instance to start walking from (the direct caller).
+            target_slot_key: The slot key the child agent would need.
+
+        Returns:
+            Ancestor instance name if one holds a conflicting slot pool, None otherwise.
+            Max depth 10 to prevent infinite loops.
+        """
+        current = self.pool.get_instance(start_instance_name)
+        for _ in range(10):
+            if current is None:
+                break
+            parent_name = getattr(current, 'parent_instance', None)
+            if not parent_name:
+                break
+
+            parent = self.pool.get_instance(parent_name)
+            if parent is None:
+                break
+
+            # Check if this ancestor holds a slot
+            if hasattr(parent, '_state_lock'):
+                try:
+                    with parent._state_lock:
+                        if parent._slot_release is not None:
+                            # Compute ancestor's slot key (same logic as inline computation in _handle_call_agent)
+                            router = self.pool.api_router
+                            if router:
+                                anc_concurrency = router.get_effective_concurrency(parent.agent_class)
+                                anc_llm_cfg = router.get_llm_config(parent.agent_class)
+                                anc_api_base = anc_llm_cfg.get('api_base') or anc_llm_cfg.get('model_server', 'unknown')
+                                anc_is_sequential = (anc_concurrency == 0)
+                                anc_slot_key = '_shared_sequential_slot_' if anc_is_sequential else anc_api_base
+
+                                if anc_slot_key == target_slot_key:
+                                    logger.debug(
+                                        f"[DEADLOCK_PREVENTION] Ancestor '{parent_name}' holds slot pool "
+                                        f"'{anc_slot_key}' conflicting with child's need"
+                                    )
+                                    return parent_name
+                except Exception as e:
+                    logger.debug(f"Ancestor slot check failed for {parent_name} (non-critical): {e}")
+
+            current = parent
+
+        return None
+
     def _run_child_sync(
         self,
         agent_class: str,

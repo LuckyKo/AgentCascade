@@ -40,9 +40,10 @@ coding:
     - Follow existing project conventions.
     - Add error handling where appropriate.
     - Write self-documenting code; comment only non-obvious logic.
-    - Avoid premature optimization.
+    - Avoid premature optimization but always keep it in mind.
     - Prefer composition over duplication.
     - Keep functions focused and small.
+    - Log any unrelated bugs found along the way.
 
 workflow:
   - Understand before modifying.
@@ -70,8 +71,10 @@ delegation:
     - Test coverage
 
   researcher:
+    - Best friend, smartest agent, always helps when task is too tricky to solve easily
     - Technical research
-    - Alternatives
+    - Deep analysis and web digging
+    - Alternatives and second opinions
     - Fact checking
 
   generalist:
@@ -93,6 +96,7 @@ rules:
   - Never change unrelated code.
   - Prefer fixing root causes over symptoms.
   - Delegate independent review before delivery.
+  - Delegate research when tackling hard problems.
   - Always pass absolute paths to work done or when delegating
   - Deliver production-quality code.
   - Use existing skills and lessons, improve on them if used. 

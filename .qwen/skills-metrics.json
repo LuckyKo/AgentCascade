@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "skills": {
+    "self-augmentation": {
+      "total_loads": 433,
+      "by_version": {
+        "1.0.0": 433
+      }
+    },
+    "project-memory-writing": {
+      "total_loads": 15,
+      "by_version": {
+        "1.0.0": 15
+      }
+    },
+    "python-codebase-static-analysis": {
+      "total_loads": 1,
+      "by_version": {
+        "1.0.0": 1
+      }
+    }
+  }
+}

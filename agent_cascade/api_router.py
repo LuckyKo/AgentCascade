@@ -1363,6 +1363,13 @@ class APIRouter:
             endpoint_name = llm_cfg.get('model', 'unknown')
 
             for attempt in range(max_retries + 1):
+                # Check if instance was terminated during a previous failed attempt or between retries.
+                # Prevents starting new API calls after termination (does not interrupt mid-stream calls).
+                if self._pool and _inst_name:
+                    if _inst_name in self._pool.terminated_instances:
+                        logger.debug(f"[TERMINATION] Instance '{_inst_name}' terminated, aborting LLM call")
+                        raise RuntimeError(f"Instance '{_inst_name}' has been terminated")
+
                 try:
                     # Try to get the agent instance name from kwargs if available
                     agent_obj = kwargs.get('agent_obj')
@@ -1408,6 +1415,13 @@ class APIRouter:
                                     history.append(now)
                                     break  # Successfully recorded, exit loop
                     
+                    # Check termination again just before making the actual API call,
+                    # in case instance was terminated during rate limit wait or backoff.
+                    if self._pool and _inst_name:
+                        if _inst_name in self._pool.terminated_instances:
+                            logger.debug(f"[TERMINATION] Instance '{_inst_name}' terminated before API call, aborting")
+                            raise RuntimeError(f"Instance '{_inst_name}' has been terminated")
+
                     result = execute_with_sem(current_agent_name)
                     
                     # Track the last successful endpoint config for automatic recovery.

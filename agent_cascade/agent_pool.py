@@ -1084,6 +1084,35 @@ class AgentPool:
             # is terminated, not all agents via the global _stopped_event.
             self.terminate_instance(instance_name, set_global_stopped=False)
 
+        # Wake SLEEPING parent when async child is dismissed (Fix TODO #41).
+        # If this instance was an async child with a SLEEPING parent waiting for it,
+        # inject a result so the parent wakes up instead of sleeping forever.
+        if inst and inst.parent_instance:
+            parent_name = inst.parent_instance
+            parent = self.get_instance(parent_name)
+            if parent:
+                from agent_cascade.agent_instance import AgentState
+                with parent._state_lock:
+                    parent_is_sleeping = (parent.state == AgentState.SLEEPING)
+
+                if parent_is_sleeping and hasattr(self, '_async_registry'):
+                    # Look up the async registration for this child
+                    parent_info = self._async_registry.get_parent_for_child(instance_name)
+                    if parent_info:
+                        _, func_id = parent_info
+                        result_msg = f"[Agent '{instance_name}' Dismissed]:\nAgent was dismissed before completing."
+                        try:
+                            # Enqueue the dismissal result to wake up the sleeping parent
+                            self.enqueue_message(parent_name, result_msg)
+                            logger.debug(
+                                f"[ASYNC_WAKEUP] Enqueued dismissal result for child '{instance_name}' "
+                                f"to wake SLEEPING parent '{parent_name}'"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Failed to enqueue dismissal result for {instance_name}: {e}")
+                        # Clean up the child mapping since this instance is being removed
+                        self._async_registry.remove_child_mapping(instance_name)
+
         # Clear state label before removing from pool (terminate already clears it if active).
         if inst:
             self._clear_state_label(inst)
@@ -2554,7 +2583,7 @@ class AgentPool:
                     logger.warning(f"Failed to dismiss zombie instance {child_instance_name} during error cleanup: {cleanup_err}")
                 return f"[Agent '{child_instance_name}' Failed]:\n{str(e)}"
 
-        self._async_registry.register(instance_name, run_child_agent, function_id=function_id)
+        self._async_registry.register(instance_name, run_child_agent, function_id=function_id, child_instance_name=child_instance_name)
 
     # ── Pause/Resume state management ───────────────────────────────────────
 

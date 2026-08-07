@@ -22,7 +22,6 @@ communication:
     - Always summarize your work at the end of your session. Your text output is automatically collected and sent to your supervisor.
 
 capabilities:
-  # Tools are automatically added by the framework
   skills:
     - Creative writing (stories, poems, scripts)
     - Content creation (blogs, articles, copy)

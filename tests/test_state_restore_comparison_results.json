@@ -1,0 +1,74 @@
+[
+  {
+    "model": "Agents-A1-APEX-I-Quality",
+    "display": "Agents-A1-APEX-I-Quality",
+    "passed": true,
+    "step2": {
+      "prompt_tokens": 18410,
+      "cached": 0,
+      "processed": 18410
+    },
+    "step3": {
+      "n_saved": 18439,
+      "n_written": 443937944
+    },
+    "step5": {
+      "port": 9008,
+      "pid_before": 20640,
+      "pid_after": 20552
+    },
+    "step6": {
+      "n_restored": 18439
+    },
+    "step6b": {
+      "done": true
+    },
+    "step7": {
+      "total_prompt": 18430,
+      "cached": 18406,
+      "processed": 24,
+      "cache_ratio": 0.9986977753662507
+    },
+    "step8": {
+      "total_prompt": 18447,
+      "cached": 18426,
+      "processed": 21
+    }
+  },
+  {
+    "model": "qwen3.6-27b-fable-fus-mtp",
+    "display": "qwen3.6-27b-fable-fus-mtp",
+    "passed": true,
+    "step2": {
+      "prompt_tokens": 18412,
+      "cached": 0,
+      "processed": 18412
+    },
+    "step3": {
+      "n_saved": 18441,
+      "n_written": 1365886728
+    },
+    "step5": {
+      "port": 9010,
+      "pid_before": 6360,
+      "pid_after": 30036
+    },
+    "step6": {
+      "n_restored": 18441
+    },
+    "step6b": {
+      "done": true
+    },
+    "step7": {
+      "total_prompt": 18466,
+      "cached": 18408,
+      "processed": 58,
+      "cache_ratio": 0.9968590923860067
+    },
+    "step8": {
+      "total_prompt": 18517,
+      "cached": 18495,
+      "processed": 22
+    }
+  }
+]

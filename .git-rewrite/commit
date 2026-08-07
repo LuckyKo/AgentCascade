@@ -1,0 +1,6 @@
+tree dea37aed4ca0f5a2f4fdddd21471c23733c7d917
+parent ef57575808c59bd39eee9bc256c8bf5a596896ff
+author LuckyKo <gunoimail@gmail.com> 1785389523 +0300
+committer LuckyKo <gunoimail@gmail.com> 1785389523 +0300
+
+feat: persist all non-cosmetic UI settings + export/import functionality

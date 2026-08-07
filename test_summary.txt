@@ -1,0 +1,103 @@
+
+[conftest] Local LLM found: LM Studio (http://127.0.0.1:1234/v1) — 22 models
+sF...................................................................... [  6%]
+........................................................................ [ 12%]
+........................................................................ [ 18%]
+........................................................................ [ 24%]
+........................................................................ [ 30%]
+........................................................................ [ 36%]
+........................................................................ [ 42%]
+......................................+++++++++++++++++++++++++++++++++++ Timeout +++++++++++++++++++++++++++++++++++
+~~~~~~~~~~~~~~~~~ Stack of code-interpreter-watchdog (22264) ~~~~~~~~~~~~~~~~~~
+  File "C:\Python312\Lib\threading.py", line 1032, in _bootstrap
+    self._bootstrap_inner()
+  File "C:\Python312\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Python312\Lib\threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "N:\work\WD\AgentCascade\agent_cascade\tools\code_interpreter.py", line 207, in _kernel_watchdog
+    _WATCHDOG_TERMINATE.wait(timeout=5)
+  File "C:\Python312\Lib\threading.py", line 655, in wait
+    signaled = self._cond.wait(timeout)
+  File "C:\Python312\Lib\threading.py", line 359, in wait
+    gotit = waiter.acquire(True, timeout)
+~~~~~~~~~~~~~~~~~~~~~~~~~ Stack of MainThread (32580) ~~~~~~~~~~~~~~~~~~~~~~~~~
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Python312\Scripts\pytest.exe\__main__.py", line 5, in <module>
+    sys.exit(console_main())
+  File "C:\Python312\Lib\site-packages\_pytest\config\__init__.py", line 223, in console_main
+    code = main()
+  File "C:\Python312\Lib\site-packages\_pytest\config\__init__.py", line 199, in main
+    ret: ExitCode | int = config.hook.pytest_cmdline_main(config=config)
+  File "C:\Python312\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\Python312\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\Python312\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\Python312\Lib\site-packages\_pytest\main.py", line 365, in pytest_cmdline_main
+    return wrap_session(config, _main)
+  File "C:\Python312\Lib\site-packages\_pytest\main.py", line 318, in wrap_session
+    session.exitstatus = doit(config, session) or 0
+  File "C:\Python312\Lib\site-packages\_pytest\main.py", line 372, in _main
+    config.hook.pytest_runtestloop(session=session)
+  File "C:\Python312\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\Python312\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\Python312\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\Python312\Lib\site-packages\_pytest\main.py", line 396, in pytest_runtestloop
+    item.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
+  File "C:\Python312\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\Python312\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\Python312\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\Python312\Lib\site-packages\_pytest\runner.py", line 118, in pytest_runtest_protocol
+    runtestprotocol(item, nextitem=nextitem)
+  File "C:\Python312\Lib\site-packages\_pytest\runner.py", line 137, in runtestprotocol
+    reports.append(call_and_report(item, "call", log))
+  File "C:\Python312\Lib\site-packages\_pytest\runner.py", line 244, in call_and_report
+    call = CallInfo.from_call(
+  File "C:\Python312\Lib\site-packages\_pytest\runner.py", line 353, in from_call
+    result: TResult | None = func()
+  File "C:\Python312\Lib\site-packages\_pytest\runner.py", line 245, in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+  File "C:\Python312\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\Python312\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\Python312\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\Python312\Lib\site-packages\_pytest\runner.py", line 179, in pytest_runtest_call
+    item.runtest()
+  File "C:\Python312\Lib\site-packages\_pytest\python.py", line 1720, in runtest
+    self.ihook.pytest_pyfunc_call(pyfuncitem=self)
+  File "C:\Python312\Lib\site-packages\pluggy\_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "C:\Python312\Lib\site-packages\pluggy\_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "C:\Python312\Lib\site-packages\pluggy\_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "C:\Python312\Lib\site-packages\_pytest\python.py", line 166, in pytest_pyfunc_call
+    result = testfunction(**testargs)
+  File "N:\work\WD\AgentCascade\tests\test_inner_loop_live_data.py", line 177, in test_fp_rate_below_5_percent
+    fp_count = sum(1 for t in texts if feed_chunks(t) is not None)
+  File "N:\work\WD\AgentCascade\tests\test_inner_loop_live_data.py", line 177, in <genexpr>
+    fp_count = sum(1 for t in texts if feed_chunks(t) is not None)
+  File "N:\work\WD\AgentCascade\tests\test_inner_loop_live_data.py", line 139, in feed_chunks
+    return None
+  File "N:\work\WD\AgentCascade\agent_cascade\inner_loop_detect.py", line 121, in feed
+    return None
+  File "N:\work\WD\AgentCascade\agent_cascade\two_phase_loop_detect.py", line 389, in feed
+    return None  # No loop detected
+  File "N:\work\WD\AgentCascade\agent_cascade\two_phase_loop_detect.py", line 284, in _check_suspicion
+    return None
+  File "C:\Python312\Lib\collections\__init__.py", line 632, in most_common
+    return heapq.nlargest(n, self.items(), key=_itemgetter(1))
+  File "C:\Python312\Lib\heapq.py", line 579, in nlargest
+    return [elem for (k, order, elem) in result]
++++++++++++++++++++++++++++++++++++ Timeout +++++++++++++++++++++++++++++++++++

@@ -12,7 +12,7 @@ Components:
 from dataclasses import dataclass, field
 import time
 import threading
-from typing import Callable, Optional, Dict, List
+from typing import Callable, Optional, Dict, List, Tuple
 from concurrent.futures import Future, ThreadPoolExecutor
 
 
@@ -70,13 +70,16 @@ class AsyncToolRegistry:
         self._pending: Dict[str, List[BackgroundToolEntry]] = {}
         self._lock = threading.Lock()
         self.pool = pool
+        # Reverse mapping: child_instance_name -> (parent_instance_name, function_id)
+        # Used to wake up SLEEPING parent when async child is dismissed
+        self._child_to_parent: Dict[str, Tuple[str, str]] = {}
         # ThreadPoolExecutor with 4 workers for background tool execution
         self._executor = ThreadPoolExecutor(
             max_workers=4,
             thread_name_prefix="async_tool"
         )
     
-    def register(self, instance_name: str, tool_call: Callable[[], str], function_id: Optional[str] = None) -> BackgroundToolEntry:
+    def register(self, instance_name: str, tool_call: Callable[[], str], function_id: Optional[str] = None, child_instance_name: Optional[str] = None) -> BackgroundToolEntry:
         """Register a background tool for execution.
         
         Creates a BackgroundToolEntry, adds it to the pending list, and submits
@@ -86,6 +89,8 @@ class AsyncToolRegistry:
             instance_name: The agent instance name owning this tool call.
             tool_call: Callable that executes the tool (no args, returns str).
             function_id: The LLM's tool_call_id for this async call (optional).
+            child_instance_name: Name of the child agent being run asynchronously (optional).
+                                 Used to track parent-child relationship for dismissal wakeup.
             
         Returns:
             BackgroundToolEntry tracking this tool's execution.
@@ -97,6 +102,9 @@ class AsyncToolRegistry:
                 function_id=function_id
             )
             self._pending.setdefault(instance_name, []).append(entry)
+            # Track child->parent mapping for dismissal wakeup support
+            if child_instance_name and function_id:
+                self._child_to_parent[child_instance_name] = (instance_name, function_id)
             # Submit to executor outside lock to avoid holding lock during execution
             future = self._executor.submit(self._execute, entry)
             # Store the future on the entry so it can be cancelled later (Fix TODO #41)
@@ -197,8 +205,32 @@ class AsyncToolRegistry:
                         pass  # Future cancel is best-effort
             # Remove the instance's pending list entirely
             self._pending.pop(instance_name, None)
+            # Also clean up child->parent mappings for this parent
+            self._child_to_parent = {
+                child: (p, fid) for child, (p, fid) in self._child_to_parent.items()
+                if p != instance_name
+            }
             return cancelled
     
+    def get_parent_for_child(self, child_instance_name: str) -> Optional[Tuple[str, str]]:
+        """Get the parent instance name and function_id waiting for a specific child.
+        
+        Used to wake up a SLEEPING parent when its async child is dismissed.
+        
+        Args:
+            child_instance_name: The child agent instance name.
+            
+        Returns:
+            Tuple of (parent_instance_name, function_id) if found, None otherwise.
+        """
+        with self._lock:
+            return self._child_to_parent.get(child_instance_name)
+    
+    def remove_child_mapping(self, child_instance_name: str):
+        """Remove the child->parent mapping for a dismissed/completed child."""
+        with self._lock:
+            self._child_to_parent.pop(child_instance_name, None)
+
     def shutdown(self, wait: bool = True):
         """Shutdown the executor.
         
