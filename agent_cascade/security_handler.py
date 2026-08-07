@@ -140,8 +140,8 @@ class SecurityAdvisorHandler:
         # Resolve the true caller from the approval (the agent that requested the tool).
         # Fall back to session name if missing or not in pool. This fixes deadlock where
         # Security always inherited slot 0 instead of the caller's endpoint.
-        caller_agent = ap.get('agent_name') or instance_name
-        if self.agent_pool and self.agent_pool.get_instance(caller_agent) is None:
+        caller_agent = ap.get('agent_name')
+        if not caller_agent or (self.agent_pool and self.agent_pool.get_instance(caller_agent) is None):
             caller_agent = instance_name
 
         # Duplicate check guard — prevent overlapping checks for the same request
@@ -265,6 +265,8 @@ class SecurityAdvisorHandler:
 
                 # Create engine and instance INSIDE the lock (prevents lifecycle collisions)
                 engine = ExecutionEngine(self.agent_pool)
+                # caller=caller_agent makes Security inherit the true caller's endpoint chain
+                # instead of slot 0, preventing deadlock when the caller holds a slot.
                 sec_instance = engine._create_system_agent(
                     agent_class='Security',
                     instance_name=sec_state_key,
@@ -316,13 +318,13 @@ class SecurityAdvisorHandler:
                 sec_warning_timer.start()
 
             # ── Slot bypass for Security advisor ───────────────────────────
-            caller_name_sec = caller_agent
-            caller_inst_sec = self.agent_pool.get_instance(caller_name_sec) if caller_name_sec else None
+            caller_inst_sec = self.agent_pool.get_instance(caller_agent) if caller_agent else None
 
             sec_instance._skip_slot_acquire = True
+            holds_slot = getattr(caller_inst_sec, "_slot_release", None) is not None if caller_inst_sec else False
             logger.debug(
                 f"[SECURITY_SLOT_BYPASS] Skipping slot acquire for Security - "
-                f"caller={caller_name_sec}, caller_holds_slot={(getattr(caller_inst_sec, '_slot_release', None) is not None) if caller_inst_sec else False}"
+                f"caller={caller_agent}, caller_holds_slot={holds_slot}"
             )
 
             # Fix 4 — Defensive fallback: ensure semaphore exists before using it
