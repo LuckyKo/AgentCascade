@@ -1012,14 +1012,9 @@ function saveSettings(sendToServer) {
   // Log API POST Dump toggle (frontend-only, not in backend pool_settings)
   if ($('#setting-log-api-post')) s['log-api-post'] = $('#setting-log-api-post').checked;
 
-  // Grep spillover toggle and char limit
-  if ($('#setting-grep-spillover')) s['grep-spillover'] = $('#setting-grep-spillover').checked;
-  if ($('#setting-grep-char-limit')) s['grep-char-limit'] = $('#setting-grep-char-limit').value;
+  // Grep settings saved via getGenerateCfg() as grep_char_limit / grep_spillover — no duplicate hyphenated keys needed here.
 
-  // Shell, code, and list_dir char limits (now number inputs)
-  if ($('#setting-shell-char-limit')) s['shell-char-limit'] = $('#setting-shell-char-limit').value;
-  if ($('#setting-code-char-limit')) s['code-char-limit'] = $('#setting-code-char-limit').value;
-  if ($('#setting-list-dir-char-limit')) s['list-dir-char-limit'] = $('#setting-list-dir-char-limit').value;
+  // Shell, code, and list_dir char limits also saved via getGenerateCfg() as underscore keys — no duplicate hyphenated keys needed.
 
   localStorage.setItem('agent-cascade-settings', JSON.stringify(s));
   
@@ -1142,27 +1137,23 @@ function loadSettings() {
     if (s['system-idle-timeout'] !== undefined) {
       $('#setting-system-idle-timeout').value = s['system-idle-timeout'];
     }
-    const grepCharLimit = s['grep-char-limit'] !== undefined ? s['grep-char-limit'] : s['grep_char_limit'];
-    if (grepCharLimit !== undefined) {
-      $('#setting-grep-char-limit').value = grepCharLimit;
+    // Grep settings: prefer underscore keys from generate_cfg, fall back to legacy hyphenated keys
+    if (s['grep_char_limit'] !== undefined || s['grep-char-limit'] !== undefined) {
+      $('#setting-grep-char-limit').value = s['grep_char_limit'] ?? s['grep-char-limit'];
     }
-    const grepSpillover = s['grep-spillover'] !== undefined ? s['grep-spillover'] : s['grep_spillover'];
-    if (grepSpillover !== undefined) {
-      $('#setting-grep-spillover').checked = grepSpillover;
+    if (s['grep_spillover'] !== undefined || s['grep-spillover'] !== undefined) {
+      $('#setting-grep-spillover').checked = !!s['grep_spillover'] ?? !!s['grep-spillover'];
     }
 
-    // Shell, code, and list_dir char limits (backward compatible: hyphenated or underscore keys)
-    const shellCharLimit = s['shell-char-limit'] !== undefined ? s['shell-char-limit'] : s['shell_char_limit'];
-    if (shellCharLimit !== undefined) {
-      $('#setting-shell-char-limit').value = shellCharLimit;
+    // Shell, code, and list_dir char limits: prefer underscore keys from generate_cfg, fall back to legacy hyphenated keys
+    if (s['shell_char_limit'] !== undefined || s['shell-char-limit'] !== undefined) {
+      $('#setting-shell-char-limit').value = s['shell_char_limit'] ?? s['shell-char-limit'];
     }
-    const codeCharLimit = s['code-char-limit'] !== undefined ? s['code-char-limit'] : s['code_char_limit'];
-    if (codeCharLimit !== undefined) {
-      $('#setting-code-char-limit').value = codeCharLimit;
+    if (s['code_char_limit'] !== undefined || s['code-char-limit'] !== undefined) {
+      $('#setting-code-char-limit').value = s['code_char_limit'] ?? s['code-char-limit'];
     }
-    const listDirCharLimit = s['list-dir-char-limit'] !== undefined ? s['list-dir-char-limit'] : s['list_dir_char_limit'];
-    if (listDirCharLimit !== undefined) {
-      $('#setting-list-dir-char-limit').value = listDirCharLimit;
+    if (s['list_dir_char_limit'] !== undefined || s['list-dir-char-limit'] !== undefined) {
+      $('#setting-list-dir-char-limit').value = s['list_dir_char_limit'] ?? s['list-dir-char-limit'];
     }
 
     if (settingImageDetail && s['setting-image-detail'] !== undefined) {
@@ -1286,6 +1277,18 @@ function loadSettings() {
     if (afkToggle && afkToggle.checked && !state.generating) {
       checkAfkAutoReply();
     }
+
+    // Clean up stale hyphenated keys (now stored via generate_cfg as underscore keys)
+    const s2 = JSON.parse(localStorage.getItem('agent-cascade-settings') || '{}');
+    for (const staleKey of ['grep-spillover', 'grep-char-limit', 'shell-char-limit', 'code-char-limit', 'list-dir-char-limit']) {
+      if (staleKey in s2) {
+        delete s2[staleKey];
+      }
+    }
+    localStorage.setItem('agent-cascade-settings', JSON.stringify(s2));
+
+    // Mark settings as loaded so beforeunload won't save HTML defaults (only after cleanup succeeds)
+    settingsLoaded = true;
   } catch (e) {
     console.error('Failed to load settings', e);
   }
@@ -1293,6 +1296,7 @@ function loadSettings() {
 
 // Auto-save settings on any change in the panel (debounced for sliders/typing)
 let _saveSettingsTimer;
+let settingsLoaded = false; // Guard: only save in beforeunload if loadSettings has run
 function debouncedSaveSettings() {
   clearTimeout(_saveSettingsTimer);
   _saveSettingsTimer = setTimeout(saveSettings, 300);
@@ -5522,7 +5526,9 @@ window.addEventListener('beforeunload', () => {
     _saveSettingsTimer = null;
   }
 
-  // Force-save current settings to localStorage (no server sync needed on unload)
+  // Only force-save if loadSettings has already run (avoids saving HTML defaults on first load + close)
+  if (!settingsLoaded) return;
+
   try {
     saveSettings(false);
   } catch (e) {
