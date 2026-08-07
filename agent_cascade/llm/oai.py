@@ -442,38 +442,21 @@ class TextChatAtOAI(BaseFnCallModel):
             response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
             #logger.debug(f"[TOOL_RECOVERY] _chat_stream _chat_complete_create END (got response iterator)")
 
-            # Streaming watchdogs: track silence and total duration to detect stuck streams
             from agent_cascade.settings import STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS
-            _stream_start = time.monotonic()
-            _first_chunk = True
-            _last_chunk_time = None
+            from agent_cascade.utils.streaming import watch_stream
 
             if delta_stream:
                 # Use _iter_events() to fully drain SSE stream so connection is returned to pool
-                for sse in response._iter_events():
+                for sse in watch_stream(
+                    response._iter_events(),
+                    STREAM_MAX_SILENCE_SECONDS,
+                    STREAM_MAX_TOTAL_SECONDS,
+                    error_message_prefix="OpenAI",
+                ):
                     if sse.data == "[DONE]":
                         continue
                     chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
 
-                    # Watchdog: check for silence and total timeout on each received chunk
-                    _now = time.monotonic()
-                    # Silence check only after first chunk; slow reasoning models may take >120s to produce first token
-                    if not _first_chunk and _last_chunk_time is not None:
-                        if (_now - _last_chunk_time) > STREAM_MAX_SILENCE_SECONDS:
-                            raise ModelServiceError(
-                                f"stream_stalled: no data for {STREAM_MAX_SILENCE_SECONDS:.0f}s "
-                                f"(silence={_now - _last_chunk_time:.1f}s, total={_now - _stream_start:.1f}s)"
-                            )
-                    # Total timeout applies from stream start regardless of first chunk timing
-                    if (_now - _stream_start) > STREAM_MAX_TOTAL_SECONDS:
-                        raise ModelServiceError(
-                            f"stream_stalled: exceeded total limit of {STREAM_MAX_TOTAL_SECONDS:.0f}s "
-                            f"(total={_now - _stream_start:.1f}s)"
-                        )
-                    if _first_chunk:
-                        logger.debug(f"[TOOL_RECOVERY] _chat_stream FIRST CHUNK RECEIVED model={request_model}")
-                        _first_chunk = False
-                    _last_chunk_time = _now
                     # Update local model info if returned by the server (e.g. LM Studio)
                     if hasattr(chunk, 'model') and chunk.model:
                         if chunk.model != self.model:
@@ -490,35 +473,19 @@ class TextChatAtOAI(BaseFnCallModel):
                 full_response = ''
                 full_reasoning_content = ''
                 full_tool_calls = []
-                _first_chunk = True
-                _last_chunk_time = None
                 last_usage = None  # Track most recent usage; may arrive in a chunk without choices
                 _usage_emitted = False
                 # Use _iter_events() to fully drain SSE stream so connection is returned to pool
-                for sse in response._iter_events():
+                for sse in watch_stream(
+                    response._iter_events(),
+                    STREAM_MAX_SILENCE_SECONDS,
+                    STREAM_MAX_TOTAL_SECONDS,
+                    error_message_prefix="OpenAI",
+                ):
                     if sse.data == "[DONE]":
                         continue
                     chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
 
-                    # Watchdog: check for silence and total timeout on each received chunk
-                    _now = time.monotonic()
-                    # Silence check only after first chunk; slow reasoning models may take >120s to produce first token
-                    if not _first_chunk and _last_chunk_time is not None:
-                        if (_now - _last_chunk_time) > STREAM_MAX_SILENCE_SECONDS:
-                            raise ModelServiceError(
-                                f"stream_stalled: no data for {STREAM_MAX_SILENCE_SECONDS:.0f}s "
-                                f"(silence={_now - _last_chunk_time:.1f}s, total={_now - _stream_start:.1f}s)"
-                            )
-                    # Total timeout applies from stream start regardless of first chunk timing
-                    if (_now - _stream_start) > STREAM_MAX_TOTAL_SECONDS:
-                        raise ModelServiceError(
-                            f"stream_stalled: exceeded total limit of {STREAM_MAX_TOTAL_SECONDS:.0f}s "
-                            f"(total={_now - _stream_start:.1f}s)"
-                        )
-                    if _first_chunk:
-                        # logger.debug(f"[TOOL_RECOVERY] _chat_stream FIRST CHUNK RECEIVED model={request_model}")
-                        _first_chunk = False
-                    _last_chunk_time = _now
                     # Update local model info if returned by the server
                     if hasattr(chunk, 'model') and chunk.model:
                         if chunk.model != self.model:
@@ -642,6 +609,9 @@ class TextChatAtOAI(BaseFnCallModel):
         except OpenAIError as ex:
             code = str(getattr(ex, 'code', None) or getattr(ex, 'status_code', None) or '')
             raise ModelServiceError(exception=ex, code=code if code else None)
+        except RuntimeError as ex:
+            # Catch watch_stream timeouts and wrap as ModelServiceError for retry logic
+            raise ModelServiceError(exception=ex)
         except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException,
                 ConnectionResetError, OSError) as ex:
             # Catch non-OpenAI network/transport errors so they are wrapped
