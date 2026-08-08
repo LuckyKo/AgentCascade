@@ -15,6 +15,7 @@ import json
 import os
 import re
 import random
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1289,12 +1290,15 @@ class ExecutionEngine:
                 # check/force, loop detection
                 # logger.debug(f"[PRE_LLM_CHECK] Checking
                 # stop/halt/async/compression for {inst_name}")
-                if self._pre_llm_checks(instance, messages, llm_messages, response, turns_available):
+                # Wrap turns_available in a mutable container so _pre_llm_checks can decrement it
+                # when a "real cycle" occurs (rollback, compression, async injection).
+                _turns = [turns_available]
+                if self._pre_llm_checks(instance, messages, llm_messages, response, _turns):
                     logger.debug(f"[PRE_LLM_CHECK] Condition met, continuing loop")
                     yield response
-                    # ── Fix TODO
                     if self._check_stop_conditions(instance):
                         break
+                    turns_available = _turns[0]  # Sync back after possible decrement
                     continue
 
                 # Turn limit warnings (50%, 90%, and final turn) - one-time
@@ -2112,13 +2116,16 @@ class ExecutionEngine:
 
     def _pre_llm_checks(
         self, instance: AgentInstance, messages: List[Message],
-        llm_messages: List[Message], response: List[Message], turns_available: int
+        llm_messages: List[Message], response: List[Message],
+        turns_wrapper: List[int],  # mutable wrapper around turns_available
     ) -> bool:
         """Phase 2: Stop/halt checks, async injection, compression check, loop detection.
 
         Returns True if processing should continue to next iteration (yield + continue).
         Handles: stop/halt guard, async message drain, forced compression with rebuild,
         and loop detection (inline rollback + hint if found).
+        When a "real cycle" occurs (rollback, compression, async message injection),
+        decrements turns_wrapper[0] so max_turns acts as a backstop.
         """
         inst_name = instance.instance_name
 
@@ -2129,6 +2136,7 @@ class ExecutionEngine:
 
         # 2. Async message injection
         if self._inject_async_messages(instance, messages, llm_messages, response):
+            turns_wrapper[0] -= 1  # R2: async injection is a real cycle
             return True  # Yield and continue loop to process new messages
 
         # 3. Rollback command check (delegated to compression_handler)
@@ -2136,6 +2144,7 @@ class ExecutionEngine:
         # feedback bug)
         if self.compression_handler.handle_rollback_command(instance, messages, llm_messages, response):
             logger.debug(f"[PRE_LLM] Rollback command handled for {inst_name}")
+            turns_wrapper[0] -= 1  # R3: user rollback command is a real cycle
             return True  # Command handled — yield and continue
 
         # 4. Compress command check (Phase 4.2: delegated to
@@ -2144,11 +2153,13 @@ class ExecutionEngine:
         # feedback bug)
         if self.compression_handler.handle_compress_command(instance, messages, llm_messages, response):
             logger.debug(f"[PRE_LLM] Compress command handled for {inst_name}")
+            turns_wrapper[0] -= 1  # R4: user compress command is a real cycle
             return True  # Command handled — yield and continue
 
         # 5. Compression trigger (pass response for notification feedback)
         if self._check_and_trigger_compression(instance, messages, llm_messages, response):
             logger.debug(f"[PRE_LLM] Compression triggered for {inst_name}")
+            turns_wrapper[0] -= 1  # R5: forced compression is a real cycle
             return True  # Compression triggered — yield and continue
 
         # 6. Loop detection (with post-compression cooldown)
@@ -2169,9 +2180,26 @@ class ExecutionEngine:
                     f"pop_count={pop_count}, messages={len(messages)}"
                 )
 
-                # ── Inline rollback + hint (no exception, no retry loop)
-                # ──────
-                # Track rollback count to prevent infinite recovery loops
+                # ── Respect auto_rollback_on_loop toggle ──────────────────────
+                if not self.pool.settings.auto_rollback_on_loop:
+                    logger.info(
+                        f"[LOOP_DETECTED_NO_ROLLBACK] {inst_name}: loop detected "
+                        f"(pattern={reason}) but auto_rollback_on_loop=False. "
+                        f"Continuing to LLM call."
+                    )
+                    # Telemetry for observability
+                    if (tel := self._telemetry()) is not None:
+                        try:
+                            tel.record_loop_detected(
+                                inst_name, reason=reason, auto_rolled_back=False, pop_count=pop_count,
+                            )
+                        except Exception:
+                            pass
+                    # Return False → proceed to LLM call with current context.
+                    # No turn consumed here; normal turn decrement at line 1343 applies.
+                    return False
+
+                # ── Inline rollback + hint (only when toggle is True) ─────────
                 rollbacks = getattr(instance, '_loop_rollback_count', 0) + 1
                 instance._loop_rollback_count = rollbacks
 
@@ -2180,7 +2208,36 @@ class ExecutionEngine:
                     messages, llm_messages, response,
                 )
 
-                if rollbacks >= 3:
+                # ── Enforce configured max_auto_rollbacks limit ───────────────
+                max_rb = self.pool.settings.max_auto_rollbacks
+                if max_rb == -1:
+                    effective_limit = sys.maxsize  # unlimited; max_turns still backstops
+                else:
+                    effective_limit = max_rb
+
+                if rollbacks > effective_limit:
+                    logger.warning(
+                        f"Loop recovery for {inst_name}: exceeded configured limit "
+                        f"(rolled back {rollbacks} times, max={max_rb}). Terminating."
+                    )
+                    # Append clear failure message for caller visibility
+                    fail_msg = Message(
+                        role=USER,
+                        content=(
+                            f"[SYSTEM]: Loop recovery failed — the agent exceeded the maximum "
+                            f"allowed loop recoveries ({max_rb if max_rb != -1 else 'unlimited'}). "
+                            f"The detected pattern was: {reason}. Please adjust your prompt or task."
+                        ),
+                    )
+                    self._append_and_log(instance, fail_msg)
+                    # Terminate this instance (and its children). Use set_global_stopped=False
+                    # so other agents are unaffected.
+                    self.pool.terminate_instance(inst_name, set_global_stopped=False)
+                    # Turn consumed for this rollback cycle
+                    turns_wrapper[0] -= 1
+                    return True  # Caller will break on _check_stop_conditions next iteration
+                elif rollbacks >= min(3, effective_limit):
+                    # Keep existing warning at ≥3rd rollback if we haven't hit the limit yet
                     logger.warning(
                         f"Loop recovery for {inst_name}: rolled back "
                         f"{rollbacks} times without success. Continuing."
@@ -2195,6 +2252,8 @@ class ExecutionEngine:
                     except Exception:
                         pass
 
+                # Turn consumed for this rollback cycle (Change 2 integration)
+                turns_wrapper[0] -= 1  # R6: loop rollback is a real cycle
                 return True  # Continue loop with fresh state
         else:
             # Clear the cooldown flag now that we've skipped loop detection

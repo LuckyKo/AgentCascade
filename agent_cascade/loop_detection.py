@@ -30,11 +30,11 @@ _FEATURE_TEXT_LIMIT = 3000
 _HASH_DIGITS = 8
 
 class LoopDetectedError(Exception):
-    """Raised when a repetitive loop is detected in agent turns.
+    """DEPRECATED (2026-08): No longer raised by the main codebase.
 
-    Kept for backward compatibility with existing tests. No longer raised
-    by the main codebase — loop detection is now handled inline inside
-    engine.run().
+    Raised when a repetitive loop is detected in agent turns. Kept for backward
+    compatibility with existing tests and external consumers. Loop detection is
+    now handled inline inside ExecutionEngine._pre_llm_checks().
     """
     def __init__(self, reason, agent_name=None, pop_count=None, turn_pop_count=0, resp_snapshot=None):
         self.reason = reason

@@ -458,10 +458,17 @@ def _handle_max_turns(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> 
 
 @register_config_handler('max_auto_rollbacks')
 def _handle_max_auto_rollbacks(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
-    """Update maximum automatic rollback attempts on detected loops."""
+    """Update maximum automatic rollback attempts on detected loops.
+
+    -1 means unlimited (∞); all other negatives clamp to 0; positives clamp to [0, 10].
+    """
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = int(ui_cfg.get('max_auto_rollbacks', 3))
-        agent_pool.settings.max_auto_rollbacks = max(0, min(val, 10))
+        if val == -1:
+            agent_pool.settings.max_auto_rollbacks = -1
+        else:
+            # Clamp all other values to [0, 10]
+            agent_pool.settings.max_auto_rollbacks = max(0, min(val, 10))
 
 
 @register_config_handler('auto_rollback_on_loop')

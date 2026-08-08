@@ -417,7 +417,11 @@ def run_agent_in_pool_with_recovery(
     max_auto_retries: int = 3,
     auto_rollback_enabled: bool = True,
 ) -> Iterator[List[Message]]:
-    """Run an agent with automatic loop detection recovery.
+    """DEPRECATED (2026-08): Inline loop detection in ExecutionEngine._pre_llm_checks
+    handles rollback directly. LoopDetectedError is never raised; this retry wrapper
+    is dead code. Kept only for backward compatibility.
+
+    Run an agent with automatic loop detection recovery.
 
     On loop detection the wrapper performs a surgical rollback of the detected
     agent's conversation and injects a hint message before retrying. After
