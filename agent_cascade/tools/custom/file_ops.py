@@ -495,22 +495,6 @@ class ViewImage(BaseTool, PathResolutionMixin):
     #  Helper: save capture PNG to temp file                              #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _save_capture_and_return(png_bytes: bytes, text: str) -> list:
-        """Save captured PNG bytes to a temp file and return ContentItem list."""
-        from agent_cascade.llm.schema import ContentItem
-        tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='capture_view_')
-        os.close(tmp_fd)
-        with open(tmp_png_path, "wb") as f:
-            f.write(png_bytes)
-        temp_png = Path(tmp_png_path)
-        file_url = temp_png.as_uri()
-        return [
-            ContentItem(image=file_url),
-            ContentItem(text=text),
-            temp_png  # returned so caller can track for cleanup
-        ]
-
     # ------------------------------------------------------------------ #
     #  Main call()                                                        #
     # ------------------------------------------------------------------ #
@@ -554,16 +538,16 @@ class ViewImage(BaseTool, PathResolutionMixin):
                         return "ERROR: Screen capture requires a graphical display. No display server detected."
                     return f"ERROR: Screen capture failed: {msg}"
 
-                if monitor_index is not None:
-                    logger.info("Screen capture completed via __screen_capture:%d directive", monitor_index)
-                    result = self._save_capture_and_return(png_bytes, f"Screen capture completed for monitor {monitor_index}.")
-                else:
-                    logger.info("Screen capture completed via __screen_capture directive")
-                    result = self._save_capture_and_return(png_bytes, "Screen capture completed.")
-                temp_png = result[2]  # extract Path for cleanup tracking
-                return result[:2]  # return only ContentItems
+                # Save to temp file, then fall through to normal image handling (including captions)
+                tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='capture_view_')
+                os.close(tmp_fd)
+                with open(tmp_png_path, "wb") as f:
+                    f.write(png_bytes)
+                temp_png = Path(tmp_png_path)
+                logger.info("Screen capture completed via __screen_capture directive" + (f":{monitor_index}" if monitor_index is not None else ""))
+                # Fall through with the temp file path so normal image processing applies
 
-            if path.startswith("__window_capture:"):
+            elif path.startswith("__window_capture:"):
                 pid_str = path[len("__window_capture:"):]
                 try:
                     pid = int(pid_str)
@@ -588,21 +572,29 @@ class ViewImage(BaseTool, PathResolutionMixin):
                     return f"ERROR: {msg}"
                 except Exception as e:
                     return f"ERROR: Window capture for PID {pid} failed: {e}"
+
+                # Save to temp file, then fall through to normal image handling (including captions)
+                tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='capture_view_')
+                os.close(tmp_fd)
+                with open(tmp_png_path, "wb") as f:
+                    f.write(png_bytes)
+                temp_png = Path(tmp_png_path)
                 logger.info("Window capture completed via __window_capture:%d directive", pid)
-                result = self._save_capture_and_return(png_bytes, f"Window capture completed for PID {pid}.")
-                temp_png = result[2]  # extract Path for cleanup tracking
-                return result[:2]  # return only ContentItems
+                # Fall through with the temp file path so normal image processing applies
 
             try:
-                resolved = self._resolve_path(path)
+                resolved = self._resolve_path(path) if not temp_png else None
             except ValueError as e:
                 return f"ERROR: {str(e)}"
 
-            if not resolved.exists():
+            if temp_png:
+                # Captured image — use the temp file directly
+                resolved = temp_png
+            elif not resolved.exists():
                 return f"ERROR: Image not found: {path}"
 
-            # Validate it's actually an image file
-            if resolved.suffix.lower() not in ViewImage.IMAGE_EXTENSIONS:
+            # Validate it's actually an image file (skip for captured PNGs)
+            if not temp_png and resolved.suffix.lower() not in ViewImage.IMAGE_EXTENSIONS:
                 return f"ERROR: '{path}' is not a recognized image file (supported: {', '.join(e.lstrip('.').upper() for e in sorted(ViewImage.IMAGE_EXTENSIONS))})"
 
             # SVG files need conversion to PNG (PIL/Pillow can't read SVG natively)

@@ -36,8 +36,8 @@ class TestViewImageDirectiveRouting:
         return tool
 
     @pytest.mark.parametrize("directive,capture_func,expected_pid,text_contains", [
-        ("__screen_capture", "capture_screen", None, "Screen capture completed"),
-        ("__window_capture:1234", "capture_window_by_pid", 1234, "Window capture completed for PID 1234"),
+        ("__screen_capture", "capture_screen", None, "Viewing image: __screen_capture"),
+        ("__window_capture:1234", "capture_window_by_pid", 1234, "Viewing image: __window_capture:1234"),
     ])
     def test_capture_directive_parsed(self, view_image_tool, directive, capture_func, expected_pid, text_contains):
         """Mock capture functions, verify correct routing for screen and window capture directives."""
@@ -64,9 +64,9 @@ class TestViewImageDirectiveRouting:
                         assert text_contains in result[1].text
 
     @pytest.mark.parametrize("directive,expected_monitor_index,text_contains", [
-        ("__screen_capture:0", 0, "Screen capture completed for monitor 0"),
-        ("__screen_capture:1", 1, "Screen capture completed for monitor 1"),
-        ("__screen_capture:5", 5, "Screen capture completed for monitor 5"),
+        ("__screen_capture:0", 0, "Viewing image: __screen_capture:0"),
+        ("__screen_capture:1", 1, "Viewing image: __screen_capture:1"),
+        ("__screen_capture:5", 5, "Viewing image: __screen_capture:5"),
     ])
     def test_per_monitor_capture_directive(self, view_image_tool, directive, expected_monitor_index, text_contains):
         """Mock capture_screen(), verify correct routing for __screen_capture:N directives."""
