@@ -553,7 +553,7 @@ def format_as_multimodal_message(
                 else:
                     raise TypeError
 
-        if add_upload_info and files and (msg.role in (SYSTEM, USER)):
+        if add_upload_info and files and (msg.role in (SYSTEM, USER, ASSISTANT, FUNCTION)):
             if lang == 'auto':
                 has_zh = has_chinese_chars(msg)
             else:
@@ -587,21 +587,14 @@ def format_as_multimodal_message(
                         upload = f'（上传了 {upload}）'
                     else:
                         upload = f'(Uploaded {upload}) '
-                elif msg.role in (ASSISTANT, FUNCTION):
-                    if has_zh:
-                        upload = f'{upload}'
-                    else:
-                        upload = f'{upload}'
                 # Check and avoid adding duplicate upload info
                 upload_info_already_added = False
                 for item in content:
                     if item.text and (upload in item.text):
                         upload_info_already_added = True
-                if not upload_info_already_added:
-                    if msg.role == ASSISTANT or msg.role == FUNCTION:
-                        content = [ContentItem(text=upload)]
-                    else:
-                        content = [ContentItem(text=upload)] + content
+                if not upload_info_already_added and upload:
+                    # Preserve existing multimodal items; prepend upload info
+                    content.insert(0, ContentItem(text=upload))
     else:
         raise TypeError
     msg = Message(role=msg.role,
