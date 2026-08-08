@@ -4124,6 +4124,14 @@ class ExecutionEngine:
                         om = getattr(self.pool, 'operation_manager', None)
                         base_dir = getattr(om, 'base_dir', Path('.')) if om else Path('.')
 
+                        # Use agent-specific endpoint config for vision capability check.
+                        # self.pool.llm_cfg lacks model_type, causing ContentItem lists
+                        # to be stringified instead of properly rendered as images.
+                        if self.pool.api_router:
+                            agent_llm_cfg = self.pool.api_router.get_llm_config(instance.agent_class)
+                        else:
+                            agent_llm_cfg = self.pool.llm_cfg or {}
+
                         tool_result = self.compression_handler._assemble_tool_result(
                             instance,
                             tool_result,
@@ -4131,7 +4139,7 @@ class ExecutionEngine:
                             instance_name=inst_name,
                             tool_name=tool_name,
                             base_dir=base_dir,
-                            llm_cfg=self.pool.llm_cfg or {},
+                            llm_cfg=agent_llm_cfg,
                         )
                     except Exception as e:
                         # Log the failure (was previously silent), then fall back
