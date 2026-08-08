@@ -500,7 +500,7 @@ class TestEffectiveConcurrencyBasedDecision:
         original_get_eff = router_with_endpoints.get_effective_concurrency
         calls_to_child_class = []
 
-        def tracking_get_eff(agent_type):
+        def tracking_get_eff(agent_type, caller_agent_type=None):
             result = original_get_eff(agent_type)
             calls_to_child_class.append(agent_type)
             return result

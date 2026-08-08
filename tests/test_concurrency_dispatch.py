@@ -77,7 +77,7 @@ def _make_mock_pool(
     def get_effective_concurrency(agent_class):
         return agent_concurrency.get(agent_class, -1) if agent_concurrency else -1
 
-    def get_agent_slot_info(agent_class):
+    def get_agent_slot_info(agent_class, caller_agent_type=None):
         """Return slot info dict matching real api_router.get_agent_slot_info()."""
         concurrency = get_effective_concurrency(agent_class)
         if concurrency == -1:

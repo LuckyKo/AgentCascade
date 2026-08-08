@@ -78,6 +78,7 @@ logs/
 
 # API configs (contain secrets)
 config/api_endpoints.json
+config/api_endpoints.json.bak
 config/secrets.json
 
 # Pool settings (runtime-generated, user-specific)
