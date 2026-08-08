@@ -36,3 +36,5 @@ soundfile                  # Audio file I/O (for voice tools)
 
 # ── Image Processing ────────────────────────────────────────
 pillow                     # Image manipulation
+mss>=9.0.0                 # Cross-platform screen capture (fallback + Linux window capture)
+pywin32>=306; sys_platform == 'win32'  # Windows window capture via PrintWindow API

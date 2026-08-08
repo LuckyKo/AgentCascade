@@ -497,11 +497,80 @@ class ViewImage(BaseTool, PathResolutionMixin):
 
     def call(self, params: str, **kwargs):
         from agent_cascade.llm.schema import ContentItem
+        import logging
+
+        logger = logging.getLogger(__name__)
         params = self._verify_json_format_args(params)
         path = params['path']
 
+        # Check SCREEN_CAPTURE_ENABLED flag (Fix #1)
+        if os.environ.get('SCREEN_CAPTURE_ENABLED', 'True').lower() not in ('true', '1', 'yes'):
+            return "ERROR: Screen capture is disabled by operator configuration."
+
         temp_png: Path | None = None  # track temp file for cleanup
         try:
+            # Check for screen capture directives BEFORE _resolve_path() to avoid path validation errors
+            if path == "__screen_capture":
+                from agent_cascade.tools.custom import screen_capture
+                try:
+                    png_bytes = screen_capture.capture_screen()
+                except ImportError as e:
+                    return f"ERROR: {str(e)}"
+                except Exception as e:
+                    msg = str(e)
+                    if "display" in msg.lower():
+                        return "ERROR: Screen capture requires a graphical display. No display server detected."
+                    return f"ERROR: Screen capture failed: {msg}"
+                logger.info("Screen capture completed via __screen_capture directive")
+                tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='capture_view_')
+                os.close(tmp_fd)
+                with open(tmp_png_path, "wb") as f:
+                    f.write(png_bytes)
+                temp_png = Path(tmp_png_path)
+                file_url = temp_png.as_uri()
+                return [
+                    ContentItem(image=file_url),
+                    ContentItem(text="Screen capture completed.")
+                ]
+
+            if path.startswith("__window_capture:"):
+                from agent_cascade.tools.custom import screen_capture
+                pid_str = path[len("__window_capture:"):]
+                try:
+                    pid = int(pid_str)
+                    if pid <= 0:
+                        raise ValueError("PID must be positive")
+                except ValueError:
+                    return "ERROR: Invalid window capture format. Use __window_capture:PID where PID is a positive integer."
+
+                try:
+                    png_bytes = screen_capture.capture_window_by_pid(pid)
+                except ImportError as e:
+                    return f"ERROR: {str(e)}"
+                except ValueError as e:
+                    msg = str(e)
+                    if "No visible window found" in msg or "No window found" in msg:
+                        return f"ERROR: {msg}. The process may not have a UI or may be hidden."
+                    return f"ERROR: {msg}"
+                except RuntimeError as e:
+                    msg = str(e)
+                    if "display" in msg.lower():
+                        return "ERROR: Screen capture requires a graphical display. No display server detected."
+                    return f"ERROR: {msg}"
+                except Exception as e:
+                    return f"ERROR: Window capture for PID {pid} failed: {e}"
+                logger.info("Window capture completed via __window_capture:%d directive", pid)
+                tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='capture_view_')
+                os.close(tmp_fd)
+                with open(tmp_png_path, "wb") as f:
+                    f.write(png_bytes)
+                temp_png = Path(tmp_png_path)
+                file_url = temp_png.as_uri()
+                return [
+                    ContentItem(image=file_url),
+                    ContentItem(text=f"Window capture completed for PID {pid}.")
+                ]
+
             try:
                 resolved = self._resolve_path(path)
             except ValueError as e:

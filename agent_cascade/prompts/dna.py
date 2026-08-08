@@ -165,9 +165,9 @@ TOOL_METADATA = {
         }
     },
     'view_image': {
-        'description': 'View an image file in the workspace. Returns the image for the model to see. Supports PNG, JPG, GIF, WEBP, SVG (auto-converted to PNG), and BMP formats.',
+        'description': 'View an image file in the workspace or capture screen/window content. Returns the image for the model to see. Supports PNG, JPG, GIF, WEBP, SVG (auto-converted to PNG), and BMP formats. Special paths: "__screen_capture" captures the entire screen; "__window_capture:PID" captures a specific window by process ID.',
         'parameters': {
-            'path': 'Path to the image file, absolute or relative to workspace directory'
+            'path': 'Path to the image file, absolute or relative to workspace directory. Special directives: "__screen_capture" for full screen capture; "__window_capture:PID" to capture a specific window by its process ID.'
         }
     },
     'write_file': {
