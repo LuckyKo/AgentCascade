@@ -531,18 +531,35 @@ class ViewImage(BaseTool, PathResolutionMixin):
         temp_png: Path | None = None  # track temp file for cleanup
         try:
             # Check for screen capture directives BEFORE _resolve_path() to avoid path validation errors
-            if path == "__screen_capture":
+            if path == "__screen_capture" or path.startswith("__screen_capture:"):
+                monitor_index = None
+                if path.startswith("__screen_capture:"):
+                    idx_str = path[len("__screen_capture:"):]
+                    try:
+                        monitor_index = int(idx_str)
+                        if monitor_index < 0:
+                            raise ValueError("Monitor index must be non-negative")
+                    except ValueError:
+                        return "ERROR: Invalid screen capture format. Use __screen_capture or __screen_capture:N where N is a non-negative integer."
+
                 try:
-                    png_bytes = screen_capture.capture_screen()
+                    png_bytes = screen_capture.capture_screen(monitor_index=monitor_index)
                 except ImportError as e:
+                    return f"ERROR: {str(e)}"
+                except ValueError as e:
                     return f"ERROR: {str(e)}"
                 except Exception as e:
                     msg = str(e)
                     if "display" in msg.lower():
                         return "ERROR: Screen capture requires a graphical display. No display server detected."
                     return f"ERROR: Screen capture failed: {msg}"
-                logger.info("Screen capture completed via __screen_capture directive")
-                result = self._save_capture_and_return(png_bytes, "Screen capture completed.")
+
+                if monitor_index is not None:
+                    logger.info("Screen capture completed via __screen_capture:%d directive", monitor_index)
+                    result = self._save_capture_and_return(png_bytes, f"Screen capture completed for monitor {monitor_index}.")
+                else:
+                    logger.info("Screen capture completed via __screen_capture directive")
+                    result = self._save_capture_and_return(png_bytes, "Screen capture completed.")
                 temp_png = result[2]  # extract Path for cleanup tracking
                 return result[:2]  # return only ContentItems
 

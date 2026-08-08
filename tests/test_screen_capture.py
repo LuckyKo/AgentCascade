@@ -63,6 +63,45 @@ class TestViewImageDirectiveRouting:
                         assert 'image' in result[0].__dict__
                         assert text_contains in result[1].text
 
+    @pytest.mark.parametrize("directive,expected_monitor_index,text_contains", [
+        ("__screen_capture:0", 0, "Screen capture completed for monitor 0"),
+        ("__screen_capture:1", 1, "Screen capture completed for monitor 1"),
+        ("__screen_capture:5", 5, "Screen capture completed for monitor 5"),
+    ])
+    def test_per_monitor_capture_directive(self, view_image_tool, directive, expected_monitor_index, text_contains):
+        """Mock capture_screen(), verify correct routing for __screen_capture:N directives."""
+        mock_png_bytes = b'\x89PNG\x0d\x0a...'
+        mock_temp_path = 'C:/tmp/test_capture.png'
+
+        with patch(
+            'agent_cascade.tools.custom.screen_capture.capture_screen',
+            return_value=mock_png_bytes
+        ) as mock_capture:
+            with patch('tempfile.mkstemp', return_value=(42, mock_temp_path)):
+                with patch('os.close'):
+                    with patch('builtins.open', mock_open()):
+                        result = view_image_tool.call(json.dumps({'path': directive}))
+
+                        mock_capture.assert_called_once_with(monitor_index=expected_monitor_index)
+                        assert isinstance(result, list)
+                        assert len(result) == 2
+                        assert 'image' in result[0].__dict__
+                        assert text_contains in result[1].text
+
+    def test_invalid_screen_capture_monitor_index(self, view_image_tool):
+        """Paths like '__screen_capture:-1', '__screen_capture:abc', '__screen_capture:' return error messages."""
+        invalid_paths = [
+            '__screen_capture:-1',
+            '__screen_capture:abc',
+            '__screen_capture:',
+            '__screen_capture:3.14',
+        ]
+
+        for path in invalid_paths:
+            result = view_image_tool.call(json.dumps({'path': path}))
+            assert isinstance(result, str)
+            assert 'Invalid screen capture format' in result
+
     def test_invalid_pid_rejected(self, view_image_tool):
         """Paths like '__window_capture:abc', '__window_capture:-5', '__window_capture:' return error messages."""
         invalid_paths = [
@@ -168,11 +207,11 @@ class TestScreenCaptureModule:
         mock_mss_instance = MagicMock()
         mock_mss_context = MagicMock(__enter__=MagicMock(return_value=mock_mss_instance),
                                      __exit__=MagicMock(return_value=False))
-        mock_mss_module = MagicMock(mss=mock_mss_context)
 
         mock_screenshot = MagicMock()
         mock_screenshot.size = (1920, 1080)
         mock_screenshot.bgra = b'\x00' * (1920 * 1080 * 4)
+        # Monitor 0 is the combined virtual screen
         mock_mss_instance.monitors = [{'left': 0, 'top': 0, 'width': 1920, 'height': 1080}]
         mock_mss_instance.grab.return_value = mock_screenshot
 
@@ -184,7 +223,7 @@ class TestScreenCaptureModule:
         # Patch ImageGrab to fail, mss module in sys.modules, and Image.frombytes/BytesIO
         with patch('PIL.ImageGrab', create=True) as mock_grab_actual:
             mock_grab_actual.grab.side_effect = OSError("No display found")
-            with patch.dict(sys.modules, {'mss': mock_mss_module}):
+            with patch.dict(sys.modules, {'mss': MagicMock(mss=MagicMock(return_value=mock_mss_context))}):
                 with patch.object(screen_capture.Image, 'frombytes', return_value=mock_image_frombytes):
                     with patch.object(screen_capture.io, 'BytesIO', return_value=mock_buf):
                         result = screen_capture.capture_screen()
@@ -192,8 +231,68 @@ class TestScreenCaptureModule:
                         # ImageGrab was attempted first
                         mock_grab_actual.grab.assert_called_once_with(all_screens=True)
                         # MSS fallback was used — mss.mss() should have been called
-                        mock_mss_module.mss.assert_called_once()
+                        import mss as mocked_mss
+                        mocked_mss.mss.assert_called_once()
                         assert isinstance(result, bytes)
+
+    def test_capture_screen_per_monitor_skips_imagegrab(self):
+        """When monitor_index is set, ImageGrab is skipped and mss is used directly."""
+        from agent_cascade.tools.custom import screen_capture
+
+        # Set up mss mock with multiple monitors
+        mock_mss_instance = MagicMock()
+        mock_mss_context = MagicMock(__enter__=MagicMock(return_value=mock_mss_instance),
+                                     __exit__=MagicMock(return_value=False))
+
+        mock_screenshot = MagicMock()
+        mock_screenshot.size = (1920, 1080)
+        mock_screenshot.bgra = b'\x00' * (1920 * 1080 * 4)
+        # Monitor 0=combined, 1=first physical, 2=second physical
+        mock_mss_instance.monitors = [
+            {'left': 0, 'top': 0, 'width': 3840, 'height': 1080},   # 0: combined
+            {'left': 0, 'top': 0, 'width': 1920, 'height': 1080},   # 1: left monitor
+            {'left': 1920, 'top': 0, 'width': 1920, 'height': 1080} # 2: right monitor
+        ]
+        mock_mss_instance.grab.return_value = mock_screenshot
+
+        mock_image_frombytes = MagicMock()
+        mock_buf = MagicMock()
+        mock_image_frombytes.save = MagicMock()
+        mock_buf.getvalue.return_value = b'\x89PNG'
+
+        with patch.dict(sys.modules, {'mss': MagicMock(mss=MagicMock(return_value=mock_mss_context))}):
+            with patch.object(screen_capture.Image, 'frombytes', return_value=mock_image_frombytes):
+                with patch.object(screen_capture.io, 'BytesIO', return_value=mock_buf):
+                    # Test monitor index 1 (first physical monitor)
+                    result = screen_capture.capture_screen(monitor_index=1)
+
+                    # ImageGrab should NOT be called when monitor_index is specified
+                    import mss as mocked_mss
+                    mocked_mss.mss.assert_called_once()
+                    # Should grab monitor[1], not monitor[0]
+                    mock_mss_instance.grab.assert_called_once_with(mock_mss_instance.monitors[1])
+                    assert isinstance(result, bytes)
+
+    def test_capture_screen_per_monitor_out_of_range(self):
+        """capture_screen with invalid monitor_index raises ValueError."""
+        from agent_cascade.tools.custom import screen_capture
+
+        mock_mss_instance = MagicMock()
+        mock_mss_context = MagicMock(__enter__=MagicMock(return_value=mock_mss_instance),
+                                     __exit__=MagicMock(return_value=False))
+        mock_mss_module = MagicMock(mss=mock_mss_context)
+
+        # Only 2 monitors available (0=combined, 1=physical)
+        mock_mss_instance.monitors = [
+            {'left': 0, 'top': 0, 'width': 1920, 'height': 1080},
+            {'left': 1920, 'top': 0, 'width': 1920, 'height': 1080}
+        ]
+
+        with patch.dict(sys.modules, {'mss': mock_mss_module}):
+            # Test out-of-range index
+            with pytest.raises(ValueError) as exc_info:
+                screen_capture.capture_screen(monitor_index=5)
+            assert "out of range" in str(exc_info.value).lower()
 
     def test_capture_window_by_pid_dispatches_windows(self):
         """On win32 platform, calls _capture_window_windows."""

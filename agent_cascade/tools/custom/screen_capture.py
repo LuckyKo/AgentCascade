@@ -18,11 +18,24 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 
-def capture_screen() -> bytes:
-    """Capture the entire screen (all monitors combined) as PNG bytes.
+def capture_screen(monitor_index: int | None = None) -> bytes:
+    """Capture the screen as PNG bytes.
 
-    Uses Pillow ImageGrab as primary (already a dependency), falls back to mss.
+    Args:
+        monitor_index: If None, captures all monitors combined (default).
+                       If set to a non-negative int, captures only that monitor.
+
+    Returns:
+        PNG bytes of the captured screen/monitor.
+
+    Raises:
+        ValueError: If monitor_index is out of range.
+        ImportError: If neither ImageGrab nor mss is available.
     """
+    # When a specific monitor is requested, skip ImageGrab (doesn't support per-monitor) and use mss directly
+    if monitor_index is not None:
+        return _capture_screen_mss(monitor_index)
+
     # Try Pillow ImageGrab first — zero new dependencies
     try:
         from PIL import ImageGrab
@@ -35,7 +48,24 @@ def capture_screen() -> bytes:
         # Fall back to mss
         pass
 
-    # Fallback: use mss
+    # Fallback: use mss with monitor 0 (combined virtual screen)
+    return _capture_screen_mss(0)
+
+
+def _capture_screen_mss(monitor_index: int) -> bytes:
+    """Capture the screen using mss.
+
+    Args:
+        monitor_index: Index into sct.monitors list. 0 is combined virtual screen,
+                       1+ are individual monitors.
+
+    Returns:
+        PNG bytes of the captured screen/monitor.
+
+    Raises:
+        ValueError: If monitor_index is out of range.
+        ImportError: If mss is not installed.
+    """
     try:
         import mss
     except ImportError:
@@ -44,8 +74,13 @@ def capture_screen() -> bytes:
         )
 
     with mss.mss() as sct:
-        # Monitor 0 is the combined virtual screen (all monitors).
-        monitor = sct.monitors[0]
+        monitors = sct.monitors
+        if monitor_index < 0 or monitor_index >= len(monitors):
+            raise ValueError(
+                f"Monitor index {monitor_index} is out of range. "
+                f"Available monitors: 0 (combined), {', '.join(str(i) for i in range(1, len(monitors)))}"
+            )
+        monitor = monitors[monitor_index]
         screenshot = sct.grab(monitor)
         img = Image.frombytes('RGB', screenshot.size, screenshot.bgra, 'raw', 'BGRX')
         buf = io.BytesIO()
