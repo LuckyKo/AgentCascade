@@ -31,7 +31,7 @@ from examples.llm_riddles import test as llm_riddles  # noqa
 from examples.llm_vl_mix_text import test as llm_vl_mix_text  # noqa
 from examples.multi_agent_router import test as multi_agent_router  # noqa
 from examples.qwen2vl_assistant_tooluse import test as qwen2vl_assistant_tooluse  # noqa
-from examples.qwen2vl_assistant_video import test as test_video  # noqa
+from examples.qwen2vl_assistant_video import test as _qwen2vl_assistant_video_test  # noqa
 from examples.react_data_analysis import test as react_data_analysis  # noqa
 from examples.visual_storytelling import test as visual_storytelling  # noqa
 
@@ -162,4 +162,4 @@ def test_qwen2vl_assistant_tooluse(local_vl_llm_cfg):
 @pytest.mark.skip_if_no_local
 @pytest.mark.skipif(True, reason="Requires DashScope setup with video model support; unrelated UnboundLocalError in qwenvl_dashscope.py line 58")
 def test_video_understanding(local_vl_llm_cfg):
-    test_video(vl_llm_cfg=local_vl_llm_cfg)
+    _qwen2vl_assistant_video_test(vl_llm_cfg=local_vl_llm_cfg)
