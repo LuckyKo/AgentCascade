@@ -131,7 +131,10 @@ class CodeMap(BaseTool):
             return self._map_generic(content, 'python') # Fallback
 
     def _map_generic(self, content: str, lang: str) -> str:
-        result = [f"# {lang.capitalize()} Code Map (Heuristic)\n"]
+        if lang == 'markdown':
+            result = ["# Markdown Code Map\n(ATX headings only; fenced code blocks ignored)\n"]
+        else:
+            result = [f"# {lang.capitalize()} Code Map (Heuristic)\n"]
         lines = content.splitlines()
 
         # Regex patterns for common languages
@@ -176,14 +179,49 @@ class CodeMap(BaseTool):
             'css': [
                 (r'^@media\s+([^\{]+)', 'media'),
                 (r'^([.#\w][\w\.-]+)\s*\{?', 'rule'),
+            ],
+            'markdown': [
+                (r'^\s*(\#{1,6})\s+(.+)', 'heading'),
             ]
         }
 
         active_patterns = patterns.get(lang, patterns.get('javascript')) # Use JS as fallback for many C-like
 
+        # Markdown-specific state tracking (CommonMark-style fence state machine)
+        in_code_block = False
+        fence_char = None  # '`' or '~'
+        fence_len = 0      # length of opening fence
+
         # Simple line-by-line regex matching
         # Note: This is naive and will match inside strings/comments unless we use Pygments
         for i, line in enumerate(lines, 1):
+            # Handle fenced code blocks for markdown
+            if lang == 'markdown':
+                stripped = line.strip()
+                fence_match = re.match(r'^(`{3,}|~{3,})\s*(.*)$', stripped)
+
+                if fence_match:
+                    fc = fence_match.group(1)[0]  # '`' or '~'
+                    fl = len(fence_match.group(1))
+
+                    if not in_code_block:
+                        # Opening a new code block
+                        in_code_block = True
+                        fence_char = fc
+                        fence_len = fl
+                    elif fc == fence_char and fl >= fence_len:
+                        # Closing the existing code block
+                        in_code_block = False
+
+                    continue  # Don't treat fence lines as headings
+
+                if in_code_block:
+                    continue  # Skip content inside code blocks
+
+                # Skip indented code blocks (4+ spaces or tab per CommonMark)
+                if line.startswith('    ') or line.startswith('\t'):
+                    continue
+
             for pattern, p_type in active_patterns:
                 match = re.search(pattern, line)
                 if match:
@@ -201,14 +239,22 @@ class CodeMap(BaseTool):
                     elif p_type == 'id':
                         result.append(f"L{i}: element with id: {name}")
                     elif p_type == 'heading':
-                        # Use group(1) for level and group(2) for text
-                        h_text = match.group(2).strip()
-                        result.append(f"L{i}: <h{name}> {h_text}")
+                        if lang == 'markdown':
+                            level = len(match.group(1))
+                            h_text = re.sub(r'\s*#+\s*$', '', match.group(2).strip())
+                            result.append(f"L{i}: H{level} {h_text}")
+                        else:
+                            # HTML: group(1) is level digit, group(2) is text
+                            level = match.group(1)
+                            h_text = match.group(2).strip()
+                            result.append(f"L{i}: H{level} {h_text}")
                     elif p_type == 'media':
                         result.append(f"L{i}: @media {name}")
                     elif p_type == 'rule':
                         result.append(f"L{i}: css rule: {name}")
 
         if len(result) == 1:
+            if lang == 'markdown':
+                return "No headings found in Markdown file."
             return f"No recognizable structures found for {lang}."
         return "\n".join(result)
