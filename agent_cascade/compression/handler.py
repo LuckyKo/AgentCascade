@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from agent_cascade.execution_engine import ExecutionEngine
 
 from agent_cascade.log import logger
-from agent_cascade.llm.schema import Message, USER
+from agent_cascade.llm.schema import ContentItem, Message, USER
 from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.settings import (
     COMPRESSION_DEFAULT_FRACTION,
@@ -79,6 +79,41 @@ class CompressionHandler:
     def set_engine(self, engine: 'ExecutionEngine') -> None:
         """Set engine reference after ExecutionEngine construction completes."""
         self._engine = engine
+
+    # ── Image Captioning Helper (for tool results with uncaptioned images) ──
+
+    def _caption_tool_result_images(self, items: List[ContentItem]) -> None:
+        """Generate captions for uncaptioned image ContentItems in-place.
+
+        Called from _assemble_tool_result before stringifying a ContentItem list
+        (e.g., view_image output). Wraps items temporarily in a Message so we can
+        reuse the existing api_router.caption_images() infrastructure.
+
+        Errors are swallowed — captioning is best-effort and must never break tool execution.
+        Uncaptioned images will fall back to plain markdown links without captions.
+
+        Args:
+            items: List of ContentItem objects (modified in-place).
+        """
+        try:
+            api_router = getattr(self.pool, 'api_router', None)
+            if not api_router or not callable(getattr(api_router, 'caption_images', None)):
+                return  # captioning infrastructure unavailable
+
+            # Determine agent type for endpoint resolution; fall back to orchestrator's default
+            agent_type = 'generalist'
+            try:
+                engine = self.engine  # may raise if not yet set
+                agent_type = getattr(engine, '_default_agent_class', 'generalist')
+            except (RuntimeError, AttributeError):
+                pass
+
+            # Wrap items in a temporary Message so caption_images can process them
+            temp_msg = Message(role=USER, content=list(items))
+            api_router.caption_images([temp_msg], agent_type=agent_type)
+            # caption_images modifies in-place; items are now captioned if possible
+        except Exception as e:
+            logger.debug(f"[CompressionHandler] Image captioning failed (non-fatal): {e}")
 
     # ── Validation → Recovery Helper (Fix 5: deduplicated pattern) ────────────
 
@@ -331,6 +366,31 @@ class CompressionHandler:
         # Step 1: Ensure we have a string; handle None explicitly
         if raw_tool_result is None:
             raw_tool_result = ""
+        elif isinstance(raw_tool_result, list):
+            # Attempt to caption uncaptioned images before stringification.
+            # This ensures the model receives accurate text descriptions of images
+            # instead of just markdown links it can't interpret.
+            self._caption_tool_result_images(raw_tool_result)
+
+            # Convert ContentItem lists (e.g., from view_image) to markdown format
+            # so embedded images survive assembly instead of being destroyed by str()
+            parts: List[str] = []
+            for item in raw_tool_result:
+                if isinstance(item, ContentItem):
+                    if item.image:
+                        cap = getattr(item, 'caption', None)
+                        if cap:
+                            parts.append(f"![image]({item.image})\nCaption: {cap}")
+                        else:
+                            parts.append(f"![image]({item.image})")
+                    elif item.text:
+                        parts.append(item.text)
+                elif isinstance(item, str):
+                    parts.append(item)
+                else:
+                    # Fallback for unexpected types in the list
+                    parts.append(str(item))
+            raw_tool_result = '\n'.join(parts) if parts else ""
         elif not isinstance(raw_tool_result, str):
             raw_tool_result = str(raw_tool_result)
 

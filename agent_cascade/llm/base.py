@@ -688,15 +688,26 @@ class BaseChatModel(ABC):
                 # OpenAI spec: tool messages need 'tool_call_id', not 'id'
                 tool_call_id = msg.get('extra', {}).get('function_id', '1')
                 content = msg.get('content', '')
-                # Content might be a list of ContentItems — flatten to string
                 if isinstance(content, list):
-                    parts = []
-                    for item in content:
-                        if hasattr(item, 'text') and item.text:
-                            parts.append(item.text)
-                        elif isinstance(item, dict) and item.get('text'):
-                            parts.append(item['text'])
-                    content = ''.join(parts)
+                    # Check if there are any multimodal items (image_url, video_url, input_audio).
+                    # If so, preserve the full list so vision models receive actual image data.
+                    has_multimodal = any(
+                        (hasattr(item, 'type') and item.type in ('image_url', 'video_url', 'input_audio'))
+                        or (isinstance(item, dict) and item.get('type') in ('image_url', 'video_url', 'input_audio'))
+                        for item in content
+                    )
+                    if has_multimodal:
+                        # Already in proper format from convert_messages_to_dicts; pass through.
+                        pass
+                    else:
+                        # Text-only list — flatten to string (safe for non-vision models).
+                        parts = []
+                        for item in content:
+                            if hasattr(item, 'text') and item.text:
+                                parts.append(item.text)
+                            elif isinstance(item, dict) and item.get('text'):
+                                parts.append(item['text'])
+                        content = ''.join(parts)
                 new_messages.append({
                     'role': 'tool',
                     'tool_call_id': tool_call_id,
