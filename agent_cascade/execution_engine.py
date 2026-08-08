@@ -2236,8 +2236,8 @@ class ExecutionEngine:
                     # Turn consumed for this rollback cycle
                     turns_wrapper[0] -= 1
                     return True  # Caller will break on _check_stop_conditions next iteration
-                elif rollbacks >= min(3, effective_limit):
-                    # Keep existing warning at ≥3rd rollback if we haven't hit the limit yet
+                elif rollbacks >= 3 and rollbacks < effective_limit:
+                    # Warn at ≥3rd rollback only if we still have headroom before limit
                     logger.warning(
                         f"Loop recovery for {inst_name}: rolled back "
                         f"{rollbacks} times without success. Continuing."
