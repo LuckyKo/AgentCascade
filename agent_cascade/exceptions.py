@@ -34,3 +34,26 @@ class ContextWindowExceeded(Exception):
     an endpoint with larger context window rather than retrying the same one.
     """
     pass
+
+
+class FallbackCompressionRequired(Exception):
+    """Raised by APIRouter when a context-exceeded error occurs during fallback.
+    
+    Signals to the ExecutionEngine that it should iteratively compress the agent's
+    conversation until it fits an available endpoint, before retrying.
+    
+    Attributes:
+        instance_name: The agent instance name that needs compression
+        agent_type: The agent type (e.g., 'coder', 'researcher')
+        failed_endpoint: Name/model of the endpoint that rejected due to context size
+        original_error: The underlying ContextWindowExceeded or API error
+    """
+    def __init__(self, instance_name: str, agent_type: str, failed_endpoint: str, original_error: Exception = None):
+        self.instance_name = instance_name
+        self.agent_type = agent_type
+        self.failed_endpoint = failed_endpoint
+        self.original_error = original_error
+        super().__init__(
+            f"Context window exceeded on fallback endpoint '{failed_endpoint}' for "
+            f"'{instance_name}' ({agent_type}). Iterative compression required before retry."
+        )

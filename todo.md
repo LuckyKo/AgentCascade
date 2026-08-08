@@ -91,7 +91,7 @@ Timed out after 30s waiting for endpoint slot on https://opencode.ai/zen/v1. Cur
 - [x] KV slot save/load gets sent unique ID for every call/return on the same agent. Fixed: state_ops.py now uses instance_name as stable label instead of timestamped variant (line 139), autoloader overwrites same file on each save → one .bin per agent per model. Legacy timestamped files cleaned up automatically via repurposed _cleanup_old_states(). Added defensive path traversal check. No llama-loader changes needed — _sanitize_label() already handles this. See plans/kv_slot_label_fix_plan.md.
 - [x] some settings like `grep spillover` reset when i close and reopen the chrome tab. they persist on refresh/hard refresh though. Fixed: race condition in beforeunload handler saving HTML defaults before loadSettings ran, plus dual-key pollution (hyphenated vs underscore). Added settingsLoaded guard, removed duplicate key writes from saveSettings, prefer underscore keys in loadSettings with hyphenated fallback, cleanup stale keys. See .agent_lessons/settings-reset-on-tab-close-fix.md
 - [ ] make code_map also parse md files (where the basic tags are at)
-- [ ] fallback to a lower context window limit API fails to properly trigger compression.
+- [x] fallback to a lower context window limit API fails to properly trigger compression. Fixed: removed silent truncation in llm/base.py (raises ContextWindowExceeded immediately), added FallbackCompressionRequired exception raised from api_router.call_with_fallback() on context-exceeded for non-Compressor agents, execution_engine handles it with smart slice-first iterative compression (up to 5 rounds, progressive aggressiveness). Cursor advances before raising so retry uses different endpoint. See investigation_report_fallback_compression_gap.md, plans/fallback_compression_fix_plan.md.
 
 # Errors to investigate:
 
@@ -123,11 +123,3 @@ Timed out after 30s waiting for endpoint slot on https://opencode.ai/zen/v1. Cur
 2026-08-07 12:40:55,385 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.29.236.001 I slot print_timing: id  0 | task 1 | prompt processing, n_tokens =   9274, progress = 0.36, t =   9.06 s / 1023.86 tokens per second
 2026-08-07 12:40:57,413 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.31.264.074 I slot print_timing: id  0 | task 1 | prompt processing, n_tokens =  11322, progress = 0.45, t =  11.09 s / 1021.30 tokens per second
 
-# FIXED (2026-08-08): Security agent sends wrong model name to inherited endpoint
-
-Root cause: oai.py mutated self.model during streaming but left original_model stale ('whatever_is_on'). Next call hit broken dynamic branch and sent placeholder instead of endpoint model.
-Fix: Changed model selection in _chat_stream/_chat_no_stream to only use original_model when generate_cfg lacks explicit model key. Endpoint-provided models now always honored.
-See: logs/investigation_report_security_llm_config_inheritance.md, .agent_lessons/oai-model-mutation-sends-stale-model
-
-Old error log (for reference):
-2026-08-08 01:55:46,368 - WARNING - [APIRouter] Endpoint 'deepseek-v4-flash-free' @ https://opencode.ai/zen/v1 attempt 1/2: Error code: 401 - {'type': 'error', 'error': {'type': 'ModelError', 'message': 'Model whatever_is_on is not supported'}}

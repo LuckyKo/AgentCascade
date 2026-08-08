@@ -331,46 +331,25 @@ class BaseChatModel(ABC):
         if max_input_tokens > 0:
             agent_name = generate_cfg.pop('agent_name', 'Unknown')
 
-            # Overflow guard: token estimates are imperfect, so allow a small tolerance
-            # margin. Within tolerance: truncate as safety net. Beyond tolerance: raise
-            # ContextWindowExceeded instead of silently dropping messages (prevents
-            # divergence between LLM payload and instance.conversation).
+            # Overflow guard: if estimated tokens exceed limit, raise ContextWindowExceeded
+            # immediately so upstream can compress. No silent truncation — compression preserves
+            # meaning; truncation just drops content.
             try:
                 estimated_tokens = sum(get_message_stats(m)['tokens'] for m in messages)
             except Exception:
-                estimated_tokens = None  # If counting fails, fall through to truncation as backstop
+                # If counting fails, log warning and continue — let the API handle it.
+                logger.warning(
+                    f"[{agent_name}] Token estimation failed, skipping overflow check. "
+                    f"API may reject with context-exceeded error."
+                )
+                estimated_tokens = None
 
             if estimated_tokens is not None and estimated_tokens > max_input_tokens:
-                # Truncate first as the primary defense against context overflow.
-                messages = _truncate_input_messages_roughly(
-                    messages=messages,
-                    max_tokens=max_input_tokens,
-                    agent_name=agent_name,
-                    on_token_count_cb=on_token_count_cb,
-                )
-
-                # Re-check after truncation: only raise if truncation failed to reduce tokens.
-                # If truncation did its job (tokens reduced), allow it through even if still
-                # slightly over — system message overhead is unavoidable with tiny limits.
-                try:
-                    truncated_tokens = sum(get_message_stats(m)['tokens'] for m in messages)
-                except Exception:
-                    truncated_tokens = None  # If recount fails, let it through — truncation did its best
-
-                if truncated_tokens is not None and truncated_tokens >= estimated_tokens:
-                    # Truncation didn't help at all — something is wrong, raise.
-                    raise ContextWindowExceeded(
-                        f"Context window exceeded after truncation [{agent_name}]: "
-                        f"~{truncated_tokens} tokens vs {max_input_tokens} limit. "
-                        f"Truncation failed to reduce payload. Compression should have prevented this."
-                    )
-            else:
-                # No overflow detected, still run truncation as a safety net for edge cases.
-                messages = _truncate_input_messages_roughly(
-                    messages=messages,
-                    max_tokens=max_input_tokens,
-                    agent_name=agent_name,
-                    on_token_count_cb=on_token_count_cb,
+                # Raise immediately — no truncation. Upstream (execution engine) will compress.
+                raise ContextWindowExceeded(
+                    f"Context window exceeded [{agent_name}]: "
+                    f"~{estimated_tokens} tokens vs {max_input_tokens} limit. "
+                    f"Compression required before retry."
                 )
 
         if functions:

@@ -1443,12 +1443,26 @@ class APIRouter:
                     # Advance the per-instance cursor so engine-level retries skip past this endpoint.
                     _inst_name_for_cursor = kwargs.get('agent_instance_name')
                     if _inst_name_for_cursor and self._is_context_exceeded_error(e):
-                        new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
-                        logger.warning(
-                            f"[APIRouter] Context window exceeded for '{_inst_name_for_cursor}' "
-                            f"on endpoint '{endpoint_name}'. Cursor advanced to {new_pos}. "
-                            f"Next engine-level retry will use a different endpoint."
-                        )
+                        # For Compressor agents: just advance cursor (they handle their own compression)
+                        if agent_type.lower().startswith('compressor'):
+                            new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
+                            logger.warning(
+                                f"[APIRouter] Context window exceeded for Compressor '{_inst_name_for_cursor}' "
+                                f"on endpoint '{endpoint_name}'. Cursor advanced to {new_pos}."
+                            )
+                        else:
+                            # Advance cursor NOW so retry uses a different (hopefully larger) endpoint after compression.
+                            new_pos = self.advance_instance_endpoint(_inst_name_for_cursor)
+                            logger.warning(
+                                f"[APIRouter] Context window exceeded for '{_inst_name_for_cursor}' "
+                                f"on endpoint '{endpoint_name}'. Triggering iterative fallback compression. "
+                                f"Cursor advanced to {new_pos}."
+                            )
+                            # Lazy import to avoid potential circular imports
+                            from agent_cascade.exceptions import FallbackCompressionRequired
+                            raise FallbackCompressionRequired(
+                                _inst_name_for_cursor, agent_type, endpoint_name, original_error=e
+                            ) from e
 
                     # NOTE: CharacterRunDetected/MaxTokenExceeded exceptions are raised during
                     # generator iteration inside execution_engine.py, after this method has returned.
