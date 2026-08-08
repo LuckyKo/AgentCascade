@@ -994,3 +994,214 @@ class TestFeatureExtraction:
         
         result = detect_loop(msgs)
         assert result is not None, "Should detect pattern with identical long content"
+
+
+# ══════════════════════════════════════════════
+# PART 8 — Max Auto-Rollbacks Enforcement Tests
+# ══════════════════════════════════════════════
+
+class TestMaxAutoRollbacksEnforcement:
+    """Test max_auto_rollbacks enforcement and auto_rollback_on_loop toggle in _pre_llm_checks."""
+
+    def _make_fake_instance(self, name: str = "test_agent", rollback_count: int = 0):
+        """Create a minimal fake AgentInstance for testing _pre_llm_checks.
+
+        Uses a plain class instead of MagicMock to avoid auto-created attributes
+        interfering with getattr(instance, '_suppress_loop_detection_next_turn', False).
+        """
+        class FakeInstance:
+            def __init__(self, instance_name, rollback_count):
+                self.instance_name = instance_name
+                if rollback_count >= 0:
+                    self._loop_rollback_count = rollback_count
+
+        return FakeInstance(name, rollback_count)
+
+    def _make_fake_pool(self, max_auto_rollbacks=3, auto_rollback_on_loop=True):
+        """Create a minimal mock AgentPool with settings."""
+        pool = MagicMock()
+        pool.settings = MagicMock()
+        pool.settings.max_auto_rollbacks = max_auto_rollbacks
+        pool.settings.auto_rollback_on_loop = auto_rollback_on_loop
+        return pool
+
+    def _make_engine(self, pool):
+        """Create an ExecutionEngine with a mocked pool and dependencies."""
+        from agent_cascade.execution_engine import ExecutionEngine
+
+        engine = MagicMock(spec=ExecutionEngine)
+        engine.pool = pool
+        engine.compression_handler = MagicMock()
+        engine.compression_handler.handle_rollback_command.return_value = False
+        engine.compression_handler.handle_compress_command.return_value = False
+
+        # Bind real _pre_llm_checks method to the mock
+        engine._pre_llm_checks = ExecutionEngine._pre_llm_checks.__get__(engine, ExecutionEngine)
+        engine._check_stop_conditions = MagicMock(return_value=False)
+        engine._inject_async_messages = MagicMock(return_value=False)
+        engine._check_and_trigger_compression = MagicMock(return_value=False)
+        engine._telemetry = MagicMock(return_value=None)
+        engine._append_and_log = MagicMock()
+        engine._inline_rollback_and_hint = MagicMock()
+
+        return engine
+
+    def test_rollback_limit_enforced(self):
+        """max_auto_rollbacks=2: termination after 3rd loop detection (exceeds limit)."""
+        pool = self._make_fake_pool(max_auto_rollbacks=2, auto_rollback_on_loop=True)
+        engine = self._make_engine(pool)
+
+        # Build a repeating pattern that detect_loop will flag
+        msgs = [
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+        ]
+
+        inst = self._make_fake_instance("test_agent")
+
+        # First loop detection: rollback_count goes to 1, within limit
+        turns = [50]
+        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+            result = engine._pre_llm_checks(inst, msgs, [], [], turns)
+
+        assert result is True, "Should continue loop after rollback"
+        assert inst._loop_rollback_count == 1
+        engine._inline_rollback_and_hint.assert_called_once()
+        pool.terminate_instance.assert_not_called()
+
+        # Second detection: rollback_count goes to 2, still within limit
+        engine.reset_mock()
+        turns = [50]
+        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+            result = engine._pre_llm_checks(inst, msgs, [], [], turns)
+
+        assert result is True
+        assert inst._loop_rollback_count == 2
+        pool.terminate_instance.assert_not_called()
+
+        # Third detection: rollback_count goes to 3, exceeds limit (3 > 2) → terminate
+        engine.reset_mock()
+        turns = [50]
+        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+            result = engine._pre_llm_checks(inst, msgs, [], [], turns)
+
+        assert result is True, "Should return True so caller breaks on stop_conditions"
+        assert inst._loop_rollback_count == 3
+        pool.terminate_instance.assert_called_once()
+        call_kwargs = pool.terminate_instance.call_args
+        assert call_kwargs.kwargs.get("set_global_stopped") is False
+
+    def test_rollback_limit_unlimited(self):
+        """max_auto_rollbacks=-1: many loop detections, no termination by rollback limit."""
+        pool = self._make_fake_pool(max_auto_rollbacks=-1, auto_rollback_on_loop=True)
+        engine = self._make_engine(pool)
+
+        msgs = [
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+        ]
+
+        inst = self._make_fake_instance("test_agent")
+
+        # Simulate 10 loop detections — none should terminate
+        for i in range(10):
+            engine.reset_mock()
+            turns = [50]
+            with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+                result = engine._pre_llm_checks(inst, msgs, [], [], turns)
+
+            assert result is True, f"Detection {i+1}: should continue loop"
+            pool.terminate_instance.assert_not_called(), \
+                f"Detection {i+1}: should not terminate with unlimited rollbacks"
+
+        assert inst._loop_rollback_count == 10
+
+    def test_rollback_limit_zero(self):
+        """max_auto_rollbacks=0: first loop detection → rollback then terminate (1 > 0)."""
+        pool = self._make_fake_pool(max_auto_rollbacks=0, auto_rollback_on_loop=True)
+        engine = self._make_engine(pool)
+
+        msgs = [
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+        ]
+
+        inst = self._make_fake_instance("test_agent")
+
+        turns = [50]
+        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+            result = engine._pre_llm_checks(inst, msgs, [], [], turns)
+
+        # Rollback is performed (count becomes 1), then limit check: 1 > 0 → terminate
+        assert result is True
+        assert inst._loop_rollback_count == 1
+        engine._inline_rollback_and_hint.assert_called_once()
+        pool.terminate_instance.assert_called_once()
+
+    def test_auto_rollback_disabled_no_rollback(self):
+        """auto_rollback_on_loop=False: loop detected → no rollback, returns False to proceed to LLM."""
+        pool = self._make_fake_pool(max_auto_rollbacks=5, auto_rollback_on_loop=False)
+        engine = self._make_engine(pool)
+
+        msgs = [
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+        ]
+
+        inst = self._make_fake_instance("test_agent")
+
+        turns = [50]
+        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+            result = engine._pre_llm_checks(inst, msgs, [], [], turns)
+
+        # Returns False → caller proceeds to LLM call with current context
+        assert result is False, "Should proceed to LLM when auto_rollback_on_loop=False"
+        engine._inline_rollback_and_hint.assert_not_called()
+        pool.terminate_instance.assert_not_called()
+        # No turn consumed in _pre_llm_checks; normal decrement at caller applies
+        assert turns[0] == 50
+
+    def test_turn_consumed_on_loop_rollback(self):
+        """Verify turns_wrapper[0] decremented after loop rollback."""
+        pool = self._make_fake_pool(max_auto_rollbacks=5, auto_rollback_on_loop=True)
+        engine = self._make_engine(pool)
+
+        msgs = [
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+            _msg(USER, "q"), _msg(ASSISTANT, "a"),
+        ]
+
+        inst = self._make_fake_instance("test_agent")
+
+        turns = [42]
+        with patch('agent_cascade.execution_engine._canonical_detect_loop', return_value=("repeat", 2)):
+            engine._pre_llm_checks(inst, msgs, [], [], turns)
+
+        assert turns[0] == 41, "Turn should be consumed on loop rollback"
+
+    def test_config_handler_accepts_minus_one(self):
+        """Config handler preserves -1 as unlimited."""
+        from agent_cascade.config_handlers import _handle_max_auto_rollbacks
+
+        pool = self._make_fake_pool(max_auto_rollbacks=3)
+        ui_cfg = {"max_auto_rollbacks": -1}
+
+        _handle_max_auto_rollbacks(ui_cfg, pool, [])
+
+        assert pool.settings.max_auto_rollbacks == -1, "-1 should be preserved as unlimited"
+
+    def test_config_handler_clamps_other_negatives_to_zero(self):
+        """Config handler clamps other negative values (e.g., -5) to 0."""
+        from agent_cascade.config_handlers import _handle_max_auto_rollbacks
+
+        pool = self._make_fake_pool(max_auto_rollbacks=3)
+        ui_cfg = {"max_auto_rollbacks": -5}
+
+        _handle_max_auto_rollbacks(ui_cfg, pool, [])
+
+        assert pool.settings.max_auto_rollbacks == 0, "-5 should clamp to 0 (only -1 is special)"
