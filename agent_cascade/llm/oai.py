@@ -393,12 +393,12 @@ class TextChatAtOAI(BaseFnCallModel):
     ) -> Iterator[List[Message]]:
         messages = self.convert_messages_to_dicts(messages)
         # logger.debug(f'LLM Input generate_cfg: \n{generate_cfg}')
-        local_model = generate_cfg.pop('model', self.model)
+        local_model = generate_cfg.pop('model', None)
+        if local_model is None:
+            local_model = self.original_model if self.dynamic_model else self.model
         request_model = local_model
-        if self.dynamic_model and local_model == self.model:
-            # If the user didn't specify a model, and we are using our internal state,
-            # send the generic 'original_model' name to allow the server to use whatever is loaded.
-            request_model = self.original_model
+        if self.dynamic_model:
+            logger.debug(f"LLM model selection: self.model={self.model!r}, original_model={self.original_model!r}, local_model={local_model!r}, request_model={request_model!r}")
 
         log_api_post = generate_cfg.pop('log_api_post', False)
 
@@ -458,6 +458,8 @@ class TextChatAtOAI(BaseFnCallModel):
                     chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
 
                     # Update local model info if returned by the server (e.g. LM Studio)
+                    # NOTE: self.model is updated here for context window detection, but original_model
+                    # is intentionally NOT updated — the dynamic branch logic no longer depends on it.
                     if hasattr(chunk, 'model') and chunk.model:
                         if chunk.model != self.model:
                             self.model = chunk.model
@@ -487,6 +489,8 @@ class TextChatAtOAI(BaseFnCallModel):
                     chunk = response._client._process_response_data(data=sse.json(), cast_to=response._cast_to, response=response.response)
 
                     # Update local model info if returned by the server
+                    # NOTE: self.model is updated here for context window detection, but original_model
+                    # is intentionally NOT updated — the dynamic branch logic no longer depends on it.
                     if hasattr(chunk, 'model') and chunk.model:
                         if chunk.model != self.model:
                             self.model = chunk.model
@@ -631,10 +635,12 @@ class TextChatAtOAI(BaseFnCallModel):
         generate_cfg: dict,
     ) -> List[Message]:
         messages = self.convert_messages_to_dicts(messages)
-        local_model = generate_cfg.pop('model', self.model)
+        local_model = generate_cfg.pop('model', None)
+        if local_model is None:
+            local_model = self.original_model if self.dynamic_model else self.model
         request_model = local_model
-        if self.dynamic_model and local_model == self.model:
-            request_model = self.original_model
+        if self.dynamic_model:
+            logger.debug(f"LLM model selection: self.model={self.model!r}, original_model={self.original_model!r}, local_model={local_model!r}, request_model={request_model!r}")
 
         log_api_post = generate_cfg.pop('log_api_post', False)
 
@@ -677,6 +683,8 @@ class TextChatAtOAI(BaseFnCallModel):
             response = self._chat_complete_create(model=request_model, messages=messages, stream=False, **generate_cfg)
 
             # Update local model info if returned by the server
+            # NOTE: self.model is updated here for context window detection, but original_model
+            # is intentionally NOT updated — the dynamic branch logic no longer depends on it.
             if hasattr(response, 'model') and response.model:
                 if response.model != self.model:
                     self.model = response.model

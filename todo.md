@@ -123,56 +123,11 @@ Timed out after 30s waiting for endpoint slot on https://opencode.ai/zen/v1. Cur
 2026-08-07 12:40:55,385 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.29.236.001 I slot print_timing: id  0 | task 1 | prompt processing, n_tokens =   9274, progress = 0.36, t =   9.06 s / 1023.86 tokens per second
 2026-08-07 12:40:57,413 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.31.264.074 I slot print_timing: id  0 | task 1 | prompt processing, n_tokens =  11322, progress = 0.45, t =  11.09 s / 1021.30 tokens per second
 
-# Security agent doesnt properly inherit the caller's endpoint? (deepseek-v4-flash-free called with model `whatever_is_on`)
+# FIXED (2026-08-08): Security agent sends wrong model name to inherited endpoint
 
-2026-08-08 01:55:46,202 - security_handler.py - 325 - DEBUG - [SECURITY_SLOT_BYPASS] Skipping slot acquire for Security - caller=settings_investigator, caller_holds_slot=True
-2026-08-08 01:55:46,202 - execution_engine.py - 1068 - DEBUG - engine.run() ENTRY - instance=Security_op_c996e073
-2026-08-08 01:55:46,202 - execution_engine.py - 1148 - DEBUG - [TURN_START] Calling _setup_turn for Security_op_c996e073
-2026-08-08 01:55:46,203 - execution_engine.py - 1654 - INFO - [CACHE_REBUILD] Rebuilding working set for Security_op_c996e073 (conv_len=2)
-2026-08-08 01:55:46,203 - execution_engine.py - 1792 - DEBUG - [CACHE_REBUILD] System prompt for Security_op_c996e073 textually identical — skipping pool update
-2026-08-08 01:55:46,204 - execution_engine.py - 1183 - DEBUG - [TURN_DONE] Got messages=2, llm_messages=2
-2026-08-08 01:55:46,205 - base.py - 1068 - INFO - Agent [Security] - ALL tokens: 499, Available tokens: 144406
-2026-08-08 01:55:46,368 - log.py - 80 - WARNING - [APIRouter] Endpoint 'deepseek-v4-flash-free' @ https://opencode.ai/zen/v1 attempt 1/2: Error code: 401 - {'type': 'error', 'error': {'type': 'ModelError', 'message': 'Model whatever_is_on is not supported'}}
-Traceback: Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 442, in _chat_stream
-    response = self._chat_complete_create(model=request_model, messages=messages, stream=True, **generate_cfg)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 255, in _chat_complete_create
-    return client.chat.completions.create(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Python312\Lib\site-packages\openai\_utils\_utils.py", line 286, in wrapper
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Python312\Lib\site-packages\openai\resources\chat\completions\completions.py", line 1192, in create
-    return self._post(
-           ^^^^^^^^^^^
-  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1259, in post
-    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
-                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Python312\Lib\site-packages\openai\_base_client.py", line 1047, in request
-    raise self._make_status_error_from_response(err.response) from None
-openai.AuthenticationError: Error code: 401 - {'type': 'error', 'error': {'type': 'ModelError', 'message': 'Model whatever_is_on is not supported'}}
+Root cause: oai.py mutated self.model during streaming but left original_model stale ('whatever_is_on'). Next call hit broken dynamic branch and sent placeholder instead of endpoint model.
+Fix: Changed model selection in _chat_stream/_chat_no_stream to only use original_model when generate_cfg lacks explicit model key. Endpoint-provided models now always honored.
+See: logs/investigation_report_security_llm_config_inheritance.md, .agent_lessons/oai-model-mutation-sends-stale-model
 
-During handling of the above exception, another exception occurred:
-
-Traceback (most recent call last):
-  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1425, in call_with_fallback
-    result = execute_with_sem(current_agent_name)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\api_router.py", line 1340, in execute_with_sem
-    first_chunk = next(it)
-                  ^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 601, in _convert_messages_iterator_to_target_type
-    for messages in messages_iter:
-                    ^^^^^^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 461, in _format_and_cache
-    for o in output:
-             ^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\llm\base.py", line 585, in _postprocess_messages_iterator
-    for pre_msg in messages:
-                   ^^^^^^^^
-  File "n:\work\WD\AgentCascade\agent_cascade\llm\oai.py", line 611, in _chat_stream
-    raise ModelServiceError(exception=ex, code=code if code else None)
-agent_cascade.llm.base.ModelServiceError: Error code: 401 - {'type': 'error', 'error': {'type': 'ModelError', 'message': 'Model whatever_is_on is not supported'}}
-[APIRouter] Endpoint 'deepseek-v4-flash-free' @ https://opencode.ai/zen/v1 attempt 1/2: Error code: 401 - {'type': 'error', 'error': {'type': 'ModelError', 'message': 'Model whatever_is_on is not supported'}}
-Traceback: Traceback (most recent call last):
+Old error log (for reference):
+2026-08-08 01:55:46,368 - WARNING - [APIRouter] Endpoint 'deepseek-v4-flash-free' @ https://opencode.ai/zen/v1 attempt 1/2: Error code: 401 - {'type': 'error', 'error': {'type': 'ModelError', 'message': 'Model whatever_is_on is not supported'}}
