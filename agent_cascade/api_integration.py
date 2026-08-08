@@ -445,6 +445,10 @@ def run_agent_in_pool_with_recovery(
             yield from run_agent_in_pool(pool, instance_name)
             return
         except LoopDetectedError as e:
+            # NOTE: This branch is dead code in production — LoopDetectedError is
+            # never raised by the main codebase (loop detection handled inline in
+            # ExecutionEngine._pre_llm_checks). Kept only for backward compatibility
+            # with tests that artificially raise it. Do not rely on this path.
             target = e.agent_name or instance_name
 
             if auto_rollback_enabled:
