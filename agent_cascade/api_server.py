@@ -909,7 +909,7 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
         # Support for windows paths like n:/...
         # Sometimes file:///N:/... gets parsed as N:/...
         
-        if os.path.exists(path):
+        if os.path.isfile(path):
             return FileResponse(path)
         return JSONResponse(status_code=404, content={"message": "File not found"})
 
