@@ -4131,6 +4131,7 @@ class ExecutionEngine:
                             instance_name=inst_name,
                             tool_name=tool_name,
                             base_dir=base_dir,
+                            llm_cfg=self.pool.llm_cfg or {},
                         )
                     except Exception as e:
                         # Log the failure (was previously silent), then fall back

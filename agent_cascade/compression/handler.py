@@ -13,7 +13,7 @@ Design Pattern: Lazy Initialization (same as AgentLifecycleManager)
 import json
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional, Union
 
 if TYPE_CHECKING:
     from agent_cascade.execution_engine import ExecutionEngine
@@ -298,6 +298,66 @@ class CompressionHandler:
                 text = f"{text}\n\n[CACHE INFO]\n{block}"
         return text
 
+    # ── List-aware drain helpers for multimodal ContentItem preservation ───────
+
+    def _drain_cache_notifications_into_list(
+        self,
+        instance: 'AgentInstance',
+        items: List[ContentItem],
+        prepend: bool = False,
+    ) -> List[ContentItem]:
+        """Drain cache pool notifications into a ContentItem list as text items."""
+        with instance._compression_lock:
+            queue = instance._cache_notifications
+            notifications = list(queue)
+            instance._cache_notifications = []
+
+        if notifications:
+            block = "\n\n".join(str(n) for n in notifications)
+            text = f"[CACHE INFO]\n{block}"
+            text_item = ContentItem(text=text)
+            if prepend:
+                items.insert(0, text_item)
+            else:
+                items.append(text_item)
+        return items
+
+    def _drain_tool_warnings_into_list(
+        self,
+        instance: 'AgentInstance',
+        items: List[ContentItem],
+        prepend: bool = False,
+    ) -> List[ContentItem]:
+        """Drain tool warnings into a ContentItem list as text items."""
+        with instance._compression_lock:
+            queue = instance._tool_warnings
+            warnings = list(queue)
+            instance._tool_warnings = []
+
+        if warnings:
+            block = "\n\n".join(str(w) for w in warnings)
+            text = f"[TOOL WARNINGS]\n{block}"
+            text_item = ContentItem(text=text)
+            if prepend:
+                items.insert(0, text_item)
+            else:
+                items.append(text_item)
+        return items
+
+    def _drain_pending_into_list(
+        self,
+        instance: 'AgentInstance',
+        items: List[ContentItem],
+    ) -> List[ContentItem]:
+        """Drain pending compression notifications into a ContentItem list as text items."""
+        with instance._compression_lock:
+            pending = instance._pending_notifications
+            if pending:
+                notif_block = "\n\n".join(n for n in pending)
+                items.append(ContentItem(text=notif_block))
+                instance._pending_notifications = []
+        return items
+
     # ── Unified Tool Result Assembly ───────────────────────────────────────────
 
     def _legacy_drain_tool_result(
@@ -326,15 +386,24 @@ class CompressionHandler:
         raw_tool_result = self._drain_pending_into_tool_result(instance, raw_tool_result)
         return raw_tool_result
 
+    def _has_multimodal_items(self, items: List[Any]) -> bool:
+        """Check if a ContentItem list contains image/video/audio items."""
+        for item in items:
+            if isinstance(item, ContentItem):
+                if item.image or item.video or item.audio:
+                    return True
+        return False
+
     def _assemble_tool_result(
         self,
         instance: 'AgentInstance',
-        raw_tool_result: str,
+        raw_tool_result: Any,
         char_limit: Optional[int],
         instance_name: str,
         tool_name: str,
         base_dir: Path,
-    ) -> str:
+        llm_cfg: Optional[dict] = None,
+    ) -> Union[str, List[ContentItem]]:
         """Assemble a final tool result with consistent layout of warnings, output, and truncation.
 
         Layout (in order):
@@ -349,11 +418,13 @@ class CompressionHandler:
           - Only the tool output body is subject to character-limit truncation.
           - The truncation footer uses a single consistent format.
 
+        For vision-capable agents receiving multimodal ContentItem lists (e.g., from
+        view_image), the list is preserved as-is so images survive into Message.content
+        and get converted to base64 by qwenvl_oai.py's convert_messages_to_dicts.
+
         Args:
             instance: Agent instance holding notification queues.
-            raw_tool_result: Raw tool output string (may already contain inline markers
-                             like "[TRUNCATED]" headers from read_file, or a pre-existing
-                             truncation footer).
+            raw_tool_result: Raw tool output — string, or ContentItem list from vision tools.
             char_limit: Maximum chars for the output body before additional truncation.
                         None or -1 means no additional truncation.
             instance_name: Agent instance name.
@@ -361,19 +432,53 @@ class CompressionHandler:
             base_dir: Base directory for spillover path resolution.
 
         Returns:
-            Assembled tool result string.
+            Assembled tool result — string for text-only, or ContentItem list for vision endpoints.
         """
-        # Step 1: Ensure we have a string; handle None explicitly
-        if raw_tool_result is None:
-            raw_tool_result = ""
-        elif isinstance(raw_tool_result, list):
-            # Attempt to caption uncaptioned images before stringification.
-            # This ensures the model receives accurate text descriptions of images
-            # instead of just markdown links it can't interpret.
-            self._caption_tool_result_images(raw_tool_result)
+        # Step 1: Handle multimodal ContentItem lists for vision-capable agents
+        if isinstance(raw_tool_result, list):
+            has_multimodal = self._has_multimodal_items(raw_tool_result)
+            # Check vision capability via llm_cfg — endpoint config already defines this.
+            # Support both 'model_type' (production configs) and 'model_service_type' (legacy/tests).
+            agent_supports_vision = False
+            if llm_cfg:
+                model_type_key = llm_cfg.get('model_type') or llm_cfg.get('model_service_type', '')
+                agent_supports_vision = model_type_key in ('qwenvl_oai', 'qwenvl_dashscope', 'qwenaudio_dashscope')
 
-            # Convert ContentItem lists (e.g., from view_image) to markdown format
-            # so embedded images survive assembly instead of being destroyed by str()
+            if has_multimodal and agent_supports_vision:
+                # Preserve the ContentItem list so images survive into Message.content
+                # and get converted to base64 by qwenvl_oai.py's convert_messages_to_dicts.
+                #
+                # Design note: char_limit truncation is intentionally bypassed here because:
+                # - Truncating image/video/audio data would corrupt it (binary, not text)
+                # - Text ContentItems from vision tools (e.g., view_image captions) are small
+                # - If a future multimodal tool needs truncation, it should handle it before
+                #   returning the ContentItem list. For now, this is a known limitation.
+
+                # Check if tool already marked itself as truncated; clear the flag so it doesn't leak.
+                was_truncated = was_tool_call_truncated(instance_name, tool_name)
+                clear_truncation_state()
+
+                # Caption uncaptioned images in-place for accessibility.
+                self._caption_tool_result_images(raw_tool_result)
+
+                # Append notifications/warnings as text ContentItems instead of stringifying.
+                raw_tool_result = self._drain_cache_notifications_into_list(instance, raw_tool_result, prepend=True)
+                raw_tool_result = self._drain_tool_warnings_into_list(instance, raw_tool_result, prepend=False)
+                raw_tool_result = self._drain_pending_into_list(instance, raw_tool_result)
+
+                # If the tool set truncation flag (e.g., a future multimodal tool that does),
+                # append a truncation notice as a text ContentItem.
+                if was_truncated:
+                    raw_tool_result.append(
+                        ContentItem(text=f"\n[TRUNCATED — Character limit exceeded for {instance_name}:{tool_name}. Full output may be available in logs/spillover/]")
+                    )
+
+                return raw_tool_result
+
+            # Non-vision agent or text-only list: stringify to markdown (existing behavior)
+            # Captioning skipped here — non-vision agents can't use image data anyway,
+            # and captions are only useful when images survive as ContentItems.
+
             parts: List[str] = []
             for item in raw_tool_result:
                 if isinstance(item, ContentItem):
@@ -391,6 +496,10 @@ class CompressionHandler:
                     # Fallback for unexpected types in the list
                     parts.append(str(item))
             raw_tool_result = '\n'.join(parts) if parts else ""
+
+        # Step 1b: Ensure we have a string; handle None and other types explicitly
+        if raw_tool_result is None:
+            raw_tool_result = ""
         elif not isinstance(raw_tool_result, str):
             raw_tool_result = str(raw_tool_result)
 
