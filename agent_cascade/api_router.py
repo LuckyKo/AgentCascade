@@ -1441,7 +1441,7 @@ class APIRouter:
                     # Unlike CharacterRunDetected/MaxTokenExceeded (which occur during streaming
                     # in execution_engine), context-exceeded happens here at API call time.
                     # Advance the per-instance cursor so engine-level retries skip past this endpoint.
-                    _inst_name_for_cursor = kwargs.get('agent_instance_name')
+                    _inst_name_for_cursor = _inst_name  # Use the variable extracted at call time (kwargs.pop removed it)
                     if _inst_name_for_cursor and self._is_context_exceeded_error(e):
                         # For Compressor agents: just advance cursor (they handle their own compression)
                         if agent_type.lower().startswith('compressor'):
