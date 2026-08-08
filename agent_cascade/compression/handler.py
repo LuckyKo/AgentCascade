@@ -27,7 +27,7 @@ from agent_cascade.settings import (
     COMPRESSION_MAX_FRACTION,
 )
 from agent_cascade.utils.pool_validation import validate_message_pool
-from agent_cascade.utils.utils import msg_field
+from agent_cascade.utils.utils import is_multimodal_content, msg_field, VISION_MODEL_TYPES
 from agent_cascade.tool_utils import (
     was_tool_call_truncated,
     clear_truncation_state,
@@ -386,14 +386,6 @@ class CompressionHandler:
         raw_tool_result = self._drain_pending_into_tool_result(instance, raw_tool_result)
         return raw_tool_result
 
-    def _has_multimodal_items(self, items: List[Any]) -> bool:
-        """Check if a ContentItem list contains image/video/audio items."""
-        for item in items:
-            if isinstance(item, ContentItem):
-                if item.image or item.video or item.audio:
-                    return True
-        return False
-
     def _assemble_tool_result(
         self,
         instance: 'AgentInstance',
@@ -436,13 +428,13 @@ class CompressionHandler:
         """
         # Step 1: Handle multimodal ContentItem lists for vision-capable agents
         if isinstance(raw_tool_result, list):
-            has_multimodal = self._has_multimodal_items(raw_tool_result)
+            has_multimodal = is_multimodal_content(raw_tool_result)
             # Check vision capability via llm_cfg — endpoint config already defines this.
             # Support both 'model_type' (production configs) and 'model_service_type' (legacy/tests).
             agent_supports_vision = False
             if llm_cfg:
                 model_type_key = llm_cfg.get('model_type') or llm_cfg.get('model_service_type', '')
-                agent_supports_vision = model_type_key in ('qwenvl_oai', 'qwenvl_dashscope', 'qwenaudio_dashscope')
+                agent_supports_vision = model_type_key in VISION_MODEL_TYPES
 
             if has_multimodal and agent_supports_vision:
                 # Preserve the ContentItem list so images survive into Message.content

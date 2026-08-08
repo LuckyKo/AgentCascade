@@ -45,6 +45,35 @@ MAX_FC_ARGS_LEN = 2048
 # Default timeout for HTTP requests (seconds)
 DEFAULT_REQUEST_TIMEOUT = 30
 
+# Model types that support multimodal input (vision/audio/video).
+# Single source of truth — use instead of inline tuples/strings scattered across layers.
+VISION_MODEL_TYPES = frozenset({
+    'qwenvl_oai',
+    'qwenvl_dashscope',
+    'qwenaudio_dashscope',
+})
+
+
+def is_multimodal_content(content) -> bool:
+    """Check if content contains image/video/audio ContentItems.
+
+    Centralized multimodal check — replaces inline checks scattered across
+    compression/handler.py, llm/base.py, and other modules.
+
+    Args:
+        content: Message content — None, str, or list of ContentItem(s).
+
+    Returns:
+        True if any item has image/video/audio field set.
+    """
+    if not isinstance(content, list):
+        return False
+    for item in content:
+        if isinstance(item, ContentItem):
+            if item.image or item.video or item.audio:
+                return True
+    return False
+
 
 # ── Message Field Accessor Helpers (consolidated from execution_engine, handler, api_server) ──
 
