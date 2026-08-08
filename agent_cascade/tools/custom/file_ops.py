@@ -492,11 +492,32 @@ class ViewImage(BaseTool, PathResolutionMixin):
         return Path(tmp_png_path)
 
     # ------------------------------------------------------------------ #
+    #  Helper: save capture PNG to temp file                              #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _save_capture_and_return(png_bytes: bytes, text: str) -> list:
+        """Save captured PNG bytes to a temp file and return ContentItem list."""
+        from agent_cascade.llm.schema import ContentItem
+        tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='capture_view_')
+        os.close(tmp_fd)
+        with open(tmp_png_path, "wb") as f:
+            f.write(png_bytes)
+        temp_png = Path(tmp_png_path)
+        file_url = temp_png.as_uri()
+        return [
+            ContentItem(image=file_url),
+            ContentItem(text=text),
+            temp_png  # returned so caller can track for cleanup
+        ]
+
+    # ------------------------------------------------------------------ #
     #  Main call()                                                        #
     # ------------------------------------------------------------------ #
 
     def call(self, params: str, **kwargs):
         from agent_cascade.llm.schema import ContentItem
+        from agent_cascade.tools.custom import screen_capture
         import logging
 
         logger = logging.getLogger(__name__)
@@ -511,7 +532,6 @@ class ViewImage(BaseTool, PathResolutionMixin):
         try:
             # Check for screen capture directives BEFORE _resolve_path() to avoid path validation errors
             if path == "__screen_capture":
-                from agent_cascade.tools.custom import screen_capture
                 try:
                     png_bytes = screen_capture.capture_screen()
                 except ImportError as e:
@@ -522,19 +542,11 @@ class ViewImage(BaseTool, PathResolutionMixin):
                         return "ERROR: Screen capture requires a graphical display. No display server detected."
                     return f"ERROR: Screen capture failed: {msg}"
                 logger.info("Screen capture completed via __screen_capture directive")
-                tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='capture_view_')
-                os.close(tmp_fd)
-                with open(tmp_png_path, "wb") as f:
-                    f.write(png_bytes)
-                temp_png = Path(tmp_png_path)
-                file_url = temp_png.as_uri()
-                return [
-                    ContentItem(image=file_url),
-                    ContentItem(text="Screen capture completed.")
-                ]
+                result = self._save_capture_and_return(png_bytes, "Screen capture completed.")
+                temp_png = result[2]  # extract Path for cleanup tracking
+                return result[:2]  # return only ContentItems
 
             if path.startswith("__window_capture:"):
-                from agent_cascade.tools.custom import screen_capture
                 pid_str = path[len("__window_capture:"):]
                 try:
                     pid = int(pid_str)
@@ -560,16 +572,9 @@ class ViewImage(BaseTool, PathResolutionMixin):
                 except Exception as e:
                     return f"ERROR: Window capture for PID {pid} failed: {e}"
                 logger.info("Window capture completed via __window_capture:%d directive", pid)
-                tmp_fd, tmp_png_path = tempfile.mkstemp(suffix='.png', prefix='capture_view_')
-                os.close(tmp_fd)
-                with open(tmp_png_path, "wb") as f:
-                    f.write(png_bytes)
-                temp_png = Path(tmp_png_path)
-                file_url = temp_png.as_uri()
-                return [
-                    ContentItem(image=file_url),
-                    ContentItem(text=f"Window capture completed for PID {pid}.")
-                ]
+                result = self._save_capture_and_return(png_bytes, f"Window capture completed for PID {pid}.")
+                temp_png = result[2]  # extract Path for cleanup tracking
+                return result[:2]  # return only ContentItems
 
             try:
                 resolved = self._resolve_path(path)
@@ -577,11 +582,11 @@ class ViewImage(BaseTool, PathResolutionMixin):
                 return f"ERROR: {str(e)}"
 
             if not resolved.exists():
-                return f"Image not found: {path}"
+                return f"ERROR: Image not found: {path}"
 
             # Validate it's actually an image file
             if resolved.suffix.lower() not in ViewImage.IMAGE_EXTENSIONS:
-                return f"'{path}' is not a recognized image file (supported: {', '.join(e.lstrip('.').upper() for e in sorted(ViewImage.IMAGE_EXTENSIONS))})"
+                return f"ERROR: '{path}' is not a recognized image file (supported: {', '.join(e.lstrip('.').upper() for e in sorted(ViewImage.IMAGE_EXTENSIONS))})"
 
             # SVG files need conversion to PNG (PIL/Pillow can't read SVG natively)
             if resolved.suffix.lower() == '.svg':

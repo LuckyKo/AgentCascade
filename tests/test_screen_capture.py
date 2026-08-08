@@ -35,45 +35,33 @@ class TestViewImageDirectiveRouting:
         tool = ViewImage()
         return tool
 
-    def test_screen_capture_directive_parsed(self, view_image_tool):
-        """Mock capture_screen(), verify it's called when path='__screen_capture'."""
+    @pytest.mark.parametrize("directive,capture_func,expected_pid,text_contains", [
+        ("__screen_capture", "capture_screen", None, "Screen capture completed"),
+        ("__window_capture:1234", "capture_window_by_pid", 1234, "Window capture completed for PID 1234"),
+    ])
+    def test_capture_directive_parsed(self, view_image_tool, directive, capture_func, expected_pid, text_contains):
+        """Mock capture functions, verify correct routing for screen and window capture directives."""
         mock_png_bytes = b'\x89PNG\x0d\x0a...'  # fake PNG header
-        mock_temp_path = 'C:/tmp/test_capture.png'  # Use absolute Windows-style path
+        mock_temp_path = 'C:/tmp/test_capture.png'
 
         with patch(
-            'agent_cascade.tools.custom.screen_capture.capture_screen',
+            f'agent_cascade.tools.custom.screen_capture.{capture_func}',
             return_value=mock_png_bytes
         ) as mock_capture:
             with patch('tempfile.mkstemp', return_value=(42, mock_temp_path)):
                 with patch('os.close'):
                     with patch('builtins.open', mock_open()):
-                        result = view_image_tool.call(json.dumps({'path': '__screen_capture'}))
+                        result = view_image_tool.call(json.dumps({'path': directive}))
 
-                        mock_capture.assert_called_once()
+                        if expected_pid is not None:
+                            mock_capture.assert_called_once_with(expected_pid)
+                        else:
+                            mock_capture.assert_called_once()
                         assert isinstance(result, list)
                         # First item is ContentItem(image=...), second is ContentItem(text=...)
                         assert len(result) == 2
                         assert 'image' in result[0].__dict__
-                        assert 'Screen capture completed' in result[1].text
-
-    def test_window_capture_directive_parsed(self, view_image_tool):
-        """Mock capture_window_by_pid(), verify called with correct PID for '__window_capture:1234'."""
-        mock_png_bytes = b'\x89PNG\x0d\x0a...'
-        mock_temp_path = 'C:/tmp/test_capture.png'  # Use absolute Windows-style path
-
-        with patch(
-            'agent_cascade.tools.custom.screen_capture.capture_window_by_pid',
-            return_value=mock_png_bytes
-        ) as mock_capture:
-            with patch('tempfile.mkstemp', return_value=(42, mock_temp_path)):
-                with patch('os.close'):
-                    with patch('builtins.open', mock_open()):
-                        result = view_image_tool.call(json.dumps({'path': '__window_capture:1234'}))
-
-                        mock_capture.assert_called_once_with(1234)
-                        assert isinstance(result, list)
-                        assert len(result) == 2
-                        assert 'Window capture completed for PID 1234' in result[1].text
+                        assert text_contains in result[1].text
 
     def test_invalid_pid_rejected(self, view_image_tool):
         """Paths like '__window_capture:abc', '__window_capture:-5', '__window_capture:' return error messages."""
@@ -86,8 +74,6 @@ class TestViewImageDirectiveRouting:
         for path in invalid_paths:
             result = view_image_tool.call(json.dumps({'path': path}))
             assert isinstance(result, str)
-            assert 'ERROR' in result or 'Invalid' in result
-            # Verify the specific error message about invalid format
             assert 'Invalid window capture format' in result
 
     def test_unknown_directive_falls_through(self, view_image_tool):

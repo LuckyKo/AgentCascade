@@ -10,6 +10,8 @@ All functions return PNG bytes or raise descriptive exceptions.
 import io
 import logging
 import os
+import re
+import subprocess
 import sys
 from PIL import Image
 
@@ -159,9 +161,6 @@ def _find_window_by_pid(pid: int):
 
 def _capture_window_linux(pid: int) -> bytes:
     """Capture a specific window by PID on Linux using mss + xdotool."""
-    import re
-    import subprocess
-
     try:
         import mss
     except ImportError:
