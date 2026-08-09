@@ -624,6 +624,7 @@ const defaultWorkspace = $('#defaultWorkspace');
 const settingVisionEnabled = $('#setting-vision-enabled');
 const settingImageDetail = $('#setting-image-detail');
 const settingMaxImageSize = $('#setting-max-image-size');
+const settingMaxImagesForLlm = $('#setting-max-images-for-llm');
 const insertImageBtn = $('#insertImageBtn');
 const imageInput = $('#imageInput');
 const insertDocBtn = $('#insertDocBtn');
@@ -949,6 +950,7 @@ function saveSettings(sendToServer) {
 
   if (settingImageDetail) s['setting-image-detail'] = settingImageDetail.value;
   if (settingMaxImageSize) s['setting-max-image-size'] = settingMaxImageSize.value;
+  if (settingMaxImagesForLlm) s['max_images_for_llm'] = parseInt(settingMaxImagesForLlm.value) || 2;
   if ($('#setting-mcp-enabled')) s['setting-mcp-enabled'] = $('#setting-mcp-enabled').checked;
   if (settingMcpServers) s['setting-mcp-servers'] = settingMcpServers.value;
 
@@ -1161,6 +1163,9 @@ function loadSettings() {
     }
     if (settingMaxImageSize && s['setting-max-image-size'] !== undefined) {
       settingMaxImageSize.value = s['setting-max-image-size'];
+    }
+    if (settingMaxImagesForLlm && s['max_images_for_llm'] !== undefined) {
+      settingMaxImagesForLlm.value = s['max_images_for_llm'];
     }
 
     if ($('#setting-mcp-enabled') && s['setting-mcp-enabled'] !== undefined) {
@@ -4713,6 +4718,8 @@ function getGenerateCfg() {
   if ($('#setting-shell-char-limit')) cfg.shell_char_limit = parseInt($('#setting-shell-char-limit').value) || -1;
   if ($('#setting-code-char-limit')) cfg.code_char_limit = parseInt($('#setting-code-char-limit').value) || -1;
   if ($('#setting-list-dir-char-limit')) cfg.list_dir_char_limit = parseInt($('#setting-list-dir-char-limit').value) || -1;
+
+  if ($('#setting-max-images-for-llm')) cfg.max_images_for_llm = parseInt($('#setting-max-images-for-llm').value) || 2;
 
   // Approval timeout settings
   if (approvalTimeoutSeconds && approvalTimeoutSeconds.value) cfg.approval_timeout_seconds = parseInt(approvalTimeoutSeconds.value) || 300;

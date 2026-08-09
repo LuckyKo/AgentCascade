@@ -2,9 +2,9 @@
   "schema_version": "1.0",
   "skills": {
     "self-augmentation": {
-      "total_loads": 659,
+      "total_loads": 661,
       "by_version": {
-        "1.0.0": 659
+        "1.0.0": 661
       }
     },
     "project-memory-writing": {

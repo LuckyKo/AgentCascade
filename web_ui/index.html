@@ -333,6 +333,10 @@
                     <span>Max Image Size (px)</span>
                     <input type="number" id="setting-max-image-size" min="256" max="4096" value="1024" />
                   </label>
+                  <label class="setting-field">
+                    <span title="Max images with base64 sent to LLM per request. -1=keep all, N>=0=keep only last N">Max Images for LLM</span>
+                    <input type="number" id="setting-max-images-for-llm" min="-1" max="50" value="2" />
+                  </label>
                 </div>
               </div>
 
