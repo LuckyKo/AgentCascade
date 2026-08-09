@@ -43,7 +43,7 @@ const TAB_PREFIX = 'sub-';  // e.g., 'sub-Maine'
 // ── Throttle configuration (all streaming/render timing constants in one place) ──
 const THROTTLE = Object.freeze({
   PUSH_IMMEDIATE_MS: 30,       // ActivityBar push throttle
-  RENDER_SUBAGENT_MS: 150,     // sub-agent streaming render throttle
+  RENDER_SUBAGENT_MS: 250,     // sub-agent streaming render throttle (raised to reduce image re-decode pressure during streaming)
   RENDER_ROOT_BASE_MS: 250,    // root agent base render throttle
   RENDER_ROOT_MAX_MS: 500,     // root agent max render throttle cap (adaptive)
   ACTIVITY_BAR_RENDER_MS: 200, // ActivityBar full render throttle
@@ -2448,6 +2448,11 @@ function createMessageEl(msg, index, config) {
 
   contentDiv.innerHTML = html;
   
+  // FIX 3: Apply decoding="async" to all images to avoid blocking main thread during decode
+  contentDiv.querySelectorAll('img').forEach(img => {
+      if (!img.decoding || img.decoding === 'sync') img.decoding = 'async';
+  });
+
   // Initialize streaming optimization dataset attributes
   // lastFlushTime ensures the 100ms flush window starts from bubble creation
   div.dataset.lastFlushTime = String(performance.now());
@@ -2459,6 +2464,64 @@ function createMessageEl(msg, index, config) {
 }
 
 // ── Bubble content updater ─────────────────────────────────────────────
+
+/**
+ * Check if a content div contains base64/data URI images.
+ */
+function bubbleHasImages(contentDiv) {
+    return contentDiv && contentDiv.querySelector('img[src^="data:image"]');
+}
+
+/**
+ * Extract a stable hash key from a data URI by using the last 80 chars of the base64 portion only.
+ */
+function extractSrcHash(src) {
+    const commaIdx = src.indexOf(',');
+    const base64Part = commaIdx > 0 ? src.slice(commaIdx + 1) : src;
+    return base64Part.length > 80 ? base64Part.slice(-80) : base64Part;
+}
+
+/**
+ * Cache existing img nodes from contentDiv by src hash, then restore them after innerHTML replacement.
+ * This preserves decoded bitmaps and avoids expensive re-decode on every streaming tick.
+ * Returns a function to call after setting innerHTML that restores cached images.
+ */
+function createImagePreserver(contentDiv) {
+    const imgCache = new Map(); // srcHash -> [img1, img2, ...]
+
+    // Collect existing image nodes before DOM replacement (handles duplicates)
+    contentDiv.querySelectorAll('img[src^="data:image"]').forEach(img => {
+        const srcHash = extractSrcHash(img.src);
+        if (!imgCache.has(srcHash)) imgCache.set(srcHash, []);
+        imgCache.get(srcHash).push(img);
+    });
+
+    if (imgCache.size === 0) return null; // No images to preserve
+
+    // Return restore function to call after innerHTML is set
+    return function restoreCachedImages(newContentDiv) {
+        if (!newContentDiv || !newContentDiv.querySelectorAll('img').length) return;
+
+        newContentDiv.querySelectorAll('img[src^="data:image"]').forEach(img => {
+            const srcHash = extractSrcHash(img.src);
+            const cachedList = imgCache.get(srcHash);
+            if (cachedList && cachedList.length > 0 && img.parentNode) {
+                // Use the first available cached node, clone if needed for future uses
+                const cached = cachedList.shift();
+                if (cachedList.length === 0) imgCache.delete(srcHash); // Clean up empty entries
+                img.parentNode.replaceChild(cached, img);
+            }
+        });
+
+        // Apply decoding="async" to all images to avoid blocking main thread
+        newContentDiv.querySelectorAll('img').forEach(img => {
+            if (!img.decoding || img.decoding === 'sync') img.decoding = 'async';
+        });
+
+        // Clear remaining cache to prevent memory leaks
+        imgCache.clear();
+    };
+}
 
 /**
  * Updates the content of a message bubble with INCREMENTAL rendering support.
@@ -2540,16 +2603,19 @@ function updateBubbleContent(bubble, msg, config) {
     if (isGenerating && prevContent !== undefined && !msg.function_call && msg.role !== 'function' && !msg.reasoning_content) {
         const newText = curContent.slice(prevContent.length);
         if (newText) {
-            // FIX 4: Periodically force a full re-render every 8 incremental appends to prevent formatting drift.
-            // Raw text append can diverge from markdown-structured state over many ticks.
+            // For image-bearing bubbles, prefer incremental append to avoid destroying cached img nodes.
+            // Increase forced re-render interval from 8 → 32 for bubbles with images to reduce image re-decode pressure.
+            const hasImages = bubbleHasImages(contentDiv);
             const incrementCount = parseInt(bubble.dataset.incrementCount || '0');
+            const forceInterval = hasImages ? 32 : 8;
+
             try {
                 appendStreamingDelta(contentDiv, newText);
                 bubble.dataset.incrementCount = String(incrementCount + 1);
-                if (incrementCount + 1 >= 8) {
+                if (incrementCount + 1 >= forceInterval) {
                     bubble.dataset.incrementCount = '0'; // Reset counter after drift correction
                 } else {
-                    return;  // Success - skip full re-render
+                    return;  // Success - skip full re-render (critical for image-bearing bubbles!)
                 }
             } catch(e) {
                 // If incremental fails for any reason, fall through to full re-render below
@@ -2593,7 +2659,13 @@ function updateBubbleContent(bubble, msg, config) {
         codeScrollPositions.push({ element: cb, scrollTop: cb.scrollTop });
     });
 
+    // FIX 1: Cache existing image nodes before innerHTML replacement to preserve decoded bitmaps.
+    const restoreImages = createImagePreserver(contentDiv);
+
     contentDiv.innerHTML = html;
+
+    // Restore cached images (preserves decoded bitmaps) and apply decoding="async"
+    if (restoreImages) restoreImages(contentDiv);
 
     const newDetails = contentDiv.querySelectorAll('details');
     newDetails.forEach((d, i) => {
