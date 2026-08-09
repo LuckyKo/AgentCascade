@@ -22,21 +22,48 @@ from agent_cascade.telemetry import TelemetryCollector
 def detect_workspace_dir(project_root: Path) -> str:
     """
     Detect the workspace directory to use. Prefers a sibling 'AgentWorkspace'
-    folder, falls back to <project_root>/workspace. Sets the env var so
-    downstream modules can read it.
+    folder or Docker /workspace mount, falls back to <project_root>/workspace.
+    Sets the env var so downstream modules can read it.
+
+    Priority (identical to settings.py _resolve_default_workspace()):
+    1. QWEN_AGENT_DEFAULT_WORKSPACE env var (if set)
+    2. Docker mount point /workspace (only if running inside a Docker container)
+    3. Sibling AgentWorkspace directory relative to project root
+    4. workspace/ under project root
 
     Returns the resolved workspace path as a string.
     """
-    workspace_dir = os.getenv('QWEN_AGENT_DEFAULT_WORKSPACE')
+    env_val = os.getenv('QWEN_AGENT_DEFAULT_WORKSPACE')
+    if env_val:
+        workspace_dir = os.path.abspath(env_val)
+    else:
+        workspace_dir = None
 
     if not workspace_dir:
+        # Docker deployment: /workspace is mounted as AgentWorkspace
+        # Only use this if we're actually inside a Docker container (/.dockerenv marker)
+        if os.path.exists('/.dockerenv') and Path('/workspace').exists():
+            workspace_dir = str(Path('/workspace').resolve())
+            logger.info("[INIT] Using Docker workspace mount: %s", workspace_dir)
+
+    if not workspace_dir:
+        # Prefer sibling AgentWorkspace directory (e.g., N:\work\WD\AgentWorkspace)
         sibling_ws = project_root.parent / 'AgentWorkspace'
         if sibling_ws.exists():
-            workspace_dir = str(sibling_ws)
+            workspace_dir = str(sibling_ws.resolve())
             logger.info("[INIT] Detected sibling workspace: %s", workspace_dir)
-        else:
-            workspace_dir = str(project_root / 'workspace')
+
+    if not workspace_dir:
+        # Check for workspace/ under project root
+        local_ws = project_root / 'workspace'
+        if local_ws.exists():
+            workspace_dir = str(local_ws.resolve())
             logger.info("[INIT] Using local workspace: %s", workspace_dir)
+
+    if not workspace_dir:
+        # Ultimate fallback: workspace/ under project root (always valid, will be created)
+        workspace_dir = str((project_root / 'workspace').resolve())
+        logger.warning("[INIT] Workspace not found, creating at: %s", workspace_dir)
 
     os.environ['QWEN_AGENT_DEFAULT_WORKSPACE'] = workspace_dir
     return workspace_dir

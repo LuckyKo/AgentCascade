@@ -15,6 +15,7 @@
 import ast
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Literal
 
 # Settings for LLMs
@@ -26,8 +27,46 @@ MAX_LLM_CALL_PER_RUN: int = int(os.getenv('QWEN_AGENT_MAX_LLM_CALL_PER_RUN', 250
 DEFAULT_MAX_TURNS: int = int(os.getenv('QWEN_AGENT_DEFAULT_MAX_TURNS', 50))  # Default turn limit per agent execution
 MAX_AUTO_CONTINUE_ATTEMPTS: int = 5  # Max consecutive auto-continue resets before giving up
 
+
+def _resolve_default_workspace() -> str:
+    """Resolve DEFAULT_WORKSPACE at import time.
+
+    Priority:
+    1. QWEN_AGENT_DEFAULT_WORKSPACE env var (if set)
+    2. Docker mount point /workspace (only if running inside a Docker container)
+    3. Sibling AgentWorkspace directory relative to project root (e.g., ../AgentWorkspace from agent_cascade/)
+    4. workspace/ under project root
+
+    This ensures images/logs go to the correct workspace regardless of CWD when server starts.
+    """
+    env_val = os.getenv('QWEN_AGENT_DEFAULT_WORKSPACE')
+    if env_val:
+        return os.path.abspath(env_val)
+
+    # Docker deployment: /workspace is mounted as AgentWorkspace
+    # Only use this if we're actually inside a Docker container (/.dockerenv marker)
+    if os.path.exists('/.dockerenv') and Path('/workspace').exists():
+        return str(Path('/workspace').resolve())
+
+    # Determine project root: agent_cascade/ is one level below project root
+    project_root = Path(__file__).resolve().parent.parent
+
+    # Prefer sibling AgentWorkspace directory (e.g., N:\work\WD\AgentWorkspace)
+    sibling_ws = project_root.parent / 'AgentWorkspace'
+    if sibling_ws.exists():
+        return str(sibling_ws.resolve())
+
+    # Check for workspace/ under project root
+    local_ws = project_root / 'workspace'
+    if local_ws.exists():
+        return str(local_ws.resolve())
+
+    # Ultimate fallback: workspace/ under project root (always valid, will be created)
+    return str((project_root / 'workspace').resolve())
+
+
 # Settings for tools
-DEFAULT_WORKSPACE: str = os.path.abspath(os.getenv('QWEN_AGENT_DEFAULT_WORKSPACE', 'workspace/'))
+DEFAULT_WORKSPACE: str = _resolve_default_workspace()
 DEFAULT_TOOL_RESULT_MAX_CHARS: int = int(os.getenv('QWEN_AGENT_TOOL_RESULT_MAX_CHARS', 10000))
 DEFAULT_READ_FILE_MAX_LINES: int = int(os.getenv('QWEN_AGENT_READ_FILE_MAX_LINES', 150))
 DEFAULT_HEURISTIC_MATCH_THRESHOLD: float = float(os.getenv('QWEN_AGENT_HEURISTIC_MATCH_THRESHOLD', 0.90))
