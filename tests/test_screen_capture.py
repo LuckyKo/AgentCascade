@@ -147,9 +147,9 @@ class TestViewImageDirectiveRouting:
                 assert 'disabled' in result2.lower() or 'ERROR' in result2
 
     def test_temp_file_created_for_capture(self, view_image_tool):
-        """Verify temp PNG file is created and URI returned."""
+        """Verify screen capture temp file is created and result goes through media storage."""
         mock_png_bytes = b'\x89PNG\x0d\x0a...'
-        mock_temp_path = 'C:/tmp/capture_view_xyz.png'  # Use absolute Windows-style path
+        mock_temp_path = 'C:/tmp/capture_view_xyz.png'
 
         with patch(
             'agent_cascade.tools.custom.screen_capture.capture_screen',
@@ -159,16 +159,28 @@ class TestViewImageDirectiveRouting:
                 with patch('os.close'):
                     m = mock_open()
                     with patch('builtins.open', m):
-                        result = view_image_tool.call(json.dumps({'path': '__screen_capture'}))
+                        # After temp file write, save_image_to_media is called which opens the file via PIL
+                        with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
+                            mock_save.return_value = 'N:/work/WD/AgentCascade/logs/media/images/img_20260101_120000_abcd.jpg'
+                            result = view_image_tool.call(json.dumps({'path': '__screen_capture'}))
 
-                        # Verify temp file was opened for writing
-                        m.assert_called_with(mock_temp_path, 'wb')
-                        handle = m.return_value
-                        handle.write.assert_called_once_with(mock_png_bytes)
+                            # Verify temp file was created for the capture
+                            m.assert_called_with(mock_temp_path, 'wb')
+                            handle = m.return_value
+                            handle.write.assert_called_once_with(mock_png_bytes)
 
-                        # Verify URI is in the result
-                        assert isinstance(result, list)
-                        assert 'capture_view_xyz.png' in result[0].image
+                            # Verify media storage was called with the temp file path
+                            mock_save.assert_called_once()
+                            call_args = mock_save.call_args
+                            passed_source = call_args[1].get('image_source', call_args[0][0] if call_args[0] else '')
+                            # Normalize path separators for cross-platform comparison
+                            assert 'capture_view_xyz.png' in passed_source.replace('\\', '/')
+
+                            # Verify result contains the media path
+                            assert isinstance(result, list)
+                            assert len(result) == 2
+                            assert 'image' in result[0].__dict__
+                            assert 'img_20260101_120000_abcd.jpg' in result[0].image
 
 
 # ---------------------------------------------------------------------------

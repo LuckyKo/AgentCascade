@@ -306,9 +306,10 @@ class TestUnauthenticatedEndpoints:
         assert "sessions" in data or isinstance(data, list)
 
     def test_get_file_invalid_path_returns_error(self, client):
-        """GET /api/file with invalid path returns an error (404)."""
+        """GET /api/file with path outside allowed roots returns 403 (security check)."""
+        # Paths outside allowed roots are blocked by security check before existence check.
         resp = client.get("/api/file", params={"path": "/nonexistent_file_xyz.txt"})
-        assert resp.status_code == 404
+        assert resp.status_code == 403
 
     def test_post_find_file_returns_response(self, client_no_exceptions):
         """POST /api/find_file returns a response without crashing."""
