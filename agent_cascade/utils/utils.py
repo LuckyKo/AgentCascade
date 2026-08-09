@@ -223,7 +223,27 @@ def has_chinese_messages(messages: List[Union[Message, dict, list, bool, None]],
     return False
 
 
+# Mapping for common MIME types that don't follow simple "type/subtype" → ".subtype" convention
+_DATA_URL_MIME_TO_EXT = {
+    'image/jpeg': 'jpg',
+    'image/svg+xml': 'svg',
+    'application/octet-stream': 'bin',
+}
+
 def get_basename_from_url(path_or_url: str) -> str:
+    # Handle base64 data URLs - generate a safe filename from MIME type
+    if path_or_url.lower().startswith('data:'):
+        try:
+            mime_part = path_or_url.split(',')[0]  # e.g., "data:image/jpeg;base64"
+            mime_type = mime_part.split(';')[0].split(':')[1]  # e.g., "image/jpeg"
+            if not mime_type or '/' not in mime_type:
+                return 'data_image.bin'
+            # Use mapping for known edge cases, otherwise take subtype after '/'
+            ext = _DATA_URL_MIME_TO_EXT.get(mime_type, mime_type.split('/')[-1])
+            return f"data_image.{ext}"
+        except Exception:
+            return 'data_image.bin'
+
     if re.match(r'^[A-Za-z]:\\', path_or_url):
         # "C:\\a\\b\\c" -> "C:/a/b/c"
         path_or_url = path_or_url.replace('\\', '/')
@@ -305,7 +325,45 @@ def save_url_to_local_work_dir(url: str, save_dir: str, save_filename: str = '')
         os.remove(new_path)
     logger.info(f'Downloading {url} to {new_path}...')
     start_time = time.time()
-    if not is_http_url(url):
+
+    # Handle base64 data URLs (e.g., "data:image/jpeg;base64,/9j/4AAQ...")
+    if url.lower().startswith('data:'):
+        MAX_DATA_URL_SIZE = 50 * 1024 * 1024  # 50MB limit to prevent resource exhaustion
+        try:
+            # Validate structure: must have comma separating header from data
+            if ',' not in url:
+                raise ValueError('Invalid data URL format: missing comma separator')
+
+            header, b64_data = url.split(',', 1)
+
+            # Check for base64 marker
+            if ';base64' not in header.lower():
+                raise ValueError(f'Data URL encoding not supported. Expected base64, got header: {header}')
+
+            # Pre-check estimated decoded size to avoid memory exhaustion before decoding
+            # Base64 expands by factor of ~3/4 (decoded = encoded * 3/4)
+            estimated_size = len(b64_data) * 3 // 4
+            if estimated_size > MAX_DATA_URL_SIZE:
+                raise ValueError(
+                    f'Data URL exceeds maximum allowed size of {MAX_DATA_URL_SIZE / (1024*1024):.0f}MB '
+                    f'(estimated decoded size: {estimated_size / (1024*1024):.1f}MB)'
+                )
+
+            # Decode and write to file with size limit
+            decoded = base64.b64decode(b64_data)
+            if len(decoded) > MAX_DATA_URL_SIZE:
+                raise ValueError(
+                    f'Decoded data exceeds maximum allowed size of {MAX_DATA_URL_SIZE / (1024*1024):.0f}MB '
+                    f'(got {len(decoded) / (1024*1024):.1f}MB)'
+                )
+
+            with open(new_path, 'wb') as f:
+                f.write(decoded)
+        except ValueError:
+            raise  # Re-raise our own validation errors unchanged
+        except Exception as e:
+            raise ValueError(f'Failed to decode base64 data URL: {e}') from e
+    elif not is_http_url(url):
         url = sanitize_chrome_file_path(url)
         shutil.copy(url, new_path)
     else:
