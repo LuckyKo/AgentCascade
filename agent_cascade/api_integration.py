@@ -867,7 +867,8 @@ def build_state_from_pool(
     # Add tool char limits from pool.llm_cfg if available
     if hasattr(pool, 'llm_cfg'):
         for key in ('tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
-                     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit'):
+                     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
+                     'max_images_for_llm'):
             if key in pool.llm_cfg:
                 pool_settings[key] = pool.llm_cfg[key]
 
@@ -1046,7 +1047,8 @@ def build_stream_update_from_pool(
     # Add tool char limits from pool.llm_cfg if available
     if hasattr(pool, 'llm_cfg'):
         for key in ('tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
-                     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit'):
+                     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
+                     'max_images_for_llm'):
             if key in pool.llm_cfg:
                 pool_settings[key] = pool.llm_cfg[key]
 
@@ -1838,7 +1840,8 @@ def _apply_ui_config(
 
                 for _key in (
                     'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
-                    'shell_char_limit', 'code_char_limit', 'list_dir_char_limit'
+                    'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
+                    'max_images_for_llm'
                 ):
                     if _key in sanitized:
                         pool.llm_cfg[_key] = sanitized[_key]

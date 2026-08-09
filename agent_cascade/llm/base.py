@@ -24,7 +24,7 @@ from collections import defaultdict
 from pprint import pformat
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
-from agent_cascade.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION, SYSTEM, USER, Message
+from agent_cascade.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTION, SYSTEM, USER, ContentItem, Message
 from agent_cascade.log import logger
 from agent_cascade.settings import DEFAULT_MAX_INPUT_TOKENS, COMPRESSION_OVERFLOW_TOLERANCE_PCT
 from agent_cascade.exceptions import ContextWindowExceeded
@@ -496,6 +496,18 @@ class BaseChatModel(ABC):
     ) -> List[Message]:
         raise NotImplementedError
 
+    def _strip_base64_from_images(
+        self,
+        messages: List[Message],
+        max_images: int,
+    ) -> List[Message]:
+        """Strip base64 data from all but the last N images in conversation.
+
+        Delegates to utils.strip_base64_from_images().
+        """
+        from agent_cascade.utils.utils import strip_base64_from_images as _strip
+        return _strip(messages, max_images)
+
     def _preprocess_messages(
         self,
         messages: List[Message],
@@ -504,6 +516,13 @@ class BaseChatModel(ABC):
         functions: Optional[List[Dict]] = None,
         use_raw_api: bool = False,
     ) -> List[Message]:
+        # ── Feature: Strip excess image base64 before sending to LLM ────────────
+        # Read max_images_for_llm from generate_cfg (passed via pool config).
+        # -1 = keep all images, N >= 0 = keep only last N with base64 data.
+        max_images_for_llm = generate_cfg.get('max_images_for_llm', 2)
+        if max_images_for_llm != -1:
+            messages = self._strip_base64_from_images(messages, max_images_for_llm)
+
         # ── Feature 019: Preprocessing Cache ────────────────────────────────────
         # Check cache first to avoid redundant preprocessing work
         cache_key = self._get_message_hash(messages, functions, generate_cfg, lang)

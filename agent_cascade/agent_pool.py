@@ -535,6 +535,12 @@ class AgentPool:
                     try: self.llm_cfg['list_dir_char_limit'] = int(val)
                     except (ValueError, TypeError): pass
 
+                # max_images_for_llm
+                val = data.pop('max_images_for_llm', None)
+                if val is not None:
+                    try: self.llm_cfg['max_images_for_llm'] = int(val)
+                    except (ValueError, TypeError): pass
+
         except Exception as e:
             logger.error(f"[PoolSettings] Failed to load settings from {self._pool_settings_path}: {e}. Using defaults.")
 

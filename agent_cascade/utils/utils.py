@@ -1199,3 +1199,54 @@ def format_tool_result_preview(tool_name: str, content: str, max_len: int = 120)
     if stripped:
         return f"Tool {name}: {stripped[:max_len]}"
     return f"Tool {name} completed"
+
+
+def strip_base64_from_images(
+    messages: List[Message],
+    max_images: int,
+) -> List[Message]:
+    """Strip base64 data from all but the last N images in conversation.
+
+    Standalone utility — works on Message objects without requiring an LLM instance.
+    Always returns a deep copy to avoid mutating originals.
+
+    Args:
+        messages: Messages to process (will be deep-copied).
+        max_images: Maximum images with base64 to keep. -1 or any negative = keep all, 0 = strip all.
+
+    Returns:
+        New list of Message objects with base64 stripped from excess images.
+    """
+    result = copy.deepcopy(messages)
+
+    if max_images < 0:
+        return result
+
+    # Collect all image ContentItems with base64 data, in order
+    images_with_base64 = []  # list of (msg_idx, item_idx, content_item)
+    for msg_idx, msg in enumerate(result):
+        content = msg.content
+        if content is None or not isinstance(content, list):
+            continue
+        for item_idx, item in enumerate(content):
+            if hasattr(item, 'image') and item.image:
+                img_val = item.image
+                # Only strip data URIs (base64), not file paths or URLs
+                if isinstance(img_val, str) and img_val.startswith('data:'):
+                    images_with_base64.append((msg_idx, item_idx, item))
+
+    total_images = len(images_with_base64)
+    if max_images >= 0 and total_images > max_images:
+        # Strip base64 from all but the last N images
+        to_strip = total_images - max_images
+        for i in range(to_strip):
+            msg_idx, item_idx, content_item = images_with_base64[i]
+            caption = getattr(content_item, 'caption', None) or ''
+            if caption:
+                placeholder_text = f'[Image: {caption}]'
+            else:
+                placeholder_text = '[Image]'
+            # Replace image ContentItem with text ContentItem preserving caption info
+            result[msg_idx].content[item_idx] = ContentItem(text=placeholder_text)
+
+    return result

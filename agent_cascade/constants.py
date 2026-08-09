@@ -124,6 +124,9 @@ NON_LLM_KEYS: tuple[str, ...] = (
     'shell_char_limit',
     'code_char_limit',
     
+    # Image base64 management (read from generate_cfg in _preprocess_messages, not sent to LLM API)
+    'max_images_for_llm',
+    
     # Tool-specific settings
     'disabled_tools',
     'seed',

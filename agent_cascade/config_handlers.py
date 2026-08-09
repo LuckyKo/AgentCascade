@@ -46,6 +46,8 @@ POOL_SETTINGS_KEYS = frozenset({
     # Tool char limits (stored in pool.llm_cfg but persisted via pool_settings.json)
     'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
+    # Image base64 management
+    'max_images_for_llm',
     # Approval timeout settings
     'approval_timeout_seconds', 'enable_approval_timeout',
     # Async shell console window toggle
@@ -523,6 +525,17 @@ def _handle_list_dir_char_limit(ui_cfg: dict, agent_pool: Optional[Any], agents:
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         val = int(ui_cfg.get('list_dir_char_limit', -1))
         agent_pool.llm_cfg['list_dir_char_limit'] = val
+
+
+@register_config_handler('max_images_for_llm')
+def _handle_max_images_for_llm(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update max images with base64 data sent to LLM (-1 = keep all)."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        try:
+            val = int(ui_cfg.get('max_images_for_llm', 2))
+            agent_pool.llm_cfg['max_images_for_llm'] = val
+        except (ValueError, TypeError):
+            pass  # Invalid value — keep existing setting
 
 
 @register_config_handler('disabled_tools')

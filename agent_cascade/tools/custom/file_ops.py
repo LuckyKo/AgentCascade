@@ -3,7 +3,10 @@ import tempfile
 import os
 import atexit
 import sys
+import logging
 from typing import Optional, Any, Union
+
+logger = logging.getLogger(__name__)
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.settings import (
     DEFAULT_WORKSPACE, DEFAULT_TOOL_RESULT_MAX_CHARS, CHARS_PER_TOKEN_ESTIMATE,
@@ -11,7 +14,7 @@ from agent_cascade.settings import (
 )
 import json
 from agent_cascade.prompts.dna import TOOL_METADATA
-from agent_cascade.utils.utils import json_loads
+from agent_cascade.utils.utils import json_loads, encode_image_as_base64
 
 
 class PathResolutionMixin:
@@ -600,12 +603,18 @@ class ViewImage(BaseTool, PathResolutionMixin):
             # SVG files need conversion to PNG (PIL/Pillow can't read SVG natively)
             if resolved.suffix.lower() == '.svg':
                 temp_png = self._convert_svg_to_png(resolved)
-                file_url = temp_png.as_uri()
-            else:
-                file_url = resolved.as_uri()
+
+            # Encode image as inline base64 so logs capture what was actually sent to the model
+            try:
+                image_path_for_encoding = str(temp_png) if temp_png else str(resolved)
+                base64_data_url = encode_image_as_base64(image_path_for_encoding, max_short_side_length=1080)
+            except Exception as e:
+                # Fall back to file:// URL if encoding fails (e.g., unsupported format)
+                logger.warning(f"Failed to encode image as base64 '{image_path_for_encoding}': {e}. Using file:// URL.")
+                base64_data_url = str(temp_png.as_uri() if temp_png else resolved.as_uri())
 
             return [
-                ContentItem(image=file_url),
+                ContentItem(image=base64_data_url),
                 ContentItem(text=f"Viewing image: {path}")
             ]
         except (ValueError, TypeError) as e:

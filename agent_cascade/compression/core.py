@@ -8,7 +8,7 @@ from agent_cascade.compression.helpers import (
     get_message_role,
 )
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
-from agent_cascade.utils.utils import extract_text_from_message
+from agent_cascade.utils.utils import extract_text_from_message, strip_base64_from_images
 from agent_cascade.utils.tokenization_qwen import count_tokens as qwen_count
 from agent_cascade.llm.schema import FUNCTION, Message
 from agent_cascade.settings import (
@@ -234,6 +234,12 @@ def compress_context(
         # U0 is at index 1 if SYS exists (active_start_idx=2), or index 0 otherwise (active_start_idx=1).
         u0_index = active_start_idx - 1
         target_messages = [history[u0_index]] + list(active_set[:target_discard_count])
+
+    # ── Strip all base64 image data before compression ────────────────────────
+    # The compressor only needs text content. _format_messages_for_summary() already
+    # converts image items to text placeholders, but this ensures no base64 leaks
+    # through string content or edge cases. Use max_images=0 to strip all base64.
+    target_messages = strip_base64_from_images(target_messages, max_images=0)
 
     # ── 6b. ACTUAL token count check: verify target messages fit in compressor's context window ──
     # This is the TRUE overfeeding detection — counts real tokens instead of using rough estimates.

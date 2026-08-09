@@ -3546,6 +3546,15 @@ class ExecutionEngine:
         if override is not None:
             merged.update(override)                       # Layer 2: user override
 
+        # Inject pool-level settings that are read by LLM preprocessing but not sent to API.
+        # These live in pool.llm_cfg (set via config handlers) and must be available in
+        # generate_cfg for _preprocess_messages to consume them.
+        pool = getattr(instance, '_pool', None) or getattr(instance, 'pool', None)
+        if pool and hasattr(pool, 'llm_cfg'):
+            for key in ('max_images_for_llm',):
+                if key in pool.llm_cfg:
+                    merged[key] = pool.llm_cfg[key]
+
         if endpoint_cfg:
             # Strip stale params when custom sampling disabled
             use_custom = endpoint_cfg.get('_use_custom_sampling', True)

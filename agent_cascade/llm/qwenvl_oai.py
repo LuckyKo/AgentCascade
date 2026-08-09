@@ -91,7 +91,19 @@ class QwenVLChatAtOAI(TextChatAtOAI):
             new_msg['content'] = new_content
             new_messages.append(new_msg)
         new_messages = self._conv_agent_cascade_messages_to_oai(new_messages)
-        if logger.isEnabledFor(logging.DEBUG):
+        
+        # Log vision payload summary for debugging
+        image_count = 0
+        for msg in new_messages:
+            content = msg.get('content')
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get('type') == 'image_url':
+                        url = item.get('image_url', {}).get('url', '')
+                        has_base64 = url.startswith('data:')
+                        image_count += 1
+                        logger.debug(f'Vision payload: role={msg.get("role")}, image_url starts with data:={has_base64}, url_prefix={url[:50]}...')
+        if image_count > 0 and logger.isEnabledFor(logging.DEBUG):
             lite_messages = copy.deepcopy(new_messages)
             for msg in lite_messages:
                 content = msg.get('content')
