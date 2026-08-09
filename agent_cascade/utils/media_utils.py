@@ -6,14 +6,13 @@ providing path-based references instead of inline base64 data URLs.
 """
 
 import base64
-import hashlib
 import io
 import os
 import re
 import secrets
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
 
@@ -35,23 +34,6 @@ def _get_media_root() -> Path:
     package_dir = Path(__file__).resolve().parent.parent
     workspace_root = package_dir.parent
     return workspace_root / "logs" / "media"
-
-
-def get_media_dir() -> str:
-    """Return the absolute path to the media root directory, creating it if needed.
-
-    Returns:
-        Absolute path with forward slashes.
-
-    Raises:
-        MediaStorageError: If directory creation fails.
-    """
-    try:
-        media_root = _get_media_root()
-        media_root.mkdir(parents=True, exist_ok=True)
-        return os.path.abspath(str(media_root)).replace("\\", "/")
-    except OSError as e:
-        raise MediaStorageError(f"Failed to create media directory: {e}") from e
 
 
 def get_images_dir() -> str:
@@ -85,8 +67,8 @@ def _generate_media_filename(prefix: str, extension: str) -> str:
     """
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d_%H%M%S")
-    # 6-char hex hash from random bytes for uniqueness under high concurrency
-    short_hash = secrets.token_hex(3)
+    # 8-char hex hash from random bytes for uniqueness under high concurrency
+    short_hash = secrets.token_hex(4)
     return f"{prefix}_{timestamp}_{short_hash}.{extension}"
 
 
