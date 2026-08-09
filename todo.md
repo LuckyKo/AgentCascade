@@ -86,7 +86,7 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] some settings like `grep spillover` reset when i close and reopen the chrome tab. they persist on refresh/hard refresh though. Fixed: race condition in beforeunload handler saving HTML defaults before loadSettings ran, plus dual-key pollution (hyphenated vs underscore). Added settingsLoaded guard, removed duplicate key writes from saveSettings, prefer underscore keys in loadSettings with hyphenated fallback, cleanup stale keys. See .agent_lessons/settings-reset-on-tab-close-fix.md
 - [x] make code_map also parse md files (where the basic tags are at). Implemented ATX heading extraction with CommonMark-style fenced code block handling in agent_cascade/tools/custom/code_map.py. Kept custom regex instead of adding a parser library: ~10x faster, zero deps, correct for all relevant cases. Added guard for 4-space/tab indented code blocks. See research/markdown_heading_library_report.md and .agent_lessons/markdown-heading-extraction-decision.md.
 - [x] fallback to a lower context window limit API fails to properly trigger compression.
-- [ ] investigator (researcher_class) session tool list is wrong: system_info reports `Disabled Tools: code_interpreter, copy_file, delete_file, edit_file, propose_skill, re_indent, shell_cmd, web_extractor, web_search, write_file` for the researcher agent, but `code_interpreter` actually WORKS (verified by running it), and the researcher role should have write_file + CI by definition. Suspected: stale/broken tool-policy resolution (agent-class to tool-policy map missing researcher, or disabled-tools list being applied incorrectly). Writing this todo via CI because write_file/edit_file show as disabled. See .agent_lessons/view_image_image_embedding_two_drop_points.md.
+- [x] investigator (researcher_class) session tool list is wrong: system_info reports `Disabled Tools: code_interpreter, copy_file, delete_file, edit_file, propose_skill, re_indent, shell_cmd, web_extractor, web_search, write_file` for the researcher agent, but `code_interpreter` actually WORKS (verified by running it), and the researcher role should have write_file + CI by definition. Fixed: reporting divergence in agent.py _get_active_functions/_get_disabled_tool_names — template-level resolution didn't pass instance override so Layer 4 baseline always fired for reports while engine path was correct. Now extracts per-agent UI entry as instance_override, preserves Layer 4 fallback for unknown agents. Requires server restart. See investigation_researcher_tool_policy.md, review_researcher_tool_policy_fix.md, .agent_lessons/researcher-tool-policy-mismatch.md.
 - [ ] check how async shell cmd handles timeout, it doesn't seems like its respected very precisely
 - [ ] add elapsed timer to heartbeat responses, like: `⟨shell_cmd heartbeat⟩ Beat 2 (15s), Tool ID: 8 | No new output (still running)` 
 - [ ] path discovery error, that path is in RW and valid, should work: `ERROR: Path error for '/N:/work/WD/AgentCascade/investigation_report_view_image_contentitem_flow.md' — Path '/N:/work/WD/AgentCascade/investigation_report_view_image_contentitem_flow.md' is outside the allowed RO directories`
@@ -95,13 +95,3 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 
 # Errors to investigate:
-
-# [RESOLVED 2026-08-09] delete_and_insert mode "wrong line removed" — root cause found and fixed
-# - Range logic was correct (line 870 was correctly deleted)
-# - Real bug: argument sanitizer stripped leading whitespace from multi-line new_content via strip_thinking_blocks()
-# - Secondary bug: _normalize_tool_arguments used unanchored regex, corrupting content inside JSON string values
-# Fixes applied:
-#   1. thinking_block.py: conditional .strip() only when tags removed (PASS review)
-#   2. file_ops.py EditFile: skip sanitization of new_content entirely (PASS review)
-#   3. execution_engine.py: anchor _normalize_thinking_blocks regex with ^\s* (PASS review)
-# Reports: investigation_report_edit_file_delete_and_insert.md, investigation_report_thinking_blocks_in_tool_args.md

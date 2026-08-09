@@ -191,36 +191,56 @@ class Agent(ABC):
 
         Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
 
-        Also reads from agent_pool._ui_disabled_tools for real-time tool assignment
-        updates when pool is provided.
+        Feeds only this agent's UI entry into the resolver as instance_override so that:
+        - Agents with explicit UI entries (e.g. {"Researcher": []}) suppress Layer 4 baseline
+        - Unknown agents without UI entries still get Layer 4 read-only protection
         """
         from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
 
+        # Extract ONLY this agent's entry from live pool UI dict.
+        # Passing the entire dict would set has_explicit_config=True for all agents,
+        # breaking Layer 4 fallback for unknown/dynamically discovered agents.
+        per_agent = {}
+        if pool is not None and hasattr(pool, '_ui_disabled_tools'):
+            ui_dt = getattr(pool, '_ui_disabled_tools', {}) or {}
+            if self.name in ui_dt:
+                per_agent[self.name] = ui_dt[self.name]
+            elif self.agent_type in ui_dt:
+                per_agent[self.agent_type] = ui_dt[self.agent_type]
+
         disabled = resolve_disabled_tools_for_agent(
-            instance_override=None,  # This method is for template-level queries
+            instance_override={'disabled_tools': per_agent} if per_agent else None,
             template_cfg=(getattr(self.llm, 'generate_cfg', None) or {}),
             agent_name=self.name,
             agent_type=getattr(self, 'agent_type', '') or '',
         )
 
-        # Check live pool config for real-time tool updates.
-        if pool is not None and hasattr(pool, 'get_ui_disabled_tools_for_agent'):
-            live_disabled = pool.get_ui_disabled_tools_for_agent(
-                self.name, getattr(self, 'agent_type', '') or ''
-            )
-            disabled |= live_disabled
-
         return [func.function for name, func in self.function_map.items() if name not in disabled]
 
-    def _get_disabled_tool_names(self) -> set:
+    def _get_disabled_tool_names(self, pool=None) -> set:
         """Return the set of currently disabled tool names for this agent.
 
         Centralized disabled_tools resolution — see agent_cascade.utils.disabled_tools
+
+        Feeds only this agent's UI entry into the resolver as instance_override when pool
+        is provided, matching _get_active_functions(pool=...) behavior. Without pool,
+        falls back to template-level resolution (may differ from enforcement).
         """
         from agent_cascade.utils.disabled_tools import resolve_disabled_tools_for_agent
 
+        # Extract ONLY this agent's entry from live pool UI dict.
+        # Passing the entire dict would set has_explicit_config=True for all agents,
+        # breaking Layer 4 fallback for unknown/dynamically discovered agents.
+        per_agent = {}
+        if pool is not None and hasattr(pool, '_ui_disabled_tools'):
+            ui_dt = getattr(pool, '_ui_disabled_tools', {}) or {}
+            if self.name in ui_dt:
+                per_agent[self.name] = ui_dt[self.name]
+            elif self.agent_type in ui_dt:
+                per_agent[self.agent_type] = ui_dt[self.agent_type]
+
         return resolve_disabled_tools_for_agent(
-            instance_override=None,  # This method is for template-level queries
+            instance_override={'disabled_tools': per_agent} if per_agent else None,
             template_cfg=getattr(self.llm, 'generate_cfg', None),
             agent_name=self.name,
             agent_type=getattr(self, 'agent_type', ''),
