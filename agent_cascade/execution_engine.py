@@ -5299,9 +5299,6 @@ class ExecutionEngine:
         """
         # FIX
 
-        # Build args dict for lifecycle manager's build_task_message
-        args = {'task': task, 'context': context}
-
         # Use lifecycle manager with force_fresh=True for system agents
         inst, is_reuse, session_was_loaded = self.lifecycle.find_or_create_instance(
             agent_class, instance_name, caller, nest_depth=0, force_fresh=True
@@ -5311,8 +5308,17 @@ class ExecutionEngine:
         # for consistency)
         sys_msg = self.lifecycle.build_system_message(inst.agent_class, instance_name)
 
-        # Build task message using lifecycle manager
-        task_msg = self.lifecycle.build_task_message(args, caller, agent_class=inst.agent_class)
+        # Build task message directly — no image scanning for system-invoked agents.
+        # build_task_message() scans caller's conversation for images referenced in
+        # task text; system tasks don't reference caller images so this would be
+        # wasteful and could accidentally match substrings. Construct plain task message.
+        caller_prefix = f"This is a message from {caller}."
+        if context:
+            context_text = f"{caller_prefix}\n{context}"
+        else:
+            context_text = caller_prefix
+        formatted_task = f'Context: {context_text}\n\nTask: {task}\n\nPlease help with this task.'
+        task_msg = Message(role=USER, content=formatted_task)
 
         # Initialize conversation using lifecycle manager (pass actual is_reuse
         # value)

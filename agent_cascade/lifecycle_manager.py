@@ -259,6 +259,124 @@ class AgentLifecycleManager:
 
         return Message(role=SYSTEM, content="\n".join(lines))
 
+    @staticmethod
+    def _is_image_referenced_in_task(
+        img_url: str,
+        task_text: str,
+        seen_images: dict
+    ) -> bool:
+        """Check if an image is referenced in task text by basename or alias.
+
+        Args:
+            img_url: The image URL to check
+            task_text: The task text to search in
+            seen_images: Dict mapping basenames/aliases to image URLs
+
+        Returns:
+            True if the image's basename or any of its aliases appear in task_text
+        """
+        basename = get_basename_from_url(img_url)
+        if basename in task_text:
+            return True
+        # Check if any alias for this image appears in task text
+        for alias, url in seen_images.items():
+            if url == img_url and alias in task_text:
+                return True
+        return False
+
+    def _collect_images_from_caller(
+        self,
+        caller: str,
+    ) -> dict:
+        """Scan caller's conversation for images and build basename/alias mapping.
+
+        Args:
+            caller: Parent instance name to scan
+
+        Returns:
+            Dict mapping basenames and aliases (e.g., 'image_0') to image URLs
+        """
+        seen_images = {}
+        alias_counter = 0
+        caller_conv = self.pool.get_conversation(caller)
+        if not caller_conv:
+            return seen_images
+
+        for msg in caller_conv:
+            content = msg_field(msg, 'content')
+            if isinstance(content, list):
+                for item in content:
+                    item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
+                    item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
+                    if item_type == IMAGE:
+                        img_url = item_value
+                        basename = get_basename_from_url(img_url)
+                        seen_images[basename] = img_url
+                        seen_images[f"image_{alias_counter}"] = img_url
+                        alias_counter += 1
+
+        return seen_images
+
+    def _propagate_images_to_task(
+        self,
+        task_text: str,
+        caller: str,
+        max_images_for_llm: int
+    ) -> list:
+        """Build multimodal content list by propagating relevant images from caller.
+
+        Only includes images that are explicitly referenced in task text by basename
+        or alias, respecting the max_images_for_llm limit.
+
+        Args:
+            task_text: The formatted task text (includes context and task labels)
+            caller: Parent instance name to scan for images
+            max_images_for_llm: Max images with base64 to propagate (-1 = keep all)
+
+        Returns:
+            List of content items: [{'text': task_text}, {IMAGE: url}, ...] or just
+            [{'text': task_text}] if no images should be propagated.
+        """
+        agent_msg_content = [{'text': task_text}]
+
+        seen_images = self._collect_images_from_caller(caller)
+        propagated_image_urls = set()
+
+        def _can_add_more() -> bool:
+            return max_images_for_llm == -1 or len(propagated_image_urls) < max_images_for_llm
+
+        # Include images referenced in task text (by basename or alias)
+        for img_url in seen_images.values():
+            if not _can_add_more():
+                break
+            if self._is_image_referenced_in_task(img_url, task_text, seen_images) and img_url not in propagated_image_urls:
+                agent_msg_content.append({IMAGE: img_url})
+                propagated_image_urls.add(img_url)
+
+        # Also check last user message for images referenced in task text
+        if _can_add_more():
+            caller_conv = self.pool.get_conversation(caller)
+            if caller_conv:
+                last_user_msg = None
+                for m in reversed(caller_conv):
+                    if msg_field(m, 'role') == USER:
+                        last_user_msg = m
+                        break
+                if last_user_msg:
+                    content = msg_field(last_user_msg, 'content')
+                    if isinstance(content, list):
+                        for item in content:
+                            if not _can_add_more():
+                                break
+                            item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
+                            item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
+                            if item_type == IMAGE and item_value not in propagated_image_urls:
+                                if self._is_image_referenced_in_task(item_value, task_text, seen_images):
+                                    agent_msg_content.append({IMAGE: item_value})
+                                    propagated_image_urls.add(item_value)
+
+        return agent_msg_content
+
     def build_task_message(
         self,
         args: dict,
@@ -299,13 +417,6 @@ class AgentLifecycleManager:
 
         task_text = f'Context: {context_text}{max_turns_info}\n\nTask: {task_text}\n\nPlease help with this task.'
 
-        # Item 9: Multimodal image propagation — scan caller's conversation for
-        # images
-        # referenced in the task text and include them as multimodal content
-        # Match main AC branch format: single-key dicts
-        agent_msg_content: list = [{'text': task_text}]
-        added_to_inst = set()
-
         # Read max_images_for_llm from pool config to limit image propagation
         # -1 = keep all, 0 = no images, N >= 1 = max N images
         raw_max = self.pool.llm_cfg.get('max_images_for_llm', 2)
@@ -314,87 +425,14 @@ class AgentLifecycleManager:
         else:
             max_images_for_llm = 2
 
-        # Get caller's conversation history to scan for images
-        caller_conv = self.pool.get_conversation(caller)
-        seen_images = {}
-        if caller_conv:
-            for msg in caller_conv:
-                content = msg_field(msg, 'content')
-                if isinstance(content, list):
-                    for item in content:
-                        item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
-                        item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
-                        if item_type == IMAGE:  # Issue 1 fix: use constant instead of hardcoded string
-                            img_url = item_value
-                            # Match main AC branch behavior: generate aliases
-                            # for image references
-                            basename = get_basename_from_url(img_url)  # Issue 2 fix: use utility function
-                            seen_images[basename] = img_url
-                            idx = len([v for k, v in seen_images.items() if not k.startswith("image_")]) - 1
-                            seen_images[f"image_{idx}"] = img_url
-
-        # Skip image embedding for text-only system agents — they receive captions
-        # or context summaries instead of raw image data
-        if agent_class not in ('Compressor', 'Security'):
-            # Include images that are referenced in the task text (by basename or
-            # alias), respecting max_images_for_llm limit (-1 means keep all)
-            for img_url in seen_images.values():
-                if max_images_for_llm != -1 and len(added_to_inst) >= max_images_for_llm:
-                    break
-                basename = get_basename_from_url(img_url)  # Issue 2 fix: use utility function
-                # Check if referenced by basename OR alias in task text
-                is_referenced = basename in task_text
-                if not is_referenced:
-                    for alias, url in seen_images.items():
-                        if url == img_url and alias in task_text:
-                            is_referenced = True
-                            break
-                if is_referenced and img_url not in added_to_inst:
-                    agent_msg_content.append({IMAGE: img_url})  # Match main AC branch format
-                    added_to_inst.add(img_url)
-
-            # Also check the last user message for images, but only add them if
-            # they're also referenced in task text by basename/alias AND within
-            # max_images_for_llm limit (-1 means keep all)
-            # Note: No tool_name guard needed here since build_task_message() is
-            # exclusively called from call_agent path
-            if caller_conv and (max_images_for_llm == -1 or len(added_to_inst) < max_images_for_llm):
-                last_user_msg = None
-                for m in reversed(caller_conv):
-                    if msg_field(m, 'role') == USER:
-                        last_user_msg = m
-                        break
-                if last_user_msg:
-                    content = msg_field(last_user_msg, 'content')
-                    if isinstance(content, list):
-                        for item in content:
-                            if max_images_for_llm != -1 and len(added_to_inst) >= max_images_for_llm:
-                                break
-                            item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
-                            item_value = item.get('value') if isinstance(item, dict) else getattr(item, 'value', None)
-                            if item_type == IMAGE and item_value not in added_to_inst:  # Issue 1 fix: use constant
-                                # Only add from last user message if referenced by basename/alias in task text
-                                img_basename = get_basename_from_url(item_value)
-                                # Check if this specific image's basename or its aliases appear in task text
-                                is_referenced = img_basename in task_text
-                                if not is_referenced:
-                                    # Check if any alias for this image appears in task text
-                                    for alias, url in seen_images.items():
-                                        if url == item_value and alias in task_text:
-                                            is_referenced = True
-                                            break
-                                if is_referenced:
-                                    agent_msg_content.append({IMAGE: item_value})  # Match main AC branch format
-                                    added_to_inst.add(item_value)
+        # Delegate image propagation to helper method (uses _collect_images_from_caller,
+        # _is_image_referenced_in_task internally)
+        agent_msg_content = self._propagate_images_to_task(task_text, caller, max_images_for_llm)
 
         # Fallback for empty message (match main AC branch behavior)
-        # Note: This is technically dead code since the formatted string above
-        # always contains
-        # non-empty text (caller prefix + labels), but kept as a safety net for
-        # consistency.
         if not task_text.strip():
             task_text = "Please proceed with your task."
-            agent_msg_content[0]['text'] = task_text  # Issue 3 fix: removed redundant guard
+            agent_msg_content[0]['text'] = task_text
 
         # Use multimodal content list if images found, otherwise plain text
         if len(agent_msg_content) > 1:
