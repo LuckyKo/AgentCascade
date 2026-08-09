@@ -45,6 +45,9 @@ MAX_FC_ARGS_LEN = 2048
 # Default timeout for HTTP requests (seconds)
 DEFAULT_REQUEST_TIMEOUT = 30
 
+# Maximum size for base64 data URL decoded content (50MB) to prevent resource exhaustion
+MAX_DATA_URL_SIZE = 50 * 1024 * 1024
+
 # Model types that support multimodal input (vision/audio/video).
 # Single source of truth — use instead of inline tuples/strings scattered across layers.
 VISION_MODEL_TYPES = frozenset({
@@ -223,7 +226,7 @@ def has_chinese_messages(messages: List[Union[Message, dict, list, bool, None]],
     return False
 
 
-# Mapping for common MIME types that don't follow simple "type/subtype" → ".subtype" convention
+# Mapping for common MIME types that don't follow simple "type/subtype" -> ".subtype" convention
 _DATA_URL_MIME_TO_EXT = {
     'image/jpeg': 'jpg',
     'image/svg+xml': 'svg',
@@ -234,14 +237,13 @@ def get_basename_from_url(path_or_url: str) -> str:
     # Handle base64 data URLs - generate a safe filename from MIME type
     if path_or_url.lower().startswith('data:'):
         try:
-            mime_part = path_or_url.split(',')[0]  # e.g., "data:image/jpeg;base64"
-            mime_type = mime_part.split(';')[0].split(':')[1]  # e.g., "image/jpeg"
+            mime_part = path_or_url.split(',')[0]
+            mime_type = mime_part.split(';')[0].split(':')[1]
             if not mime_type or '/' not in mime_type:
                 return 'data_image.bin'
-            # Use mapping for known edge cases, otherwise take subtype after '/'
             ext = _DATA_URL_MIME_TO_EXT.get(mime_type, mime_type.split('/')[-1])
             return f"data_image.{ext}"
-        except Exception:
+        except (IndexError, ValueError):
             return 'data_image.bin'
 
     if re.match(r'^[A-Za-z]:\\', path_or_url):
@@ -328,28 +330,15 @@ def save_url_to_local_work_dir(url: str, save_dir: str, save_filename: str = '')
 
     # Handle base64 data URLs (e.g., "data:image/jpeg;base64,/9j/4AAQ...")
     if url.lower().startswith('data:'):
-        MAX_DATA_URL_SIZE = 50 * 1024 * 1024  # 50MB limit to prevent resource exhaustion
         try:
-            # Validate structure: must have comma separating header from data
             if ',' not in url:
                 raise ValueError('Invalid data URL format: missing comma separator')
 
             header, b64_data = url.split(',', 1)
 
-            # Check for base64 marker
             if ';base64' not in header.lower():
                 raise ValueError(f'Data URL encoding not supported. Expected base64, got header: {header}')
 
-            # Pre-check estimated decoded size to avoid memory exhaustion before decoding
-            # Base64 expands by factor of ~3/4 (decoded = encoded * 3/4)
-            estimated_size = len(b64_data) * 3 // 4
-            if estimated_size > MAX_DATA_URL_SIZE:
-                raise ValueError(
-                    f'Data URL exceeds maximum allowed size of {MAX_DATA_URL_SIZE / (1024*1024):.0f}MB '
-                    f'(estimated decoded size: {estimated_size / (1024*1024):.1f}MB)'
-                )
-
-            # Decode and write to file with size limit
             decoded = base64.b64decode(b64_data)
             if len(decoded) > MAX_DATA_URL_SIZE:
                 raise ValueError(
@@ -357,10 +346,10 @@ def save_url_to_local_work_dir(url: str, save_dir: str, save_filename: str = '')
                     f'(got {len(decoded) / (1024*1024):.1f}MB)'
                 )
 
-            with open(new_path, 'wb') as f:
-                f.write(decoded)
+            with open(new_path, 'wb') as file:
+                file.write(decoded)
         except ValueError:
-            raise  # Re-raise our own validation errors unchanged
+            raise
         except Exception as e:
             raise ValueError(f'Failed to decode base64 data URL: {e}') from e
     elif not is_http_url(url):
