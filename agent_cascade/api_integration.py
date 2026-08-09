@@ -25,6 +25,7 @@ from agent_cascade.log import logger
 
 from .agent_instance import AgentInstance, AgentState
 from .agent_pool import AgentPool
+from .constants import POOL_SETTINGS_TO_BROADCAST
 from .execution_engine import ExecutionEngine
 
 
@@ -866,12 +867,9 @@ def build_state_from_pool(
 
     # Add tool char limits from pool.llm_cfg if available
     if hasattr(pool, 'llm_cfg'):
-        for key in ('tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
-                     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
-                     'max_images_for_llm'):
+        for key in POOL_SETTINGS_TO_BROADCAST:
             if key in pool.llm_cfg:
                 pool_settings[key] = pool.llm_cfg[key]
-
 
     # Add runtime pool settings (approval timeout, async shell console window)
     _add_pool_runtime_settings(pool, pool_settings)
@@ -1046,13 +1044,9 @@ def build_stream_update_from_pool(
 
     # Add tool char limits from pool.llm_cfg if available
     if hasattr(pool, 'llm_cfg'):
-        for key in ('tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
-                     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
-                     'max_images_for_llm'):
+        for key in POOL_SETTINGS_TO_BROADCAST:
             if key in pool.llm_cfg:
                 pool_settings[key] = pool.llm_cfg[key]
-
-
     # Add runtime pool settings (approval timeout, async shell console window)
     _add_pool_runtime_settings(pool, pool_settings)
 
@@ -1838,11 +1832,7 @@ def _apply_ui_config(
         try:
             with pool._execution._state_lock:  # Thread-safe write to shared config
 
-                for _key in (
-                    'tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
-                    'shell_char_limit', 'code_char_limit', 'list_dir_char_limit',
-                    'max_images_for_llm'
-                ):
+                for _key in POOL_SETTINGS_TO_BROADCAST:
                     if _key in sanitized:
                         pool.llm_cfg[_key] = sanitized[_key]
 

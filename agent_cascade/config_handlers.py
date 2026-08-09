@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, Optional
 from agent_cascade.settings import (
     CI_MIN_EXECUTION_TIMEOUT, CI_MIN_WATCHDOG_TIMEOUT, CI_MIN_STALE_CONTAINER_TTL,
 )
+from agent_cascade.constants import MAX_IMAGES_FOR_LLM_DEFAULT
 
 # ── LLM config key set (defined locally to avoid circular import with api_server) ────
 LLM_CONFIG_KEYS = frozenset({
@@ -532,7 +533,7 @@ def _handle_max_images_for_llm(ui_cfg: dict, agent_pool: Optional[Any], agents: 
     """Update max images with base64 data sent to LLM (-1 = keep all)."""
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         try:
-            val = int(ui_cfg.get('max_images_for_llm', 2))
+            val = int(ui_cfg.get('max_images_for_llm', MAX_IMAGES_FOR_LLM_DEFAULT))
             agent_pool.llm_cfg['max_images_for_llm'] = val
         except (ValueError, TypeError):
             pass  # Invalid value — keep existing setting

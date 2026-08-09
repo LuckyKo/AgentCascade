@@ -100,6 +100,22 @@ RUNTIME_REGISTERED_TOOLS: frozenset[str] = frozenset({
 # Configuration Keys (tuples for use in membership tests)
 # ────────────────────────────────────────────────────────────────────────────
 
+# Config keys that should be broadcast from pool.llm_cfg to all agents.
+# Used by api_integration.py to propagate tool char limits and image settings.
+POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
+    'tool_result_max_chars',
+    'grep_char_limit',
+    'grep_spillover',
+    'shell_char_limit',
+    'code_char_limit',
+    'list_dir_char_limit',
+    'max_images_for_llm',
+)
+
+# Default value for max_images_for_llm when not explicitly configured.
+# -1 = keep all images, N >= 0 = keep only last N with base64 data.
+MAX_IMAGES_FOR_LLM_DEFAULT: int = 2
+
 # Config keys that should NOT be passed to the LLM API.
 # These are operational settings used by the execution engine, not model parameters.
 # This tuple merges ALL items from api_integration.py, api_server.py, and agent_invoker.py.

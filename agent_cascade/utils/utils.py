@@ -1208,19 +1208,21 @@ def strip_base64_from_images(
     """Strip base64 data from all but the last N images in conversation.
 
     Standalone utility — works on Message objects without requiring an LLM instance.
-    Always returns a deep copy to avoid mutating originals.
+    Returns original list unchanged when max_images < 0 (no copy needed). Otherwise returns a deep copy.
 
     Args:
-        messages: Messages to process (will be deep-copied).
-        max_images: Maximum images with base64 to keep. -1 or any negative = keep all, 0 = strip all.
+        messages: Messages to process.
+        max_images: Maximum images with base64 to keep. -1 or any negative = return original list unchanged,
+                    0 = strip all base64 data, N > 0 = keep only last N images with base64 data.
 
     Returns:
-        New list of Message objects with base64 stripped from excess images.
+        Original list if max_images < 0 (no mutation), otherwise new list of Message objects with
+        base64 stripped from excess images.
     """
-    result = copy.deepcopy(messages)
-
     if max_images < 0:
-        return result
+        return messages  # No copy needed when keeping all images
+
+    result = copy.deepcopy(messages)
 
     # Collect all image ContentItems with base64 data, in order
     images_with_base64 = []  # list of (msg_idx, item_idx, content_item)
