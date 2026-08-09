@@ -46,7 +46,7 @@ class TestSaveImageToMedia:
 
     def test_save_from_file_path(self):
         """save_image_to_media() with a valid file path input."""
-        from agent_cascade.utils.media_utils import save_image_to_media
+        from agent_cascade.utils.media_utils import save_image_to_media, _get_media_root
 
         # Create a temporary test image file
         img = Image.new("RGB", (200, 200), color="red")
@@ -62,10 +62,11 @@ class TestSaveImageToMedia:
             assert result.endswith(".jpg"), f"Expected .jpg extension, got: {result}"
             assert Path(result).exists(), f"Saved file does not exist: {result}"
 
-            # Verify it's in /logs/media/images/
-            images_dir = PROJECT_ROOT / "logs" / "media" / "images"
-            assert str(images_dir) in result.replace("\\", "/"), \
-                f"Path not under images dir: {result}"
+            # Verify it's in the instance-aware media/images/ directory
+            images_dir = _get_media_root() / "images"
+            images_dir_str = str(images_dir).replace("\\", "/")
+            assert images_dir_str in result, \
+                f"Path not under images dir: {result} (expected under {images_dir_str})"
 
             # Verify returned path uses forward slashes and is absolute
             assert "/" in result, f"Path should use forward slashes: {result}"
@@ -791,6 +792,57 @@ class TestFrontendProxyLocalImagePaths:
         """/api/* paths should NOT be proxied."""
         assert self._should_proxy("/api/file?path=C:/logs/media/test.jpg") is False
         assert self._should_proxy("/api/image/some-id") is False
+
+
+class TestInstanceIsolation:
+    """Tests for instance-aware media path isolation."""
+
+    def test_media_root_without_instance_id(self):
+        """Without AGENT_CASCADE_INSTANCE_ID, media root should use default logs/media."""
+        import os
+        # Ensure no instance ID is set
+        saved = os.environ.pop("AGENT_CASCADE_INSTANCE_ID", None)
+        try:
+            # Force reload to pick up env change
+            import importlib
+            import agent_cascade.instance_id as iid_mod
+            importlib.reload(iid_mod)
+            import agent_cascade.utils.media_utils as mu_mod
+            importlib.reload(mu_mod)
+
+            from agent_cascade.utils.media_utils import _get_media_root
+            root = _get_media_root()
+            # Should end with logs/media (no instance suffix)
+            assert str(root).endswith("logs/media") or str(root).endswith("logs\\media"), \
+                f"Expected default logs/media path, got: {root}"
+        finally:
+            if saved is not None:
+                os.environ["AGENT_CASCADE_INSTANCE_ID"] = saved
+
+    def test_media_root_with_instance_id(self):
+        """With AGENT_CASCADE_INSTANCE_ID set, media root should use instance-specific logs_<id>/media."""
+        import os
+        # Save and set instance ID
+        saved = os.environ.get("AGENT_CASCADE_INSTANCE_ID")
+        os.environ["AGENT_CASCADE_INSTANCE_ID"] = "test_instance"
+        try:
+            # Force reload to pick up env change
+            import importlib
+            import agent_cascade.instance_id as iid_mod
+            importlib.reload(iid_mod)
+            import agent_cascade.utils.media_utils as mu_mod
+            importlib.reload(mu_mod)
+
+            from agent_cascade.utils.media_utils import _get_media_root
+            root = _get_media_root()
+            # Should end with logs_test_instance/media
+            assert "logs_test_instance/media" in str(root).replace("\\", "/"), \
+                f"Expected instance-specific path with logs_test_instance/media, got: {root}"
+        finally:
+            if saved is None:
+                os.environ.pop("AGENT_CASCADE_INSTANCE_ID", None)
+            else:
+                os.environ["AGENT_CASCADE_INSTANCE_ID"] = saved
 
 
 if __name__ == "__main__":

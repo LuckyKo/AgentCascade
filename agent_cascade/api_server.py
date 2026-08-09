@@ -214,11 +214,16 @@ def _get_allowed_file_roots() -> List[Path]:
     """Return the list of directories that /api/file is allowed to serve from.
 
     Includes:
-      - Media directory (/logs/media/ under AgentCascade root)
-      - Workspace root (AgentCascade root itself)
+      - Media directory (<workspace>/logs/media/ or <workspace>/logs_<instance>/media/)
+      - Workspace root (DEFAULT_WORKSPACE)
     """
-    workspace_root = Path(__file__).resolve().parent.parent
-    media_dir = workspace_root / "logs" / "media"
+    from agent_cascade.instance_id import make_instance_dir
+    from agent_cascade.settings import DEFAULT_WORKSPACE
+
+    workspace_root = Path(DEFAULT_WORKSPACE)
+    base_logs = str(workspace_root / "logs")
+    instance_logs = make_instance_dir(base_logs)
+    media_dir = Path(instance_logs) / "media"
     return [media_dir, workspace_root]
 
 

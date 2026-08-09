@@ -18,6 +18,9 @@ from typing import Optional, Union
 
 from PIL import Image
 
+from agent_cascade.instance_id import make_instance_dir
+from agent_cascade.settings import DEFAULT_WORKSPACE
+
 
 class MediaStorageError(Exception):
     """Raised when media storage operations fail."""
@@ -25,15 +28,15 @@ class MediaStorageError(Exception):
 
 
 def _get_media_root() -> Path:
-    """Return the root media directory under AgentCascade workspace.
+    """Return the root media directory under the workspace logs.
 
-    The media root is /logs/media/ relative to the project root (AgentCascade dir).
-    This places media alongside agent logs for easy session cleanup.
+    The media root is <workspace>/logs/media/ (or <workspace>/logs_<instance>/media/)
+    depending on whether AGENT_CASCADE_INSTANCE_ID is set. This places media
+    alongside agent logs for easy session cleanup and instance isolation.
     """
-    # agent_cascade package dir -> parent is AgentCascade root
-    package_dir = Path(__file__).resolve().parent.parent
-    workspace_root = package_dir.parent
-    return workspace_root / "logs" / "media"
+    base_logs = str(Path(DEFAULT_WORKSPACE) / "logs")
+    instance_logs = make_instance_dir(base_logs)
+    return Path(instance_logs) / "media"
 
 
 def get_images_dir() -> str:
