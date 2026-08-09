@@ -1056,6 +1056,7 @@ class AsyncShellTracker:
             # Increment heartbeat counter for this task
             task.heartbeat_count += 1
             beat = task.heartbeat_count
+            elapsed = time.time() - task.start_time
 
         # Re-check killed flag after reading output to avoid sending heartbeat for killed tasks.
         with task._lock:
@@ -1067,7 +1068,7 @@ class AsyncShellTracker:
             # agents wake up and know the process hasn't died.
             logger.debug("[async_shell] heartbeat(no output) agent=%s tool_id=%s beat=%s",
                          agent_name, tool_id, beat)
-            msg = f"⟨shell_cmd heartbeat⟩ Beat {beat}, Tool ID: {tool_id} | No new output (still running)"
+            msg = f"⟨shell_cmd heartbeat⟩ Beat {beat} ({elapsed:.0f}s), Tool ID: {tool_id} | No new output (still running)"
             self._enqueue(agent_name, msg)
             return
 
@@ -1097,7 +1098,7 @@ class AsyncShellTracker:
                 logger.debug(f"[AsyncShell] truncate_with_spillover failed in heartbeat for {agent_name}: {e}")
 
         msg = (
-            f"⟨shell_cmd heartbeat⟩ Beat {beat}, Tool ID: {tool_id} | "
+            f"⟨shell_cmd heartbeat⟩ Beat {beat} ({elapsed:.0f}s), Tool ID: {tool_id} | "
             f"{line_count} line{'s' if line_count != 1 else ''} since last tick\n"
             f"{output_text}"
         )
