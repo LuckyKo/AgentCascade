@@ -2,18 +2,30 @@
   "schema_version": "1.0",
   "skills": {
     "self-augmentation": {
-      "total_loads": 435,
+      "total_loads": 659,
       "by_version": {
-        "1.0.0": 435
+        "1.0.0": 659
       }
     },
     "project-memory-writing": {
-      "total_loads": 15,
+      "total_loads": 29,
       "by_version": {
-        "1.0.0": 15
+        "1.0.0": 29
       }
     },
     "python-codebase-static-analysis": {
+      "total_loads": 9,
+      "by_version": {
+        "1.0.0": 9
+      }
+    },
+    "investigate-streaming-gaps": {
+      "total_loads": 3,
+      "by_version": {
+        "1.0.0": 3
+      }
+    },
+    "version-control": {
       "total_loads": 1,
       "by_version": {
         "1.0.0": 1

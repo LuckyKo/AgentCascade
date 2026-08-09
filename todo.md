@@ -86,34 +86,33 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [x] some settings like `grep spillover` reset when i close and reopen the chrome tab. they persist on refresh/hard refresh though. Fixed: race condition in beforeunload handler saving HTML defaults before loadSettings ran, plus dual-key pollution (hyphenated vs underscore). Added settingsLoaded guard, removed duplicate key writes from saveSettings, prefer underscore keys in loadSettings with hyphenated fallback, cleanup stale keys. See .agent_lessons/settings-reset-on-tab-close-fix.md
 - [x] make code_map also parse md files (where the basic tags are at). Implemented ATX heading extraction with CommonMark-style fenced code block handling in agent_cascade/tools/custom/code_map.py. Kept custom regex instead of adding a parser library: ~10x faster, zero deps, correct for all relevant cases. Added guard for 4-space/tab indented code blocks. See research/markdown_heading_library_report.md and .agent_lessons/markdown-heading-extraction-decision.md.
 - [x] fallback to a lower context window limit API fails to properly trigger compression.
+- [ ] investigator (researcher_class) session tool list is wrong: system_info reports `Disabled Tools: code_interpreter, copy_file, delete_file, edit_file, propose_skill, re_indent, shell_cmd, web_extractor, web_search, write_file` for the researcher agent, but `code_interpreter` actually WORKS (verified by running it), and the researcher role should have write_file + CI by definition. Suspected: stale/broken tool-policy resolution (agent-class to tool-policy map missing researcher, or disabled-tools list being applied incorrectly). Writing this todo via CI because write_file/edit_file show as disabled. See .agent_lessons/view_image_image_embedding_two_drop_points.md.
+- [ ] check how async shell cmd handles timeout, it doesn't seems like its respected very precisely
+- [ ] add elapsed timer to heartbeat responses, like: `⟨shell_cmd heartbeat⟩ Beat 2 (15s), Tool ID: 8 | No new output (still running)` 
+- [ ] path discovery error, that path is in RW and valid, should work: `ERROR: Path error for '/N:/work/WD/AgentCascade/investigation_report_view_image_contentitem_flow.md' — Path '/N:/work/WD/AgentCascade/investigation_report_view_image_contentitem_flow.md' is outside the allowed RO directories`
+
 
 # Errors to investigate:
 
-# Slot restore works most of the time, but sometimes it doesn't and we get full reprocess (no LCP check?)
+# delete_and_inset mode broken, wrong line removed?
+{
+  "path": "N:\\work\\WD\\AgentCascade\\agent_cascade\\api_integration.py",
+  "new_content": "",
+  "old_content": "",
+  "range": "870:870",
+  "match_mode": "delete_and_insert",
+  "justification": "Replace line 870 to add max_images_for_llm"
+}
+Tool Result
+🗑️
+OK: Edited N:\work\WD\AgentCascade\agent_cascade\api_integration.py lines 870-870 (d&i, deleted 1 lines, -1 +0 = -1net)
 
-2026-08-07 12:40:43,679 [INFO] httpx: HTTP Request: GET http://127.0.0.1:9135/health "HTTP/1.1 503 Service Unavailable"
-2026-08-07 12:40:44,115 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.17.965.862 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 100096, kv_unified = 'true'
-2026-08-07 12:40:44,201 [INFO] httpx: HTTP Request: GET http://127.0.0.1:9135/health "HTTP/1.1 503 Service Unavailable"
-2026-08-07 12:40:44,317 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.18.168.493 I srv  llama_server: model loaded
-2026-08-07 12:40:44,317 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.18.168.502 I srv  llama_server: listening on http://127.0.0.1:9135
-2026-08-07 12:40:44,714 [INFO] httpx: HTTP Request: GET http://127.0.0.1:9135/health "HTTP/1.1 200 OK"
-2026-08-07 12:40:44,715 [INFO] autoloader: llama-server on port 9135 is READY! (took 18.68s)
-2026-08-07 12:40:44,718 [INFO] autoloader: Model Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf ready on port 9135
-2026-08-07 12:40:44,719 [INFO] autoloader: Restoring slot 0 state from file: N:\work\stuff\Beta\llama-autoloader\states\Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf.stream_timeout_fixer_1786095558.bin
-2026-08-07 12:40:45,582 [INFO] httpx: HTTP Request: POST http://127.0.0.1:9135/slots/0?action=restore "HTTP/1.1 200 OK"
-2026-08-07 12:40:45,583 [INFO] autoloader: State restored for model=qwen3.6-27b-fable-fus-mtp label=stream_timeout_fixer_1786095558 path=Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf.stream_timeout_fixer_1786095558.bin
-[32mINFO[0m:     127.0.0.1:53882 - "[1mPOST /v1/models/qwen3.6-27b-fable-fus-mtp/state/load HTTP/1.1[0m" [32m200 OK[0m
-2026-08-07 12:40:45,841 [INFO] autoloader: --> Incoming POST request to '/v1/chat/completions' (model param input: 'Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf')
-2026-08-07 12:40:45,841 [INFO] autoloader: Resolved model ID: 'Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf'
-2026-08-07 12:40:45,842 [INFO] autoloader: Forwarding POST /v1/chat/completions -> llama-server on port 9135
-2026-08-07 12:40:45,978 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.19.829.050 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = -1
-2026-08-07 12:40:46,327 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.20.178.137 I slot launch_slot_: id  0 | task 1 | processing task, is_child = 0
-2026-08-07 12:40:46,327 [INFO] httpx: HTTP Request: POST http://127.0.0.1:9135/v1/chat/completions "HTTP/1.1 200 OK"
-[32mINFO[0m:     127.0.0.1:54109 - "[1mPOST /v1/chat/completions HTTP/1.1[0m" [32m200 OK[0m
-2026-08-07 12:40:50,167 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.24.018.262 I slot print_timing: id  0 | task 1 | prompt processing, n_tokens =   4096, progress = 0.16, t =   3.84 s / 1066.64 tokens per second
-2026-08-07 12:40:52,086 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.25.937.739 I slot print_timing: id  0 | task 1 | prompt processing, n_tokens =   6144, progress = 0.24, t =   5.76 s / 1066.74 tokens per second
-2026-08-07 12:40:54,050 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.27.900.592 I slot print_timing: id  0 | task 1 | prompt processing, n_tokens =   8192, progress = 0.32, t =   7.72 s / 1060.81 tokens per second
-2026-08-07 12:40:54,458 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.28.309.593 I slot print_timing: id  0 | task 1 | prompt processing, n_tokens =   8483, progress = 0.33, t =   8.13 s / 1043.24 tokens per second
-2026-08-07 12:40:55,385 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.29.236.001 I slot print_timing: id  0 | task 1 | prompt processing, n_tokens =   9274, progress = 0.36, t =   9.06 s / 1023.86 tokens per second
-2026-08-07 12:40:57,413 [INFO] autoloader: [Qwen3.6-27B-Fable-Fus-MTP-Q4_K_M.gguf] 0.31.264.074 I slot print_timing: id  0 | task 1 | prompt processing, n_tokens =  11322, progress = 0.45, t =  11.09 s / 1021.30 tokens per second
-
+@@ -867,7 +867,6 @@
+     # Add tool char limits from pool.llm_cfg if available
+     if hasattr(pool, 'llm_cfg'):
+         for key in ('tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
+-                     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit'):
+             if key in pool.llm_cfg:
+                 pool_settings[key] = pool.llm_cfg[key]
+ 
+backup → N:\work\WD\AgentWorkspace\logs\backups\coder\api_integration.py.1786236685.bak

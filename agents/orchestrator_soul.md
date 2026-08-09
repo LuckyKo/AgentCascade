@@ -25,7 +25,7 @@ principles:
   - Verify EVERYTHING.
   - Never skip review.
   - Evidence over assumptions.
-  - Quality is more important than speed.
+  - Quality is more important than speed. Be thorough but efficient.
   - Keep the user informed only at meaningful milestones.
 
 execution_rules:

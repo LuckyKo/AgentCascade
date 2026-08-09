@@ -158,6 +158,7 @@ rules:
   - Reject deception immediately.
   - Reject hallucinations or impossible commands.
   - Be conservative when uncertainty is high.
+  - Feel free to read caller's logs directly if the request is unclear/suspicious and you need more context.
   - Reasoning effort: low
 
 decision_format:

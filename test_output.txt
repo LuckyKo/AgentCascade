@@ -1,5 +1,5 @@
 
-[conftest] Local LLM found: LM Studio (http://127.0.0.1:1234/v1) — 22 models
+[conftest] Local LLM found: LM Studio (http://127.0.0.1:1234/v1) — 23 models
 ============================= test session starts =============================
 platform win32 -- Python 3.12.6, pytest-9.0.2, pluggy-1.6.0 -- C:\Python312\python.exe
 cachedir: .pytest_cache
@@ -7,48 +7,13 @@ rootdir: N:\work\WD\AgentCascade
 configfile: pytest.ini
 plugins: anyio-4.9.0, asyncio-1.4.0, timeout-2.4.0, xdist-3.8.0, typeguard-4.4.4
 asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-timeout: 60.0s
+timeout: 120.0s
 timeout method: thread
 timeout func_only: False
 created: 8/8 workers
-8 workers [12 items]
+8 workers [1 item]
 
 scheduling tests via LoadScheduling
 
-tests/test_max_tokens_resolution.py::TestResolveMaxTokensTemplateFallback::test_template_static_config_used_when_router_returns_zero 
-tests/test_max_tokens_resolution.py::TestResolveMaxTokensGenerateCfgNone::test_generate_cfg_none_does_not_crash 
-tests/test_max_tokens_resolution.py::TestResolveMaxTokensNullInputs::test_pool_none_falls_through_to_defaults 
-tests/test_max_tokens_resolution.py::TestResolveMaxTokensRouterException::test_router_exception_falls_through 
-tests/test_max_tokens_resolution.py::TestResolveMaxTokensOverridePriority::test_override_beats_router_value 
-tests/test_max_tokens_resolution.py::TestResolveMaxTokensRouterReturnsValue::test_router_value_returned 
-tests/test_max_tokens_resolution.py::TestResolveMaxTokensDefaultFallback::test_default_returned_when_no_template 
-tests/test_max_tokens_resolution.py::TestResolveMaxTokensNullInputs::test_instance_none_uses_orchestrator_class 
-[gw7] [  8%] PASSED tests/test_max_tokens_resolution.py::TestResolveMaxTokensGenerateCfgNone::test_generate_cfg_none_does_not_crash 
-[gw4] [ 16%] PASSED tests/test_max_tokens_resolution.py::TestResolveMaxTokensNullInputs::test_pool_none_falls_through_to_defaults 
-[gw2] [ 25%] PASSED tests/test_max_tokens_resolution.py::TestResolveMaxTokensDefaultFallback::test_default_returned_when_no_template 
-tests/llm/test_max_input_tokens_not_popped.py::test_default_max_input_tokens_when_missing 
-[gw2] [ 33%] PASSED tests/llm/test_max_input_tokens_not_popped.py::test_default_max_input_tokens_when_missing 
-[gw1] [ 41%] PASSED tests/test_max_tokens_resolution.py::TestResolveMaxTokensTemplateFallback::test_template_static_config_used_when_router_returns_zero 
-tests/llm/test_max_input_tokens_not_popped.py::test_max_input_tokens_gets_used_for_truncation 
-[gw1] [ 50%] PASSED tests/llm/test_max_input_tokens_not_popped.py::test_max_input_tokens_gets_used_for_truncation 
-[gw5] [ 58%] PASSED tests/test_max_tokens_resolution.py::TestResolveMaxTokensNullInputs::test_instance_none_uses_orchestrator_class 
-[gw6] [ 66%] PASSED tests/test_max_tokens_resolution.py::TestResolveMaxTokensRouterException::test_router_exception_falls_through 
-[gw0] [ 75%] PASSED tests/test_max_tokens_resolution.py::TestResolveMaxTokensRouterReturnsValue::test_router_value_returned 
-tests/llm/test_max_input_tokens_not_popped.py::test_max_input_tokens_not_popped 
-[gw0] [ 83%] PASSED tests/llm/test_max_input_tokens_not_popped.py::test_max_input_tokens_not_popped 
-[gw3] [ 91%] PASSED tests/test_max_tokens_resolution.py::TestResolveMaxTokensOverridePriority::test_override_beats_router_value 
-tests/llm/test_max_input_tokens_not_popped.py::test_agent_name_passed_to_truncation 
-[gw3] [100%] PASSED tests/llm/test_max_input_tokens_not_popped.py::test_agent_name_passed_to_truncation 
-
-============================ slowest 10 durations =============================
-2.99s call     tests/test_max_tokens_resolution.py::TestResolveMaxTokensOverridePriority::test_override_beats_router_value
-2.97s call     tests/test_max_tokens_resolution.py::TestResolveMaxTokensRouterReturnsValue::test_router_value_returned
-2.96s call     tests/test_max_tokens_resolution.py::TestResolveMaxTokensRouterException::test_router_exception_falls_through
-2.96s call     tests/test_max_tokens_resolution.py::TestResolveMaxTokensNullInputs::test_instance_none_uses_orchestrator_class
-2.94s call     tests/test_max_tokens_resolution.py::TestResolveMaxTokensTemplateFallback::test_template_static_config_used_when_router_returns_zero
-1.96s call     tests/test_max_tokens_resolution.py::TestResolveMaxTokensDefaultFallback::test_default_returned_when_no_template
-1.94s call     tests/test_max_tokens_resolution.py::TestResolveMaxTokensNullInputs::test_pool_none_falls_through_to_defaults
-1.94s call     tests/test_max_tokens_resolution.py::TestResolveMaxTokensGenerateCfgNone::test_generate_cfg_none_does_not_crash
-0.01s setup    tests/test_max_tokens_resolution.py::TestResolveMaxTokensNullInputs::test_instance_none_uses_orchestrator_class
-0.01s setup    tests/test_max_tokens_resolution.py::TestResolveMaxTokensRouterException::test_router_exception_falls_through
-============================= 12 passed in 8.09s ==============================
+tests/test_vision_tool_call_e2e.py::TestVisionToolCallE2E::test_vision_tool_call_preserves_contentitem_and_base64 
+[gw0] [100%] FAILED tests/test_vision_tool_call_e2e.py::TestVisionToolCallE2E::test_vision_tool_call_preserves_contentitem_and_base64 

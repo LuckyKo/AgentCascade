@@ -20,3 +20,4 @@ requests
 seaborn
 sympy
 tiktoken
+soundfile

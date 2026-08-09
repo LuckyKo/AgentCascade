@@ -159,15 +159,13 @@ def _capture_window_windows(pid: int) -> bytes:
             # PrintWindow failed — fall back to BitBlt (only works if window is visible/on-screen)
             ctypes.windll.gdi32.BitBlt(hdc_mem, 0, 0, width, height, hdc_window, 0, 0, win32con.SRCCOPY)
 
-        # Use win32ui to convert the GDI bitmap handle to a PIL Image.
-        # This is more reliable than manually constructing BITMAPINFOHEADER + GetDIBits.
+        # Use win32ui to convert the GDI bitmap handle to raw pixel bytes.
+        # GetBitmapBits returns BGRA data (4 bytes/pixel, alpha is 0 for compatible bitmaps).
         bmp_obj = win32ui.CreateBitmapFromHandle(bmp_handle)
-
-        # Get the raw bits as a bytes object
         raw_bits = bmp_obj.GetBitmapBits(True)
 
-        img = Image.frombytes('RGBA', (width, height), raw_bits)
-        img = img.convert('RGB')
+        # Interpret as BGRX to get correct RGB colors (discard unused alpha channel)
+        img = Image.frombytes('RGB', (width, height), raw_bits, 'raw', 'BGRX')
 
         buf = io.BytesIO()
         img.save(buf, format='PNG')
