@@ -2604,10 +2604,16 @@ function updateBubbleContent(bubble, msg, config) {
         const newText = curContent.slice(prevContent.length);
         if (newText) {
             // For image-bearing bubbles, prefer incremental append to avoid destroying cached img nodes.
-            // Increase forced re-render interval from 8 → 32 for bubbles with images to reduce image re-decode pressure.
+            // Increase forced re-render interval for bubbles with images to reduce image re-decode pressure.
+            // Adaptive: shorter interval for very long messages (more drift risk), longer for image-heavy ones.
             const hasImages = bubbleHasImages(contentDiv);
             const incrementCount = parseInt(bubble.dataset.incrementCount || '0');
-            const forceInterval = hasImages ? 32 : 8;
+            const msgLen = curContent.length;
+            let forceInterval = 8; // default for plain text
+            if (hasImages) {
+                // Base interval: 24 ticks (~6s at 250ms throttle), reduced for very long messages (>10k chars)
+                forceInterval = msgLen > 10000 ? 16 : 24;
+            }
 
             try {
                 appendStreamingDelta(contentDiv, newText);

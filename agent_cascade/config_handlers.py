@@ -534,6 +534,9 @@ def _handle_max_images_for_llm(ui_cfg: dict, agent_pool: Optional[Any], agents: 
     if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
         try:
             val = int(ui_cfg.get('max_images_for_llm', MAX_IMAGES_FOR_LLM_DEFAULT))
+            # Clamp to safe range: -1 (keep all) or 0-50
+            if val != -1 and (val < 0 or val > 50):
+                val = MAX_IMAGES_FOR_LLM_DEFAULT
             agent_pool.llm_cfg['max_images_for_llm'] = val
         except (ValueError, TypeError):
             pass  # Invalid value — keep existing setting
