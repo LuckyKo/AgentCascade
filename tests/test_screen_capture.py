@@ -161,7 +161,9 @@ class TestViewImageDirectiveRouting:
                     with patch('builtins.open', m):
                         # After temp file write, save_image_to_media is called which opens the file via PIL
                         with patch('agent_cascade.tools.custom.file_ops.save_image_to_media') as mock_save:
-                            mock_save.return_value = 'N:/work/WD/AgentCascade/logs/media/images/img_20260101_120000_abcd.jpg'
+                            from agent_cascade.utils.media_utils import _get_media_root
+                            test_media_path = str((_get_media_root() / "images" / "img_20260101_120000_abcd.jpg")).replace("\\", "/")
+                            mock_save.return_value = test_media_path
                             result = view_image_tool.call(json.dumps({'path': '__screen_capture'}))
 
                             # Verify temp file was created for the capture

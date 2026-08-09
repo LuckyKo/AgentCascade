@@ -1,7 +1,7 @@
 """
 Media storage utilities for AgentCascade.
 
-Handles saving images (and future media types) to the /logs/media/ directory,
+Handles saving images (and future media types) to the <workspace>/logs/media/ directory,
 providing path-based references instead of inline base64 data URLs.
 """
 
