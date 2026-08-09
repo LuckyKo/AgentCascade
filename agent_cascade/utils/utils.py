@@ -238,7 +238,7 @@ def get_basename_from_url(path_or_url: str) -> str:
     if path_or_url.lower().startswith('data:'):
         try:
             mime_part = path_or_url.split(',')[0]
-            mime_type = mime_part.split(';')[0].split(':')[1]
+            mime_type = mime_part.split(';')[0].split(':')[1].lower()
             if not mime_type or '/' not in mime_type:
                 return 'data_image.bin'
             ext = _DATA_URL_MIME_TO_EXT.get(mime_type, mime_type.split('/')[-1])
@@ -325,7 +325,8 @@ def save_url_to_local_work_dir(url: str, save_dir: str, save_filename: str = '')
     new_path = os.path.join(save_dir, save_filename)
     if os.path.exists(new_path):
         os.remove(new_path)
-    logger.info(f'Downloading {url} to {new_path}...')
+    url_display = url[:100] + '...' if len(url) > 100 else url
+    logger.info(f'Downloading {url_display} to {new_path}...')
     start_time = time.time()
 
     # Handle base64 data URLs (e.g., "data:image/jpeg;base64,/9j/4AAQ...")
@@ -338,6 +339,14 @@ def save_url_to_local_work_dir(url: str, save_dir: str, save_filename: str = '')
 
             if ';base64' not in header.lower():
                 raise ValueError(f'Data URL encoding not supported. Expected base64, got header: {header}')
+
+            # Estimate decoded size before decoding to prevent memory exhaustion
+            estimated_size = (len(b64_data) * 3) // 4
+            if estimated_size > MAX_DATA_URL_SIZE:
+                raise ValueError(
+                    f'Data URL exceeds maximum allowed size of {MAX_DATA_URL_SIZE / (1024*1024):.0f}MB '
+                    f'(estimated decoded size: {estimated_size / (1024*1024):.1f}MB)'
+                )
 
             decoded = base64.b64decode(b64_data)
             if len(decoded) > MAX_DATA_URL_SIZE:
