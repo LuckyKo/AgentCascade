@@ -2692,6 +2692,8 @@ function renderMarkdown(text, allowThinking = true) {
   // O(N^2) regex work to keep the UI responsive.
   if (!allowThinking) {
     try {
+      // Rewrite local file paths to use /api/file proxy so browser can load them
+      text = proxyLocalImagePaths(text);
       // Sanitize HTML output from marked to prevent XSS from LLM-generated content
       return DOMPurify.sanitize(marked.parse(text));
     } catch {
@@ -2740,6 +2742,8 @@ function renderMarkdown(text, allowThinking = true) {
   }
 
   try {
+    // Rewrite local file paths to use /api/file proxy so browser can load them
+    text = proxyLocalImagePaths(text);
     // Sanitize HTML output from marked to prevent XSS from LLM-generated content
     return DOMPurify.sanitize(marked.parse(text));
   } catch {
@@ -2833,10 +2837,9 @@ function renderToolResult(msg) {
   
   let contentHtml;
   if (msg.name === 'view_image' || content.match(/!\[.*?\]\(.*?\)/)) {
-    // Image content: process through markdown to render images, rewriting file:/// URLs via backend proxy
+    // Image content: process through markdown to render images, rewriting local paths via backend proxy
     const truncatedForImage = (shouldTruncate && content.length > 2000) ? content.substring(0, 2000) + '\n\n... (truncated)' : content;
-    const proxiedContent = truncatedForImage.replace(/!\[(.*?)\]\((?:file:\/\/\/|file:\/\/)(.*?)\)/g, '![image](/api/file?path=$2)');
-    contentHtml = `<div class="tool-image-wrapper" style="padding-top: 8px;">${renderMarkdown(proxiedContent, false)}</div>`;
+    contentHtml = `<div class="tool-image-wrapper" style="padding-top: 8px;">${renderMarkdown(proxyLocalImagePaths(truncatedForImage), false)}</div>`;
   } else if (!isCodeTool) {
     // Prose/markdown tools: process through renderMarkdown for proper formatting.
     // Do NOT truncate before rendering — truncating raw markdown mid-block produces malformed HTML.
@@ -4600,6 +4603,46 @@ if (inputArea) {
       setTimeout(() => chatInput.focus(), 0);
     }
   });
+}
+
+/**
+ * Rewrite local file paths in markdown image syntax to use /api/file proxy.
+ * Handles: file:// URIs, Windows absolute paths (N:/...), POSIX absolute paths (/workspace/...).
+ * Preserves URLs starting with http://, https://, data:, and already-proxied /api/* paths.
+ */
+function proxyLocalImagePaths(text) {
+    if (typeof text !== 'string') return text;
+    
+    // Strategy: match ![alt](url) and rewrite the URL portion based on its type
+    return text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, url) => {
+        // Already proxied or external — leave as-is
+        if (url.startsWith('/api/') || url.startsWith('/media/') || 
+            url.startsWith('http://') || url.startsWith('https://') || 
+            url.startsWith('data:')) {
+            return match;
+        }
+        
+        // file:// URI → extract path, proxy it
+        let filePath = url;
+        if (url.startsWith('file:///')) {
+            filePath = url.slice(8);
+        } else if (url.startsWith('file://')) {
+            filePath = url.slice(7);
+        }
+        
+        // Windows absolute path: N:/... or N:\...
+        if (/^[A-Za-z]:[\\/]/.test(filePath)) {
+            return `![${alt}](/api/file?path=${encodeURIComponent(filePath)})`;
+        }
+        
+        // POSIX absolute path: /workspace/..., /logs/..., etc. (but not relative like ./foo)
+        if (/^\//.test(filePath) && !filePath.startsWith('/.')) {
+            return `![${alt}](/api/file?path=${encodeURIComponent(filePath)})`;
+        }
+        
+        // Unknown format — leave as-is to avoid breaking things
+        return match;
+    });
 }
 
 sendBtn.addEventListener('click', sendMessage);

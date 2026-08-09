@@ -15,6 +15,7 @@ from agent_cascade.settings import (
 import json
 from agent_cascade.prompts.dna import TOOL_METADATA
 from agent_cascade.utils.utils import json_loads, encode_image_as_base64
+from agent_cascade.utils.media_utils import save_image_to_media, MediaStorageError
 
 
 class PathResolutionMixin:
@@ -604,19 +605,32 @@ class ViewImage(BaseTool, PathResolutionMixin):
             if resolved.suffix.lower() == '.svg':
                 temp_png = self._convert_svg_to_png(resolved)
 
-            # Encode image as inline base64 so logs capture what was actually sent to the model
+            # Save image to media dir (path-based) with base64 fallback
             try:
                 image_path_for_encoding = str(temp_png) if temp_png else str(resolved)
-                base64_data_url = encode_image_as_base64(image_path_for_encoding, max_short_side_length=1080)
-            except Exception as e:
-                # Fall back to file:// URL if encoding fails (e.g., unsupported format)
-                logger.warning(f"Failed to encode image as base64 '{image_path_for_encoding}': {e}. Using file:// URL.")
-                base64_data_url = str(temp_png.as_uri() if temp_png else resolved.as_uri())
+                media_path = save_image_to_media(
+                    image_source=image_path_for_encoding,
+                    max_short_side=1080,
+                )
+                return [
+                    ContentItem(image=media_path),
+                    ContentItem(text=f"Viewing image: {path}")
+                ]
+            except MediaStorageError as e:
+                # Fallback to base64 if media storage fails (disk full, permissions, etc.)
+                logger.warning(f"Media storage failed for view_image, falling back to base64: {e}")
+                try:
+                    image_path_for_encoding = str(temp_png) if temp_png else str(resolved)
+                    base64_data_url = encode_image_as_base64(image_path_for_encoding, max_short_side_length=1080)
+                except Exception as enc_err:
+                    # Fall back to file:// URL if encoding also fails
+                    logger.warning(f"Failed to encode image as base64 '{image_path_for_encoding}': {enc_err}. Using file:// URL.")
+                    base64_data_url = str(temp_png.as_uri() if temp_png else resolved.as_uri())
 
-            return [
-                ContentItem(image=base64_data_url),
-                ContentItem(text=f"Viewing image: {path}")
-            ]
+                return [
+                    ContentItem(image=base64_data_url),
+                    ContentItem(text=f"Viewing image: {path}")
+                ]
         except (ValueError, TypeError) as e:
             # SVG parse errors from cairosvg come through as ValueError/TypeError
             return f"ERROR: SVG parse error in '{path}': {e}"

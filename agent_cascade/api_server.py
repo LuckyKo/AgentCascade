@@ -55,6 +55,7 @@ from agent_cascade.utils.utils import extract_text_from_message, get_message_sta
 from agent_cascade.prompts.dna import SECURITY_ADVISOR_PROMPT, COMPRESSION_MARKER
 from agent_cascade.llm.base import _truncate_input_messages_roughly
 from agent_cascade.execution_engine import ExecutionEngine
+from agent_cascade.utils.media_utils import save_image_from_data_uri, MediaStorageError
 
 from agent_cascade.utils.thinking_block import (
     _THINK_BLOCK_RE, _THINK_BLOCK_UNCLOSED_RE, _THINK_BLOCK_BRACKET_RE,
@@ -110,7 +111,12 @@ def _parse_multimodal_content(text):
     """
     Parse markdown images ![alt](data:...) and return a list of content items.
     If no images are found, returns the original text.
+
+    Saves base64 data URIs to media storage as paths; falls back to inline
+    base64 if media storage fails.
     """
+    from agent_cascade.log import logger
+
     parts = []
     last_end = 0
     for match in _IMAGE_DATA_PATTERN.finditer(text):
@@ -118,12 +124,18 @@ def _parse_multimodal_content(text):
         if start > last_end:
             parts.append({'text': text[last_end:start]})
         alt, url = match.groups()
-        parts.append({'image': url})
+        try:
+            media_path = save_image_from_data_uri(url)
+            parts.append({'image': media_path})  # Path instead of base64
+        except MediaStorageError as e:
+            # Fallback to inline base64 if media storage fails
+            logger.warning(f"Media storage failed for user image, keeping inline base64: {e}")
+            parts.append({'image': url})
         last_end = end
     
     if last_end < len(text):
         parts.append({'text': text[last_end:]})
-    
+
     if not parts:
         return text
     if len(parts) == 1 and 'text' in parts[0]:
@@ -193,6 +205,71 @@ def _set_generating_true(session: dict) -> None:
         session['generating'] = True
 
 
+# ── File serving security helpers (for /api/file endpoint) ───────────────
+
+_SENSITIVE_FILENAMES = {".env", ".gitconfig", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
+
+
+def _get_allowed_file_roots() -> List[Path]:
+    """Return the list of directories that /api/file is allowed to serve from.
+
+    Includes:
+      - Media directory (/logs/media/ under AgentCascade root)
+      - Workspace root (AgentCascade root itself)
+    """
+    workspace_root = Path(__file__).resolve().parent.parent
+    media_dir = workspace_root / "logs" / "media"
+    return [media_dir, workspace_root]
+
+
+def _is_path_allowed(path: str) -> bool:
+    """Check if a file path is allowed to be served via /api/file.
+
+    URL-decodes and resolves the path, then verifies it falls under an allowed root
+    using prefix matching with os.sep to avoid partial directory name matches.
+
+    Args:
+        path: The raw path string from the request (may be URL-encoded).
+
+    Returns:
+        True if the path is safe to serve, False otherwise.
+    """
+    from urllib.parse import unquote
+    from agent_cascade.log import logger
+
+    # URL-decode the path
+    decoded = unquote(path)
+
+    try:
+        resolved = Path(decoded).resolve()
+    except (OSError, ValueError) as e:
+        logger.warning(f"Failed to resolve path for /api/file: {decoded} ({e})")
+        return False
+
+    # Check filename-level restrictions
+    basename = resolved.name.lower()
+
+    # Block hidden files/dirs (starting with dot)
+    if basename.startswith("."):
+        return False
+
+    # Block known sensitive filenames
+    if basename in _SENSITIVE_FILENAMES:
+        return False
+
+    # Check that path is under an allowed root
+    allowed_roots = _get_allowed_file_roots()
+    resolved_str = str(resolved) + os.sep
+
+    for root in allowed_roots:
+        root_str = str(root.resolve()) + os.sep
+        if resolved_str.startswith(root_str):
+            return True
+
+    logger.warning(f"Path outside allowed roots for /api/file: {decoded} (resolved: {resolved})")
+    return False
+
+
 def create_app(agents, agent_pool, config=None, auto_security=False):
     from agent_cascade.log import logger
 
@@ -212,6 +289,13 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
 
     config = config or {}
     app = FastAPI(title="AgentCascade API")
+
+    # Ensure media directory exists at startup (non-critical fallback)
+    from agent_cascade.utils.media_utils import get_images_dir, MediaStorageError
+    try:
+        get_images_dir()  # Creates /logs/media/images/ if needed
+    except MediaStorageError as e:
+        logger.warning(f"Media directory unavailable at startup (will fall back to base64): {e}")
 
     # Initialize concurrency control for Security advisor checks
     # Security runs on a separate daemon thread (line 2245), so we need a semaphore
@@ -905,12 +989,22 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
             path = path[8:]
         elif path.startswith("file://"):
             path = path[7:]
-            
+
         # Support for windows paths like n:/...
         # Sometimes file:///N:/... gets parsed as N:/...
-        
-        if os.path.isfile(path):
-            return FileResponse(path)
+
+        # Security check: ensure path is within allowed roots
+        if not _is_path_allowed(path):
+            logger.warning(f"Blocked access to disallowed path via /api/file: {path}")
+            return JSONResponse(status_code=403, content={"message": "Access denied"})
+
+        try:
+            if os.path.isfile(path):
+                return FileResponse(path)
+        except OSError as e:
+            logger.error(f"Error serving file {path}: {e}")
+            return JSONResponse(status_code=500, content={"message": "Internal server error"})
+
         return JSONResponse(status_code=404, content={"message": "File not found"})
 
     @app.get("/api/telemetry")
@@ -1152,6 +1246,13 @@ def create_app(agents, agent_pool, config=None, auto_security=False):
         except Exception as e:
             logger.error(f"Failed to parse document: {e}")
             return JSONResponse(status_code=500, content={"message": str(e)})
+
+    # Start media cleanup scheduler (non-critical)
+    from agent_cascade.utils.media_utils import start_media_cleanup_scheduler
+    try:
+        start_media_cleanup_scheduler(max_age_days=30, interval_hours=6)
+    except Exception as e:
+        logger.warning(f"Media cleanup scheduler failed to start (non-critical): {e}")
 
     return app
 
