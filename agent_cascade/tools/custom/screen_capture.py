@@ -23,7 +23,8 @@ def capture_screen(monitor_index: int | None = None) -> bytes:
 
     Args:
         monitor_index: If None, captures all monitors combined (default).
-                       If set to a non-negative int, captures only that monitor.
+                       If set to a non-negative int, captures only that physical monitor
+                       using 0-based indexing (0=first monitor, 1=second, etc.).
 
     Returns:
         PNG bytes of the captured screen/monitor.
@@ -32,9 +33,10 @@ def capture_screen(monitor_index: int | None = None) -> bytes:
         ValueError: If monitor_index is out of range.
         ImportError: If neither ImageGrab nor mss is available.
     """
-    # When a specific monitor is requested, skip ImageGrab (doesn't support per-monitor) and use mss directly
+    # When a specific monitor is requested, skip ImageGrab (doesn't support per-monitor) and use mss directly.
+    # Public API uses 0-based physical monitor indices; mss uses 1+ for physical monitors (0=combined).
     if monitor_index is not None:
-        return _capture_screen_mss(monitor_index)
+        return _capture_screen_mss(monitor_index + 1)
 
     # Try Pillow ImageGrab first — zero new dependencies
     try:
@@ -141,12 +143,12 @@ def _capture_window_windows(pid: int) -> bytes:
     # Capture window content using PrintWindow API (preferred) or BitBlt fallback
     PW_RENDERFULLCONTENT = 2  # Windows 8.1+ flag for full content rendering
 
-    # Create device context and bitmap via ctypes
     hdc_window = win32gui.GetWindowDC(hwnd)
     try:
+        # Create a compatible DC and bitmap handle via ctypes
         hdc_mem = ctypes.windll.gdi32.CreateCompatibleDC(hdc_window)
-        bmp = ctypes.windll.gdi32.CreateCompatibleBitmap(hdc_window, width, height)
-        ctypes.windll.gdi32.SelectObject(hdc_mem, bmp)
+        bmp_handle = ctypes.windll.gdi32.CreateCompatibleBitmap(hdc_window, width, height)
+        ctypes.windll.gdi32.SelectObject(hdc_mem, bmp_handle)
 
         # Try PrintWindow first — captures actual window content even when minimized/obscured
         print_window_result = ctypes.windll.user32.PrintWindow(
@@ -157,14 +159,14 @@ def _capture_window_windows(pid: int) -> bytes:
             # PrintWindow failed — fall back to BitBlt (only works if window is visible/on-screen)
             ctypes.windll.gdi32.BitBlt(hdc_mem, 0, 0, width, height, hdc_window, 0, 0, win32con.SRCCOPY)
 
-        # Create a DIB header to get pixel data
-        bmp_info = ctypes.create_string_buffer(40)  # BITMAPINFOHEADER
-        ctypes.windll.gdi32.GetObjectA(bmp, 40, bmp_info)
-        bits = ctypes.create_string_buffer(width * height * 4)
-        ctypes.windll.gdi32.GetDIBits(hdc_mem, bmp, 0, height, bits, bmp_info, win32con.DIB_RGB_COLORS)
+        # Use win32ui to convert the GDI bitmap handle to a PIL Image.
+        # This is more reliable than manually constructing BITMAPINFOHEADER + GetDIBits.
+        bmp_obj = win32ui.CreateBitmapFromHandle(bmp_handle)
 
-        img = Image.frombytes('RGBA', (width, height), bytes(bits))
-        # Convert to RGB for PNG
+        # Get the raw bits as a bytes object
+        raw_bits = bmp_obj.GetBitmapBits(True)
+
+        img = Image.frombytes('RGBA', (width, height), raw_bits)
         img = img.convert('RGB')
 
         buf = io.BytesIO()
@@ -173,7 +175,7 @@ def _capture_window_windows(pid: int) -> bytes:
     finally:
         win32gui.ReleaseDC(hwnd, hdc_window)
         ctypes.windll.gdi32.DeleteDC(hdc_mem)
-        ctypes.windll.gdi32.DeleteObject(bmp)
+        ctypes.windll.gdi32.DeleteObject(bmp_handle)
 
 
 def _find_window_by_pid(pid: int):
