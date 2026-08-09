@@ -57,6 +57,9 @@ def strip_thinking_blocks(data: Any) -> Any:
     Iteratively remove <think> and [THINK] blocks from the START of a string.
     Note: This function is non-recursive. To clean structured content (like history),
     call it on the individual string fields.
+
+    Only strips leading/trailing whitespace if thinking blocks were actually removed,
+    preserving original whitespace for strings that don't contain thinking tags.
     """
     if not isinstance(data, str):
         return data
@@ -64,6 +67,7 @@ def strip_thinking_blocks(data: Any) -> Any:
     # Optimization: only run regex if we see potential tags
     lower_data = data.lower()
     
+    any_changed = False
     changed = True
     while changed:
         changed = False
@@ -73,6 +77,7 @@ def strip_thinking_blocks(data: Any) -> Any:
                 data = new_data
                 lower_data = data.lower()
                 changed = True
+                any_changed = True
         
         if not changed and ('[think' in lower_data or '[thought' in lower_data):
             new_data = _BRACKET_SEARCH_RE.sub('', data, count=1)
@@ -80,6 +85,7 @@ def strip_thinking_blocks(data: Any) -> Any:
                 data = new_data
                 lower_data = data.lower()
                 changed = True
+                any_changed = True
                 
         if not changed and '<|channel>thought' in lower_data:
             new_data = _GEMMA_THOUGHT_RE.sub('', data, count=1)
@@ -87,5 +93,9 @@ def strip_thinking_blocks(data: Any) -> Any:
                 data = new_data
                 lower_data = data.lower()
                 changed = True
-        
-    return data.strip()
+                any_changed = True
+    
+    # Only strip whitespace if we actually removed thinking blocks.
+    # This preserves original whitespace for strings without thinking tags,
+    # which is critical for preserving indentation in code content like edit_file's new_content.
+    return data.strip() if any_changed else data

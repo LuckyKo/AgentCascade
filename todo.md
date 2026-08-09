@@ -90,29 +90,18 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 - [ ] check how async shell cmd handles timeout, it doesn't seems like its respected very precisely
 - [ ] add elapsed timer to heartbeat responses, like: `⟨shell_cmd heartbeat⟩ Beat 2 (15s), Tool ID: 8 | No new output (still running)` 
 - [ ] path discovery error, that path is in RW and valid, should work: `ERROR: Path error for '/N:/work/WD/AgentCascade/investigation_report_view_image_contentitem_flow.md' — Path '/N:/work/WD/AgentCascade/investigation_report_view_image_contentitem_flow.md' is outside the allowed RO directories`
+- [ ] model trashing due to two sync agents running in parallel (something we should never allow). A (sync) calls B (async) and continues then calls D (sync), B calls C (sync), D fails with timeout once but then A and C start sending messages in parallel, causing model trashing. Out APi router should properly schedule sync threads (or any other limited but shared slot) one after another in the order they came, keep slot until they release it, never allow multiple sync agents on the same slot to run their turns interleaved. the fail on timeout for call_agent is fine but not great, still causes issues. we need proper que system in place for each API endpoint slot, with much longer timeouts, this half-assed scheduler ain't doing it, need a proper multi-thread style scheduler implemented
+- [ ] check if dismiss_agent actually terminates a running agent thread
 
 
 # Errors to investigate:
 
-# delete_and_inset mode broken, wrong line removed?
-{
-  "path": "N:\\work\\WD\\AgentCascade\\agent_cascade\\api_integration.py",
-  "new_content": "",
-  "old_content": "",
-  "range": "870:870",
-  "match_mode": "delete_and_insert",
-  "justification": "Replace line 870 to add max_images_for_llm"
-}
-Tool Result
-🗑️
-OK: Edited N:\work\WD\AgentCascade\agent_cascade\api_integration.py lines 870-870 (d&i, deleted 1 lines, -1 +0 = -1net)
-
-@@ -867,7 +867,6 @@
-     # Add tool char limits from pool.llm_cfg if available
-     if hasattr(pool, 'llm_cfg'):
-         for key in ('tool_result_max_chars', 'grep_char_limit', 'grep_spillover',
--                     'shell_char_limit', 'code_char_limit', 'list_dir_char_limit'):
-             if key in pool.llm_cfg:
-                 pool_settings[key] = pool.llm_cfg[key]
- 
-backup → N:\work\WD\AgentWorkspace\logs\backups\coder\api_integration.py.1786236685.bak
+# [RESOLVED 2026-08-09] delete_and_insert mode "wrong line removed" — root cause found and fixed
+# - Range logic was correct (line 870 was correctly deleted)
+# - Real bug: argument sanitizer stripped leading whitespace from multi-line new_content via strip_thinking_blocks()
+# - Secondary bug: _normalize_tool_arguments used unanchored regex, corrupting content inside JSON string values
+# Fixes applied:
+#   1. thinking_block.py: conditional .strip() only when tags removed (PASS review)
+#   2. file_ops.py EditFile: skip sanitization of new_content entirely (PASS review)
+#   3. execution_engine.py: anchor _normalize_thinking_blocks regex with ^\s* (PASS review)
+# Reports: investigation_report_edit_file_delete_and_insert.md, investigation_report_thinking_blocks_in_tool_args.md

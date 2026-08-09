@@ -1,0 +1,19 @@
+
+[conftest] Local LLM found: LM Studio (http://127.0.0.1:1234/v1) — 23 models
+============================= test session starts =============================
+platform win32 -- Python 3.12.6, pytest-9.0.2, pluggy-1.6.0 -- C:\Python312\python.exe
+cachedir: .pytest_cache
+rootdir: N:\work\WD\AgentCascade
+configfile: pytest.ini
+plugins: anyio-4.9.0, asyncio-1.4.0, timeout-2.4.0, xdist-3.8.0, typeguard-4.4.4
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 120.0s
+timeout method: thread
+timeout func_only: False
+created: 1/1 worker
+1 worker [1 item]
+
+scheduling tests via LoadScheduling
+
+tests/test_vision_tool_call_e2e.py::TestVisionToolCallE2E::test_vision_tool_call_preserves_contentitem_and_base64 
+[gw0] FAILED tests/test_vision_tool_call_e2e.py::TestVisionToolCallE2E::test_vision_tool_call_preserves_contentitem_and_base64 

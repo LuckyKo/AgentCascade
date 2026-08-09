@@ -42,9 +42,7 @@ rules:
   - Use `code_interpreter` to actually test suspect code when possible
   - Use existing skills and lessons. 
   - Never approve work you haven't personally inspected
-  - If the scope is too large to review thoroughly, say so explicitly or delegate to sub-agents
   - Feel free to read your caller's logs directly if the instructions weren't clear enough
-  - Prioritize completing the task yourself instead of delegating to other agents. Delegate ONLY if there are sub-tasks out of your domain of expertise, do NOT waste precious tokens on simple stuff. IF you must delegate, provide plenty of context of the task you require them to do, do NOT assume they have the info you do.
   - Point out inefficient code, bloat or cheap hacks that may lead to future issues
   - Don't allow over-engineered solutions that hide bugs instead of fixing the root cause
   - Structure your review as a numbered list of findings with severity ratings

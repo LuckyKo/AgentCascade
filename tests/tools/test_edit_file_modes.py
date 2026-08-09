@@ -626,3 +626,68 @@ def test_re_indent_shift_mode():
         )
         assert content == expected, f"Test 7 assertion: got [{content}]"
 
+
+def test_delete_and_insert_preserves_whitespace_via_tool_pipeline():
+    """Regression test: indented multi-line new_content survives the tool call pipeline.
+
+    This verifies that the argument sanitizer in EditFile._verify_json_format_args
+    does NOT strip leading/trailing whitespace from new_content when using
+    delete_and_insert mode (or any mode). Previously, strip_thinking_blocks() was
+    applied to all string args unconditionally, corrupting indented code blocks.
+
+    Tests through the actual EditFile tool class to catch pipeline-level bugs,
+    not just OperationManager behavior.
+    """
+    import json
+    from agent_cascade.tools.custom.file_ops import EditFile
+    from agent_cascade.operation_manager import OperationManager
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        op_mgr = OperationManager(base_dir=tmpdir)
+        op_mgr.file_ownership = {}
+
+        # Create an EditFile tool instance wired to the operation manager
+        edit_tool = EditFile(cfg=None, agent_pool=type('obj', (object,), {
+            'operation_manager': op_mgr
+        })(), agent_name='test_agent')
+
+        file_path = Path(tmpdir) / "test_indent.py"
+        file_path.write_text("class Foo:\n    def bar(self):\n        pass\n", encoding='utf-8')
+        op_mgr.file_ownership[str(file_path.resolve())] = "test_agent"
+
+        # Indented multi-line new_content with leading/trailing whitespace that must be preserved
+        indented_code = """\t\tdef baz(self):
+\t\t    x = 1
+\t\t    y = 2
+\t\t    return x + y"""
+
+        # Simulate what the LLM would send: JSON string with new_content containing tabs/indentation
+        params_json_str = json.dumps({
+            "path": "test_indent.py",
+            "match_mode": "delete_and_insert",
+            "range": "3:3",  # replace line 3 (the "pass" line)
+            "new_content": indented_code,
+            "justification": "add method"
+        })
+
+        result = edit_tool.call(params_json_str)
+        assert "OK:" in result, f"Edit failed: {result}"
+
+        content = file_path.read_text(encoding='utf-8')
+
+        # Verify the indentation was preserved exactly — tabs at start of each line must survive
+        # Note: trailing newline is NOT added by the operation manager when new_content doesn't end with one
+        expected = (
+            "class Foo:\n"
+            "    def bar(self):\n"
+            "\t\tdef baz(self):\n"
+            "\t\t    x = 1\n"
+            "\t\t    y = 2\n"
+            "\t\t    return x + y"
+        )
+        assert content == expected, (
+            f"Whitespace was corrupted!\n"
+            f"Expected:\n{repr(expected)}\n"
+            f"Got:\n{repr(content)}"
+        )
+

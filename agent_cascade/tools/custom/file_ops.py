@@ -763,6 +763,46 @@ class EditFile(BaseTool, PathResolutionMixin):
         self.agent_pool = kwargs.get('agent_pool')
         self.agent_name = kwargs.get('agent_name')
 
+    def _verify_json_format_args(self, params, strict_json=False):
+        """Override to preserve new_content whitespace.
+
+        The base sanitizer strips thinking blocks from all string args, which corrupts
+        indented multi-line code in new_content. Thinking block tags wouldn't appear
+        inside legitimate code content anyway (they're start-anchored), so skipping
+        sanitization for new_content is safe and necessary.
+        """
+        import json
+        from agent_cascade.utils.thinking_block import strip_thinking_blocks
+        from agent_cascade.utils.utils import json_loads
+
+        if isinstance(params, str):
+            try:
+                if strict_json:
+                    params_json = json.loads(params)
+                else:
+                    params_json = json_loads(params)
+                if not isinstance(params_json, dict):
+                    raise ValueError('Parameters must be formatted as a valid JSON! Got non-dict result')
+            except (json.decoder.JSONDecodeError, ValueError):
+                raise ValueError('Parameters must be formatted as a valid JSON!')
+        else:
+            params_json = params
+
+        # Preserve new_content exactly as-is to protect indentation.
+        # Only sanitize other string fields for thinking block contamination.
+        sanitized_params = {}
+        for k, v in params_json.items():
+            if k == 'new_content' and isinstance(v, str):
+                sanitized_params[k] = v  # no stripping
+            elif isinstance(v, str):
+                sanitized_params[k] = strip_thinking_blocks(v)
+            else:
+                sanitized_params[k] = v
+
+        import jsonschema
+        jsonschema.validate(instance=sanitized_params, schema=self.parameters)
+        return sanitized_params
+
     def call(self, params: str, **kwargs) -> str:
         from agent_cascade.utils.utils import extract_code
         

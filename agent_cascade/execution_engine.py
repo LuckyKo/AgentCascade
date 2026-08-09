@@ -274,15 +274,17 @@ def _normalize_gemma_thought_tags(msg):
 
 
 def _normalize_thinking_blocks(text):
-    """Strip thinking blocks from text to prevent tag pollution.
+    """Strip thinking blocks from the START of text to prevent tag pollution.
 
-    Removes <thinking>...</thinking> and <thought>...</thought> tags from text.
+    Removes <thinking>...</thinking> and <thought>...</thought> tags that appear
+    at the beginning of the text. Uses start-anchored regex to avoid corrupting
+    content inside JSON string values (e.g., tool arguments containing tag-like text).
 
     Args:
-        text: Raw text that may contain thinking tags
+        text: Raw text that may contain thinking tags at the start
 
     Returns:
-        Cleaned text with thinking blocks removed
+        Cleaned text with leading thinking blocks removed
     """
     # Early return for very long texts to avoid expensive regex operations
     # (Issue
@@ -290,10 +292,10 @@ def _normalize_thinking_blocks(text):
         return text
     if not isinstance(text, str):
         return text
-    # Remove standard think blocks
-    cleaned = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
+    # Remove standard think blocks at start only (anchored with ^)
+    cleaned = re.sub(r'^\s*<thinking>.*?</thinking>', '', text, flags=re.DOTALL | re.IGNORECASE)
     # Also remove <thought> blocks (common variant)
-    cleaned = re.sub(r'<thought>.*?</thought>', '', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'^\s*<thought>.*?</thought>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
     return cleaned
 
 
