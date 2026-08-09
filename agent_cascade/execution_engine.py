@@ -280,6 +280,10 @@ def _normalize_thinking_blocks(text):
     at the beginning of the text. Uses start-anchored regex to avoid corrupting
     content inside JSON string values (e.g., tool arguments containing tag-like text).
 
+    TODO: Consider consolidating with strip_thinking_blocks from thinking_block.py.
+    Currently kept separate as it's used for reasoning_content normalization and
+    _strip_thinking_blocks method, both of which need start-anchored behavior only.
+
     Args:
         text: Raw text that may contain thinking tags at the start
 
@@ -358,21 +362,6 @@ def _extract_tool_calls_from_text(text):
         if name and args and '<function=' not in args:
             results.append((name, args))
     return results
-
-
-def _normalize_tool_arguments(func_call):
-    """Clean thinking blocks from function call arguments.
-
-    Modifies func_call in-place to remove thinking tags that may have leaked
-    into the arguments field during LLM generation.
-
-    Args:
-        func_call: FunctionCall object or dict with 'arguments' field
-    """
-    if isinstance(func_call, dict) and func_call.get('arguments'):
-        func_call['arguments'] = _normalize_thinking_blocks(func_call['arguments'])
-    elif hasattr(func_call, 'arguments'):
-        func_call.arguments = _normalize_thinking_blocks(func_call.arguments)
 
 
 def _check_message_truncation(msg):
@@ -3783,10 +3772,8 @@ class ExecutionEngine:
                 msg_set(msg, 'reasoning_content', _normalize_thinking_blocks(reasoning_content))
 
             # Clean thinking blocks from function call arguments (P4
-            # continuation)
-            func_call = msg_field(msg, 'function_call')
-            if func_call:
-                _normalize_tool_arguments(func_call)
+            # continuation) — REMOVED: json_loads already strips pre-parse,
+            # and per-value normalization is a corruption risk.
 
     def _log_messages_to_jsonl(
         self,
