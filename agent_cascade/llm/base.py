@@ -373,7 +373,12 @@ class BaseChatModel(ABC):
                                              generate_cfg=generate_cfg,
                                              functions=functions,
                                              use_raw_api=self.use_raw_api)
-        if not self.support_multimodal_input:
+        
+        # Convert images to text descriptions when routing to a non-vision endpoint.
+        # The model class property (self.support_multimodal_input) reflects the template LLM,
+        # not the actual endpoint being called — so we must also check the endpoint's vision_enabled flag.
+        effective_vision = self.support_multimodal_input and generate_cfg.get('vision_enabled', True)
+        if not effective_vision:
             messages = [format_as_text_message(msg, add_upload_info=False) for msg in messages]
 
         # Remove AgentCascade specific keys that LLM SDKs (like OpenAI) don't accept
