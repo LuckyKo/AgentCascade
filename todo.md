@@ -96,34 +96,12 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 # Errors to investigate:
 
-# re-indent tool messes up code - the diff shows code changes instead of indenting it
-{
-  "path": "N:\\work\\WD\\AgentCascade\\agent_cascade\\run_agent_unified.py",
-  "lines": "273:309",
-  "indent": 4,
-  "indent_type": "space",
-  "mode": "shift",
-  "justification": "Indent except/finally blocks to match try block level (8 spaces)"
-}
-Tool Result
-🗑️
-OK: Re-indented N:\work\WD\AgentCascade\agent_cascade\run_agent_unified.py lines 273-309 (shift +4sp, 37 total / 37 changed)
-
-@@ -270,43 +270,43 @@
-                     loop,
-                 )
- 
--    except (KeyboardInterrupt, SystemExit):
--        # Never swallow user interrupts or explicit exits
--        raise
--    except Exception as e:
-...
-+            try:
-+                with pool._instance_threads_lock:
-+                    pool._instance_threads.pop(instance_name, None)
-+            except Exception as e:
-+                logger.debug(f"Thread registration cleanup failed (non-critical): {e}")
- 
- 
- # ═══════════════════════════════════════════════════════════════════════
-backup → N:\work\WD\AgentWorkspace\logs\backups\coder\run_agent_unified.py.1786352572.bak
+# [RESOLVED 2026-08-10] re-indent tool messes up code - the diff shows code changes instead of indenting it
+# Investigation: N:\work\WD\AgentWorkspace\logs\re_indent_bug_analysis.md
+# Root cause: Misleading diff display (8+8 truncation dropped hunk headers), NOT actual corruption.
+# Shift logic verified correct byte-for-byte against backup chain.
+# Fixes applied to file_operations.py re_indent method:
+#   1. Uniform whitespace shifts now show compact summary "(uniform indent shift: N lines: +Xsp each)" instead of misleading diff
+#   2. Non-uniform diffs now truncate per-hunk preserving @@ headers
+#   3. Re-read-after-approval added to prevent stale-content race condition
+#   4. Sanity warning when >70% changed in uniform shift: "confirm block boundaries are intended"

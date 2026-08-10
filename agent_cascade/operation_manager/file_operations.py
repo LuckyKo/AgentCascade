@@ -1346,7 +1346,14 @@ class FileOpsMixin:
         try:
             resolved = self._resolve_path(path, mode="rw")
 
-            # Reuse file_content from first read (line 1120) — no need to re-read
+            # Re-read file after approval to avoid stale-content race condition
+            # (enhances safety vs pre-approval read — another agent/tool may have modified the file while waiting for approval)
+            try:
+                file_content = resolved.read_text(encoding='utf-8')
+            except Exception as e:
+                return f"ERROR: Failed to re-read file after approval: {str(e)}"
+            file_lines = file_content.splitlines(keepends=True)
+
             safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
             backup_dir = self.base_dir / "logs" / "backups" / safe_agent
             backup_dir.mkdir(parents=True, exist_ok=True)
@@ -1361,6 +1368,8 @@ class FileOpsMixin:
             # Generate unified diff before writing (both old and new content available)
             import difflib
             diff_content = ''
+            uniform_shift_info = None  # For sanity warning later
+
             if ws_counts:
                 changed_count = sum(1 for i in range(len(block_lines)) if block_lines[i] != new_block_lines[i])
                 if changed_count > 0:
@@ -1370,15 +1379,66 @@ class FileOpsMixin:
                         old_lines, new_lines,
                         fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''
                     ))
+
+                    # Check if all changes are uniform whitespace shifts (same content, different leading ws)
+                    # Uses keepends=True to match block_lines/new_block_lines representation used in changed_count
+                    block_old = file_content.splitlines(keepends=True)[start:end]
+                    block_new = new_content_val.splitlines(keepends=True)[start:end]
+                    is_uniform_shift = True
+                    shift_amount = None
+                    for ol, nl in zip(block_old, block_new):
+                        if ol == nl:
+                            continue  # unchanged line (e.g., blank)
+                        if ol.lstrip(' \t') != nl.lstrip(' \t'):
+                            is_uniform_shift = False
+                            break
+                        new_ws = len(nl) - len(nl.lstrip(' \t'))
+                        old_ws = len(ol) - len(ol.lstrip(' \t'))
+                        diff_amt = new_ws - old_ws
+                        if shift_amount is None:
+                            shift_amount = diff_amt
+                        elif diff_amt != shift_amount:
+                            is_uniform_shift = False
+                            break
+
+                    if is_uniform_shift and changed_count > 0:
+                        uniform_shift_info = (changed_count, shift_amount)
+
                     # Skip --- and +++ headers (first 2), keep @@ headers and content
                     diff_content = '\n'.join(diff_lines[2:]) if len(diff_lines) > 2 else ''
-                    # Limit to 20 lines; truncate to ~17 if longer (8 + ... + 8)
-                    if diff_content:
+
+                    # For uniform whitespace shifts: use compact summary instead of misleading truncated diff
+                    if is_uniform_shift and changed_count > 0:
+                        sign = '+' if shift_amount >= 0 else '-'
+                        diff_content = f"(uniform indent shift: {changed_count} lines: {sign}{abs(shift_amount)}sp each)"
+                    # For non-uniform diffs with many lines: truncate per-hunk to preserve @@ headers
+                    elif diff_content:
                         all_diff_lines = diff_content.splitlines()
                         if len(all_diff_lines) > 20:
-                            first_lines = all_diff_lines[:8]
-                            last_lines = all_diff_lines[-8:]
-                            diff_content = '\n'.join(first_lines + ['...'] + last_lines)
+                            # Split into hunks (each starting with @@), truncate each independently
+                            hunks = []
+                            current_hunk = []
+                            for line in all_diff_lines:
+                                if line.startswith('@@'):
+                                    if current_hunk:
+                                        hunks.append(current_hunk)
+                                    current_hunk = [line]
+                                else:
+                                    current_hunk.append(line)
+                            if current_hunk:
+                                hunks.append(current_hunk)
+
+                            truncated_hunks = []
+                            for hunk in hunks:
+                                if len(hunk) <= 12:
+                                    truncated_hunks.append(hunk)
+                                else:
+                                    # Keep header + up to 5 content lines from start, ellipsis, last 4 from end
+                                    header = [hunk[0]]
+                                    body = hunk[1:]
+                                    truncated_hunks.append(header + body[:5] + ['...'] + body[-4:])
+
+                            diff_content = '\n'.join(line for hunk in truncated_hunks for line in hunk)
             else:
                 changed_count = 0
 
@@ -1412,6 +1472,13 @@ class FileOpsMixin:
 
             if justification:
                 res_msg += f"\nSecurity Justification: {justification}"
+
+            # Sanity warning for large uniform indent shifts (high changed_count relative to range)
+            if uniform_shift_info and total_in_range > 0:
+                _, shift_amt = uniform_shift_info
+                ratio = changed_count / total_in_range
+                if ratio > 0.7:
+                    res_msg += f"\n(uniform indent shift — confirm block boundaries are intended)"
 
             # Unified diff snippet in code block
             if diff_content:
