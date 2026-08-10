@@ -289,8 +289,16 @@ class AgentPool:
         self._halted_instances: set = set()                # per-instance halt state (legacy, kept for compat)
         self._compression_halted: set = set()              # instances halted by forced compression (not manual)
         self.terminated_instances: set = set()             # instances marked for immediate termination
+        self._instance_threads: Dict[str, threading.Thread] = {}  # instance_name -> execution thread for join on dismissal
+        self._instance_threads_lock = threading.Lock()            # protects _instance_threads dict access
+        self._pool_lock = threading.RLock()                  # protects instances dict and terminated_instances set
         self.children: Dict[str, List[str]] = {}           # parent_name -> [child_names] for cascade termination
         self._children_lock = threading.RLock()            # Lock for child tracking structures (pool.children + _child_instances)
+
+        # Lock hierarchy (for future reference — never nest locks in reverse order):
+        #   _pool_lock → _state_lock → _instance_threads_lock / _children_lock
+        # Current code uses these locks separately (no nesting), but if nested locking is added,
+        # always acquire in the above order to prevent deadlocks.
 
         # ── Run generation counter (prevents resume race condition) ───────────
         # Each time a new execution thread starts, this is incremented. Old threads
@@ -615,32 +623,40 @@ class AgentPool:
     # ── Child relationship helper (centralized mutation for Bug41 fix) ────────
 
     def _update_child_relationship(self, parent_name: str, child_name: str, add: bool = True) -> None:
-        """Update both pool.children and parent's _child_instances atomically under lock.
+        """Update both pool.children and parent's _child_instances.
+        
+        Uses _children_lock for pool.children dict and _state_lock for instance._child_instances list.
+        Locks are acquired separately (not nested) to avoid deadlock.
         
         Args:
             parent_name: Name of the parent instance.
             child_name: Name of the child instance.
             add: If True, add the relationship; if False, remove it.
         """
+        # Update pool.children under _children_lock
         with self._children_lock:
             if add:
-                # Add to pool.children
                 if parent_name not in self.children:
                     self.children[parent_name] = []
                 if child_name not in self.children[parent_name]:
                     self.children[parent_name].append(child_name)
-                # Add to parent instance's _child_instances
-                parent_inst = self.get_instance(parent_name)
-                if parent_inst and child_name not in parent_inst._child_instances:
-                    parent_inst._child_instances.append(child_name)
             else:
-                # Remove from pool.children
                 if child_name in self.children.get(parent_name, []):
                     self.children[parent_name].remove(child_name)
-                # Remove from parent instance's _child_instances
-                parent_inst = self.get_instance(parent_name)
-                if parent_inst and child_name in parent_inst._child_instances:
-                    parent_inst._child_instances.remove(child_name)
+
+        # Update parent instance's _child_instances under its _state_lock
+        parent_inst = self.get_instance(parent_name)
+        if parent_inst:
+            try:
+                with parent_inst._state_lock:
+                    if add:
+                        if child_name not in parent_inst._child_instances:
+                            parent_inst._child_instances.append(child_name)
+                    else:
+                        if child_name in parent_inst._child_instances:
+                            parent_inst._child_instances.remove(child_name)
+            except Exception as e:
+                logger.debug(f"Updating _child_instances for {parent_name} failed (non-critical): {e}")
 
     def get_template(self, name: str) -> Optional[Assistant]:
         """Get template by name with case-insensitive fallback.
@@ -848,8 +864,10 @@ class AgentPool:
             compression_summary=None,
             latest_marker_index=-1,
         )
-        self.instances[instance_name] = instance
-        self._instances_version += 1  # Fix #3: signal that instances changed
+        # Register instance atomically under _pool_lock to prevent race during creation
+        with self._pool_lock:
+            self.instances[instance_name] = instance
+            self._instances_version += 1  # Fix #3: signal that instances changed
         # Track parent-child relationship for cascade termination (Fix Bug41, thread-safe via helper)
         if parent_instance:
             self._update_child_relationship(parent_instance, instance_name, add=True)
@@ -872,8 +890,11 @@ class AgentPool:
         """
         instance_name = instance_name.strip()
         self._instances_version += 1  # Fix #3: signal that instances changed
-        inst = self.instances.pop(instance_name, None)
-        self.terminated_instances.discard(instance_name)  # Issue #4 fix: prevent memory leaks
+        with self._pool_lock:
+            inst = self.instances.pop(instance_name, None)
+        # Don't discard from terminated_instances here — keep the signal alive until
+        # the thread confirms it stopped via join in dismiss_instance(). 
+        # Memory leak prevention now handled in dismiss_instance() after join.
         with self._queue_lock:
             self.message_queues.pop(instance_name, None)
         # Clean up mapping's dict storage to prevent stale keys
@@ -904,22 +925,34 @@ class AgentPool:
         log_path = log_inst.log_path if log_inst else None
         self._fire_on_dismissed(instance_name, log_path)
 
-        # Clean up children tracking (Fix Bug41) — snapshot under lock to minimize hold time
+        # Clean up children tracking (Fix Bug41) — snapshot under locks to minimize hold time.
+        # Use _pool_lock for instances access, _state_lock for _child_instances reads.
+        stray_parents = []
+        with self._pool_lock:
+            for pi in self.instances.values():
+                try:
+                    with pi._state_lock:
+                        if instance_name in pi._child_instances:
+                            stray_parents.append(pi)
+                except Exception:
+                    pass  # Ignore if lock unavailable (non-critical cleanup path)
         with self._children_lock:
             self.children.pop(instance_name, None)
             parent_keys = list(self.children.keys())
-            # Snapshot instances that reference this child for cleanup outside lock
-            stray_parents = [pi for pi in self.instances.values() if instance_name in pi._child_instances]
 
         # Remove from all parents' tracking via helper (handles both pool.children and _child_instances)
         for parent in parent_keys:
             if instance_name in self.children.get(parent, []):
                 self._update_child_relationship(parent, instance_name, add=False)
 
-        # Clean up any remaining per-instance references outside lock
+        # Clean up any remaining per-instance references. Best-effort — state may change concurrently.
         for parent_inst in stray_parents:
-            if instance_name in parent_inst._child_instances:
-                parent_inst._child_instances.remove(instance_name)
+            try:
+                with parent_inst._state_lock:
+                    if instance_name in parent_inst._child_instances:
+                        parent_inst._child_instances.remove(instance_name)
+            except Exception as e:
+                logger.debug(f"Cleanup of child reference {instance_name} from {parent_inst.instance_name} failed (non-critical): {e}")
 
         # BUG31 Fix: Clean up api_integration module-level caches to prevent memory leaks
         # and stale data when instances are dismissed and re-created with same name.
@@ -976,21 +1009,26 @@ class AgentPool:
                               affecting other agents mid-execution.
         """
         instance_name = instance_name.strip()
-        # First cascade-terminate all children (recursive, Fix Bug41, thread-safe read)
+        logger.debug("[TERM_DEBUG] terminate_instance(%r, set_global_stopped=%s) called", instance_name, set_global_stopped)
+        # First cascade-terminate all children (recursive, Fix Bug41).
+        # Snapshot child list under _children_lock, then check existence under _pool_lock before recursing.
         with self._children_lock:
             child_list = list(self.children.get(instance_name, []))
         for child_name in child_list:
-            if self.instances.get(child_name):
+            with self._pool_lock:
+                child_exists = child_name in self.instances
+            if child_exists:
                 self.terminate_instance(child_name, set_global_stopped=False)  # Recursive — handles nested trees
 
-        # Get instance BEFORE adding to terminated set — prevents race where
-        # another thread checks is_instance_terminated() before instance exists
-        inst = self.instances.get(instance_name)
-        
-        if inst:
+        # Get instance and add termination signal atomically under _pool_lock.
+        # Always add to terminated set (even if instance gone) so status checks detect it.
+        with self._pool_lock:
+            inst = self.instances.get(instance_name)
             # Add to terminated_instances FIRST so stop-checks can detect dismissal immediately
             self.terminated_instances.add(instance_name)
+            logger.debug("[TERM_DEBUG]   -> added %r to terminated_instances", instance_name)
 
+        if inst:
             # Check if instance was in an active state before calling terminate()
             with inst._state_lock:
                 is_active = inst.state in ACTIVE_STATES
@@ -998,6 +1036,7 @@ class AgentPool:
             # Call canonical terminate() method — sets is_terminated=True, transitions state,
             # clears streaming responses and volatile state. Idempotent so safe even if called twice.
             inst.terminate()
+            logger.debug("[TERM_DEBUG]   -> inst.terminate() called for %r", instance_name)
 
             if is_active:
                 # Bug5 Fix #1: Only set global _stopped_event when explicitly requested
@@ -1006,10 +1045,6 @@ class AgentPool:
 
                 # RECOMMENDED FIX: Mark activity before transitioning to TERMINATED for consistency
                 self._mark_activity(instance_name)
-        else:
-            # Instance doesn't exist in pool anymore — still add to terminated set
-            # so status checks can detect it was terminated.
-            self.terminated_instances.add(instance_name)
 
         # ── Fix TODO #41 Root Cause 1: Cancel pending async tool tasks ────────
         # Remove and cancel running background tools BEFORE draining results,
@@ -1066,14 +1101,19 @@ class AgentPool:
         other agents mid-execution. Only this specific instance is terminated.
         """
         instance_name = instance_name.strip()
-        # First dismiss all children (recursive cascade, Fix Bug41, thread-safe read)
+        # First dismiss all children (recursive cascade, Fix Bug41).
+        # Snapshot child list under lock, then release before recursing to avoid deadlock.
         with self._children_lock:
             child_list = list(self.children.get(instance_name, []))
         for child_name in child_list:
-            if self.instances.get(child_name):
+            with self._pool_lock:
+                child_exists = child_name in self.instances
+            if child_exists:
                 self.dismiss_instance(child_name)  # Recursive — handles nested trees
 
-        inst = self.instances.get(instance_name)
+        # Get instance and check active state atomically under _pool_lock
+        with self._pool_lock:
+            inst = self.instances.get(instance_name)
 
         # FIX: Thread-safe state read - snapshot under lock before checking ACTIVE_STATES
         is_active = False
@@ -1085,13 +1125,14 @@ class AgentPool:
             # Bug5 Fix: Pass set_global_stopped=False to ensure only THIS instance
             # is terminated, not all agents via the global _stopped_event.
             self.terminate_instance(instance_name, set_global_stopped=False)
-
-        # Ensure termination flag is set even if instance wasn't in ACTIVE_STATES
-        # when dismissed (e.g., was IDLE/COMPLETING). Call terminate() directly since
-        # terminate_instance() only transitions state for active instances.
-        inst = self.instances.get(instance_name)
-        if inst and not inst.is_terminated:
-            inst.terminate()
+        else:
+            # Ensure termination flag is set even if instance wasn't in ACTIVE_STATES
+            # when dismissed (e.g., was IDLE/COMPLETING). Call terminate() directly since
+            # terminate_instance() only transitions state for active instances.
+            with self._pool_lock:
+                inst = self.instances.get(instance_name)
+            if inst and not inst.is_terminated:
+                inst.terminate()
 
         # Wake SLEEPING parent when async child is dismissed (Fix TODO #41).
         # If this instance was an async child with a SLEEPING parent waiting for it,
@@ -1126,8 +1167,32 @@ class AgentPool:
         if inst:
             self._clear_state_label(inst)
 
+        # ── Wait for agent's execution thread to actually stop ──────────────
+        # Get the thread reference before removing instance from pool
+        with self._instance_threads_lock:
+            thread = self._instance_threads.pop(instance_name, None)
+        if thread and thread.is_alive():
+            logger.info(f"Waiting for '{instance_name}' thread to stop...")
+            try:
+                thread.join(timeout=2.0)  # Short courtesy wait — join only waits, doesn't stop. 2s is enough for cooperative threads; longer blocks dismiss_agent tool unnecessarily.
+                if thread.is_alive():
+                    logger.warning(
+                        f"Thread for '{instance_name}' did not stop within 2s timeout. "
+                        f"Termination signal kept active — agent will stop at next cooperative check."
+                    )
+            except Exception as e:
+                logger.warning(f"Error joining thread for '{instance_name}': {e}")
+        else:
+            logger.debug(f"No active thread to join for '{instance_name}'")
+
+        # Only discard termination signal if we actually confirmed the thread stopped.
+        # If no thread was registered (async executor worker, race condition) or it's still alive,
+        # keep the signal so cooperative stop-checks continue to work.
+        with self._pool_lock:
+            if thread and not thread.is_alive():
+                self.terminated_instances.discard(instance_name)
+
         # Always remove the instance from the pool so its tab disappears from the UI
-        # remove_instance() handles terminated_instances.discard() (Issue #4 fix)
         self.remove_instance(instance_name)
 
     # ── API bridge methods for api_server.py ────────────────────────────────
@@ -1202,15 +1267,17 @@ class AgentPool:
                 logger.warning(f"clear_pending failed during reset (threads may hang): {e}")
 
         # ── Step 2: Dismiss all sub-agents (non-orchestrator) ───────────────
-        # Take a snapshot of instance keys to avoid RuntimeError during iteration.
+        # Take a snapshot of instance keys under _pool_lock to avoid RuntimeError during iteration.
         # dismiss_instance() recursively cascade-dismisses children first, then
         # calls remove_instance() which cleans up loggers, queues, caches.
-        for name in list(self.instances.keys()):
-            inst = self.instances.get(name)
-            if inst is None or inst.parent_instance is None:
-                continue  # Skip main orchestrator and already-removed instances
+        with self._pool_lock:
+            sub_agent_names = [name for name, inst in self.instances.items()
+                               if inst.parent_instance is not None]
+        for name in sub_agent_names:
             # Double-dismiss guard: instance may have been cascade-dismissed by parent
-            if name not in self.instances:
+            with self._pool_lock:
+                still_exists = name in self.instances
+            if not still_exists:
                 continue
             self.dismiss_instance(name)
 
@@ -1234,10 +1301,12 @@ class AgentPool:
 
         # ── Step 5: Clear per-instance state ────────────────────────────────
         self._paused.set()  # reset to resumed state
+        with self._pool_lock:
+            self.terminated_instances.clear()
+        with self._children_lock:
+            self.children.clear()
         self._halted_instances.clear()
         self._compression_halted.clear()
-        self.terminated_instances.clear()
-        self.children.clear()
         # Keep unified's active_stack_clear() — temp removed it but unified still needs it
         if hasattr(self, 'active_stack_clear'):
             self.active_stack_clear()
@@ -1312,15 +1381,17 @@ class AgentPool:
         self._on_dismissed_callbacks = []
         
         try:
-            # Take a snapshot of instance keys to avoid RuntimeError during iteration.
+            # Take a snapshot of instance keys under _pool_lock to avoid RuntimeError during iteration.
             # dismiss_instance() modifies self.instances by removing dismissed instances
             # and recursively cascade-dismisses children first.
-            for name in list(self.instances.keys()):
-                inst = self.instances.get(name)
-                if inst is None or inst.parent_instance is None:
-                    continue  # Skip root orchestrator and already-removed instances
+            with self._pool_lock:
+                sub_agent_names = [name for name, inst in self.instances.items()
+                                   if inst.parent_instance is not None]
+            for name in sub_agent_names:
                 # Double-dismiss guard: instance may have been cascade-dismissed by parent
-                if name not in self.instances:
+                with self._pool_lock:
+                    still_exists = name in self.instances
+                if not still_exists:
                     continue
                 self.dismiss_instance(name)
             
@@ -1338,8 +1409,10 @@ class AgentPool:
     def _clear_all_state_dicts(self):
         """Clear all per-instance state dictionaries."""
         self.instance_state.clear()
-        self.terminated_instances.clear()
-        self.children.clear()
+        with self._pool_lock:
+            self.terminated_instances.clear()
+        with self._children_lock:
+            self.children.clear()
         self.instance_summaries.clear()
         self._halted_instances.clear()
         self._compression_halted.clear()
@@ -1392,11 +1465,17 @@ class AgentPool:
                 else:
                     inst.rebuild_conversation(conv)
 
-        # Sync per-instance _child_instances with restored pool.children
+        # Sync per-instance _child_instances with restored pool.children (atomic snapshot under lock)
+        with self._children_lock:
+            child_lists = {k: list(v) for k, v in self.children.items()}
         for n in saved['conversations']:
             inst = self.instances.get(n)
-            if inst is not None and n in self.children:
-                inst._child_instances = list(self.children[n])
+            if inst is not None and n in child_lists:
+                try:
+                    with inst._state_lock:
+                        inst._child_instances = child_lists[n]
+                except Exception as e:
+                    logger.debug(f"Syncing _child_instances for {n} failed during session load (non-critical): {e}")
 
     def _dismiss_all_instances(self, exclude: Optional[set] = None):
         """Dismiss ALL instances from the pool, including root orchestrator(s).
@@ -2664,12 +2743,17 @@ class AgentPool:
 
         Per-instance termination check — does NOT affect other agents (unlike _stopped_event).
         Checks terminated_instances set first (authoritative), then falls back to inst.is_terminated flag.
+        Thread-safe: snapshots both signals under _pool_lock to prevent race conditions.
         """
         instance_name = instance_name.strip()
-        if instance_name in self.terminated_instances:
-            return True
-        inst = self.instances.get(instance_name)
-        return inst.is_terminated if inst else False
+        with self._pool_lock:
+            in_set = instance_name in self.terminated_instances
+            inst = self.instances.get(instance_name)
+            inst_flag = inst.is_terminated if inst else False
+            result = in_set or inst_flag
+            if result:
+                logger.debug("[TERM_DEBUG] is_instance_terminated(%r): in_set=%s, inst_flag=%s -> %s", instance_name, in_set, inst_flag, result)
+            return result
 
     @staticmethod
     def find_last_marker(history: List[Message]) -> int:

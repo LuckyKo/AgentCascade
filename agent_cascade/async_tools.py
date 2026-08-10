@@ -44,6 +44,7 @@ class BackgroundToolEntry:
     completed: bool = False
     function_id: Optional[str] = None
     future: Optional[Future] = None  # Set after registration, allows cancellation (Fix TODO #41)
+    child_instance_name: Optional[str] = None  # Name of async child agent, if this entry runs a child agent
 
 
 class AsyncToolRegistry:
@@ -99,7 +100,8 @@ class AsyncToolRegistry:
             entry = BackgroundToolEntry(
                 tool_call=tool_call,
                 agent_instance_name=instance_name,
-                function_id=function_id
+                function_id=function_id,
+                child_instance_name=child_instance_name
             )
             self._pending.setdefault(instance_name, []).append(entry)
             # Track child->parent mapping for dismissal wakeup support
@@ -135,6 +137,16 @@ class AsyncToolRegistry:
                 )
                 from agent_cascade.exceptions import AgentTerminatedError
                 raise AgentTerminatedError(entry.agent_instance_name)
+            # Also check if this is an async child agent and that child was terminated.
+            # This ensures dismissal of the child instance aborts its executor worker.
+            if (entry.child_instance_name and self.pool and
+                    self.pool.is_instance_terminated(entry.child_instance_name)):
+                logger.debug(
+                    f"[AsyncToolRegistry] Skipping async child '{entry.child_instance_name}': "
+                    f"child instance was dismissed before execution started"
+                )
+                from agent_cascade.exceptions import AgentTerminatedError
+                raise AgentTerminatedError(entry.child_instance_name)
             entry.result = entry.tool_call()
         except Exception as e:
             entry.error = str(e)

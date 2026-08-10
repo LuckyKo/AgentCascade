@@ -100,6 +100,12 @@ def run_agent_thread_unified(
         pool._ws_send_queue = send_queue
         pool._ws_loop = loop
 
+        # Register this thread with the pool BEFORE creating the instance, so dismiss_instance
+        # can find it even if called during startup. The cleanup in finally handles removal on exit.
+        import threading
+        with pool._instance_threads_lock:
+            pool._instance_threads[instance_name] = threading.current_thread()
+
         # ── Create main agent instance if it doesn't exist ───────────────
         instance = pool.get_instance(instance_name)
         if (instance is None or not instance.conversation) and system_message_content:
@@ -132,9 +138,12 @@ def run_agent_thread_unified(
 
         # Shared stop-check helper (used by main loop and auto-skill)
         def is_stopped():
-            return (pool.stopped or current_generation != pool._run_generation
+            stopped = (pool.stopped or current_generation != pool._run_generation
                     or instance_name in pool._halted_instances
                     or pool.is_instance_terminated(instance_name))
+            if stopped:
+                logger.debug("[TERM_DEBUG] run_agent_thread_unified(%r): is_stopped() -> True", instance_name)
+            return stopped
 
         for turn_output_raw in run_agent_in_pool_with_recovery(
             pool=pool,
@@ -142,6 +151,7 @@ def run_agent_thread_unified(
             max_auto_retries=max_auto_retries,
             auto_rollback_enabled=auto_rollback_enabled,
         ):
+
             # Unpack (turn_output, is_streaming) signal from engine.run()
             if isinstance(turn_output_raw, tuple) and len(turn_output_raw) == 2:
                 turn_output, is_streaming_tick = turn_output_raw
@@ -286,6 +296,16 @@ def run_agent_thread_unified(
                 )
         except Exception as e:
             logger.debug(f"Error state broadcast failed (non-critical): {e}")
+    finally:
+        # Clean up thread registration on completion to prevent memory leaks.
+        # Dismissed agents have this cleaned up by dismiss_instance(); this handles
+        # normal completion and exception paths where the agent finishes on its own.
+        # Using pop(name, None) is safe - returns None if already removed by dismiss_instance().
+        try:
+            with pool._instance_threads_lock:
+                pool._instance_threads.pop(instance_name, None)
+        except Exception as e:
+            logger.debug(f"Thread registration cleanup failed (non-critical): {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
