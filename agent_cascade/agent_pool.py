@@ -995,21 +995,13 @@ class AgentPool:
     def terminate_instance(self, instance_name: str, set_global_stopped: bool = False):
         """Mark an instance for immediate termination.
 
-        Adds to terminated_instances set and calls inst.terminate() which sets the
-        durable is_terminated flag and transitions state to TERMINATED.
-        Cascade-terminates all child agents recursively (Fix Bug41).
-        Mirrors old AgentPool.terminate_instance() semantics.
+        Adds to terminated_instances and calls inst.terminate(). Cascade-terminates children (Bug41).
 
         Args:
             instance_name: Name of the instance to terminate.
-            set_global_stopped: If True, sets the global _stopped_event which signals
-                              ALL agents to stop. If False (default for dismissal), only
-                              THIS instance's state is changed without signaling other agents
-                              via the global event. Bug5 Fix: Dismissal uses False to avoid
-                              affecting other agents mid-execution.
+            set_global_stopped: If True, signals ALL agents via _stopped_event. False (default) only terminates this instance (Bug5 fix).
         """
         instance_name = instance_name.strip()
-        logger.debug("[TERM_DEBUG] terminate_instance(%r, set_global_stopped=%s) called", instance_name, set_global_stopped)
         # First cascade-terminate all children (recursive, Fix Bug41).
         # Snapshot child list under _children_lock, then check existence under _pool_lock before recursing.
         with self._children_lock:
@@ -1026,7 +1018,6 @@ class AgentPool:
             inst = self.instances.get(instance_name)
             # Add to terminated_instances FIRST so stop-checks can detect dismissal immediately
             self.terminated_instances.add(instance_name)
-            logger.debug("[TERM_DEBUG]   -> added %r to terminated_instances", instance_name)
 
         if inst:
             # Check if instance was in an active state before calling terminate()
@@ -1036,7 +1027,6 @@ class AgentPool:
             # Call canonical terminate() method — sets is_terminated=True, transitions state,
             # clears streaming responses and volatile state. Idempotent so safe even if called twice.
             inst.terminate()
-            logger.debug("[TERM_DEBUG]   -> inst.terminate() called for %r", instance_name)
 
             if is_active:
                 # Bug5 Fix #1: Only set global _stopped_event when explicitly requested
@@ -1093,12 +1083,7 @@ class AgentPool:
     def dismiss_instance(self, instance_name: str):
         """Remove an instance from the pool. If active, terminate it; otherwise clean up.
 
-        Recursively dismisses all child agents first (cascade termination, Fix Bug41).
-        This is the UI-initiated termination path (WebSocket terminate_agent_instance message).
-        Mirrors old AgentPool.dismiss_instance() semantics.
-
-        Bug5 Fix #1: Dismissal should NOT set global _stopped_event to avoid affecting
-        other agents mid-execution. Only this specific instance is terminated.
+        Cascade-dismisses children first (Bug41). Does not set global _stopped_event — only this instance is terminated (Bug5 fix).
         """
         instance_name = instance_name.strip()
         # First dismiss all children (recursive cascade, Fix Bug41).
@@ -1115,28 +1100,22 @@ class AgentPool:
         with self._pool_lock:
             inst = self.instances.get(instance_name)
 
-        # FIX: Thread-safe state read - snapshot under lock before checking ACTIVE_STATES
         is_active = False
         if inst:
             with inst._state_lock:
                 is_active = inst.state in ACTIVE_STATES
 
         if is_active:
-            # Bug5 Fix: Pass set_global_stopped=False to ensure only THIS instance
-            # is terminated, not all agents via the global _stopped_event.
+            # Bug5 fix: only terminate this instance, not all agents
             self.terminate_instance(instance_name, set_global_stopped=False)
         else:
-            # Ensure termination flag is set even if instance wasn't in ACTIVE_STATES
-            # when dismissed (e.g., was IDLE/COMPLETING). Call terminate() directly since
-            # terminate_instance() only transitions state for active instances.
+            # Set termination flag even for non-active instances (IDLE/COMPLETING).
             with self._pool_lock:
                 inst = self.instances.get(instance_name)
             if inst and not inst.is_terminated:
                 inst.terminate()
 
-        # Wake SLEEPING parent when async child is dismissed (Fix TODO #41).
-        # If this instance was an async child with a SLEEPING parent waiting for it,
-        # inject a result so the parent wakes up instead of sleeping forever.
+        # Wake SLEEPING parent when async child is dismissed (Bug41 fix).
         if inst and inst.parent_instance:
             parent_name = inst.parent_instance
             parent = self.get_instance(parent_name)
@@ -1167,17 +1146,17 @@ class AgentPool:
         if inst:
             self._clear_state_label(inst)
 
-        # ── Wait for agent's execution thread to actually stop ──────────────
-        # Get the thread reference before removing instance from pool
+        # Wait for agent's execution thread to actually stop.
         with self._instance_threads_lock:
             thread = self._instance_threads.pop(instance_name, None)
         if thread and thread.is_alive():
             logger.info(f"Waiting for '{instance_name}' thread to stop...")
             try:
-                thread.join(timeout=2.0)  # Short courtesy wait — join only waits, doesn't stop. 2s is enough for cooperative threads; longer blocks dismiss_agent tool unnecessarily.
+                join_timeout = getattr(self.settings, 'dismiss_thread_join_timeout', 2.0)
+                thread.join(timeout=join_timeout)  # Short wait; join only waits, doesn't force-stop
                 if thread.is_alive():
                     logger.warning(
-                        f"Thread for '{instance_name}' did not stop within 2s timeout. "
+                        f"Thread for '{instance_name}' did not stop within {join_timeout}s timeout. "
                         f"Termination signal kept active — agent will stop at next cooperative check."
                     )
             except Exception as e:
@@ -1185,9 +1164,7 @@ class AgentPool:
         else:
             logger.debug(f"No active thread to join for '{instance_name}'")
 
-        # Only discard termination signal if we actually confirmed the thread stopped.
-        # If no thread was registered (async executor worker, race condition) or it's still alive,
-        # keep the signal so cooperative stop-checks continue to work.
+        # Only discard termination signal if we confirmed the thread stopped.
         with self._pool_lock:
             if thread and not thread.is_alive():
                 self.terminated_instances.discard(instance_name)
@@ -2741,9 +2718,8 @@ class AgentPool:
     def is_instance_terminated(self, instance_name: str) -> bool:
         """Check if an instance has been marked for termination.
 
-        Per-instance termination check — does NOT affect other agents (unlike _stopped_event).
-        Checks terminated_instances set first (authoritative), then falls back to inst.is_terminated flag.
-        Thread-safe: snapshots both signals under _pool_lock to prevent race conditions.
+        Per-instance check (unlike _stopped_event). Checks terminated_instances set, then inst.is_terminated flag.
+        Thread-safe via _pool_lock.
         """
         instance_name = instance_name.strip()
         with self._pool_lock:
@@ -2751,8 +2727,6 @@ class AgentPool:
             inst = self.instances.get(instance_name)
             inst_flag = inst.is_terminated if inst else False
             result = in_set or inst_flag
-            if result:
-                logger.debug("[TERM_DEBUG] is_instance_terminated(%r): in_set=%s, inst_flag=%s -> %s", instance_name, in_set, inst_flag, result)
             return result
 
     @staticmethod

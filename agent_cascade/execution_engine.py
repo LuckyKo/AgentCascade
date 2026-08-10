@@ -1850,9 +1850,11 @@ class ExecutionEngine:
 
         Does NOT return True for compression-halt or manual halt — those are suspendable.
         """
-        return (self.pool.stopped or
-                self._my_generation != self.pool._run_generation or
-                self.pool.is_instance_terminated(inst_name))
+        global_stop = self.pool.stopped
+        gen_mismatch = self._my_generation != self.pool._run_generation
+        inst_terminated = self.pool.is_instance_terminated(inst_name)
+        result = global_stop or gen_mismatch or inst_terminated
+        return result
 
     def _is_suspended_by_compression(self, inst_name: str) -> bool:
         """Check if this instance is suspended because of forced compression.
@@ -1941,12 +1943,14 @@ class ExecutionEngine:
             Returns (response + turn_output + partial_msgs, False) if stop detected.
             Returns None if no stop detected (caller should continue normally).
         """
-        if stream_tick % 20 == 0 and self._is_terminal_stop(inst_name):
-            logger.debug(
-                "[TERMINATE] Stopped mid-stream after %d ticks - %s",
-                stream_tick, inst_name
-            )
-            return (response + turn_output + partial_msgs, False)
+        if stream_tick % 20 == 0:
+            stopped = self._is_terminal_stop(inst_name)
+            if stopped:
+                logger.debug(
+                    "[TERMINATE] Stopped mid-stream after %d ticks - %s",
+                    stream_tick, inst_name
+                )
+                return (response + turn_output + partial_msgs, False)
         return None
 
     def _inject_async_messages(

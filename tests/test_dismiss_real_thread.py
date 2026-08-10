@@ -59,7 +59,7 @@ def test_dismiss_real_thread_stops_within_bound():
 
     # Register thread BEFORE starting (matches run_agent_unified.py fix)
     with pool._instance_threads_lock:
-        pool._instance_threads[instance_name] = threading.current_thread() if False else None  # placeholder
+        pool._instance_threads[instance_name] = None
 
     thread = threading.Thread(target=target, daemon=True)
     with pool._instance_threads_lock:

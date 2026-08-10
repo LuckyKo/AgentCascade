@@ -190,6 +190,10 @@ STREAM_MAX_SILENCE_SECONDS: float = float(os.getenv(
 STREAM_MAX_TOTAL_SECONDS: float = float(os.getenv(
     'QWEN_AGENT_STREAM_MAX_TOTAL_SECONDS', 900.0))  # Max total duration of a streaming response
 
+# Dismiss thread join timeout (seconds to wait for agent thread to stop cooperatively)
+DISMISS_THREAD_JOIN_TIMEOUT: float = float(os.getenv(
+    'QWEN_AGENT_DISMISS_THREAD_JOIN_TIMEOUT', 2.0))
+
 # HTTP client timeouts (passed to httpx)
 HTTP_READ_TIMEOUT: float = float(os.getenv(
     'QWEN_AGENT_HTTP_READ_TIMEOUT', 300.0))  # Timeout for reading a single chunk from server

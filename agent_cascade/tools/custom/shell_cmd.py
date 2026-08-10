@@ -308,10 +308,9 @@ class ShellCmd(BaseTool):
             f"  - __status → check current status and recent output\n"
             f"  - __kill → terminate the process\n"
             f"  - __ctrl_c → send interrupt signal\n"
-            f"  - __wait → wait until next heartbeat (max 60s)\n"
+            f"  - __wait → wait until next heartbeat (similar to simply stoping as you will be woken up by the heartbeat response)\n"
             f"  - __heartbeat=N → update heartbeat interval (N seconds)\n"
             f"  - any other text → send as stdin input to the running command"
-            f"Or just stop, you will be woken up by the heartbeat responses or final output when the command completes."
         )
 
         # Append early output if available (Case 2, truncate if large)

@@ -70,6 +70,8 @@ POOL_SETTINGS_KEYS = frozenset({
     'tail_sync_check_enabled',
     # Streaming timeout settings
     'stream_max_silence_seconds', 'stream_max_total_seconds',
+    # Dismiss thread join timeout
+    'dismiss_thread_join_timeout',
 })
 
 # ── Non-PoolSettings keys that still trigger persistence (stored at top level of pool_settings.json) ────
@@ -449,6 +451,14 @@ def _handle_stream_max_total_seconds(ui_cfg: dict, agent_pool: Optional[Any], ag
     if agent_pool is not None and hasattr(agent_pool, 'settings'):
         val = float(ui_cfg.get('stream_max_total_seconds', 900.0))
         agent_pool.settings.stream_max_total_seconds = max(60.0, val)
+
+
+@register_config_handler('dismiss_thread_join_timeout')
+def _handle_dismiss_thread_join_timeout(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Update dismiss thread join timeout (seconds to wait for agent thread to stop)."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = float(ui_cfg.get('dismiss_thread_join_timeout', 2.0))
+        agent_pool.settings.dismiss_thread_join_timeout = max(0.5, min(val, 10.0))
 
 
 @register_config_handler('max_turns')

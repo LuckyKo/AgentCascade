@@ -95,3 +95,35 @@ It uses a modular, multi-agent architecture with a unique supervisor-worker dyna
 
 
 # Errors to investigate:
+
+# re-indent tool messes up code - the diff shows code changes instead of indenting it
+{
+  "path": "N:\\work\\WD\\AgentCascade\\agent_cascade\\run_agent_unified.py",
+  "lines": "273:309",
+  "indent": 4,
+  "indent_type": "space",
+  "mode": "shift",
+  "justification": "Indent except/finally blocks to match try block level (8 spaces)"
+}
+Tool Result
+🗑️
+OK: Re-indented N:\work\WD\AgentCascade\agent_cascade\run_agent_unified.py lines 273-309 (shift +4sp, 37 total / 37 changed)
+
+@@ -270,43 +270,43 @@
+                     loop,
+                 )
+ 
+-    except (KeyboardInterrupt, SystemExit):
+-        # Never swallow user interrupts or explicit exits
+-        raise
+-    except Exception as e:
+...
++            try:
++                with pool._instance_threads_lock:
++                    pool._instance_threads.pop(instance_name, None)
++            except Exception as e:
++                logger.debug(f"Thread registration cleanup failed (non-critical): {e}")
+ 
+ 
+ # ═══════════════════════════════════════════════════════════════════════
+backup → N:\work\WD\AgentWorkspace\logs\backups\coder\run_agent_unified.py.1786352572.bak

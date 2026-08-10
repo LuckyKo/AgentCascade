@@ -147,9 +147,11 @@ class AgentLifecycleManager:
                 inst.last_activity = now
 
                 # Clear old child tracking — reused instances start fresh with no children
-                # Track old parent for cleanup, then update to new caller (thread-safe)
+                # Track old parent for cleanup, then update to new caller (thread-safe).
+                # Use _children_lock for pool.children and _state_lock for instance state.
                 with self.pool._children_lock:
                     old_parent = inst.parent_instance
+                with inst._state_lock:
                     inst.parent_instance = caller
                     inst._child_instances.clear()
 

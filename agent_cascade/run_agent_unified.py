@@ -141,8 +141,6 @@ def run_agent_thread_unified(
             stopped = (pool.stopped or current_generation != pool._run_generation
                     or instance_name in pool._halted_instances
                     or pool.is_instance_terminated(instance_name))
-            if stopped:
-                logger.debug("[TERM_DEBUG] run_agent_thread_unified(%r): is_stopped() -> True", instance_name)
             return stopped
 
         for turn_output_raw in run_agent_in_pool_with_recovery(

@@ -28,6 +28,7 @@ from agent_cascade.settings import (
     CACHE_POOL_ENABLED, CACHE_POOL_SIZE, CACHE_THRESHOLD_CHARS,
     DEFAULT_LOAD_SKILL_MODE, DEFAULT_MAX_TURNS,
     STREAM_MAX_SILENCE_SECONDS, STREAM_MAX_TOTAL_SECONDS,
+    DISMISS_THREAD_JOIN_TIMEOUT,
 )
 
 
@@ -726,6 +727,9 @@ class PoolSettings:
     # Streaming timeout settings (layered defense against stuck streams)
     stream_max_silence_seconds: float = STREAM_MAX_SILENCE_SECONDS  # Max seconds between chunks before considering stream stalled
     stream_max_total_seconds: float = STREAM_MAX_TOTAL_SECONDS      # Max total duration of a streaming response
+
+    # Dismiss thread join timeout (seconds to wait for agent thread to stop cooperatively)
+    dismiss_thread_join_timeout: float = DISMISS_THREAD_JOIN_TIMEOUT
 
     def to_dict(self) -> dict:
         """Serialize settings to a JSON-safe dictionary.
