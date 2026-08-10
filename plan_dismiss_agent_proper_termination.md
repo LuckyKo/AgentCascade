@@ -3,6 +3,7 @@
 **Date:** 2026-08-10
 **Author:** planner_dismiss_termination
 **Status:** REVISION 3 — ready for implementation
+- Refined: Renamed InstanceDismissedError → AgentTerminatedError for consistency with existing 'terminated' terminology (commit b6b2097)
 **Related:** investigation_report_dismiss_agent_thread_termination.md, .agent_lessons/dismiss-agent-cooperative-termination.md
 
 ---
@@ -70,7 +71,7 @@ Ensure signals are set before resources are cleaned up.
 **Change:** Add new exception class after line 59:
 
 ```python
-class InstanceDismissedError(Exception):
+class AgentTerminatedError(Exception):
     """Raised when an agent instance is dismissed mid-execution.
 
     Used to propagate the dismissal signal through call stacks (especially sync
@@ -334,7 +335,7 @@ while True:
     
     # Check if instance was terminated while waiting
     if pool and instance_name and pool.is_instance_terminated(instance_name):
-        raise InstanceDismissedError(instance_name)
+        raise AgentTerminatedError(instance_name)
     
     wait_time = min(remaining, CHECK_INTERVAL)
     if sched['sem'].acquire(timeout=wait_time):
@@ -362,7 +363,7 @@ if wait_time > 0:
     rate_wait_start = _time.monotonic()
     while _time.monotonic() - rate_wait_start < wait_time:
         if self._pool and _inst_name and self._pool.is_instance_terminated(_inst_name):
-            raise InstanceDismissedError(_inst_name)
+            raise AgentTerminatedError(_inst_name)
         _time.sleep(min(0.5, wait_time - (_time.monotonic() - rate_wait_start)))
 ```
 
@@ -372,7 +373,7 @@ Location: In the retry loop's backoff section (around line 1480-1520 depending o
 
 Similar pattern: replace `time.sleep(backoff)` with interruptible loop checking termination.
 
-**Risk:** Low. All changes are within existing error-handling paths. InstanceDismissedError will propagate up and be caught by execution_engine.py (see Change 6 below).
+**Risk:** Low. All changes are within existing error-handling paths. AgentTerminatedError will propagate up and be caught by execution_engine.py (see Change 6 below).
 
 ---
 
@@ -470,7 +471,7 @@ def wait_for_message(self, instance_name: str, timeout: float = 30.0) -> Optiona
 
 ---
 
-### 7. agent_cascade/execution_engine.py — Handle InstanceDismissedError
+### 7. agent_cascade/execution_engine.py — Handle AgentTerminatedError
 
 **Purpose:** Catch the abort exception and exit cleanly without retrying or logging as an error.
 
@@ -481,7 +482,7 @@ Location: Around line 1380-1450 where `api_router.call_with_fallback()` is calle
 Add to the existing exception handling (which already checks for "has been terminated" RuntimeError):
 
 ```python
-except InstanceDismissedError as e:
+except AgentTerminatedError as e:
     logger.debug(f"[DISMISSAL] Instance '{e.instance_name}' dismissed during LLM call, aborting cleanly")
     break  # Exit run() loop cleanly — no retry, no error message
 except RuntimeError as e:
@@ -496,11 +497,11 @@ except RuntimeError as e:
 
 Location: Around line 5140-5220 where `run_agent_in_pool_with_recovery` handles retries.
 
-Add InstanceDismissedError to the list of exceptions that should abort without retry:
+Add AgentTerminatedError to the list of exceptions that should abort without retry:
 
 ```python
-except (InstanceDismissedError, RuntimeError) as e:
-    if isinstance(e, InstanceDismissedError):
+except (AgentTerminatedError, RuntimeError) as e:
+    if isinstance(e, AgentTerminatedError):
         logger.debug(f"[DISMISSAL] Aborting recovery loop for {instance_name}: dismissed")
         raise  # Propagate up — don't retry a dismissed instance
     _is_termination_abort = "has been terminated" in str(e.args[0]) if e.args else False
@@ -523,19 +524,19 @@ if self._is_terminal_stop(inst_name):
 elif self._is_suspended_by_compression(inst_name):
     # ... existing handling ...
     
-# Additional check: raise InstanceDismissedError if this instance was dismissed
+# Additional check: raise AgentTerminatedError if this instance was dismissed
 # This allows sync children to propagate the signal up to their parent
 inst = self.pool.get_instance(inst_name)
 if inst and inst.is_terminated:
-    from agent_cascade.exceptions import InstanceDismissedError
-    raise InstanceDismissedError(inst_name)
+    from agent_cascade.exceptions import AgentTerminatedError
+    raise AgentTerminatedError(inst_name)
 ```
 
 **Risk:** Low-Medium. The existing RuntimeError handling for "has been terminated" is already in place; this just adds a cleaner exception type alongside it.
 
-### InstanceDismissedError — Complete Propagation Path Analysis
+### AgentTerminatedError — Complete Propagation Path Analysis
 
-**Purpose:** Ensure all code paths that can block or take significant time are covered by either raising or catching InstanceDismissedError appropriately.
+**Purpose:** Ensure all code paths that can block or take significant time are covered by either raising or catching AgentTerminatedError appropriately.
 
 #### Where It's Raised (Abort Points)
 
@@ -558,7 +559,7 @@ if inst and inst.is_terminated:
 | Semaphore acquire (slot wait) | Yes | Interruptible loop, 1s check interval | ~1s + partial wait |
 | Rate-limit backoff sleep | Yes | Interruptible loop, 0.5s check | ~0.5s + partial wait |
 | Retry backoff sleep | Yes | Interruptible loop, 0.5s check | ~0.5s + partial wait |
-| LLM streaming (SSE) | Partially | Existing 20-tick check; InstanceDismissedError after first token if rate-limited | Up to one full response (~30-60s worst case for very long responses) |
+| LLM streaming (SSE) | Partially | Existing 20-tick check; AgentTerminatedError after first token if rate-limited | Up to one full response (~30-60s worst case for very long responses) |
 | HTTP request in-flight | No | Python limitation — cannot safely interrupt blocking I/O | Request timeout (configurable, typically 30-120s) |
 | Sync tool execution | Partially | Pre-check before tool; during-tool depends on tool implementation | Until tool completes or next stop-check |
 | wait_for_message() | Yes | Returns None on termination check | ~1s (existing tick interval) |
@@ -602,12 +603,12 @@ Location: `_run_child_sync()` around lines 518-609
 
 Current behavior: Runs `run_child_core()` which calls `engine.run()`. If the child is dismissed mid-execution, the parent thread is blocked until the LLM call completes.
 
-Fix: Wrap the run_child_core call to catch InstanceDismissedError and return early:
+Fix: Wrap the run_child_core call to catch AgentTerminatedError and return early:
 
 ```python
 try:
     from agent_cascade.child_runner import run_child_core
-    from agent_cascade.exceptions import InstanceDismissedError
+    from agent_cascade.exceptions import AgentTerminatedError
     
     result = run_child_core(
         engine=self.engine,
@@ -622,7 +623,7 @@ try:
     
     # ... existing state save/restore code ...
     
-except InstanceDismissedError as e:
+except AgentTerminatedError as e:
     logger.debug(f"[DISMISSAL] Sync child '{e.instance_name}' aborted due to dismissal")
     return f"[Agent '{instance_name}' Dismissed]: Agent was dismissed before completing."
 except Exception as e:
@@ -800,13 +801,13 @@ The codebase uses a minimalist locking strategy: locks only protect specific str
 Phase 0 (Foundation) → Phase 1 (Latent Bug Fix) → Phase 2 (Stop-Checks) → Phase 3 (Abort Exception) → Phase 4 (Async + Reporting)
       │                      │                          │                       │                        │
       └──────────────────────┴──────────────────────────┴───────────────────────┴────────────────────────┘
-                               All later phases depend on terminate() and InstanceDismissedError from Phases 0-1
+                               All later phases depend on terminate() and AgentTerminatedError from Phases 0-1
 ```
 
 ### Detailed Order
 
 1. **Phase 0 — Foundation (exceptions.py, agent_instance.py)**
-   - Add InstanceDismissedError exception class
+   - Add AgentTerminatedError exception class
    - Move ACTIVE_STATES from agent_pool.py to agent_instance.py (after AgentState enum)
    - Add terminate() method to AgentInstance
    
@@ -816,23 +817,23 @@ Phase 0 (Foundation) → Phase 1 (Latent Bug Fix) → Phase 2 (Stop-Checks) → 
    - Ensure dismiss_instance() calls terminate() for non-active instances too
    - NO CHANGE to remove_instance(): keep terminated_instances.discard() as-is
 
-3. **Phase 2 — Add Stop-Checks (api_router.py, agent_pool.py)** [requires Phase 0 InstanceDismissedError]
+3. **Phase 2 — Add Stop-Checks (api_router.py, agent_pool.py)** [requires Phase 0 AgentTerminatedError]
    - Interruptible semaphore acquire in EndpointScheduler.acquire()
    - Interruptible rate-limit wait in call_with_fallback()
    - Termination check in wait_for_message()
 
-4. **Phase 3 — Handle Abort Exception (execution_engine.py, tool_dispatcher.py)** [requires Phase 0 InstanceDismissedError + Phase 2 stop-checks]
-   - Catch InstanceDismissedError in run() loop
-   - Catch InstanceDismissedError in recovery loop
+4. **Phase 3 — Handle Abort Exception (execution_engine.py, tool_dispatcher.py)** [requires Phase 0 AgentTerminatedError + Phase 2 stop-checks]
+   - Catch AgentTerminatedError in run() loop
+   - Catch AgentTerminatedError in recovery loop
    - Add termination check before long-running tool execution
-   - Handle InstanceDismissedError in _run_child_sync()
+   - Handle AgentTerminatedError in _run_child_sync()
 
 5. **Phase 4 — Async Tool Check + Status Reporting (async_tools.py, child_runner.py)** [requires Phase 0 terminate()]
    - Check termination at start of async_tools._execute()
    - Update child_runner._check_status() to also check inst.is_terminated
 
 **Dependency notes:**
-- Phases 2-4 all require InstanceDismissedError from Phase 0 (they raise or catch it).
+- Phases 2-4 all require AgentTerminatedError from Phase 0 (they raise or catch it).
 - Phase 3 requires Phase 2's stop-checks because the abort exception is raised there; without Phase 2, Phase 3's handlers would never fire.
 - Phase 4 requires terminate() from Phase 0 to check inst.is_terminated reliably.
 - Each phase after Phase 1 is independently testable and can be rolled back if issues arise. Phases 0-1 together fix the core latent bug and are mandatory for all subsequent phases.
@@ -855,7 +856,7 @@ Phase 0 (Foundation) → Phase 1 (Latent Bug Fix) → Phase 2 (Stop-Checks) → 
 
 ### Sync child dismissed while parent holds slot
 - Parent releases slot before running sync child (line 549-553), child acquires its own. If child is dismissed mid-execution:
-  - InstanceDismissedError propagates up through run_child_core() → _run_child_sync()
+  - AgentTerminatedError propagates up through run_child_core() → _run_child_sync()
   - finally block re-acquires parent's slot (lines 595-609)
   - Parent resumes with a "Dismissed" result
 - **Risk:** If the child holds the slot when dismissed, we need to ensure it's released. The existing `_release_slot()` in execution_engine.py's finally block handles this.
@@ -875,15 +876,15 @@ Phase 0 (Foundation) → Phase 1 (Latent Bug Fix) → Phase 2 (Stop-Checks) → 
 
 | Change | Risk Level | Rationale | Rollback Plan |
 |--------|-----------|-----------|---------------|
-| Add InstanceDismissedError | Low | New exception type, no behavior change until used | Delete the class |
+| Add AgentTerminatedError | Low | New exception type, no behavior change until used | Delete the class |
 | Move ACTIVE_STATES to agent_instance.py | Low | Simple relocation; same value, different file | Move back to agent_pool.py |
 | Add terminate() method to AgentInstance | Low | New method, additive; existing code unaffected until callers updated | Remove the method |
 | Refactor terminate_instance() to use instance.terminate() | Low-Medium | Extract-method refactoring; should be behavior-preserving but touches hot path. Must verify lock ordering preserved. | Restore inline state changes |
 | Interruptible semaphore acquire + pool parameter | Low-Medium | Changes timing behavior of slot acquisition; adds optional parameter (backward compatible). Could expose race conditions if termination check is too aggressive. | Restore single acquire(timeout=30), remove pool param |
 | Interruptible rate-limit wait | Low | Only affects waiting threads; termination check is additive | Restore time.sleep() |
 | Termination check in wait_for_message | Low | Returns None on dismissal, consistent with timeout. Method currently unused so zero runtime risk. | Remove the check |
-| Catch InstanceDismissedError in execution_engine | Low | Additive exception handling; doesn't change existing paths | Remove the except block |
-| Handle InstanceDismissedError in _run_child_sync | Low | Caught locally; parent gets clean message | Remove the except block |
+| Catch AgentTerminatedError in execution_engine | Low | Additive exception handling; doesn't change existing paths | Remove the except block |
+| Handle AgentTerminatedError in _run_child_sync | Low | Caught locally; parent gets clean message | Remove the except block |
 | Check termination in async_tools._execute | Low | Only affects not-yet-started tools | Remove the check |
 
 **Reviewer findings addressed:**
@@ -900,8 +901,8 @@ Phase 0 (Foundation) → Phase 1 (Latent Bug Fix) → Phase 2 (Stop-Checks) → 
 ### Unit Tests
 1. **Test AgentInstance.terminate() idempotency:** Call terminate() multiple times on same instance → verify no errors, is_terminated remains True
 2. **Test inst.is_terminated durability:** Create instance → call terminate() → simulate pool removal → verify `inst.is_terminated == True` via local reference
-3. **Test InstanceDismissedError propagation:** Mock a dismissed instance during LLM call → verify clean abort without retry
-4. **Test interruptible acquire:** Mock semaphore that never releases + dismiss during wait → verify early exit with InstanceDismissedError
+3. **Test AgentTerminatedError propagation:** Mock a dismissed instance during LLM call → verify clean abort without retry
+4. **Test interruptible acquire:** Mock semaphore that never releases + dismiss during wait → verify early exit with AgentTerminatedError
 5. **Test sync child dismissal:** Parent calls sync child → dismiss child mid-execution → verify parent resumes promptly with "Dismissed" message
 
 ### Integration Tests
@@ -940,12 +941,12 @@ These are noted for future consideration but are NOT part of this plan:
 
 | File | Changes |
 |------|---------|
-| `agent_cascade/exceptions.py` | Add InstanceDismissedError class |
+| `agent_cascade/exceptions.py` | Add AgentTerminatedError class |
 | `agent_cascade/agent_instance.py` | Move ACTIVE_STATES here; add terminate() method |
 | `agent_cascade/agent_pool.py` | Import ACTIVE_STATES from agent_instance; refactor terminate_instance() to use inst.terminate(); add pool param when calling acquire(); add check in wait_for_message() |
 | `agent_cascade/api_router.py` | Add optional pool param to acquire(); interruptible semaphore acquire loop; interruptible rate-limit/backoff waits |
-| `agent_cascade/execution_engine.py` | Catch InstanceDismissedError; add termination check before tool execution |
-| `agent_cascade/tool_dispatcher.py` | Handle InstanceDismissedError in _run_child_sync() |
+| `agent_cascade/execution_engine.py` | Catch AgentTerminatedError; add termination check before tool execution |
+| `agent_cascade/tool_dispatcher.py` | Handle AgentTerminatedError in _run_child_sync() |
 | `agent_cascade/child_runner.py` | Check inst.is_terminated in _check_status() |
 | `agent_cascade/async_tools.py` | Check termination at start of _execute() |
 
