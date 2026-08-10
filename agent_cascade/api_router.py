@@ -29,7 +29,7 @@ from agent_cascade.settings import (
     ENDPOINT_COOLDOWN_SECONDS,
     ENDPOINT_FAILURE_CLEANUP_HOURS,
 )
-from agent_cascade.exceptions import ContextWindowExceeded
+from agent_cascade.exceptions import ContextWindowExceeded, InstanceDismissedError
 from agent_cascade.retry_policy import calculate_backoff, RetryPolicy, POLICY_DEFAULT
 
 
@@ -226,7 +226,7 @@ class EndpointScheduler:
         self._slot_holders: Dict[str, List[tuple]] = {}
         self._next_acquisition_id = 0  # Counter for unique acquisition IDs
     
-    def acquire(self, api_base: str, concurrency_limit: int, instance_name: str = "unknown", agent_class: str = "unknown") -> Optional[Callable[[], None]]:
+    def acquire(self, api_base: str, concurrency_limit: int, instance_name: str = "unknown", agent_class: str = "unknown", pool=None) -> Optional[Callable[[], None]]:
         """
         Acquire a slot on the endpoint. Blocks if at capacity.
         Returns a cleanup callback to release the slot, or None if unlimited.
@@ -240,6 +240,7 @@ class EndpointScheduler:
             concurrency_limit: -1=unlimited, 0=sequential, N>0=max parallel
             instance_name: Name of the agent instance acquiring the slot (for tracking)
             agent_class: Class of the agent instance (for tracking)
+            pool: Optional AgentPool reference for termination checks during blocking acquire
             
         Returns:
             A callable that releases the slot when called, or None if no scheduling needed.
@@ -294,25 +295,39 @@ class EndpointScheduler:
             
             sched = self._schedules[slot_key]
         
-        # Semaphore.acquire() blocks atomically if at capacity.
-        # Note: sched['sem'] is captured under lock above, but theoretically a concurrent
-        # resize could swap it between here and the acquire call. In practice this is benign
-        # because all concurrency=0 endpoints use new_max=1 (no resize), and the race window
-        # is extremely narrow.
+        # Interruptible slot acquisition: check termination every CHECK_INTERVAL seconds
+        # instead of blocking for the full ENDPOINT_SLOT_ACQUIRE_TIMEOUT.
+        import time as _time
+        
+        CHECK_INTERVAL = 1.0  # Check termination every second while waiting
+        acquire_start = _time.monotonic()
+        deadline = acquire_start + ENDPOINT_SLOT_ACQUIRE_TIMEOUT
+        
         logger.debug(f"[CALL_AGENT_DEBUG] EndpointScheduler.acquire — blocking on semaphore for api_base={api_base}")
-        if not sched['sem'].acquire(timeout=ENDPOINT_SLOT_ACQUIRE_TIMEOUT):
-            # SLOT_TIMEOUT FIX v2: Include slot holder information in timeout error
-            holder_info = ""
-            with self._lock:
-                holders = self._slot_holders.get(slot_key, [])
-                if holders:
-                    holder_names = [f"{h[0]} ({h[1]})" for h in holders]
-                    holder_info = f". Currently held by: {', '.join(holder_names)}"
+        
+        while True:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                # SLOT_TIMEOUT FIX v2: Include slot holder information in timeout error
+                holder_info = ""
+                with self._lock:
+                    holders = self._slot_holders.get(slot_key, [])
+                    if holders:
+                        holder_names = [f"{h[0]} ({h[1]})" for h in holders]
+                        holder_info = f". Currently held by: {', '.join(holder_names)}"
+                
+                raise TimeoutError(
+                    f"Timed out after {ENDPOINT_SLOT_ACQUIRE_TIMEOUT}s waiting for endpoint slot on {api_base}. "
+                    f"Current active count: {sched['active_count']}, max allowed: {sched['max_active']}{holder_info}"
+                )
             
-            raise TimeoutError(
-                f"Timed out after {ENDPOINT_SLOT_ACQUIRE_TIMEOUT}s waiting for endpoint slot on {api_base}. "
-                f"Current active count: {sched['active_count']}, max allowed: {sched['max_active']}{holder_info}"
-            )
+            # Check if instance was terminated while waiting
+            if pool and instance_name and pool.is_instance_terminated(instance_name):
+                raise InstanceDismissedError(instance_name)
+            
+            wait_time = min(remaining, CHECK_INTERVAL)
+            if sched['sem'].acquire(timeout=wait_time):
+                break  # Successfully acquired
         
         with self._lock:
             # ISSUE #2 FIX: Generate unique acquisition ID BEFORE incrementing active_count
@@ -1403,7 +1418,13 @@ class APIRouter:
                                     f"[APIRouter] Rate limit reached for '{endpoint_name}' @ {endpoint_base}. "
                                     f"Waiting {wait_time:.1f}s before next call ({rate_limit_rpm} rpm)"
                                 )
-                                time.sleep(wait_time)
+                                # Interruptible sleep: check termination every 0.5s during rate-limit wait
+                                import time as _time
+                                rate_wait_start = _time.monotonic()
+                                while _time.monotonic() - rate_wait_start < wait_time:
+                                    if self._pool and _inst_name and self._pool.is_instance_terminated(_inst_name):
+                                        raise InstanceDismissedError(_inst_name)
+                                    _time.sleep(min(0.5, wait_time - (_time.monotonic() - rate_wait_start)))
                             # After sleeping, re-check and try to record (loop handles contention)
                             with self._lock:
                                 now = time.time()
@@ -1435,6 +1456,11 @@ class APIRouter:
                     return result
                     
                 except Exception as e:
+                    # InstanceDismissedError is a clean abort signal — re-raise immediately
+                    # without logging, retrying, or moving to next endpoint.
+                    if isinstance(e, InstanceDismissedError):
+                        raise
+                    
                     err_msg = str(e)
 
                     # Detect context window exceeded errors and advance cursor.
@@ -1487,7 +1513,13 @@ class APIRouter:
                             f"[APIRouter] Backing off {delay:.1f}s before retry "
                             f"for endpoint '{endpoint_name}' @ {endpoint_base}"
                         )
-                        time.sleep(delay)
+                        # Interruptible sleep: check termination every 0.5s during retry backoff
+                        import time as _time
+                        backoff_start = _time.monotonic()
+                        while _time.monotonic() - backoff_start < delay:
+                            if self._pool and _inst_name and self._pool.is_instance_terminated(_inst_name):
+                                raise InstanceDismissedError(_inst_name)
+                            _time.sleep(min(0.5, delay - (_time.monotonic() - backoff_start)))
 
             logger.info(f"[APIRouter] Exhausted retries for endpoint '{endpoint_name}'. Moving to next...")
             

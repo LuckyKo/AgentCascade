@@ -127,6 +127,14 @@ class AsyncToolRegistry:
             entry: BackgroundToolEntry to execute.
         """
         try:
+            # Check if the owning instance was terminated before starting execution.
+            if self.pool and self.pool.is_instance_terminated(entry.agent_instance_name):
+                logger.debug(
+                    f"[AsyncToolRegistry] Skipping tool for '{entry.agent_instance_name}': "
+                    f"instance was dismissed before execution started"
+                )
+                from agent_cascade.exceptions import InstanceDismissedError
+                raise InstanceDismissedError(entry.agent_instance_name)
             entry.result = entry.tool_call()
         except Exception as e:
             entry.error = str(e)

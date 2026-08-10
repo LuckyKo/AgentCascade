@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from agent_cascade.agent_instance import AgentInstance
 
 from agent_cascade.log import logger
+from agent_cascade.exceptions import InstanceDismissedError
 from agent_cascade.utils.utils import msg_field
 
 # ── ToolDispatcher Class ─────────────────────────────────────────────────────
@@ -262,7 +263,7 @@ class ToolDispatcher:
         # RUNNING/SLEEPING/COMPLETING, attempting to call it creates a shadow instance
         # with the same name → logger collision → corrupted logs with duplicate system messages.
         # Catch this early and reject with guidance to use a different instance name.
-        from .agent_pool import ACTIVE_STATES
+        from .agent_instance import ACTIVE_STATES
         
         target_inst = self.pool.get_instance(instance_name)
         if target_inst is not None:
@@ -585,6 +586,11 @@ class ToolDispatcher:
                 f"[SLOT_SYNC_CHILD_COMPLETE] Sync child '{instance_name}' completed in {time.monotonic() - sync_path_start:.2f}s"
             )
             return result
+
+        except InstanceDismissedError as e:
+            # Clean abort from dismissal — don't log as error, return dismiss notice.
+            logger.debug(f"[DISMISSAL] Sync child '{e.instance_name}' aborted due to dismissal")
+            return f"[Agent '{instance_name}' Dismissed]: Agent was dismissed before completing."
 
         except Exception as e:
             # Catch all exceptions and return formatted error string.

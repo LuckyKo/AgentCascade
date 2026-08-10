@@ -70,8 +70,7 @@ except ImportError:
     PENDING_USER_INPUT = 'PENDING_USER_INPUT'
 
 # Agent state management imports for Stop handler
-from agent_cascade.agent_pool import ACTIVE_STATES
-from agent_cascade.agent_instance import AgentState, InvalidStateTransition
+from agent_cascade.agent_instance import ACTIVE_STATES, AgentState, InvalidStateTransition
 
 # Pre-compiled regexes moved to agent_cascade.utils.thinking_block
 

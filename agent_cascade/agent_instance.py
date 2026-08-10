@@ -54,6 +54,11 @@ class AgentState(Enum):
     TERMINATED = auto()
 
 
+# States considered "active" — agent is executing or waiting, not idle/terminated.
+# Used for termination checks, dismissal guards, and activity tracking.
+ACTIVE_STATES: set[AgentState] = {AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING}
+
+
 class InvalidStateTransition(Exception):
     """Raised when an invalid state transition is attempted."""
 
@@ -602,6 +607,42 @@ class AgentInstance:
         """
         with self._state_lock:
             return self.state.name
+
+    def terminate(self) -> None:
+        """Mark this instance as terminated and clean up volatile state.
+
+        This is the canonical way to terminate an AgentInstance. It sets the
+        durable is_terminated flag, transitions to TERMINATED state (if in an
+        active state), and clears streaming responses so partial content is
+        discarded.
+
+        Pool-level operations (cascading children, killing shells, removing from
+        pool) are handled by the caller (typically agent_pool.terminate_instance()).
+
+        Safe to call multiple times (idempotent). Thread-safe: uses _state_lock
+        and _compression_lock as appropriate.
+        """
+        # Set durable termination flag — this persists even after pool removal,
+        # allowing the running thread to detect dismissal via its local reference.
+        self.is_terminated = True
+
+        # Transition to TERMINATED if in an active state (RUNNING/SLEEPING/COMPLETING).
+        # If already terminal or idle, skip the transition — idempotent.
+        with self._state_lock:
+            if self.state in ACTIVE_STATES:
+                self._transition(AgentState.TERMINATED)
+
+        # Clear volatile streaming state so partial LLM output is discarded.
+        try:
+            with self._compression_lock:
+                self._streaming_responses.clear()
+        except Exception:
+            pass  # Best-effort — don't fail termination on lock issues
+
+        # Clear cached endpoint config to avoid stale references.
+        with self._state_lock:
+            self._state_label = None
+            self._last_endpoint_config = None
 
 
 @dataclass

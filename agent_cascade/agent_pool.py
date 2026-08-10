@@ -24,12 +24,8 @@ from agent_cascade.log import logger
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 from agent_cascade.settings import DEFAULT_WORKSPACE
 
-from .agent_instance import AgentInstance, PoolSettings, AgentState
+from .agent_instance import AgentInstance, PoolSettings, AgentState, ACTIVE_STATES
 from .async_tools import AsyncToolRegistry
-
-
-# Active states for agent lifecycle management (not IDLE — it means "not executing")
-ACTIVE_STATES = (AgentState.RUNNING, AgentState.SLEEPING, AgentState.COMPLETING)
 
 
 class _InstanceConversationMapping(dict):
@@ -966,7 +962,8 @@ class AgentPool:
     def terminate_instance(self, instance_name: str, set_global_stopped: bool = False):
         """Mark an instance for immediate termination.
 
-        Adds to terminated_instances set and transitions state to TERMINATED.
+        Adds to terminated_instances set and calls inst.terminate() which sets the
+        durable is_terminated flag and transitions state to TERMINATED.
         Cascade-terminates all child agents recursively (Fix Bug41).
         Mirrors old AgentPool.terminate_instance() semantics.
 
@@ -986,25 +983,33 @@ class AgentPool:
             if self.instances.get(child_name):
                 self.terminate_instance(child_name, set_global_stopped=False)  # Recursive — handles nested trees
 
-        self.terminated_instances.add(instance_name)
+        # Get instance BEFORE adding to terminated set — prevents race where
+        # another thread checks is_instance_terminated() before instance exists
         inst = self.instances.get(instance_name)
-
-        # FIX: Thread-safe state read - snapshot under lock before checking ACTIVE_STATES
-        is_active = False
+        
         if inst:
+            # Add to terminated_instances FIRST so stop-checks can detect dismissal immediately
+            self.terminated_instances.add(instance_name)
+
+            # Check if instance was in an active state before calling terminate()
             with inst._state_lock:
                 is_active = inst.state in ACTIVE_STATES
 
-        if is_active:
-            # Bug5 Fix #1: Only set global _stopped_event when explicitly requested
-            if set_global_stopped:
-                self._stopped_event.set()  # Global signal for ALL agents
-            
-            # RECOMMENDED FIX: Mark activity before transitioning to TERMINATED for consistency
-            self._mark_activity(instance_name)
-            
-            with inst._state_lock:
-                inst._transition(AgentState.TERMINATED)
+            # Call canonical terminate() method — sets is_terminated=True, transitions state,
+            # clears streaming responses and volatile state. Idempotent so safe even if called twice.
+            inst.terminate()
+
+            if is_active:
+                # Bug5 Fix #1: Only set global _stopped_event when explicitly requested
+                if set_global_stopped:
+                    self._stopped_event.set()  # Global signal for ALL agents
+
+                # RECOMMENDED FIX: Mark activity before transitioning to TERMINATED for consistency
+                self._mark_activity(instance_name)
+        else:
+            # Instance doesn't exist in pool anymore — still add to terminated set
+            # so status checks can detect it was terminated.
+            self.terminated_instances.add(instance_name)
 
         # ── Fix TODO #41 Root Cause 1: Cancel pending async tool tasks ────────
         # Remove and cancel running background tools BEFORE draining results,
@@ -1036,17 +1041,6 @@ class AgentPool:
                     self.message_queues[instance_name].clear()
                 except Exception as e:
                     logger.debug(f"Clearing message queue for {instance_name} failed (non-critical): {e}")
-
-        # Clear _streaming_responses to discard half-completed LLM output.
-        # Without this, the streaming UI keeps showing partial content from a terminated agent.
-        if inst:
-            try:
-                with inst._compression_lock:
-                    inst._streaming_responses.clear()
-            except Exception as e:
-                logger.debug(f"Clearing streaming responses for {instance_name} failed (non-critical): {e}")
-
-            self._clear_state_label(inst)
 
     def _clear_state_label(self, inst) -> None:
         """Clear the state label and cached endpoint config on an instance to avoid stale references.
@@ -1091,6 +1085,13 @@ class AgentPool:
             # Bug5 Fix: Pass set_global_stopped=False to ensure only THIS instance
             # is terminated, not all agents via the global _stopped_event.
             self.terminate_instance(instance_name, set_global_stopped=False)
+
+        # Ensure termination flag is set even if instance wasn't in ACTIVE_STATES
+        # when dismissed (e.g., was IDLE/COMPLETING). Call terminate() directly since
+        # terminate_instance() only transitions state for active instances.
+        inst = self.instances.get(instance_name)
+        if inst and not inst.is_terminated:
+            inst.terminate()
 
         # Wake SLEEPING parent when async child is dismissed (Fix TODO #41).
         # If this instance was an async child with a SLEEPING parent waiting for it,
@@ -2438,6 +2439,8 @@ class AgentPool:
         (e.g., heartbeat or completion) arrives. When a message becomes available,
         it is removed from the queue and returned so it is not duplicated by normal draining.
 
+        Returns None if dismissed/terminated or if the timeout elapses with no new message.
+
         Args:
             instance_name: The agent instance to wait for messages.
             timeout: Maximum seconds to wait. If None, wait indefinitely.
@@ -2450,6 +2453,10 @@ class AgentPool:
             deadline = None if timeout is None else time.time() + timeout
 
             while True:
+                # Check termination before each wait iteration
+                if self.is_instance_terminated(instance_name):
+                    return None  # Dismissed — wake up and let caller handle it
+                
                 msgs = self.message_queues.get(instance_name)
                 if msgs and len(msgs) > 0:
                     # Take the first available message for this instance
@@ -2464,7 +2471,8 @@ class AgentPool:
                         return None
                     self._message_condition.wait(timeout=min(remaining, 1.0))
                 else:
-                    self._message_condition.wait()
+                    # For indefinite waits, use a shorter timeout to allow periodic termination checks
+                    self._message_condition.wait(timeout=2.0)
 
     def has_pending(self, instance_name: str) -> bool:
         """Check if there are pending async tool calls for an instance.
@@ -2520,7 +2528,7 @@ class AgentPool:
 
             # Acquire a slot on the endpoint scheduler (blocks if at capacity)
             # SLOT_TIMEOUT FIX v2: Pass instance_name and agent_class for tracking
-            return router.scheduler.acquire(api_base, concurrency_limit, instance_name, agent_class)
+            return router.scheduler.acquire(api_base, concurrency_limit, instance_name, agent_class, pool=self)
         except Exception as e:
             logger.error(f"Failed to acquire endpoint slot for {instance_name}: {e}")
             raise

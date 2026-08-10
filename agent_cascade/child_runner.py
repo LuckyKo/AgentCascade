@@ -44,7 +44,15 @@ def _check_status(pool, instance_name: str) -> tuple[bool, bool]:
     # as "stopped". Compression-halt is transient.
     was_manual_halt = (instance_name in pool._halted_instances and
                        instance_name not in pool._compression_halted)
+    
+    # Check both the set (authoritative while in pool) and the instance flag (durable after removal)
     was_terminated = instance_name in pool.terminated_instances
+    
+    # Also check the instance object directly if still accessible
+    inst = pool.get_instance(instance_name)
+    if inst:
+        was_terminated = was_terminated or inst.is_terminated
+    
     return (stop_flag or was_manual_halt), was_terminated
 
 

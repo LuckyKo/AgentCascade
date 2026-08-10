@@ -298,8 +298,7 @@ class WsMessageHandler:
 
         if self.agent_pool:
             # Transition ALL active agents to IDLE state (not just reset)
-            from agent_cascade.agent_pool import ACTIVE_STATES
-            from agent_cascade.agent_instance import AgentState, InvalidStateTransition
+            from agent_cascade.agent_instance import ACTIVE_STATES, AgentState, InvalidStateTransition
 
             transitioned = 0
             for inst_name, instance in list(self.agent_pool.instances.items()):
@@ -509,8 +508,7 @@ class WsMessageHandler:
         if instance_name and self.agent_pool:
             inst = self.agent_pool.get_instance(instance_name)
             from agent_cascade.log import logger
-            from agent_cascade.agent_pool import ACTIVE_STATES
-            from agent_cascade.agent_instance import AgentState
+            from agent_cascade.agent_instance import ACTIVE_STATES, AgentState
 
             # SAFEGUARD: Never allow terminating the root orchestrator
             is_root = (inst is not None and inst.parent_instance is None)

@@ -57,3 +57,18 @@ class FallbackCompressionRequired(Exception):
             f"Context window exceeded on fallback endpoint '{failed_endpoint}' for "
             f"'{instance_name}' ({agent_type}). Iterative compression required before retry."
         )
+
+
+class InstanceDismissedError(Exception):
+    """Raised when an agent instance is dismissed mid-execution.
+
+    Used to propagate the dismissal signal through call stacks (especially sync
+    children running inline in parent threads) so they can abort promptly rather
+    than waiting for long operations to complete.
+
+    This is NOT an error — it's a clean abort signal. Callers should catch this
+    and return early without retrying or logging as a failure.
+    """
+    def __init__(self, instance_name: str):
+        self.instance_name = instance_name
+        super().__init__(f"Instance '{instance_name}' has been dismissed")
