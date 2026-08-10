@@ -59,10 +59,10 @@ class FallbackCompressionRequired(Exception):
         )
 
 
-class InstanceDismissedError(Exception):
-    """Raised when an agent instance is dismissed mid-execution.
+class AgentTerminatedError(Exception):
+    """Raised when an agent instance is terminated/dismissed mid-execution.
 
-    Used to propagate the dismissal signal through call stacks (especially sync
+    Used to propagate the termination signal through call stacks (especially sync
     children running inline in parent threads) so they can abort promptly rather
     than waiting for long operations to complete.
 
@@ -71,4 +71,4 @@ class InstanceDismissedError(Exception):
     """
     def __init__(self, instance_name: str):
         self.instance_name = instance_name
-        super().__init__(f"Instance '{instance_name}' has been dismissed")
+        super().__init__(f"Instance '{instance_name}' has been terminated")

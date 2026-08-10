@@ -26,7 +26,7 @@ from agent_cascade.log import logger
 from .agent_instance import AgentInstance, AgentState
 from .agent_pool import AgentPool
 from .constants import POOL_SETTINGS_TO_BROADCAST
-from .exceptions import InstanceDismissedError
+from .exceptions import AgentTerminatedError
 from .execution_engine import ExecutionEngine
 
 
@@ -484,8 +484,8 @@ def run_agent_in_pool_with_recovery(
             return
         except (KeyboardInterrupt, SystemExit):
             raise
-        except InstanceDismissedError:
-            # Clean abort from dismissal — propagate without logging or error message.
+        except AgentTerminatedError:
+            # Clean abort from termination — propagate without logging or error message.
             raise
         except Exception as e:
             # Non-loop error — yield message and stop (single list of Messages)

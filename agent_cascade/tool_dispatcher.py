@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from agent_cascade.agent_instance import AgentInstance
 
 from agent_cascade.log import logger
-from agent_cascade.exceptions import InstanceDismissedError
+from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.utils.utils import msg_field
 
 # ── ToolDispatcher Class ─────────────────────────────────────────────────────
@@ -587,10 +587,10 @@ class ToolDispatcher:
             )
             return result
 
-        except InstanceDismissedError as e:
-            # Clean abort from dismissal — don't log as error, return dismiss notice.
-            logger.debug(f"[DISMISSAL] Sync child '{e.instance_name}' aborted due to dismissal")
-            return f"[Agent '{instance_name}' Dismissed]: Agent was dismissed before completing."
+        except AgentTerminatedError as e:
+            # Clean abort from termination — don't log as error, return dismiss notice.
+            logger.debug(f"[DISMISSAL] Sync child '{e.instance_name}' aborted due to termination")
+            return f"[Agent '{instance_name}' Terminated]: Agent was terminated before completing."
 
         except Exception as e:
             # Catch all exceptions and return formatted error string.

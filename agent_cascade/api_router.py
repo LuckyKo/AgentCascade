@@ -29,8 +29,34 @@ from agent_cascade.settings import (
     ENDPOINT_COOLDOWN_SECONDS,
     ENDPOINT_FAILURE_CLEANUP_HOURS,
 )
-from agent_cascade.exceptions import ContextWindowExceeded, InstanceDismissedError
+from agent_cascade.exceptions import ContextWindowExceeded, AgentTerminatedError
 from agent_cascade.retry_policy import calculate_backoff, RetryPolicy, POLICY_DEFAULT
+
+
+# ── Termination check helpers (used by interruptible sleep patterns) ─────────
+
+def _check_termination(pool, instance_name: str) -> bool:
+    """Check if an instance has been terminated/dismissed.
+    
+    Returns True if the instance should abort its current operation.
+    Safe to call with None pool or empty instance_name — returns False.
+    """
+    if not pool or not instance_name:
+        return False
+    return pool.is_instance_terminated(instance_name)
+
+
+def _interruptible_sleep(duration: float, pool, instance_name: str, interval: float = 0.5) -> None:
+    """Sleep for duration seconds, checking termination every interval seconds.
+    
+    Raises AgentTerminatedError if the instance is terminated during the wait.
+    """
+    start = time.monotonic()
+    while time.monotonic() - start < duration:
+        if _check_termination(pool, instance_name):
+            raise AgentTerminatedError(instance_name)
+        remaining = duration - (time.monotonic() - start)
+        time.sleep(min(interval, remaining))
 
 
 # ── Lightweight config initializer (used by shared_init before APIRouter loads) ─────────
@@ -322,8 +348,8 @@ class EndpointScheduler:
                 )
             
             # Check if instance was terminated while waiting
-            if pool and instance_name and pool.is_instance_terminated(instance_name):
-                raise InstanceDismissedError(instance_name)
+            if _check_termination(pool, instance_name):
+                raise AgentTerminatedError(instance_name)
             
             wait_time = min(remaining, CHECK_INTERVAL)
             if sched['sem'].acquire(timeout=wait_time):
@@ -1419,12 +1445,7 @@ class APIRouter:
                                     f"Waiting {wait_time:.1f}s before next call ({rate_limit_rpm} rpm)"
                                 )
                                 # Interruptible sleep: check termination every 0.5s during rate-limit wait
-                                import time as _time
-                                rate_wait_start = _time.monotonic()
-                                while _time.monotonic() - rate_wait_start < wait_time:
-                                    if self._pool and _inst_name and self._pool.is_instance_terminated(_inst_name):
-                                        raise InstanceDismissedError(_inst_name)
-                                    _time.sleep(min(0.5, wait_time - (_time.monotonic() - rate_wait_start)))
+                                _interruptible_sleep(wait_time, self._pool, _inst_name)
                             # After sleeping, re-check and try to record (loop handles contention)
                             with self._lock:
                                 now = time.time()
@@ -1456,9 +1477,9 @@ class APIRouter:
                     return result
                     
                 except Exception as e:
-                    # InstanceDismissedError is a clean abort signal — re-raise immediately
+                    # AgentTerminatedError is a clean abort signal — re-raise immediately
                     # without logging, retrying, or moving to next endpoint.
-                    if isinstance(e, InstanceDismissedError):
+                    if isinstance(e, AgentTerminatedError):
                         raise
                     
                     err_msg = str(e)
@@ -1514,12 +1535,7 @@ class APIRouter:
                             f"for endpoint '{endpoint_name}' @ {endpoint_base}"
                         )
                         # Interruptible sleep: check termination every 0.5s during retry backoff
-                        import time as _time
-                        backoff_start = _time.monotonic()
-                        while _time.monotonic() - backoff_start < delay:
-                            if self._pool and _inst_name and self._pool.is_instance_terminated(_inst_name):
-                                raise InstanceDismissedError(_inst_name)
-                            _time.sleep(min(0.5, delay - (_time.monotonic() - backoff_start)))
+                        _interruptible_sleep(delay, self._pool, _inst_name)
 
             logger.info(f"[APIRouter] Exhausted retries for endpoint '{endpoint_name}'. Moving to next...")
             

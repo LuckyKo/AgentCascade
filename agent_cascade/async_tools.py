@@ -133,8 +133,8 @@ class AsyncToolRegistry:
                     f"[AsyncToolRegistry] Skipping tool for '{entry.agent_instance_name}': "
                     f"instance was dismissed before execution started"
                 )
-                from agent_cascade.exceptions import InstanceDismissedError
-                raise InstanceDismissedError(entry.agent_instance_name)
+                from agent_cascade.exceptions import AgentTerminatedError
+                raise AgentTerminatedError(entry.agent_instance_name)
             entry.result = entry.tool_call()
         except Exception as e:
             entry.error = str(e)

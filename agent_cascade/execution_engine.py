@@ -52,7 +52,7 @@ from agent_cascade.exceptions import (
     MaxTokenExceeded,
     ContextWindowExceeded,
     FallbackCompressionRequired,
-    InstanceDismissedError,
+    AgentTerminatedError,
 )
 from agent_cascade.tool_utils import (
     MAX_SPILL_SIZE,  # Use shared constant for consistency
@@ -893,7 +893,7 @@ class ExecutionEngine:
                 f"[SLOT_ACQUIRE] {context} - instance={instance.instance_name}, "
                 f"class={instance.agent_class}"
             )
-        except InstanceDismissedError:
+        except AgentTerminatedError:
             # Clean abort — don't log as error, just propagate for caller to handle
             raise
         except Exception as e:
@@ -1511,10 +1511,10 @@ class ExecutionEngine:
                 except Exception:
                     pass
 
-        except InstanceDismissedError:
-            # Clean abort from dismissal during tool execution or slot acquire.
+        except AgentTerminatedError:
+            # Clean abort from termination during tool execution or slot acquire.
             # Don't log as error, don't yield error message — just exit cleanly.
-            logger.debug(f"[DISMISSAL] Aborting run() for {instance.instance_name}: dismissed")
+            logger.debug(f"[DISMISSAL] Aborting run() for {instance.instance_name}: terminated")
         except Exception as e:
             # C4 fix: Catch unhandled exceptions — log and yield error state
             logger.error("EXCEPTION - %s: %s: %s", instance.instance_name, type(e).__name__, e, exc_info=True)
@@ -3385,10 +3385,10 @@ class ExecutionEngine:
                 with instance._compression_lock:
                     instance._streaming_responses = []
 
-                # Handle InstanceDismissedError — clean abort signal from stop-checks during blocking ops.
+                # Handle AgentTerminatedError — clean abort signal from stop-checks during blocking ops.
                 # This is NOT an error; exit cleanly without retry or error message.
-                if isinstance(e, InstanceDismissedError):
-                    logger.debug(f"[DISMISSAL] Aborting LLM call for {inst_name}: instance dismissed")
+                if isinstance(e, AgentTerminatedError):
+                    logger.debug(f"[DISMISSAL] Aborting LLM call for {inst_name}: instance terminated")
                     with instance._compression_lock:
                         instance._streaming_responses = []
                     break
@@ -3980,12 +3980,12 @@ class ExecutionEngine:
                     break  # Terminal stop during wait
                 continue  # Resumed, re-enter tool dispatch loop with current tool
 
-            # Additional check: raise InstanceDismissedError if this instance was dismissed.
+            # Additional check: raise AgentTerminatedError if this instance was terminated.
             # This allows sync children to propagate the signal up to their parent rather
-            # than completing long-running tools after dismissal.
+            # than completing long-running tools after termination.
             inst = self.pool.get_instance(inst_name)
             if inst and inst.is_terminated:
-                raise InstanceDismissedError(inst_name)
+                raise AgentTerminatedError(inst_name)
 
             # ── Disabled/Inexistent Tool Auto-Deny
             # ────────────────────────────
@@ -4080,7 +4080,7 @@ class ExecutionEngine:
                     tool_result = self.tool_dispatcher.execute_tool(
                         instance, tool_name, tool_args, llm_messages, function_id=function_id
                     )
-                except InstanceDismissedError:
+                except AgentTerminatedError:
                     # Clean abort from stop-check during tool execution — re-raise for caller
                     raise
                 except Exception as e:
