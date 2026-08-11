@@ -768,32 +768,13 @@ class ToolDispatcher:
         )
         return False
     
-    def _build_ancestor_chain_for_reacquire(self, instance: 'AgentInstance') -> tuple:
+    def _build_ancestor_chain_for_reacquire(self, instance: 'AgentInstance') -> Tuple[str, ...]:
         """Build ancestor chain from root to this instance for re-acquire self-exemption.
-        
-        Phase 4 helper: same mechanism as reservation ancestor chains. Includes self at end.
-        
-        Args:
-            instance: The agent instance whose ancestors to collect.
-            
-        Returns:
-            Tuple of instance names from root to this instance, e.g., ("main", "A", "B").
+
+        Delegates to shared utility in slot_queue to avoid duplication.
         """
-        chain = []
-        current = instance
-        visited = set()
-        
-        while current is not None and current.instance_name not in visited:
-            visited.add(current.instance_name)
-            chain.append(current.instance_name)
-            
-            parent_name = getattr(current, 'parent_instance', None)
-            if parent_name:
-                current = self.pool.get_instance(parent_name)
-            else:
-                break
-        
-        return tuple(reversed(chain))  # Root first, this instance last.
+        from agent_cascade.slot_queue import build_ancestor_chain
+        return build_ancestor_chain(instance, self.pool.get_instance)
 
     def _validate_call_agent_args(
         self,

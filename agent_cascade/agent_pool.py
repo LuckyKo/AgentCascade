@@ -15,7 +15,7 @@ import time
 import threading
 import copy
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent_cascade.agents import Assistant
 from agent_cascade.instance_id import get_instance_id, make_instance_dir
@@ -2569,7 +2569,11 @@ class AgentPool:
                 return True
         return False
 
-    def _acquire_slot(self, agent_class: str, instance_name: str):
+    def _acquire_slot(
+        self,
+        agent_class: str,
+        instance_name: str,
+    ) -> Optional[Callable[[], None]]:
         """Acquire an endpoint scheduling slot. Returns a release callback or None for unlimited endpoints."""
 
         if not hasattr(self, 'api_router') or not self.api_router:
@@ -2689,35 +2693,19 @@ class AgentPool:
                 )
         except Exception as e:
             # Non-critical — proceed without reservation.
-            logger.warning(f"[RESERVATION] Failed to reserve for {instance_name} during async spawn: {e}")
+            # Risk: unrelated agents may grab the slot during parent's async wait.
+            logger.warning(
+                f"[RESERVATION] Failed to reserve for {instance_name} during async spawn: {e}. "
+                f"Risk: slot may be taken by unrelated agent while parent waits."
+            )
 
-    def _build_ancestor_chain_for_reservation(self, instance) -> tuple:
+    def _build_ancestor_chain_for_reservation(self, instance) -> Tuple[str, ...]:
         """Build ancestor chain from instance to root for reservation self-exemption.
-        
-        Phase 3 helper (duplicate of execution_engine's version — kept here because
-        agent_pool is independent and this method may be needed without engine).
-        
-        Args:
-            instance: The agent instance whose ancestors to collect.
-            
-        Returns:
-            Tuple of instance names from root to this instance, e.g., ("main", "A", "B").
+
+        Delegates to shared utility in slot_queue to avoid duplication.
         """
-        chain = []
-        current = instance
-        visited = set()
-        
-        while current is not None and current.instance_name not in visited:
-            visited.add(current.instance_name)
-            chain.append(current.instance_name)
-            
-            parent_name = getattr(current, 'parent_instance', None)
-            if parent_name:
-                current = self.get_instance(parent_name)
-            else:
-                break
-        
-        return tuple(reversed(chain))
+        from agent_cascade.slot_queue import build_ancestor_chain
+        return build_ancestor_chain(instance, self.get_instance)
 
     # ── Pause/Resume state management ───────────────────────────────────────
 

@@ -336,7 +336,16 @@ class EndpointScheduler:
                 self._start_sweeper()
             return self._pools[slot_key]
     
-    def acquire(self, api_base: str, concurrency_limit: int, instance_name: str = "unknown", agent_class: str = "unknown", pool=None, ancestor_chain: tuple = None, timeout: float = None) -> Optional[Callable[[], None]]:
+    def acquire(
+        self,
+        api_base: str,
+        concurrency_limit: int,
+        instance_name: str = "unknown",
+        agent_class: str = "unknown",
+        pool=None,
+        ancestor_chain: Optional[Tuple[str, ...]] = None,
+        timeout: Optional[float] = None,
+    ) -> Optional[Callable[[], None]]:
         """
         Acquire a slot on the endpoint. Blocks if at capacity.
         Returns a cleanup callback to release the slot, or None if unlimited.
@@ -666,7 +675,14 @@ class EndpointScheduler:
         
         return self._pools.get(slot_key)
 
-    def reserve(self, instance_name: str, ancestor_chain: tuple, reason: str, agent_class: str = None, caller_agent_type: str = None) -> Optional[str]:
+    def reserve(
+        self,
+        instance_name: str,
+        ancestor_chain: Tuple[str, ...],
+        reason: str,
+        agent_class: Optional[str] = None,
+        caller_agent_type: Optional[str] = None,
+    ) -> Optional[str]:
         """Reserve a slot for an agent (Phase 3 — Gap A fix).
         
         Called when an agent sleeps or spawns async children to prevent unrelated

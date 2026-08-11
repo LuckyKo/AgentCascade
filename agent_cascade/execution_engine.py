@@ -4692,34 +4692,15 @@ class ExecutionEngine:
                             exc_info=True
                         )
 
-    def _build_ancestor_chain(self, instance: 'AgentInstance') -> tuple:
+    def _build_ancestor_chain(self, instance: 'AgentInstance') -> Tuple[str, ...]:
         """Build ancestor chain from instance to root for reservation self-exemption.
-        
-        Phase 3 helper: constructs the chain of parent instance names that should
-        be exempt from reservations made by this agent. Includes the agent itself.
-        
-        Args:
-            instance: The agent instance whose ancestors to collect.
-            
-        Returns:
-            Tuple of instance names from root to this instance, e.g., ("main", "A", "B").
+
+        Delegates to shared utility in slot_queue to avoid duplication.
         """
-        chain = []
-        current = instance
-        visited = set()  # Prevent infinite loops if there's a cycle.
-        
-        while current is not None and current.instance_name not in visited:
-            visited.add(current.instance_name)
-            chain.append(current.instance_name)
-            
-            # Walk up via parent_instance reference.
-            parent_name = getattr(current, 'parent_instance', None)
-            if parent_name and self.pool:
-                current = self.pool.get_instance(parent_name)
-            else:
-                break
-        
-        return tuple(reversed(chain))  # Root first, this instance last.
+        from agent_cascade.slot_queue import build_ancestor_chain
+        if not self.pool:
+            return (instance.instance_name,)
+        return build_ancestor_chain(instance, self.pool.get_instance)
 
     def _transition_to_sleeping(self, instance: 'AgentInstance') -> None:
         """Transition an agent instance to SLEEPING state.

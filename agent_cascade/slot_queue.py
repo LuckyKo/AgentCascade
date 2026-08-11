@@ -24,7 +24,10 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from agent_cascade.agent_instance import AgentInstance
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -599,16 +602,59 @@ def _is_head(pool: SlotPool, ticket_id: int) -> bool:
     return next(iter(pool._waiters)) == ticket_id
 
 
+def build_ancestor_chain(
+    instance: 'AgentInstance',
+    get_instance_fn: Callable[[str], Optional['AgentInstance']],
+) -> Tuple[str, ...]:
+    """Build ancestor chain from root to this instance for reservation self-exemption.
+
+    Shared utility used by agent_pool, execution_engine, and tool_dispatcher.
+    Walks up the parent_instance references until reaching a root (no parent) or
+    detecting a cycle. Returns names ordered root-first, self-last.
+
+    Args:
+        instance: The agent instance whose ancestors to collect.
+        get_instance_fn: Callable that looks up an instance by name (e.g., pool.get_instance).
+
+    Returns:
+        Tuple of instance names from root to this instance, e.g., ("main", "A", "B").
+
+    Example:
+        For instance "worker1" with parent "orchestrator" which has no parent:
+            build_ancestor_chain(worker1, pool.get_instance) → ("orchestrator", "worker1")
+    """
+    chain: List[str] = []
+    current = instance
+    visited: set = set()
+
+    while current is not None and current.instance_name not in visited:
+        visited.add(current.instance_name)
+        chain.append(current.instance_name)
+
+        parent_name = getattr(current, 'parent_instance', None)
+        if parent_name:
+            current = get_instance_fn(parent_name)
+        else:
+            break
+
+    return tuple(reversed(chain))  # Root first, this instance last.
+
+
 def _blocked_by_reservation(pool: SlotPool, ancestor_chain: Tuple[str, ...]) -> bool:
     """Return True if ANY active reservation blocks this grantee.
-    
+
     A reservation blocks unless the grantee is a descendant of the reserving agent
-    (i.e., at least one name in the grantee's ancestor_chain appears in the 
+    (i.e., at least one name in the grantee's ancestor_chain appears in the
     reservation's ancestor_chain).
-    
+
     Self-exemption: if A reserves and then A re-acquires, A's instance_name IS in
     A's own ancestor_chain → not blocked. This is mathematically guaranteed.
-    
+
+    Example:
+        - Reservation R has ancestor_chain=("main", "A").
+        - Grantee G with chain=("main", "A", "B") → NOT blocked (shares "A").
+        - Grantee H with chain=("other", "H") → BLOCKED (no overlap).
+
     Must be called under pool._cond.
     """
     for res in pool._reservations.values():
