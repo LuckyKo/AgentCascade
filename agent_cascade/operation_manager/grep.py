@@ -63,6 +63,46 @@ class GrepMixin:
         'node_modules', '__pycache__', '.git', '*.egg-info',
     ]
 
+    @staticmethod
+    def _sanitize_glob_pattern(pattern: str, *, allow_traversal: bool = False) -> str:
+        """Sanitize a glob pattern to prevent path traversal outside the search root.
+
+        Args:
+            pattern: The glob pattern to sanitize (e.g., "*.py", "src/*.js").
+            allow_traversal: If True, skip traversal checks (for internal use only).
+
+        Returns:
+            The sanitized pattern with backslashes normalized to forward slashes.
+
+        Raises:
+            ValueError: If the pattern contains path traversal components, absolute paths, or UNC paths.
+        """
+        if not pattern:
+            return pattern
+
+        # Normalize backslashes to forward slashes
+        cleaned = pattern.replace('\\', '/')
+
+        # Reject UNC-style paths first (e.g., "//server/share" or "\\server\share")
+        if cleaned.startswith('//'):
+            raise ValueError("Invalid glob pattern: UNC paths are not allowed")
+
+        # Reject absolute Unix paths
+        if cleaned.startswith('/'):
+            raise ValueError("Invalid glob pattern: absolute paths are not allowed")
+
+        # Reject drive-letter absolute paths (e.g., "C:", "C:/", "C:*")
+        if len(cleaned) >= 2 and cleaned[0].isalpha() and cleaned[1] == ':':
+            raise ValueError("Invalid glob pattern: absolute paths are not allowed")
+
+        if not allow_traversal:
+            parts = cleaned.split('/')
+            for part in parts:
+                if part == '..':
+                    raise ValueError("Invalid glob pattern: path traversal ('..') is not allowed")
+
+        return cleaned
+
     def _try_subprocess_grep(self, pattern: str, path: Path, include: str, char_limit: int, timeout: float,
                              agent_name: str = "unknown",
                              exclude: str = "", ignore_vcs: bool = True, context: int = 0, smart_case: bool = True,
@@ -405,6 +445,18 @@ class GrepMixin:
             resolved = self._resolve_path(path)
             if not resolved.exists():
                 return f"Directory not found: {path}"
+
+            # Sanitize glob patterns to prevent path traversal via include/exclude
+            try:
+                include = self._sanitize_glob_pattern(include)
+            except ValueError as e:
+                return f"ERROR: Invalid glob pattern in 'include': {e}"
+
+            if exclude:
+                try:
+                    exclude = self._sanitize_glob_pattern(exclude)
+                except ValueError as e:
+                    return f"ERROR: Invalid glob pattern in 'exclude': {e}"
 
             if resolved.is_file():
                 return self._grep_single_file(resolved, pattern, char_limit, include=include,
